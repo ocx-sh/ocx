@@ -182,6 +182,20 @@ impl Context {
             None => ocx_lib::patches_from_env().map_err(anyhow::Error::new)?,
         };
 
+        // Resolve the active patch snapshot (if any) from `OCX_PATCH_SNAPSHOT`.
+        // Reading happens before manager construction so the snapshot can be
+        // threaded in at construction time — mirrors the resolved_patches flow
+        // above. The env var is the sole selector for now; a future
+        // `--patch-snapshot` flag would populate it here first.
+        let patch_snapshot_path = env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
+        let patch_snapshot = if let Some(ref path) = patch_snapshot_path {
+            ocx_lib::patch::PatchSnapshot::read(path)
+                .await
+                .map_err(anyhow::Error::new)?
+        } else {
+            None
+        };
+
         let manager = package_manager::PackageManager::new(
             file_structure.clone(),
             selected_index.clone(),
@@ -189,7 +203,8 @@ impl Context {
             &default_registry,
         )
         .with_progress(progress.clone())
-        .with_patches(resolved_patches.clone());
+        .with_patches(resolved_patches.clone())
+        .with_patch_snapshot(patch_snapshot);
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -211,6 +226,12 @@ impl Context {
         // `resolved_patches` was resolved above (config-file tier then env
         // fallback) before being passed to the manager constructor.
         config_view.patches = resolved_patches;
+        // Forward the already-resolved patch snapshot path into the config view
+        // so child processes (launcher exec) inherit the same snapshot via
+        // `OCX_PATCH_SNAPSHOT` — mirrors how `resolved_patches` is forwarded
+        // above. No `--patch-snapshot` flag exists yet; the env var is the
+        // sole selector for now.
+        config_view.patch_snapshot = patch_snapshot_path;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);

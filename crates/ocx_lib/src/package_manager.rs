@@ -246,10 +246,11 @@ pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::InspectResult;
-pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+pub use tasks::patch_sync::PatchSyncReport;
+pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain, SitePatchRoots};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 
-use crate::{config::patch::ResolvedPatchConfig, file_structure, oci};
+use crate::{config::patch::ResolvedPatchConfig, file_structure, oci, patch::PatchSnapshot};
 
 /// Central facade for package operations (find, install, uninstall, etc.).
 ///
@@ -280,6 +281,12 @@ pub struct PackageManager {
     /// from every loaded config tier). When `Some`, `discover_and_install_patches`
     /// runs after every user-requested base install (online only).
     patches: Option<ResolvedPatchConfig>,
+    /// Frozen companion pinning snapshot for opt-in determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups.  `None` = live lookups only.
+    /// Set via `OCX_PATCH_SNAPSHOT` / `ocx patch freeze`.
+    patch_snapshot: Option<PatchSnapshot>,
 }
 
 impl PackageManager {
@@ -302,6 +309,7 @@ impl PackageManager {
             default_registry,
             progress: crate::cli::progress::ProgressManager::disabled(),
             patches: None,
+            patch_snapshot: None,
         }
     }
 
@@ -317,6 +325,22 @@ impl PackageManager {
     /// Returns the resolved patch configuration, if any.
     pub fn patches(&self) -> Option<&ResolvedPatchConfig> {
         self.patches.as_ref()
+    }
+
+    /// Inject the active patch snapshot for opt-in compose determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups. Called from
+    /// `Context::try_init` after loading the snapshot from
+    /// `OCX_PATCH_SNAPSHOT`. Returns `self` for builder-style chaining.
+    pub fn with_patch_snapshot(mut self, patch_snapshot: Option<PatchSnapshot>) -> Self {
+        self.patch_snapshot = patch_snapshot;
+        self
+    }
+
+    /// Returns the active patch snapshot, if any.
+    pub fn patch_snapshot(&self) -> Option<&PatchSnapshot> {
+        self.patch_snapshot.as_ref()
     }
 
     /// Sets the shared span-free progress manager. The CLI injects its
@@ -516,6 +540,10 @@ impl PackageManager {
             // ADR offline contract (C4 "works offline once synced", C6 zip-`OCX_HOME`
             // parity, C7 fail-closed). So the tier is carried through unchanged.
             patches: self.patches.clone(),
+            // Carry the snapshot through so offline env paths (direnv export,
+            // global toolchain) still resolve frozen companion digests when a
+            // snapshot is active.
+            patch_snapshot: self.patch_snapshot.clone(),
         }
     }
 }

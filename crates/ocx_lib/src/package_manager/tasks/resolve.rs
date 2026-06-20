@@ -21,6 +21,42 @@ use super::super::PackageManager;
 /// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
 pub type SitePatchSet = HashMap<oci::PinnedIdentifier, Vec<Entry>>;
 
+/// GC roots derived from the site-patch tier.
+///
+/// Carries the set of companion package identifiers and descriptor blob digests
+/// that must survive garbage collection, regardless of whether they are
+/// reachable through the normal install-symlink graph.  Seeded into
+/// [`crate::package_manager::tasks::garbage_collection::GarbageCollector`]
+/// alongside project-registry roots so that patch companions and their
+/// descriptor blobs are never prematurely collected.
+///
+/// Built offline (no network) by [`PackageManager::resolve_site_patch_roots`].
+#[derive(Debug, Clone, Default)]
+pub struct SitePatchRoots {
+    /// Pinned identifiers for every companion package that should be retained.
+    pub companions: Vec<oci::PinnedIdentifier>,
+    /// Registry + blob digest pairs for every patch descriptor blob that should
+    /// be retained.  The registry is required so the GC can call
+    /// `BlobStore::path(registry, digest)` without a linear shard-suffix scan.
+    ///
+    /// GC-oriented: this is the flat list of ALL descriptor blobs (manifest +
+    /// layer digests across every resolved source) that must survive GC.
+    pub descriptors: Vec<(String, oci::Digest)>,
+    /// Per-source descriptor MANIFEST pins, keyed by the descriptor source's
+    /// canonical `registry/repository` (the same key
+    /// [`PackageManager::build_site_patch_set`] derives from
+    /// `global_descriptor_id` / `patch_descriptor_id`).  Value = the manifest
+    /// digest of the descriptor at resolve time.
+    ///
+    /// Freeze-oriented: `ocx patch freeze` writes these into
+    /// [`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors)
+    /// so compose under an active snapshot selects descriptors by FROZEN digest
+    /// (whole-tier determinism, C8) rather than re-reading the live tag store —
+    /// a post-freeze `ocx patch sync` that advances a descriptor must not change
+    /// which companions a frozen build composes.
+    pub descriptor_pins: Vec<(String, oci::Digest)>,
+}
+
 /// What a [`ChainBlob`] is in OCI terms — disambiguates the otherwise
 /// opaque digest list so `inspect` can label each entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +339,11 @@ impl PackageManager {
     /// With `self.patches = None` the output is byte-identical to the
     /// pre-Phase-4 behaviour (no-config no-op guarantee).
     pub async fn resolve_env(&self, packages: &[Arc<InstallInfo>], self_view: bool) -> crate::Result<Vec<Entry>> {
-        let (entries, _) = self.resolve_env_with_patch_boundary(packages, self_view).await?;
+        // OCI-tier / no-project callers have no per-package opt-out: pass an
+        // empty boundary set so every admitted base keeps its companion overlay.
+        let (entries, _) = self
+            .resolve_env_with_patch_boundary(packages, self_view, &std::collections::BTreeSet::new())
+            .await?;
         Ok(entries)
     }
 
@@ -318,10 +358,15 @@ impl PackageManager {
     /// pre-Phase-4 output.
     ///
     /// The CLI `--show-patches` flag uses this boundary to annotate each entry's origin.
+    ///
+    /// `no_patches` is the set of canonical `"registry/repository"` keys (tag/digest
+    /// excluded) for bases a project declared `no-patches = true`. An opted-out base
+    /// gets NO companion overlay UNLESS the tier is system-required (enforcement wins).
     pub async fn resolve_env_with_patch_boundary(
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
+        no_patches: &std::collections::BTreeSet<String>,
     ) -> crate::Result<(Vec<Entry>, usize)> {
         let out = composer::compose(packages, &self.file_structure().packages, self_view).await?;
         let mut entries = out.entries;
@@ -332,7 +377,10 @@ impl PackageManager {
         //
         // When `self.patches` is `None` this block is a no-op and
         // `entries` is byte-identical to the pre-Phase-4 output.
-        if let Some(mut patch_set) = self.build_site_patch_set(&out.admitted, packages, self_view).await? {
+        if let Some(mut patch_set) = self
+            .build_site_patch_set(&out.admitted, packages, self_view, no_patches)
+            .await?
+        {
             for admitted_id in &out.admitted {
                 // `remove` instead of `get`: patch_set is consumed here and not used
                 // afterwards, so moving entries out eliminates the per-entry String clone.
@@ -371,6 +419,7 @@ impl PackageManager {
         admitted: &[oci::PinnedIdentifier],
         _roots: &[Arc<InstallInfo>],
         _self_view: bool,
+        no_patches: &std::collections::BTreeSet<String>,
     ) -> crate::Result<Option<SitePatchSet>> {
         // No patch tier configured → no overlay; output is byte-identical to pre-Phase-4.
         let Some(patches) = self.patches() else {
@@ -391,18 +440,27 @@ impl PackageManager {
         // the registry hostname to namespace the CAS path, and all blob content is
         // content-addressed (SHA-256). Phase 5 (`ocx patch sync`) will add signature
         // verification before trusting descriptor contents.
+        // Under an active freeze snapshot (`OCX_PATCH_SNAPSHOT`) the descriptor is
+        // selected by its pinned manifest digest (frozen — C8 whole-tier
+        // determinism); otherwise it floats to the live tag-store record.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
         let global_tags_path = tag_store.tags(&global_id);
-        let global_descriptor_result =
-            load_descriptor_for_id(blob_store, patches.registry.as_str(), &global_tags_path).await?;
+        let global_descriptor_result = load_descriptor_frozen_or_live(
+            blob_store,
+            patches.registry.as_str(),
+            &global_id,
+            &global_tags_path,
+            self.patch_snapshot(),
+        )
+        .await?;
 
         // C7 fail-closed: a corrupt global descriptor (tag-store says "has descriptor"
         // but CAS blob is missing or unreadable) is a tamper / corruption event, not a
         // "no patch" case.  Fail closed when the tier is required=true.
         let global_descriptor = match global_descriptor_result {
             DescriptorLoadResult::NotPresent => None,
-            DescriptorLoadResult::Loaded(d) => Some(d),
-            DescriptorLoadResult::Corrupt(error) => {
+            DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
+            DescriptorLoadResult::Corrupt(error, _manifest_digest) => {
                 if patches.required {
                     return Err(error);
                 }
@@ -447,17 +505,35 @@ impl PackageManager {
         for admitted_id in admitted {
             let base_id = admitted_id.as_identifier();
 
-            // Load package-specific descriptor (if any).
+            // Per-package opt-out (C7 exception): a project may decline the
+            // companion overlay for this base via `[package."<id>"] no-patches`.
+            // Match is by canonical `registry/repository` (tag/digest excluded —
+            // the opt-out is version-independent). A system-required tier still
+            // applies: enforcement beats opt-out.
+            let repo_key = format!("{}/{}", base_id.registry(), base_id.repository());
+            let system_required = patches.system_required;
+            if no_patches.contains(&repo_key) && !system_required {
+                continue;
+            }
+
+            // Load package-specific descriptor (if any). Frozen by manifest digest
+            // under an active snapshot, else floats to the live tag store.
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
             let pkg_tags_path = tag_store.tags(&pkg_specific_id);
-            let pkg_descriptor_result =
-                load_descriptor_for_id(blob_store, patches.registry.as_str(), &pkg_tags_path).await?;
+            let pkg_descriptor_result = load_descriptor_frozen_or_live(
+                blob_store,
+                patches.registry.as_str(),
+                &pkg_specific_id,
+                &pkg_tags_path,
+                self.patch_snapshot(),
+            )
+            .await?;
 
             // C7 fail-closed for per-identifier corrupt descriptor.
             let pkg_descriptor = match pkg_descriptor_result {
                 DescriptorLoadResult::NotPresent => None,
-                DescriptorLoadResult::Loaded(d) => Some(d),
-                DescriptorLoadResult::Corrupt(error) => {
+                DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
+                DescriptorLoadResult::Corrupt(error, _manifest_digest) => {
                     if patches.required {
                         return Err(error);
                     }
@@ -572,11 +648,12 @@ impl PackageManager {
                 // The companion must already be installed locally (Phase 3 installed it).
                 // If not found, skip optional companions; log a warning.
                 //
-                // `find_plain` requires a PinnedIdentifier so we cannot call it directly
-                // with a tag-only Identifier. Companions are installed as tag-based
-                // identifiers — resolve via the local tag store to a pinned identifier,
-                // then call `find_plain`.
-                let companion_install_info = match self.find_companion_local(companion_id).await {
+                // When a `PatchSnapshot` is active and contains a pin for this companion,
+                // prefer the snapshot digest over the live tag lookup (opt-in determinism,
+                // Phase 5B ADR C8). The snapshot pin is policy, not truth: if the locally
+                // installed package at the snapshot digest is absent the lookup returns None,
+                // and the required-fail-closed gate fires as normal.
+                let companion_install_info = match self.find_companion_with_snapshot(companion_id).await {
                     Ok(Some(info)) => info,
                     Ok(None) => {
                         // Cache None = genuinely missing, so the required-fail-closed check
@@ -730,6 +807,250 @@ impl PackageManager {
             .map_err(crate::Error::from)?;
         Ok(result)
     }
+
+    /// Look up a companion's installed `InstallInfo`, preferring a pinned digest
+    /// from the active [`crate::patch::PatchSnapshot`] over the live tag lookup.
+    ///
+    /// When `self.patch_snapshot()` is `Some` and contains a pin for `companion_id`
+    /// (keyed by `"registry/repository"`), the pinned digest is used to construct
+    /// the `PinnedIdentifier` and the package is looked up directly in the store —
+    /// no tag resolution. This is the Phase 5B opt-in determinism mechanism.
+    ///
+    /// Falls back to [`Self::find_companion_local`] when no snapshot is active or
+    /// the snapshot does not contain a pin for this companion.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from the underlying store reads.
+    async fn find_companion_with_snapshot(&self, companion_id: &oci::Identifier) -> crate::Result<Option<InstallInfo>> {
+        use super::common::find_in_store;
+
+        // Check the snapshot for a pinned digest for this companion.
+        // The snapshot key is "registry/repository" (no tag, no digest suffix).
+        if let Some(snapshot) = self.patch_snapshot() {
+            let snapshot_key = format!("{}/{}", companion_id.registry(), companion_id.repository());
+            if let Some(pinned_digest) = snapshot.companions.get(&snapshot_key) {
+                // Build the pinned identifier using the snapshot digest and look up
+                // the package in the local store. The snapshot is policy not truth:
+                // if the package at this digest is not locally installed, return None
+                // (the required-fail-closed gate fires in the caller as normal).
+                let pinned_id = match oci::PinnedIdentifier::try_from(
+                    companion_id.clone_with_digest(pinned_digest.clone()),
+                ) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        // Digest-format error should not occur (snapshot is serialized
+                        // from valid Digest values), but fall back to live lookup if it does.
+                        log::warn!(
+                            "site-patch-set: snapshot pin for '{}' has invalid digest format; falling back to live lookup",
+                            snapshot_key
+                        );
+                        return self.find_companion_local(companion_id).await;
+                    }
+                };
+                let result = find_in_store(&self.file_structure().packages, &pinned_id)
+                    .await
+                    .map_err(crate::Error::from)?;
+                return Ok(result);
+            }
+        }
+
+        // No snapshot pin for this companion — fall back to the live tag lookup.
+        self.find_companion_local(companion_id).await
+    }
+
+    /// Resolve GC roots from the site-patch tier (strictly offline, no network).
+    ///
+    /// Returns a [`SitePatchRoots`] containing the pinned identifiers of all
+    /// companion packages and the blob digests of all descriptor blobs that
+    /// must survive garbage collection.  These roots are seeded into
+    /// [`crate::package_manager::tasks::garbage_collection::GarbageCollector`]
+    /// alongside project-registry roots.
+    ///
+    /// When no `[patches]` section is configured (`self.patches()` is `None`),
+    /// returns an empty `SitePatchRoots`.  This method never contacts the
+    /// network in any `ChainMode`.
+    ///
+    /// # Parameters
+    ///
+    /// - `platforms` — reserved for future per-platform companion filtering
+    ///   (a later sub-phase will use this to restrict companion resolution to
+    ///   platforms relevant to the current host).  Currently unused; callers
+    ///   should pass the host platform set via
+    ///   `&[oci::Platform::current().unwrap_or_else(oci::Platform::any)]` so
+    ///   the value is meaningful when the filter is implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the local filesystem state cannot be read.
+    pub async fn resolve_site_patch_roots(&self, _platforms: &[oci::Platform]) -> crate::Result<SitePatchRoots> {
+        // Short-circuit: no patch tier configured → empty roots.
+        let Some(patches) = self.patches() else {
+            return Ok(SitePatchRoots::default());
+        };
+
+        let tag_store = &self.file_structure().tags;
+        let blob_store = &self.file_structure().blobs;
+        let symlink_root = self.file_structure().symlinks.root().to_path_buf();
+
+        // Build a guaranteed-local index (same pattern as find_companion_local) so
+        // companion tag → digest resolution is network-free in every ChainMode.
+        let local_index = oci::index::Index::from_chained(
+            oci::index::LocalIndex::new(oci::index::LocalConfig {
+                tag_store: tag_store.clone(),
+                blob_store: blob_store.clone(),
+            }),
+            Vec::new(),
+            oci::index::ChainMode::Offline,
+        );
+
+        // ── Step 1: Collect installed base identifiers via the shared enumerator. ──
+        //
+        // `enumerate_installed_bases` walks the symlink store and recovers real
+        // registry hostnames. Shared with `sync_patches` (patch_sync.rs) so there
+        // is exactly ONE symlink-store walk implementation (DRY).
+        let installed_base_ids = super::patch_sync::enumerate_installed_bases(self.file_structure()).await?;
+        // `symlink_root` is no longer needed after the step above; drop the binding.
+        let _ = symlink_root;
+
+        // ── Step 2: For each installed base + the global root, load descriptors. ──
+        //
+        // Descriptor sources:
+        //   (a) Global root — covers every base via rule matching.
+        //   (b) Per-base descriptor — specific to each installed base.
+        //
+        // We collect descriptor digests (manifest + layer) and companion entries.
+
+        let mut companion_set: Vec<oci::Identifier> = Vec::new();
+        let mut descriptor_digests: Vec<(String, oci::Digest)> = Vec::new();
+        // Per-source manifest pins (source key "registry/repository" → manifest
+        // digest) used by `ocx patch freeze` to make compose select descriptors
+        // by frozen digest under an active snapshot (C8 whole-tier determinism).
+        let mut descriptor_pins: Vec<(String, oci::Digest)> = Vec::new();
+
+        // Global descriptor (covers all bases via rule matching).
+        //
+        // Load the global descriptor blob digests once (they are the same
+        // regardless of which base we match against), and for each installed
+        // base derive companions via the global descriptor's rules.
+        // Using an empty identifier for the "global" case would only work for
+        // catch-all rules; iterating installed bases correctly handles both
+        // catch-all ("match: *") and scoped rules.
+        let global_id = super::patch_discovery::global_descriptor_id(patches);
+        let global_tags_path = tag_store.tags(&global_id);
+
+        // Load global descriptor once (blob digests and descriptor value).
+        let (global_descriptor_opt, global_manifest_digest) = collect_descriptor_digests(
+            blob_store,
+            patches.registry.as_str(),
+            &global_tags_path,
+            &mut descriptor_digests,
+        )
+        .await?;
+        if let Some(manifest_digest) = global_manifest_digest {
+            descriptor_pins.push((descriptor_source_key(&global_id), manifest_digest));
+        }
+
+        // Collect global companions for each installed base.
+        if let Some(ref global_descriptor) = global_descriptor_opt {
+            for base_id in &installed_base_ids {
+                for companion_entry in global_descriptor.collect_companions(base_id, patches.required) {
+                    companion_set.push(companion_entry.identifier);
+                }
+            }
+            // When no bases are installed, still seed the global descriptor
+            // digests (already done above via collect_descriptor_digests).
+        }
+
+        // Per-base descriptors for each installed base.
+        for base_id in &installed_base_ids {
+            let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
+            let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+
+            let (pkg_descriptor_opt, pkg_manifest_digest) = collect_descriptor_digests(
+                blob_store,
+                patches.registry.as_str(),
+                &pkg_tags_path,
+                &mut descriptor_digests,
+            )
+            .await?;
+            if let Some(manifest_digest) = pkg_manifest_digest {
+                descriptor_pins.push((descriptor_source_key(&pkg_specific_id), manifest_digest));
+            }
+
+            if let Some(ref pkg_descriptor) = pkg_descriptor_opt {
+                for companion_entry in pkg_descriptor.collect_companions(base_id, patches.required) {
+                    companion_set.push(companion_entry.identifier);
+                }
+            }
+        }
+
+        // ── Step 3: Resolve companion tags → pinned identifiers (local-only). ──
+        let mut companions: Vec<oci::PinnedIdentifier> = Vec::new();
+        // Dedup companion identifiers before resolution (same companion may appear
+        // in multiple descriptor sources).
+        companion_set.sort_by_key(|id| id.to_string());
+        companion_set.dedup_by_key(|id| id.to_string());
+
+        for companion_id in &companion_set {
+            match local_index
+                .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Query)
+                .await
+            {
+                Ok(Some(digest)) => {
+                    // Strip the tag: GC companion roots are identified by registry+repo+digest
+                    // only. The tag is lookup metadata, not part of the package identity.
+                    let digest_only_id =
+                        oci::Identifier::new_registry(companion_id.repository(), companion_id.registry())
+                            .clone_with_digest(digest);
+                    match oci::PinnedIdentifier::try_from(digest_only_id) {
+                        Ok(pinned) => companions.push(pinned),
+                        Err(_) => {
+                            log::debug!(
+                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
+                                companion_id
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Companion not installed locally — skip (GC of a not-yet-installed
+                    // companion is moot; no over-collect concern here).
+                    log::debug!(
+                        "resolve-site-patch-roots: companion '{}' not in local index; skipping",
+                        companion_id
+                    );
+                }
+                Err(error) => {
+                    // Local index read error — skip and log; do not fail GC derivation.
+                    log::debug!(
+                        "resolve-site-patch-roots: error querying local index for companion '{}': {error}; skipping",
+                        companion_id
+                    );
+                }
+            }
+        }
+
+        // Dedup and sort both vecs for deterministic output.
+        companions.sort_by_key(|pinned| pinned.to_string());
+        companions.dedup_by_key(|pinned| pinned.to_string());
+
+        descriptor_digests.sort_by_key(|(registry, digest)| format!("{registry}/{digest}"));
+        descriptor_digests.dedup_by_key(|(registry, digest)| format!("{registry}/{digest}"));
+
+        // Dedup descriptor pins by source key — multiple installed version tags
+        // of the same repository resolve to the same package-specific descriptor
+        // source (same key, same manifest digest), so one entry per source
+        // suffices. Sort for deterministic snapshot output.
+        descriptor_pins.sort_by(|(left, _), (right, _)| left.cmp(right));
+        descriptor_pins.dedup_by(|(left, _), (right, _)| left == right);
+
+        Ok(SitePatchRoots {
+            companions,
+            descriptors: descriptor_digests,
+            descriptor_pins,
+        })
+    }
 }
 
 /// Size of a chain blob's on-disk `data` file, or `-1` when it cannot be
@@ -762,16 +1083,30 @@ async fn blob_data_size(file_structure: &crate::file_structure::FileStructure, p
 ///
 /// - `NotPresent` — tag-store says "never looked" or "looked, no patch":
 ///   skip silently (not an error).
-/// - `Loaded(d)` — descriptor read and parsed successfully.
-/// - `Corrupt` — tag-store records `LookedHasDescriptor` but the CAS blob
-///   is missing or unreadable.  This is **not** a "no patch" case — the
-///   descriptor existed at discovery time but is now corrupt or tampered.
-///   Callers that enforce `required = true` should fail closed here (C7).
+/// - `Loaded(digest, descriptor)` — descriptor read and parsed successfully.
+///   `digest` is the manifest digest parsed from the tag-store JSON.
+/// - `Corrupt(error, manifest_digest)` — tag-store records
+///   `LookedHasDescriptor` but the CAS blob is missing or unreadable.
+///   This is **not** a "no patch" case — the descriptor existed at discovery
+///   time but is now corrupt or tampered.  Callers that enforce `required =
+///   true` should fail closed here (C7).  `manifest_digest` is `Some` when
+///   the stored digest string was parseable (CAS blob corrupt or absent) and
+///   `None` when the digest string itself was malformed.
 #[derive(Debug)]
 enum DescriptorLoadResult {
     NotPresent,
-    Loaded(PatchDescriptor),
-    Corrupt(crate::Error),
+    /// Descriptor loaded successfully.  The `manifest_digest` is the OCI manifest
+    /// digest read from the tag-store JSON (same value as
+    /// `PatchDiscoveryState::LookedHasDescriptor::manifest_digest` after parsing).
+    /// Carrying it here avoids a second tag-store read in callers that need the
+    /// digest (e.g. `collect_descriptor_digests`).
+    Loaded(oci::Digest, PatchDescriptor),
+    /// Descriptor could not be loaded.  `manifest_digest` is `Some` when the
+    /// tag-store JSON contained a parseable manifest digest but the CAS blob was
+    /// corrupt or missing; `None` when the stored digest string itself was
+    /// malformed.  GC callers push the `Some` digest as a root so the manifest
+    /// blob survives even when the descriptor layer is damaged.
+    Corrupt(crate::Error, Option<oci::Digest>),
 }
 
 /// Load a [`PatchDescriptor`] for the given tag-store path (offline, local only).
@@ -802,17 +1137,63 @@ async fn load_descriptor_for_id(
                 Ok(d) => d,
                 Err(_) => {
                     // The stored manifest digest string is itself malformed —
-                    // treat as corruption (not "no patch").
+                    // treat as corruption (not "no patch").  No parseable digest
+                    // is available, so the `None` variant tells GC callers there
+                    // is no manifest blob to protect.
                     let corrupt_err =
                         crate::Error::Digest(crate::oci::digest::error::DigestError::Invalid(manifest_digest.clone()));
-                    return Ok(DescriptorLoadResult::Corrupt(corrupt_err));
+                    return Ok(DescriptorLoadResult::Corrupt(corrupt_err, None));
                 }
             };
             match load_descriptor_from_cas(blob_store, registry, &digest).await {
-                Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(descriptor)),
-                Err(error) => Ok(DescriptorLoadResult::Corrupt(error)),
+                Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(digest, descriptor)),
+                // The manifest digest parsed fine but the CAS blob is corrupt or
+                // missing.  Carry the digest so GC callers can protect the
+                // manifest blob even when the descriptor layer is unreadable.
+                Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(digest))),
             }
         }
+    }
+}
+
+/// Load a descriptor honouring an active freeze snapshot (C8 whole-tier
+/// determinism).
+///
+/// When `snapshot` is `Some`, descriptor SELECTION is frozen: the manifest
+/// digest comes from the snapshot's per-source pin
+/// ([`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors),
+/// keyed by [`descriptor_source_key`]) and is loaded directly from the CAS,
+/// BYPASSING the live tag store. A source absent from the snapshot is treated as
+/// `NotPresent` — the frozen tier did not include it, so a later `ocx patch
+/// sync` that publishes a new descriptor cannot change which companions a frozen
+/// build composes. When `snapshot` is `None`, the live tag-store load applies
+/// (the tier floats), via [`load_descriptor_for_id`].
+async fn load_descriptor_frozen_or_live(
+    blob_store: &crate::file_structure::BlobStore,
+    registry: &str,
+    descriptor_id: &oci::Identifier,
+    tags_path: &std::path::Path,
+    snapshot: Option<&crate::patch::PatchSnapshot>,
+) -> crate::Result<DescriptorLoadResult> {
+    use super::patch_discovery::load_descriptor_from_cas;
+
+    let Some(snapshot) = snapshot else {
+        // No snapshot active → float: select the descriptor from the live tag store.
+        return load_descriptor_for_id(blob_store, registry, tags_path).await;
+    };
+
+    // Snapshot active → freeze descriptor selection by the pinned manifest digest.
+    match snapshot.descriptors.get(&descriptor_source_key(descriptor_id)) {
+        Some(manifest_digest) => match load_descriptor_from_cas(blob_store, registry, manifest_digest).await {
+            Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(manifest_digest.clone(), descriptor)),
+            // The pinned blob is missing/corrupt in the local CAS. Carry the
+            // digest so the C7 fail-closed check in the caller fires for a
+            // required tier rather than silently dropping the overlay.
+            Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(manifest_digest.clone()))),
+        },
+        // Source not in the frozen tier → it did not exist at freeze time, so a
+        // frozen build must not compose it.
+        None => Ok(DescriptorLoadResult::NotPresent),
     }
 }
 
@@ -848,6 +1229,263 @@ fn merge_companions(
         .into_iter()
         .filter_map(|id| companion_map.remove(&id))
         .collect()
+}
+
+// ── Phase 5A helpers ─────────────────────────────────────────────────────────
+
+/// Restore an installed base's real registry hostname from its tag file.
+///
+/// The symlink store names registry directories by the *slug* of the registry
+/// (`to_relaxed_slug`), which is lossy for port-containing or otherwise
+/// non-slug-safe hostnames (`localhost:5000` -> `localhost_5000`). The tag file
+/// written at install time records the canonical `registry/repository` in its
+/// `repository` field; reading it back recovers the exact hostname so descriptor
+/// rule matching globs against the real identifier string.
+///
+/// Falls back to the slug-form identifier unchanged on any read/parse miss (a
+/// missing tag file, malformed JSON, or a `repository` value that does not carry
+/// the expected `/{repository}` suffix) — the slug form still matches catch-all
+/// rules and standard dotted registries, so this only refines the port-registry
+/// edge and never regresses the common path.
+///
+/// `pub(super)` so [`super::patch_sync::enumerate_installed_bases`] can share
+/// this helper without duplicating the slug-recovery logic.
+pub(super) async fn recover_base_with_real_registry(
+    tag_store: &crate::file_structure::TagStore,
+    slug_base_id: &oci::Identifier,
+) -> oci::Identifier {
+    let tags_path = tag_store.tags(slug_base_id);
+    let real_registry = match tokio::fs::read_to_string(&tags_path).await {
+        Ok(content) => serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|value| value.get("repository").and_then(|r| r.as_str()).map(str::to_owned))
+            .and_then(|repository| {
+                repository
+                    .strip_suffix(&format!("/{}", slug_base_id.repository()))
+                    .map(str::to_owned)
+            }),
+        Err(_) => None,
+    };
+    match real_registry {
+        Some(registry) if registry != slug_base_id.registry() => {
+            oci::Identifier::new_registry(slug_base_id.repository(), &registry)
+                .clone_with_tag(slug_base_id.tag_or_latest())
+        }
+        _ => slug_base_id.clone(),
+    }
+}
+
+/// Walk one directory level looking for `candidates/` subdirectories.
+///
+/// The symlink store layout is:
+/// ```text
+/// {symlink_root}/{registry_slug}/{repo_component_1}/.../candidates/{tag}
+/// ```
+///
+/// This function is called recursively: when the current directory is
+/// `candidates`, each child entry is a tag, and an `Identifier` is
+/// constructed from `(registry_slug, repo_components, tag)`.  Otherwise the
+/// function descends into each child directory, appending it to
+/// `repo_components`.
+///
+/// Uses `tokio::fs::read_dir` — must be called from an async context.
+///
+/// `pub(super)` so [`super::patch_sync::enumerate_installed_bases`] can share
+/// the single symlink-store walk implementation.
+///
+/// # Errors
+///
+/// Returns an error only on unexpected filesystem I/O failures (not on
+/// `NotFound`, which is handled by the caller).
+pub(super) async fn collect_candidates_from_dir(
+    dir: &std::path::Path,
+    registry_slug: &str,
+    repo_components: &mut Vec<String>,
+    out: &mut Vec<oci::Identifier>,
+) -> crate::Result<()> {
+    let dir_name = match dir.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name.to_string(),
+        None => return Ok(()),
+    };
+
+    if dir_name == "candidates" {
+        // Each child of a `candidates/` dir is a tag → candidate symlink.
+        let mut entries = match tokio::fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(crate::Error::InternalFile(dir.to_path_buf(), error)),
+        };
+        let repo = repo_components.join("/");
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| crate::Error::InternalFile(dir.to_path_buf(), e))?
+        {
+            let tag = entry.file_name().to_string_lossy().to_string();
+            if tag.is_empty() {
+                continue;
+            }
+            // Build an Identifier using the registry slug as the registry
+            // (the slug is used by tag_store.tags() via the same slugify
+            // function, so tag lookups use the same path).
+            let base_id = oci::Identifier::new_registry(&repo, registry_slug).clone_with_tag(&tag);
+            out.push(base_id);
+        }
+        return Ok(());
+    }
+
+    // Descend into child directories, extending the repo path.
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(crate::Error::InternalFile(dir.to_path_buf(), error)),
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| crate::Error::InternalFile(dir.to_path_buf(), e))?
+    {
+        let child_path = entry.path();
+        let child_name = entry.file_name().to_string_lossy().to_string();
+        // Skip non-directory entries (e.g. `current` symlinks).
+        match entry.file_type().await {
+            Ok(file_type) if file_type.is_dir() => {}
+            Ok(file_type) if file_type.is_symlink() => {
+                // Symlinks at the top level (e.g. `current`) — skip.
+                // Directories under a repo path that are symlinks would be
+                // unusual; skip them to avoid following unexpected links.
+                continue;
+            }
+            _ => continue,
+        }
+        // Do NOT push the "candidates" component into repo_components — it is
+        // a structural marker, not part of the repository name.  If we did push
+        // it, the repo string would become "myrepo/candidates" instead of
+        // "myrepo", producing a wrong base identifier (e.g.
+        // `"cmake/candidates:3.28"`) that fails scoped descriptor rule matching.
+        if child_name == "candidates" {
+            Box::pin(collect_candidates_from_dir(
+                &child_path,
+                registry_slug,
+                repo_components,
+                out,
+            ))
+            .await?;
+        } else {
+            repo_components.push(child_name);
+            Box::pin(collect_candidates_from_dir(
+                &child_path,
+                registry_slug,
+                repo_components,
+                out,
+            ))
+            .await?;
+            repo_components.pop();
+        }
+    }
+    Ok(())
+}
+
+/// Canonical `registry/repository` key identifying a patch descriptor source.
+///
+/// Both `ocx patch freeze` (which records the key in
+/// [`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors)) and
+/// [`PackageManager::build_site_patch_set`] (which looks the key up under an
+/// active snapshot) derive it from the SAME `global_descriptor_id` /
+/// `patch_descriptor_id` identifiers, so the freeze side and the compose side
+/// always agree on the key for a given source.
+fn descriptor_source_key(descriptor_id: &oci::Identifier) -> String {
+    format!("{}/{}", descriptor_id.registry(), descriptor_id.repository())
+}
+
+/// Load a descriptor from the tag store + CAS, record its blob digests
+/// (manifest digest + layer digests from the manifest), and return the
+/// parsed [`PatchDescriptor`] when present.
+///
+/// Reuses [`load_descriptor_for_id`] for the tag-map read and CAS load, then
+/// extracts layer digests from the manifest blob on disk.
+///
+/// - `NotPresent` → returns `Ok(None)`.
+/// - `Corrupt` (best-effort skip) → pushes the manifest digest as a GC root
+///   when the stored digest was parseable (`Some`), then returns `Ok(None)`.
+///   This keeps the manifest blob alive even when the descriptor layer is
+///   corrupt, allowing the next `ocx clean` to retry after the corruption is
+///   resolved rather than over-collecting the manifest.
+/// - `Loaded` → appends manifest digest + all layer digests to
+///   `descriptor_digests` and returns `Ok(Some(descriptor))`.
+///
+/// Unlike the exec-overlay path, GC root derivation is best-effort:
+/// a corrupt descriptor is a debug log + skip rather than a fail-closed
+/// error.  Over-collection (dropping a still-needed companion) would be
+/// harmful; under-retention (keeping an orphan) is safe and will be
+/// corrected on the next `ocx clean` after the corruption is fixed.
+///
+/// The manifest digest is carried directly from [`DescriptorLoadResult`] —
+/// no second tag-store read is needed.
+async fn collect_descriptor_digests(
+    blob_store: &crate::file_structure::BlobStore,
+    registry: &str,
+    tags_path: &std::path::Path,
+    descriptor_digests: &mut Vec<(String, oci::Digest)>,
+) -> crate::Result<(Option<PatchDescriptor>, Option<oci::Digest>)> {
+    // Delegate tag-map reading + CAS load to the existing helper so there is
+    // a single code path for the PatchDiscoveryState → DescriptorLoadResult
+    // transition.  This avoids duplicating the tag-map format and state
+    // matching logic (DRY).  The helper now returns the parsed manifest digest
+    // in both Loaded and Corrupt(_, Some(_)) so we never need a second read.
+    //
+    // Returns `(descriptor, manifest_digest)`. The manifest digest is `Some`
+    // ONLY for a cleanly-loaded descriptor — a corrupt descriptor is not pinned
+    // by `ocx patch freeze` (you cannot reproducibly select a descriptor whose
+    // bytes are unreadable), though its manifest blob is still seeded as a GC
+    // root so a later `ocx clean` does not over-collect.
+    let load_result = load_descriptor_for_id(blob_store, registry, tags_path).await?;
+
+    let (manifest_digest, descriptor) = match load_result {
+        DescriptorLoadResult::NotPresent => return Ok((None, None)),
+        DescriptorLoadResult::Corrupt(error, manifest_digest_opt) => {
+            log::debug!("resolve-site-patch-roots: descriptor corrupt (best-effort GC root): {error}");
+            // Push the manifest blob as a GC root if the stored digest was
+            // parseable — the manifest at least survives even when the layer
+            // is missing.
+            if let Some(manifest_digest) = manifest_digest_opt {
+                descriptor_digests.push((registry.to_string(), manifest_digest));
+            }
+            return Ok((None, None));
+        }
+        DescriptorLoadResult::Loaded(manifest_digest, descriptor) => (manifest_digest, descriptor),
+    };
+
+    // Record the manifest digest (registry-qualified).
+    descriptor_digests.push((registry.to_string(), manifest_digest.clone()));
+
+    // Extract layer digests from the manifest blob on disk.  The manifest was
+    // already verified by `load_descriptor_from_cas` inside
+    // `load_descriptor_for_id`, so we re-read the on-disk bytes only to parse
+    // the layer descriptor list — no re-verification needed.
+    let data_path = blob_store.path(registry, &manifest_digest).join("data");
+    match tokio::fs::read(&data_path).await {
+        Ok(bytes) => {
+            if let Ok(manifest_value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(layers) = manifest_value.get("layers").and_then(|v| v.as_array())
+            {
+                for layer in layers {
+                    if let Some(digest_str) = layer.get("digest").and_then(|v| v.as_str())
+                        && let Ok(layer_digest) = oci::Digest::try_from(digest_str)
+                    {
+                        descriptor_digests.push((registry.to_string(), layer_digest));
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            log::debug!(
+                "resolve-site-patch-roots: could not re-read manifest blob for layer digest extraction: {error}; manifest digest retained"
+            );
+        }
+    }
+
+    Ok((Some(descriptor), Some(manifest_digest)))
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────
@@ -1138,6 +1776,7 @@ mod phase4_spec_tests {
 
     fn test_patch_config() -> ResolvedPatchConfig {
         ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: false,
@@ -1152,7 +1791,7 @@ mod phase4_spec_tests {
     /// Tests that previously wrote raw `BTreeMap<String, String>` (the wrong
     /// schema) must use this helper instead so that `find_companion_local` can
     /// resolve the tag → digest through the public `Index` wrapper without error.
-    fn write_companion_tag_lock(
+    pub(super) fn write_companion_tag_lock(
         tag_store: &crate::file_structure::TagStore,
         companion_tag_id: &Identifier,
         digest: &Digest,
@@ -1173,7 +1812,7 @@ mod phase4_spec_tests {
     }
 
     /// Write a minimal on-disk package directory (metadata.json + resolve.json).
-    fn seed_package_in_store(store: &PackageStore, id: &PinnedIdentifier, resolved: &ResolvedPackage) {
+    pub(super) fn seed_package_in_store(store: &PackageStore, id: &PinnedIdentifier, resolved: &ResolvedPackage) {
         let pkg_path = store.path(id);
         std::fs::create_dir_all(pkg_path.join("content")).unwrap();
         let meta = serde_json::json!({ "type": "bundle", "version": 1 });
@@ -1183,7 +1822,7 @@ mod phase4_spec_tests {
     }
 
     /// Seed a package with one env var of the given key/value/visibility.
-    fn seed_package_with_constant_var(
+    pub(super) fn seed_package_with_constant_var(
         store: &PackageStore,
         id: &PinnedIdentifier,
         resolved: &ResolvedPackage,
@@ -1559,6 +2198,11 @@ mod phase4_spec_tests {
     /// Traceability: C1 global-last invariant (live companion override path).
     #[tokio::test(flavor = "multi_thread")]
     async fn c1_live_companion_entry_appended_after_root_var_proves_global_last() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -1840,6 +2484,11 @@ mod phase4_spec_tests {
     /// Traceability: Interface-only / no-private-leak invariant (live projection path).
     #[tokio::test(flavor = "multi_thread")]
     async fn no_private_leak_live_companion_private_var_excluded_by_interface_projection() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -2041,12 +2690,18 @@ mod phase4_spec_tests {
     /// Traceability: C7 fail-closed; F1 regression.
     #[tokio::test(flavor = "multi_thread")]
     async fn c7_required_companion_not_installed_locally_returns_err() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         // required=true at tier level so all companions inherit required=true.
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -2142,12 +2797,18 @@ mod phase4_spec_tests {
     /// Traceability: F6 — pkg-specific override semantic; merge_companions last-wins.
     #[tokio::test(flavor = "multi_thread")]
     async fn f6_pkg_specific_descriptor_overrides_global_companion_required_flag() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         // Tier required=false; companion required flag comes from per-rule required field.
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: false,
@@ -2283,11 +2944,17 @@ mod phase4_spec_tests {
     /// (env-value ordering, not just required-flag override).
     #[tokio::test(flavor = "multi_thread")]
     async fn f6b_pkg_specific_companion_env_value_overrides_global_companion_on_shared_key() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: false,
@@ -2456,6 +3123,11 @@ mod phase4_spec_tests {
     /// Traceability: C1 global-last (Modifier::Path variant); F7 regression.
     #[tokio::test(flavor = "multi_thread")]
     async fn f7_c1_global_last_holds_for_path_modifier() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::{
             oci::Algorithm,
@@ -2628,12 +3300,18 @@ mod phase4_spec_tests {
     /// Traceability: Fix 2 — fail-closed cap consistency with Phase 3.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix2_required_tier_over_cap_returns_err() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         // Tier required=true → cap breach must fail closed.
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -2747,12 +3425,18 @@ mod phase4_spec_tests {
     /// Traceability: Fix 2 — non-required tier + over-cap → warn + truncate.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix2_non_required_tier_over_cap_warns_and_truncates() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         // Tier required=false → cap breach should warn + truncate.
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: false,
@@ -2836,12 +3520,18 @@ mod phase4_spec_tests {
     /// Traceability: Fix 3 — cache None re-triggers required fail-closed check.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix3_required_companion_missing_fails_closed_even_on_cache_hit() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         // Tier required=true → all companions are required.
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -2954,11 +3644,17 @@ mod phase4_spec_tests {
     /// Traceability: schema regression + C7 fail-closed on real TagLock path.
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_regression_required_companion_tag_lock_envelope_missing_package_returns_err() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true, // required=true → must fail closed
@@ -3051,11 +3747,17 @@ mod phase4_spec_tests {
     /// Traceability: schema regression — real path resolves + env surfaces.
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_regression_required_companion_fully_installed_env_appears_in_overlay() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true, // required=true, so any resolution error is fatal
@@ -3158,6 +3860,11 @@ mod phase4_spec_tests {
     /// not recursive through resolve_env).
     #[tokio::test]
     async fn companion_projection_via_plain_compose_has_no_recursive_overlay() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         let dir = TempDir::new().unwrap();
         let store = make_store(dir.path());
 
@@ -3235,7 +3942,7 @@ mod phase4_spec_tests {
     /// When `seed_package` is `false` the package directory is omitted (companion
     /// tag present but package missing → the required-fail-closed path). Returns
     /// the companion's interface `(key, value)` pair.
-    async fn seed_installed_global_companion(
+    pub(super) async fn seed_installed_global_companion(
         manager: &PackageManager,
         patch_config: &crate::config::patch::ResolvedPatchConfig,
         seed_package: bool,
@@ -3298,7 +4005,7 @@ mod phase4_spec_tests {
     }
 
     /// Build a root `InstallInfo` (no deps) seeded in `store`.
-    fn seed_root_arc(store: &PackageStore, name: &str, hex_char: char) -> Arc<InstallInfo> {
+    pub(super) fn seed_root_arc(store: &PackageStore, name: &str, hex_char: char) -> Arc<InstallInfo> {
         let root_id = pinned(name, hex_char);
         seed_package_in_store(store, &root_id, &ResolvedPackage::new());
         let root_pkg_path = store.path(&root_id);
@@ -3330,6 +4037,7 @@ mod phase4_spec_tests {
     async fn remote_mode_companion_overlay_resolves_from_local_state() {
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -3365,6 +4073,7 @@ mod phase4_spec_tests {
     async fn offline_view_applies_installed_companion_overlay() {
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -3397,8 +4106,14 @@ mod phase4_spec_tests {
     /// neither applied nor reported missing (fail-OPEN).
     #[tokio::test(flavor = "multi_thread")]
     async fn offline_view_required_missing_companion_fails_closed() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: PATCH_REGISTRY.to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -3426,6 +4141,1120 @@ mod phase4_spec_tests {
                 || err_str.contains("ca-bundle")
                 || err_str.contains("RequiredCompanionFailed"),
             "offline_view fail-closed error must reference the required companion; got: {err_str}"
+        );
+    }
+}
+
+// ── Phase 5A specification tests — resolve_site_patch_roots (GC root derivation) ──
+//
+// Traceability:
+//   Spec test 1 — seeded installed base + global descriptor + installed companion
+//                 → companion PinnedIdentifier in .companions; descriptor manifest+layer
+//                 digests in .descriptors.
+//   Spec test 2 — ChainMode::Remote manager with companion installed locally
+//                 → still returns companion (proves network-free, local-only).
+//   Spec test 3 — patches=None → empty SitePatchRoots.
+//
+// These tests MUST compile and FAIL with unimplemented!() against the Phase 5A stub.
+#[cfg(test)]
+mod phase5a_spec_tests {
+    use tempfile::TempDir;
+
+    use crate::{
+        config::patch::ResolvedPatchConfig,
+        file_structure::{BlobStore, FileStructure, TagStore},
+        oci::{
+            Algorithm, Digest, Identifier, PinnedIdentifier,
+            index::{ChainMode, Index, LocalConfig, LocalIndex},
+        },
+        package::{metadata::visibility::Visibility, resolved_package::ResolvedPackage},
+        package_manager::PackageManager,
+    };
+
+    use super::{
+        super::patch_discovery::{PatchTagMap, global_descriptor_id},
+        phase4_spec_tests::{seed_package_with_constant_var, write_companion_tag_lock},
+    };
+
+    const REGISTRY: &str = "example.com";
+    const PATCH_REGISTRY: &str = "patches.example.com";
+
+    pub(super) fn sha256(hex_char: char) -> Digest {
+        Digest::Sha256(hex_char.to_string().repeat(64))
+    }
+
+    pub(super) fn test_patch_config() -> ResolvedPatchConfig {
+        ResolvedPatchConfig {
+            system_required: false,
+            registry: PATCH_REGISTRY.to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: false,
+        }
+    }
+
+    /// Build an offline `PackageManager` backed by a tempdir FileStructure.
+    pub(super) fn make_manager(dir: &TempDir) -> PackageManager {
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                tag_store: TagStore::new(dir.path().join("tags")),
+                blob_store: BlobStore::new(dir.path().join("blobs")),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// Build a `ChainMode::Remote` `PackageManager` (no sources configured).
+    ///
+    /// In `Remote` mode a tag-addressed `Op::Query` bypasses the local index
+    /// and routes to sources (here: none → `Ok(None)`). Success here proves
+    /// `resolve_site_patch_roots` uses a guaranteed-local index, not the
+    /// manager's mode-sensitive one.
+    fn make_remote_manager(dir: &TempDir) -> PackageManager {
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                tag_store: TagStore::new(dir.path().join("tags")),
+                blob_store: BlobStore::new(dir.path().join("blobs")),
+            }),
+            Vec::new(),
+            ChainMode::Remote,
+        );
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// Seed a candidate symlink for `base_id` (so it appears as an installed base).
+    ///
+    /// The symlink store layout is:
+    ///   `symlinks/{registry_slug}/{repo_path}/candidates/{tag}`
+    ///
+    /// This matches `SymlinkStore::candidate(&base_id)`. The symlink is
+    /// not a real symlink in the test — the symlink path existing (even as an
+    /// empty file or dir) is all that `resolve_site_patch_roots` needs to
+    /// enumerate it as an installed base.
+    ///
+    /// Actually, `resolve_site_patch_roots` reads the symlink store by walking
+    /// the directory tree under `symlinks/`. A real symlink to a package dir
+    /// is the correct representation, but for the purpose of making
+    /// `resolve_site_patch_roots` discover the base identifier, we just need
+    /// the candidate path to exist. We create the parent dirs and a placeholder
+    /// (regular file) for the candidate entry itself.
+    pub(super) fn seed_installed_base_symlink(dir: &TempDir, base_id: &Identifier) {
+        let symlink_store = crate::file_structure::SymlinkStore::new(dir.path().join("symlinks"));
+        let candidate_path = symlink_store.candidate(base_id);
+        std::fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+        // Write a placeholder that lets the walker see this as an installed candidate.
+        // In a real install this would be a symlink → package dir; here a regular file
+        // suffices because resolve_site_patch_roots only needs to derive the identifier
+        // (registry/repo/tag) from the path, not follow the symlink.
+        std::fs::write(&candidate_path, b"").unwrap();
+    }
+
+    /// Write a minimal descriptor blob pair (manifest + layer) into the blob store
+    /// and record `LookedHasDescriptor` in the global tag-store entry.
+    ///
+    /// Returns `(manifest_digest, layer_digest)` for the caller to use in assertions.
+    pub(super) async fn seed_global_descriptor_with_companion(
+        dir: &TempDir,
+        patch_config: &ResolvedPatchConfig,
+        companion_tag_id: &Identifier,
+    ) -> (Digest, Digest) {
+        let blob_store = BlobStore::new(dir.path().join("blobs"));
+        let tag_store = TagStore::new(dir.path().join("tags"));
+
+        let descriptor_json = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": [companion_tag_id.to_string()] }]
+        })
+        .to_string();
+        let layer_bytes = descriptor_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{
+                "mediaType": "application/octet-stream",
+                "digest": layer_digest.to_string(),
+                "size": layer_bytes.len()
+            }]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+
+        let global_id = global_descriptor_id(patch_config);
+        let global_tags_path = tag_store.tags(&global_id);
+        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
+            .await
+            .unwrap();
+
+        (manifest_digest, layer_digest)
+    }
+
+    // ── Spec test 1 — seeded base + global descriptor + installed companion ──
+
+    /// `resolve_site_patch_roots` with an installed base, a global descriptor
+    /// (rule `*` → companion), and an installed companion returns:
+    ///   - the companion `PinnedIdentifier` in `.companions`
+    ///   - the descriptor manifest digest + layer digest in `.descriptors`
+    ///
+    /// This is the primary contract test for the GC root derivation.
+    ///
+    /// Traceability: Phase 5A spec test 1.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_with_installed_base_and_companion_returns_roots() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (and any sibling test that reads WRITE_BLOB_CALL_COUNT). The counter is a
+        // process-global static; holding this lock ensures our write_blob calls (via
+        // `seed_global_descriptor_with_companion`) do not inflate its delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // Seed an installed base: place a candidate symlink under the symlink store.
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        // Seed the companion package in the package store.
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "CA_BUNDLE",
+            "/etc/ssl/certs/bundle.crt",
+            Visibility::INTERFACE,
+        );
+
+        // Write companion tag-store entry (TagLock format that LocalIndex understands).
+        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+
+        // Seed the global descriptor referencing the companion.
+        let (manifest_digest, layer_digest) =
+            seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
+
+        // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
+        let roots = manager
+            .resolve_site_patch_roots(&[])
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+
+        // Contract: companion pinned identifier is in .companions.
+        assert!(
+            roots.companions.contains(&companion_pinned),
+            "spec test 1: companion pinned identifier must be in .companions; got: {:?}",
+            roots.companions
+        );
+
+        // Contract: descriptor manifest digest is in .descriptors (registry-qualified).
+        assert!(
+            roots
+                .descriptors
+                .iter()
+                .any(|(reg, dig)| reg == PATCH_REGISTRY && dig == &manifest_digest),
+            "spec test 1: descriptor manifest digest must be in .descriptors; got: {:?}",
+            roots.descriptors
+        );
+
+        // Contract: descriptor layer digest is in .descriptors (registry-qualified).
+        assert!(
+            roots
+                .descriptors
+                .iter()
+                .any(|(reg, dig)| reg == PATCH_REGISTRY && dig == &layer_digest),
+            "spec test 1: descriptor layer digest must be in .descriptors; got: {:?}",
+            roots.descriptors
+        );
+    }
+
+    // ── Spec test 2 — ChainMode::Remote proves network-free ─────────────────────
+
+    /// `resolve_site_patch_roots` under `ChainMode::Remote` (no configured sources)
+    /// still returns the companion, proving the lookup is guaranteed-local.
+    ///
+    /// A Remote-mode index with no sources returns `Ok(None)` for tag-addressed
+    /// queries. If `resolve_site_patch_roots` used `self.index()` it would miss
+    /// the locally-installed companion and return an empty `.companions`. Success
+    /// here (companion present) proves the local-index-bypass pattern mirrors
+    /// `find_companion_local`.
+    ///
+    /// Traceability: Phase 5A spec test 2 (network-free under ChainMode::Remote).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_is_network_free_under_remote_chain_mode() {
+        // Same serialisation guard as the companion spec test above.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        // Remote-mode manager — tag-addressed Op::Query returns Ok(None) via self.index().
+        let manager = make_remote_manager(&dir).with_patches(Some(patch_config.clone()));
+
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // Seed installed base.
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        // Seed companion.
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "CA_BUNDLE",
+            "/etc/ssl/certs/bundle.crt",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+
+        // Seed global descriptor.
+        seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
+
+        // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
+        let roots = manager
+            .resolve_site_patch_roots(&[])
+            .await
+            .expect("resolve_site_patch_roots must succeed even under ChainMode::Remote");
+
+        // Contract: companion found via local-only index, even in Remote mode.
+        assert!(
+            roots.companions.contains(&companion_pinned),
+            "spec test 2: Remote-mode manager must return companion from local state; got: {:?}",
+            roots.companions
+        );
+    }
+
+    // ── Spec test 3 — patches=None → empty SitePatchRoots ───────────────────────
+
+    /// `resolve_site_patch_roots` returns an empty `SitePatchRoots` when
+    /// `self.patches()` is `None` (no `[patches]` section configured).
+    ///
+    /// This is the no-config no-op guarantee — same short-circuit logic as
+    /// `build_site_patch_set`.
+    ///
+    /// Traceability: Phase 5A spec test 3.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_with_no_patches_config_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        // Manager with patches=None.
+        let manager = make_manager(&dir); // no .with_patches(...)
+
+        // Seed an installed base so we can prove the early-return fires, not a
+        // "nothing to enumerate" path.
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        let roots = manager
+            .resolve_site_patch_roots(&[])
+            .await
+            .expect("resolve_site_patch_roots with patches=None must return Ok(empty)");
+
+        assert!(
+            roots.companions.is_empty(),
+            "spec test 3: patches=None → .companions must be empty; got: {:?}",
+            roots.companions
+        );
+        assert!(
+            roots.descriptors.is_empty(),
+            "spec test 3: patches=None → .descriptors must be empty; got: {:?}",
+            roots.descriptors
+        );
+    }
+
+    // ── Spec test 6 — scoped descriptor rule matches reconstructed base id ───────
+    //
+    // Regression test for the `collect_candidates_from_dir` bug (finding #4):
+    // when the "candidates" directory name was incorrectly pushed into
+    // `repo_components`, the reconstructed base identifier became
+    // `"cmake/candidates:3.28"` instead of `"cmake:3.28"`, causing scoped
+    // descriptor rules (e.g. `"match": "example.com/cmake:*"`) to never match.
+    //
+    // A catch-all rule (`"match": "*"`) masks the bug because glob `*` matches
+    // any string including the corrupted form.  This test uses a scoped rule
+    // to expose it.
+
+    /// A descriptor with a scoped `match` rule (`"example.com/cmake:*"`) must
+    /// match the correctly-reconstructed base identifier (`"cmake:3.28"` in
+    /// registry `"example.com"`) and return the companion in `.companions`.
+    ///
+    /// If the `collect_candidates_from_dir` bug is present, the base identifier
+    /// becomes `"cmake/candidates:3.28"` which does NOT match the scoped rule,
+    /// and `.companions` is empty — causing the test to fail.
+    ///
+    /// Traceability: Phase 5A spec test 6 (scoped-rule regression).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_scoped_rule_matches_reconstructed_base_id() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // Seed an installed base.  The candidate path is:
+        //   symlinks/{registry_slug}/cmake/candidates/3.28
+        // The correctly-reconstructed base identifier must be `cmake:3.28`
+        // in registry `example.com` — not `cmake/candidates:3.28`.
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        // Seed a companion package.
+        let companion_digest = sha256('6');
+        let companion_tag_id = Identifier::new_registry("ca-certs", PATCH_REGISTRY).clone_with_tag("v1");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-certs", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &crate::package::resolved_package::ResolvedPackage::new(),
+            "CA_CERTS",
+            "/etc/ssl/certs",
+            crate::package::metadata::visibility::Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+
+        // Seed a descriptor with a scoped rule matching `example.com/cmake:*`.
+        // This rule must ONLY fire when the base identifier is correctly
+        // reconstructed as `cmake` in registry `example.com`.
+        {
+            let blob_store = crate::file_structure::BlobStore::new(dir.path().join("blobs"));
+            let tag_store_inner = crate::file_structure::TagStore::new(dir.path().join("tags"));
+
+            let descriptor_json = serde_json::json!({
+                "version": 1,
+                "rules": [{
+                    "match": &format!("{REGISTRY}/cmake:*"),
+                    "packages": [companion_tag_id.to_string()]
+                }]
+            })
+            .to_string();
+            let layer_bytes = descriptor_json.as_bytes();
+            let layer_digest = crate::oci::Algorithm::Sha256.hash(layer_bytes);
+            let manifest_json = serde_json::json!({
+                "schemaVersion": 2,
+                "layers": [{
+                    "mediaType": "application/octet-stream",
+                    "digest": layer_digest.to_string(),
+                    "size": layer_bytes.len()
+                }]
+            })
+            .to_string();
+            let manifest_bytes = manifest_json.as_bytes();
+            let manifest_digest = crate::oci::Algorithm::Sha256.hash(manifest_bytes);
+
+            blob_store
+                .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+                .await
+                .unwrap();
+            blob_store
+                .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+                .await
+                .unwrap();
+
+            let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
+            let global_tags_path = tag_store_inner.tags(&global_id);
+            super::super::patch_discovery::PatchTagMap::write_has_descriptor(
+                &global_tags_path,
+                &manifest_digest.to_string(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let roots = manager
+            .resolve_site_patch_roots(&[])
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+
+        // Contract: scoped rule matches correctly-reconstructed base identifier.
+        // Failure here means the base identifier was corrupted (e.g.
+        // `cmake/candidates:3.28` instead of `cmake:3.28`) so the scoped
+        // rule did not fire.
+        assert!(
+            roots.companions.contains(&companion_pinned),
+            "spec test 6 (scoped-rule regression): companion must match scoped rule \
+             '{REGISTRY}/cmake:*'; base id was likely corrupted by candidates-dir bug; \
+             got: {:?}",
+            roots.companions
+        );
+    }
+
+    // ── Spec test 7 — real registry recovered for port-containing base ───────────
+
+    /// Review-finding regression: the registry of an enumerated base must be the
+    /// REAL hostname, not the lossy symlink slug, so a scoped descriptor rule that
+    /// pins a port-containing registry matches.
+    ///
+    /// The symlink store names `localhost:5000` as `localhost_5000` (`to_relaxed_slug`
+    /// maps `:` to `_`). Without recovering the real hostname from the base's tag
+    /// file, `base_id.to_string()` is `localhost_5000/cmake:3.28`, which does NOT
+    /// match a rule `localhost:5000/cmake:*`, so the companion is dropped from the
+    /// GC roots (over-collection of an in-use companion). With recovery it matches.
+    ///
+    /// A catch-all `*` rule and standard dotted registries mask this — only a
+    /// scoped rule against a port-containing registry exposes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_recovers_real_registry_for_port_containing_base() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
+        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // Installed base whose registry carries a PORT → symlink slug `localhost_5000`.
+        let base_id = Identifier::new_registry("cmake", "localhost:5000").clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        // Seed the base's tag file recording the canonical `repository` so the real
+        // hostname can be recovered from the slug directory. `tag_store.tags(&base_id)`
+        // slugifies the registry, landing at `tags/localhost_5000/cmake.json`.
+        {
+            let base_digest = sha256('b');
+            let tags_path = tag_store.tags(&base_id);
+            std::fs::create_dir_all(tags_path.parent().unwrap()).unwrap();
+            let json =
+                format!(r#"{{"version":1,"repository":"localhost:5000/cmake","tags":{{"3.28":"{base_digest}"}}}}"#);
+            std::fs::write(&tags_path, json).unwrap();
+        }
+
+        // Companion installed locally.
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &crate::package::resolved_package::ResolvedPackage::new(),
+            "CA_BUNDLE",
+            "/etc/ssl/certs/bundle.crt",
+            crate::package::metadata::visibility::Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+
+        // Global descriptor with a SCOPED port-registry rule (not catch-all).
+        {
+            let blob_store = crate::file_structure::BlobStore::new(dir.path().join("blobs"));
+            let descriptor_json = serde_json::json!({
+                "version": 1,
+                "rules": [{
+                    "match": "localhost:5000/cmake:*",
+                    "packages": [companion_tag_id.to_string()]
+                }]
+            })
+            .to_string();
+            let layer_bytes = descriptor_json.as_bytes();
+            let layer_digest = crate::oci::Algorithm::Sha256.hash(layer_bytes);
+            let manifest_json = serde_json::json!({
+                "schemaVersion": 2,
+                "layers": [{
+                    "mediaType": "application/octet-stream",
+                    "digest": layer_digest.to_string(),
+                    "size": layer_bytes.len()
+                }]
+            })
+            .to_string();
+            let manifest_bytes = manifest_json.as_bytes();
+            let manifest_digest = crate::oci::Algorithm::Sha256.hash(manifest_bytes);
+            blob_store
+                .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+                .await
+                .unwrap();
+            blob_store
+                .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+                .await
+                .unwrap();
+            let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
+            super::super::patch_discovery::PatchTagMap::write_has_descriptor(
+                &tag_store.tags(&global_id),
+                &manifest_digest.to_string(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let roots = manager
+            .resolve_site_patch_roots(&[])
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+
+        assert!(
+            roots.companions.contains(&companion_pinned),
+            "scoped rule 'localhost:5000/cmake:*' must match the port-registry base after \
+             real-registry recovery from the tag file; got: {:?}",
+            roots.companions
+        );
+    }
+}
+
+// ── Phase 5B specification tests — snapshot compose preference + offline_view carry ──
+//
+// Traceability:
+//   Test 4 — compose preference: snapshot digest wins over live tag lookup for a companion.
+//   Test 5 — with_patch_snapshot + offline_view carry the snapshot through.
+//
+// These tests MUST compile and FAIL against the Phase 5B stubs:
+//   - `build_site_patch_set` does not yet consult `self.patch_snapshot()`.
+//
+// After Phase 5B implementation all five tests must pass.
+
+#[cfg(test)]
+mod phase5b_spec_tests {
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+
+    use crate::{
+        file_structure::TagStore,
+        oci::{
+            Identifier, PinnedIdentifier,
+            index::{LocalConfig, LocalIndex},
+        },
+        package::{metadata::visibility::Visibility, resolved_package::ResolvedPackage},
+        patch::snapshot::{PatchSnapshot, SnapshotVersion},
+    };
+
+    use super::{
+        phase4_spec_tests::{seed_package_with_constant_var, seed_root_arc, write_companion_tag_lock},
+        phase5a_spec_tests::{make_manager, seed_global_descriptor_with_companion, sha256, test_patch_config},
+    };
+
+    const PATCH_REGISTRY: &str = "patches.example.com";
+
+    // ── Test 4 — snapshot digest wins over live tag lookup ────────────────────
+
+    /// When a `PatchSnapshot` is active and contains a pin for a companion,
+    /// `build_site_patch_set` / `resolve_env` must resolve the companion via
+    /// the SNAPSHOT digest, not the live tag lookup.
+    ///
+    /// Setup:
+    ///   - companion installed at digest A (live tag `latest` → A).
+    ///   - `PatchSnapshot` pins the same companion to digest B (different).
+    ///   - package dir at digest A carries `SNAP_VAR=live_value` (INTERFACE).
+    ///   - package dir at digest B carries `SNAP_VAR=snapshot_value` (INTERFACE).
+    ///
+    /// Expected: `resolve_env` returns `SNAP_VAR=snapshot_value` (snapshot B wins).
+    /// Without snapshot: `resolve_env` would return `SNAP_VAR=live_value` (live A).
+    ///
+    /// Traceability: Phase 5B spec test 4 — compose snapshot preference.
+    ///
+    /// NOTE: This test FAILS until Phase 5B implements snapshot preference in
+    /// `build_site_patch_set`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_digest_wins_over_live_tag_lookup_in_compose() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`:
+        // `seed_global_descriptor_with_companion` calls `write_blob`, which increments
+        // the process-global `WRITE_BLOB_CALL_COUNT`. Holding this lock prevents our
+        // calls from inflating the delta observed by the coalescing test.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // Digest A = live tag target.  Digest B = snapshot pin.
+        let live_digest = sha256('a');
+        let snap_digest = sha256('b');
+
+        let companion_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+
+        // Live companion: tag → A, package at A carries live_value.
+        let live_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &live_pinned,
+            &ResolvedPackage::new(),
+            "SNAP_VAR",
+            "live_value",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_id, &live_digest);
+
+        // Snapshot companion: package at digest B carries snapshot_value.
+        let snap_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(snap_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &snap_pinned,
+            &ResolvedPackage::new(),
+            "SNAP_VAR",
+            "snapshot_value",
+            Visibility::INTERFACE,
+        );
+
+        // Seed the global descriptor pointing to the companion tag, capturing its
+        // manifest digest so the snapshot can freeze descriptor SELECTION too
+        // (whole-tier freeze — C8 pins companion AND descriptor digests).
+        let (global_manifest_digest, _layer_digest) =
+            seed_global_descriptor_with_companion(&dir, &patch_config, &companion_id).await;
+
+        // Build a snapshot that pins the companion to digest B AND the global
+        // descriptor to its frozen manifest digest (so the frozen descriptor is
+        // the one that names the companion under the snapshot).
+        let companion_key = format!("{PATCH_REGISTRY}/ca-bundle");
+        let mut companions_map = BTreeMap::new();
+        companions_map.insert(companion_key, snap_digest.clone());
+        let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
+        let mut descriptors_map = BTreeMap::new();
+        descriptors_map.insert(super::descriptor_source_key(&global_id), global_manifest_digest);
+        let snapshot = PatchSnapshot {
+            version: SnapshotVersion::V1,
+            companions: companions_map,
+            descriptors: descriptors_map,
+        };
+
+        // Build a fresh manager (same tempdir) with the snapshot injected.
+        let manager_with_snapshot = make_manager(&dir)
+            .with_patches(Some(patch_config.clone()))
+            .with_patch_snapshot(Some(snapshot));
+
+        let root = seed_root_arc(&manager_with_snapshot.file_structure().packages.clone(), "root", 'r');
+
+        // This FAILS until Phase 5B implements snapshot preference in build_site_patch_set.
+        let entries = manager_with_snapshot
+            .resolve_env(&[root], false)
+            .await
+            .expect("resolve_env with snapshot must succeed");
+
+        let snap_var = entries.iter().find(|e| e.key == "SNAP_VAR");
+        assert!(
+            snap_var.is_some(),
+            "test 4: SNAP_VAR must be present in resolved env; entries: {entries:?}"
+        );
+        assert_eq!(
+            snap_var.unwrap().value,
+            "snapshot_value",
+            "test 4: snapshot digest B must win over live tag A; got '{}'",
+            snap_var.unwrap().value
+        );
+    }
+
+    /// Without a snapshot, `resolve_env` uses the live tag (digest A) and returns
+    /// `SNAP_VAR=live_value`.
+    ///
+    /// Baseline confirming test 4 is genuinely observing the right variable.
+    ///
+    /// Traceability: Phase 5B spec test 4 baseline — no snapshot floats to live.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_snapshot_live_tag_is_used() {
+        // Same serialisation guard as the snapshot preference test above.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        let live_digest = sha256('a');
+        let companion_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+
+        let live_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &live_pinned,
+            &ResolvedPackage::new(),
+            "SNAP_VAR",
+            "live_value",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_id, &live_digest);
+
+        seed_global_descriptor_with_companion(&dir, &patch_config, &companion_id).await;
+
+        // No snapshot — live tag must win.
+        let root = seed_root_arc(&store, "root", 'r');
+        let entries = manager
+            .resolve_env(&[root], false)
+            .await
+            .expect("resolve_env without snapshot must succeed");
+
+        let snap_var = entries.iter().find(|e| e.key == "SNAP_VAR");
+        assert!(
+            snap_var.is_some(),
+            "test 4 baseline: SNAP_VAR must be present without snapshot; entries: {entries:?}"
+        );
+        assert_eq!(
+            snap_var.unwrap().value,
+            "live_value",
+            "test 4 baseline: without snapshot the live tag must be used; got '{}'",
+            snap_var.unwrap().value
+        );
+    }
+
+    /// C8 whole-tier freeze (Codex BLOCK regression): once a snapshot pins the
+    /// descriptor source, a post-freeze `ocx patch sync` that ADVANCES the live
+    /// descriptor — re-pointing the global tag to a NEW descriptor that names a
+    /// DIFFERENT companion — must NOT change which companion a frozen build
+    /// composes. The frozen build selects the descriptor by its pinned manifest
+    /// digest, never the live tag store.
+    ///
+    /// Setup: frozen descriptor M1 names companion `ca-bundle` (SNAP_VAR=frozen);
+    /// live descriptor advances to M2 naming `ca-bundle-v2` (SNAP_VAR=advanced)
+    /// and re-points the global tag to M2. Under the snapshot pinning M1, the
+    /// result must be `frozen` — the advance is invisible.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frozen_descriptor_selection_ignores_post_freeze_sync() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let store = make_manager(&dir).file_structure().packages.clone();
+        let tag_store = make_manager(&dir).file_structure().tags.clone();
+
+        // Frozen companion `ca-bundle` at digest dC1 → SNAP_VAR=frozen.
+        let frozen_companion = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let frozen_digest = sha256('1');
+        let frozen_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(frozen_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &frozen_pinned,
+            &ResolvedPackage::new(),
+            "SNAP_VAR",
+            "frozen",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &frozen_companion, &frozen_digest);
+
+        // Advanced companion `ca-bundle-v2` at digest dC2 → SNAP_VAR=advanced.
+        let advanced_companion = Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_tag("latest");
+        let advanced_digest = sha256('2');
+        let advanced_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_digest(advanced_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &advanced_pinned,
+            &ResolvedPackage::new(),
+            "SNAP_VAR",
+            "advanced",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &advanced_companion, &advanced_digest);
+
+        // Freeze: descriptor M1 names the frozen companion. This is the global tag
+        // target captured by `ocx patch freeze`.
+        let (frozen_manifest, _l1) =
+            seed_global_descriptor_with_companion(&dir, &patch_config, &frozen_companion).await;
+
+        // Post-freeze sync: descriptor M2 names the advanced companion and RE-POINTS
+        // the live global tag to M2 (overwriting M1's tag entry — the digest advances).
+        let (advanced_manifest, _l2) =
+            seed_global_descriptor_with_companion(&dir, &patch_config, &advanced_companion).await;
+        assert_ne!(
+            frozen_manifest, advanced_manifest,
+            "the two descriptors must have distinct manifest digests for this test to be meaningful"
+        );
+
+        // Snapshot pins descriptor source → M1 and companion ca-bundle → dC1.
+        let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
+        let mut descriptors_map = BTreeMap::new();
+        descriptors_map.insert(super::descriptor_source_key(&global_id), frozen_manifest);
+        let mut companions_map = BTreeMap::new();
+        companions_map.insert(format!("{PATCH_REGISTRY}/ca-bundle"), frozen_digest.clone());
+        let snapshot = PatchSnapshot {
+            version: SnapshotVersion::V1,
+            companions: companions_map,
+            descriptors: descriptors_map,
+        };
+
+        // Frozen build: must compose the FROZEN companion, ignoring the advance.
+        let frozen_manager = make_manager(&dir)
+            .with_patches(Some(patch_config.clone()))
+            .with_patch_snapshot(Some(snapshot));
+        let root = seed_root_arc(&frozen_manager.file_structure().packages.clone(), "root", 'r');
+        let entries = frozen_manager
+            .resolve_env(&[root], false)
+            .await
+            .expect("frozen resolve_env");
+        let snap_var = entries.iter().find(|e| e.key == "SNAP_VAR");
+        assert_eq!(
+            snap_var.map(|e| e.value.as_str()),
+            Some("frozen"),
+            "frozen build must compose the descriptor pinned at freeze (M1 → ca-bundle), \
+             not the post-freeze advance (M2 → ca-bundle-v2); entries: {entries:?}"
+        );
+
+        // Floating build (no snapshot): follows the live tag to M2 → advanced.
+        let floating_manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let root2 = seed_root_arc(&floating_manager.file_structure().packages.clone(), "root", 'r');
+        let live_entries = floating_manager
+            .resolve_env(&[root2], false)
+            .await
+            .expect("floating resolve_env");
+        let live_var = live_entries.iter().find(|e| e.key == "SNAP_VAR");
+        assert_eq!(
+            live_var.map(|e| e.value.as_str()),
+            Some("advanced"),
+            "without a snapshot the live descriptor (M2 → ca-bundle-v2) must win — \
+             confirms the freeze test is observing a real difference; entries: {live_entries:?}"
+        );
+    }
+
+    // ── Test 5 — with_patch_snapshot + offline_view carry the snapshot ────────
+
+    /// `with_patch_snapshot(Some(snap))` must store the snapshot, and
+    /// `offline_view(...)` must carry the snapshot through so offline env
+    /// paths (direnv export, global toolchain) still use frozen digests.
+    ///
+    /// Contract:
+    ///   - `manager.patch_snapshot()` is `Some` after `with_patch_snapshot`.
+    ///   - `manager.offline_view(local_index).patch_snapshot()` is `Some`.
+    ///   - The snapshot from the offline view equals the original.
+    ///
+    /// Traceability: Phase 5B spec test 5 — builder + offline_view carry.
+    ///
+    /// NOTE: This test PASSES — `with_patch_snapshot` and `offline_view` are
+    /// already implemented. Included as a pinning guard.
+    #[test]
+    fn with_patch_snapshot_and_offline_view_carry_snapshot() {
+        let dir = TempDir::new().unwrap();
+
+        let mut companions = BTreeMap::new();
+        companions.insert(format!("{PATCH_REGISTRY}/ca-bundle"), sha256('s'));
+        let snapshot = PatchSnapshot {
+            version: SnapshotVersion::V1,
+            companions,
+            descriptors: BTreeMap::new(),
+        };
+
+        let manager = make_manager(&dir).with_patch_snapshot(Some(snapshot.clone()));
+
+        assert!(
+            manager.patch_snapshot().is_some(),
+            "test 5: patch_snapshot() must be Some after with_patch_snapshot"
+        );
+        assert_eq!(
+            manager.patch_snapshot().unwrap(),
+            &snapshot,
+            "test 5: patch_snapshot() must equal the injected snapshot"
+        );
+
+        let local_index = LocalIndex::new(LocalConfig {
+            tag_store: TagStore::new(dir.path().join("tags")),
+            blob_store: crate::file_structure::BlobStore::new(dir.path().join("blobs")),
+        });
+        let offline = manager.offline_view(local_index);
+
+        assert!(
+            offline.is_offline(),
+            "test 5: offline_view must produce an offline manager"
+        );
+        assert!(
+            offline.patch_snapshot().is_some(),
+            "test 5: offline_view must carry the patch snapshot through"
+        );
+        assert_eq!(
+            offline.patch_snapshot().unwrap(),
+            &snapshot,
+            "test 5: offline_view patch_snapshot must equal the original"
+        );
+    }
+
+    /// Manager built without `with_patch_snapshot` reports `None`.
+    ///
+    /// Traceability: Phase 5B spec test 5 — absence is preserved.
+    #[test]
+    fn manager_without_snapshot_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let manager = make_manager(&dir);
+        assert!(
+            manager.patch_snapshot().is_none(),
+            "test 5: manager without snapshot must return None from patch_snapshot()"
+        );
+    }
+}
+
+/// Phase 5D — per-package `no-patches` opt-out boundary (C7 enforcement exception).
+///
+/// These tests exercise `resolve_env_with_patch_boundary`'s `no_patches` set:
+/// an admitted base listed in the opt-out set gets NO companion overlay UNLESS
+/// the configured tier is `system_required` (enforcement beats opt-out).
+///
+/// All three seed the canonical global-companion fixture (rule `"match": "*"`),
+/// which projects the `CA_BUNDLE` interface var onto every admitted base —
+/// including the root `example.com/rootpkg`. The presence or absence of
+/// `CA_BUNDLE` in the resolved env is the overlay marker the assertions key on.
+#[cfg(test)]
+mod phase5d_spec_tests {
+    use std::collections::BTreeSet;
+
+    use tempfile::TempDir;
+
+    use crate::config::patch::ResolvedPatchConfig;
+
+    use super::{
+        phase4_spec_tests::{seed_installed_global_companion, seed_root_arc},
+        phase5a_spec_tests::make_manager,
+    };
+
+    const PATCH_REGISTRY: &str = "patches.example.com";
+
+    /// The canonical `registry/repository` key for the root seeded by
+    /// `seed_root_arc(.., "rootpkg", ..)` in the `example.com` test registry.
+    const ROOT_REPO_KEY: &str = "example.com/rootpkg";
+
+    /// Build a patch config for the test patch registry with the given
+    /// `system_required` posture (the non-overridable system origin marker).
+    fn patch_config(system_required: bool) -> ResolvedPatchConfig {
+        ResolvedPatchConfig {
+            system_required,
+            registry: PATCH_REGISTRY.to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        }
+    }
+
+    /// (11) An admitted base listed in `no_patches` with a NON-system_required
+    /// tier gets NO companion overlay: the `CA_BUNDLE` entry is ABSENT from the
+    /// resolved env.
+    ///
+    /// Traces: FILE D `build_site_patch_set` opt-out skip — "if
+    /// no_patches.contains(&repo_key) && !system_required { continue; }";
+    /// ADR §"Per-package opt-out".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opted_out_base_with_non_system_required_tier_has_no_overlay() {
+        // `seed_installed_global_companion` calls `write_blob`; serialise against
+        // the process-global `WRITE_BLOB_CALL_COUNT` consumers.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(false);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (key, _value) = seed_installed_global_companion(&manager, &config, true).await;
+
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
+
+        // Opt the root base out by canonical registry/repository key.
+        let no_patches: BTreeSet<String> = [ROOT_REPO_KEY.to_string()].into_iter().collect();
+        let (entries, _patch_start) = manager
+            .resolve_env_with_patch_boundary(&[root], false, &no_patches)
+            .await
+            .expect("resolve_env_with_patch_boundary must succeed");
+
+        assert!(
+            !entries.iter().any(|e| e.key == key),
+            "test 11: opted-out base with a non-system_required tier must have NO \
+             companion overlay; '{key}' must be absent. entries: {entries:?}"
+        );
+    }
+
+    /// (12) The SAME opted-out base, but the tier is `system_required = true`:
+    /// the companion overlay entries are PRESENT — enforcement beats opt-out.
+    ///
+    /// Traces: FILE D `build_site_patch_set` — the `&& !system_required` guard
+    /// means a system-required tier never honours the opt-out; ADR §"Config
+    /// scopes (C7 enforcement)" + §"Per-package opt-out" exception.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opted_out_base_with_system_required_tier_keeps_overlay() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(true);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (key, value) = seed_installed_global_companion(&manager, &config, true).await;
+
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
+
+        // Same opt-out as test 11 — but the tier is system_required, so it is ignored.
+        let no_patches: BTreeSet<String> = [ROOT_REPO_KEY.to_string()].into_iter().collect();
+        let (entries, _patch_start) = manager
+            .resolve_env_with_patch_boundary(&[root], false, &no_patches)
+            .await
+            .expect("resolve_env_with_patch_boundary must succeed");
+
+        assert!(
+            entries.iter().any(|e| e.key == key && e.value == value),
+            "test 12: a system_required tier must apply the overlay EVEN when the base \
+             is opted out (enforcement beats opt-out); '{key}={value}' must be present. \
+             entries: {entries:?}"
+        );
+    }
+
+    /// (13) A base NOT in `no_patches` (empty opt-out set) keeps its companion
+    /// overlay: the `CA_BUNDLE` entry is PRESENT. Baseline that the marker var
+    /// genuinely appears when the opt-out does not fire.
+    ///
+    /// Traces: FILE D `build_site_patch_set` — only `no_patches.contains(&repo_key)`
+    /// skips the overlay; an absent key leaves the overlay intact.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn base_not_opted_out_keeps_overlay() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(false);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (key, value) = seed_installed_global_companion(&manager, &config, true).await;
+
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
+
+        // Empty opt-out set — the root base is NOT opted out.
+        let no_patches: BTreeSet<String> = BTreeSet::new();
+        let (entries, _patch_start) = manager
+            .resolve_env_with_patch_boundary(&[root], false, &no_patches)
+            .await
+            .expect("resolve_env_with_patch_boundary must succeed");
+
+        assert!(
+            entries.iter().any(|e| e.key == key && e.value == value),
+            "test 13: a base that is NOT opted out must keep its companion overlay; \
+             '{key}={value}' must be present. entries: {entries:?}"
         );
     }
 }

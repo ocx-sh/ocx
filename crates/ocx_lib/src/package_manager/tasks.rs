@@ -13,6 +13,7 @@ pub mod inspect;
 pub mod install;
 pub mod layer_staging;
 pub mod patch_discovery;
+pub mod patch_sync;
 pub mod pull;
 pub mod pull_local;
 pub mod purge;

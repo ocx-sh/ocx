@@ -209,7 +209,11 @@ impl ToolchainEnv {
                 .into_iter()
                 .map(Arc::new)
                 .collect();
-            manager.resolve_env_with_patch_boundary(&infos, false).await?
+            // Per-package opt-out from the in-scope project `ocx.toml`.
+            let no_patches = ctx.config.no_patches_repositories();
+            manager
+                .resolve_env_with_patch_boundary(&infos, false, &no_patches)
+                .await?
         };
 
         // ── Emit ─────────────────────────────────────────────────────────────
@@ -356,10 +360,21 @@ pub(crate) async fn resolve_global_pinned_env(
         return Ok(None);
     }
 
+    // Per-package opt-out from the global `$OCX_HOME/ocx.toml`. The global lock
+    // can exist without a sibling `ocx.toml`; a missing or unparseable file
+    // yields an empty opt-out set (lenient — the login exporter must never fail
+    // on a malformed global config, matching this path's overall posture).
+    let no_patches = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+        Ok(config) => config.no_patches_repositories(),
+        Err(_) => std::collections::BTreeSet::new(),
+    };
+
     // Patch overlays apply offline: companions are already installed locally and
     // `offline_view` preserves the patch tier (the network alone is disabled).
     // Return the companion-overlay boundary so `--show-patches` can annotate
     // companion entries on the global path, exactly as on the project path.
-    let (entries, patch_start) = manager.resolve_env_with_patch_boundary(&infos, false).await?;
+    let (entries, patch_start) = manager
+        .resolve_env_with_patch_boundary(&infos, false, &no_patches)
+        .await?;
     Ok(Some((entries, patch_start)))
 }

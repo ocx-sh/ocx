@@ -33,6 +33,7 @@ pub mod descriptor;
 pub mod error;
 pub mod matcher;
 pub mod persistence;
+pub mod snapshot;
 
 pub use descriptor::{
     CompanionEntry, PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE, PATCH_MANIFEST_ARTIFACT_TYPE, PatchDescriptor,
@@ -43,3 +44,4 @@ pub use matcher::glob_match;
 pub use persistence::{
     FetchedDescriptorBlobs, PersistedDigests, fetch_patch_descriptor_blobs, persist_patch_descriptor,
 };
+pub use snapshot::{PATCH_SNAPSHOT_FILE, PatchSnapshot, SnapshotVersion};

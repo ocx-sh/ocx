@@ -53,6 +53,19 @@ pub struct PatchConfig {
     /// - `false` — fail open: skip with a warning (suitable for non-security
     ///   companions like a license-server URL or metrics endpoint).
     pub required: Option<bool>,
+
+    /// Runtime provenance marker: this tier was declared at the SYSTEM config
+    /// scope (`/etc/ocx/config.toml`) AND declared `required = true`, so it is
+    /// NON-OVERRIDABLE by any lower tier (C7 enforcement).
+    ///
+    /// Never serialized — it is set by the loader via [`Self::lock_as_system`]
+    /// after parsing the system-scope file, not read from disk. A lower tier
+    /// (user / `$OCX_HOME` / `OCX_CONFIG` / `--config`) cannot remove the tier,
+    /// flip `required` to false, or redirect its registry/path while this flag
+    /// is set on the accumulator.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub system_locked: bool,
 }
 
 /// Fully resolved form of [`PatchConfig`] with defaults applied.
@@ -74,6 +87,17 @@ pub struct ResolvedPatchConfig {
     /// Whether missing companions fail closed (`true`) or warn-and-skip
     /// (`false`).
     pub required: bool,
+
+    /// Whether this tier originates at the SYSTEM scope as a non-overridable
+    /// required tier (C7 enforcement).
+    ///
+    /// Distinct from [`Self::required`] (the fail posture): `system_required`
+    /// marks the non-overridable system origin and is what the per-package
+    /// no-patches opt-out exception keys on — a system-required tier still
+    /// applies even when a project opts a base out. Carried across the process
+    /// boundary in the `OCX_PATCHES` wire format so child launchers keep the
+    /// same C7 posture (C5).
+    pub system_required: bool,
 }
 
 /// Error variants raised while resolving [`PatchConfig`] or expanding the path
@@ -113,9 +137,40 @@ impl PatchConfig {
     /// Default `required` value (fail-closed, C7).
     pub const DEFAULT_REQUIRED: bool = true;
 
+    /// Mark this tier as system-locked — non-overridable by lower tiers — when
+    /// it is `required` (the C7 default is `required = true`).
+    ///
+    /// Called by the config loader on the system-scope file
+    /// (`/etc/ocx/config.toml`) after parsing and before folding higher tiers
+    /// in. The lock fires when `required` resolves to true, which is the case
+    /// both when `required = true` is explicit AND when `required` is omitted
+    /// (it defaults to [`Self::DEFAULT_REQUIRED`] = `true`, fail-closed). A
+    /// system tier that explicitly opts out with `required = false` is NOT
+    /// locked: normal last-wins merge applies to it so a lower tier may still
+    /// override a non-enforced system patch.
+    ///
+    /// SECURITY (C7): keying the lock off the *effective* `required` (not the
+    /// literal `Some(true)`) closes the hole where a corporate
+    /// `/etc/ocx/config.toml` that just sets `registry = "…"` (relying on the
+    /// fail-closed default) could be suppressed or redirected by a user tier.
+    pub fn lock_as_system(&mut self) {
+        if self.required.unwrap_or(Self::DEFAULT_REQUIRED) {
+            self.system_locked = true;
+        }
+    }
+
     /// Merge `other` into `self` field-by-field. `other`'s `Some` values
     /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    ///
+    /// A system-locked tier (`self.system_locked`) ignores ALL lower-tier
+    /// overrides (registry/path/required): a system-required `[patches]` tier is
+    /// non-overridable (C7 enforcement). The locked flag stays on `self`
+    /// (sticky). The loader folds the system tier in FIRST as the accumulator
+    /// base, so `self` is the system tier when locked.
     pub fn merge(&mut self, other: PatchConfig) {
+        if self.system_locked {
+            return;
+        }
         if other.registry.is_some() {
             self.registry = other.registry;
         }
@@ -165,6 +220,10 @@ pub fn resolve_patch_config(config: &crate::config::Config) -> Result<Option<Res
         registry: registry.clone(),
         path_template,
         required,
+        // Carry the system-origin marker into the resolved form: a tier locked
+        // by the loader (system scope + required=true) is non-overridable and
+        // the per-package opt-out exception keys on this flag.
+        system_required: patch_config.system_locked,
     }))
 }
 
@@ -214,12 +273,15 @@ pub fn expand_patch_path(template: &str, registry_host: &str, repository: &str) 
 /// inherited value rather than setting a null.
 pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<String> {
     let config = patches?;
-    // Serialise as a flat JSON object with the three resolved fields.
+    // Serialise as a flat JSON object with the resolved fields.
     // Field names are stable — this is the wire format of OCX_PATCHES.
+    // `system_required` carries the C7 non-overridable origin across the
+    // process boundary (C5) so child launchers keep the same posture.
     let object = serde_json::json!({
-        "registry":      config.registry,
-        "path_template": config.path_template,
-        "required":      config.required,
+        "registry":         config.registry,
+        "path_template":    config.path_template,
+        "required":         config.required,
+        "system_required":  config.system_required,
     });
     match serde_json::to_string(&object) {
         Ok(json) => Some(json),
@@ -273,6 +335,11 @@ pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigErro
         .get("required")
         .and_then(|v| v.as_bool())
         .unwrap_or(PatchConfig::DEFAULT_REQUIRED);
+    // Backward-compatible: absent → false (a forwarded value produced by an
+    // older ocx had no `system_required` key). A forwarded system-required tier
+    // stays system-required in child launchers, preserving C7 across the process
+    // boundary (C5).
+    let system_required = map.get("system_required").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if registry.is_empty() {
         return Ok(None);
@@ -282,6 +349,7 @@ pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigErro
         registry,
         path_template,
         required,
+        system_required,
     }))
 }
 
@@ -436,11 +504,13 @@ mod tests {
             registry: Some("corp.example.com/patches".to_string()),
             path: Some("{registry}/{repository}".to_string()),
             required: Some(true),
+            system_locked: false,
         };
         let higher = PatchConfig {
             registry: None,
             path: None,
             required: None,
+            system_locked: false,
         };
         lower.merge(higher);
         assert_eq!(lower.registry.as_deref(), Some("corp.example.com/patches"));
@@ -458,11 +528,13 @@ mod tests {
             registry: Some("old.example.com/patches".to_string()),
             path: None,
             required: Some(false),
+            system_locked: false,
         };
         let higher = PatchConfig {
             registry: Some("new.example.com/patches".to_string()),
             path: Some("{registry}/{repository}".to_string()),
             required: Some(true),
+            system_locked: false,
         };
         lower.merge(higher);
         assert_eq!(lower.registry.as_deref(), Some("new.example.com/patches"));
@@ -497,6 +569,165 @@ mod tests {
             patches.required,
             Some(true),
             "system-scope required must survive when user scope does not override it"
+        );
+    }
+
+    // ── system-locked tier (C7 non-overridable) ──────────────────────────────
+
+    /// `lock_as_system` locks a tier whose *effective* `required` is true —
+    /// which is the case for explicit `required = true` AND for an omitted
+    /// `required` (defaults to `true`, fail-closed C7). Only an explicit
+    /// `required = false` stays unlocked (normal last-wins).
+    ///
+    /// SECURITY regression (Codex BLOCK): a system `/etc/ocx/config.toml` that
+    /// only sets `registry = "…"` (relying on the default) MUST be locked, else
+    /// a user tier could suppress the corporate CA overlay.
+    #[test]
+    fn lock_as_system_locks_required_default_and_explicit_true() {
+        let mut explicit_true = PatchConfig {
+            required: Some(true),
+            ..PatchConfig::default()
+        };
+        explicit_true.lock_as_system();
+        assert!(explicit_true.system_locked, "explicit required=true must lock");
+
+        let mut not_required = PatchConfig {
+            required: Some(false),
+            ..PatchConfig::default()
+        };
+        not_required.lock_as_system();
+        assert!(!not_required.system_locked, "explicit required=false must NOT lock");
+
+        // The BLOCK regression: omitted `required` defaults to true → MUST lock.
+        let mut default_required = PatchConfig {
+            registry: Some("corp.example.com/patches".to_string()),
+            ..PatchConfig::default()
+        };
+        default_required.lock_as_system();
+        assert!(
+            default_required.system_locked,
+            "absent required defaults to true (C7 fail-closed) and MUST lock — \
+             a system tier relying on the default cannot be suppressible by a lower tier"
+        );
+    }
+
+    /// End-to-end C7 regression: a system tier that relies on the default
+    /// `required` (no explicit `required =` line) cannot be redirected or
+    /// suppressed by a lower (user) tier once `lock_as_system` runs.
+    #[test]
+    fn default_required_system_tier_is_non_overridable() {
+        let mut system = PatchConfig {
+            registry: Some("system.corp/patches".to_string()),
+            ..PatchConfig::default()
+        };
+        system.lock_as_system();
+        let user = PatchConfig {
+            registry: Some("user.corp/patches".to_string()),
+            required: Some(false),
+            ..PatchConfig::default()
+        };
+        system.merge(user);
+        assert_eq!(
+            system.registry.as_deref(),
+            Some("system.corp/patches"),
+            "default-required system registry must survive a lower-tier override"
+        );
+        assert_ne!(
+            system.required,
+            Some(false),
+            "a lower tier must not be able to flip a default-required system patch to fail-open"
+        );
+    }
+
+    /// A system-locked tier ignores ALL lower-tier overrides: registry, path,
+    /// and required cannot be redirected, and the locked flag stays sticky.
+    #[test]
+    fn merge_system_locked_ignores_lower_tier() {
+        let mut system = PatchConfig {
+            registry: Some("system.corp/patches".to_string()),
+            path: None,
+            required: Some(true),
+            system_locked: false,
+        };
+        // Loader locks the system tier before folding lower tiers in.
+        system.lock_as_system();
+        assert!(system.system_locked);
+
+        let user = PatchConfig {
+            registry: Some("user.corp/patches".to_string()),
+            path: Some("custom/{repository}".to_string()),
+            required: Some(false),
+            system_locked: false,
+        };
+        system.merge(user);
+
+        assert_eq!(
+            system.registry.as_deref(),
+            Some("system.corp/patches"),
+            "locked system registry must not be redirected"
+        );
+        assert!(
+            system.path.is_none(),
+            "locked system path must not be set by lower tier"
+        );
+        assert_eq!(
+            system.required,
+            Some(true),
+            "locked system required must not be flipped to false"
+        );
+        assert!(system.system_locked, "lock flag stays sticky after merge");
+    }
+
+    /// `resolve_patch_config` carries `system_locked` through to
+    /// `ResolvedPatchConfig::system_required`.
+    #[test]
+    fn resolve_patch_config_carries_system_required() {
+        let mut patches = PatchConfig {
+            registry: Some("system.corp/patches".to_string()),
+            required: Some(true),
+            ..PatchConfig::default()
+        };
+        patches.lock_as_system();
+        let config = crate::config::Config {
+            patches: Some(patches),
+            ..crate::config::Config::default()
+        };
+        let resolved = resolve_patch_config(&config)
+            .expect("valid")
+            .expect("configured registry yields Some");
+        assert!(
+            resolved.system_required,
+            "system_locked must propagate to ResolvedPatchConfig::system_required"
+        );
+    }
+
+    /// OCX_PATCHES wire format round-trips `system_required` across the process
+    /// boundary (C5). A forwarded value with no `system_required` key decodes to
+    /// `false` (backward compatible).
+    #[test]
+    fn ocx_patches_round_trip_system_required() {
+        let env_guard = crate::test::env::lock();
+        let original = ResolvedPatchConfig {
+            registry: "system.corp/patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+            system_required: true,
+        };
+        let json = encode_patches(Some(&original)).expect("encode");
+        env_guard.set(crate::env::keys::OCX_PATCHES, json);
+        let parsed = patches_from_env().expect("valid").expect("Some");
+        assert!(parsed.system_required, "system_required must survive the round-trip");
+        assert_eq!(parsed, original);
+
+        // Backward-compat: a value lacking the key decodes to false.
+        env_guard.set(
+            crate::env::keys::OCX_PATCHES,
+            r#"{"registry":"r","path_template":"{registry}/{repository}","required":true}"#,
+        );
+        let legacy = patches_from_env().expect("valid").expect("Some");
+        assert!(
+            !legacy.system_required,
+            "absent system_required key must decode to false"
         );
     }
 
@@ -561,6 +792,7 @@ mod tests {
                 registry: Some(String::new()),
                 path: None,
                 required: None,
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -583,6 +815,7 @@ mod tests {
                 registry: Some("corp.example.com/patches".to_string()),
                 path: None,
                 required: None,
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -607,6 +840,7 @@ mod tests {
                 registry: Some("corp.example.com/patches".to_string()),
                 path: None,
                 required: None,
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -629,6 +863,7 @@ mod tests {
                 registry: Some("corp.example.com/patches".to_string()),
                 path: None,
                 required: Some(false),
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -652,6 +887,7 @@ mod tests {
                 registry: Some("corp.example.com/patches".to_string()),
                 path: Some(custom_template.to_string()),
                 required: None,
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -675,6 +911,7 @@ mod tests {
                 registry: Some("internal.company.com/ocx-patches".to_string()),
                 path: None,
                 required: None,
+                system_locked: false,
             }),
             ..crate::config::Config::default()
         };
@@ -813,6 +1050,7 @@ mod tests {
             registry: "corp.example.com/patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
+            system_required: false,
         });
         let json = encode_patches(resolved.as_ref()).expect("Some(ResolvedPatchConfig) must encode to Some(json)");
         // Must be valid JSON with the three keys.
@@ -906,6 +1144,7 @@ mod tests {
             registry: "internal.company.com/ocx-patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
+            system_required: false,
         };
         let json =
             encode_patches(Some(&original)).expect("encode_patches must return Some for a valid ResolvedPatchConfig");
@@ -932,6 +1171,7 @@ mod tests {
             registry: "corp.patches.io".to_string(),
             path_template: "custom/{registry}/{repository}".to_string(),
             required: false,
+            system_required: false,
         };
         let json = encode_patches(Some(&original)).expect("encode must succeed");
         env_guard.set(crate::env::keys::OCX_PATCHES, json);

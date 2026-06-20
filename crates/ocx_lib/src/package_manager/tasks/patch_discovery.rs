@@ -174,6 +174,54 @@ impl PatchTagMap {
     }
 }
 
+// ── PatchDiscoveryMode ────────────────────────────────────────────────────────
+
+/// Controls whether a discovery pass may skip already-recorded states.
+///
+/// - [`Lazy`](PatchDiscoveryMode::Lazy): the normal install-time behaviour.
+///   Skips `LookedNoDescriptor` and `LookedHasDescriptor` repos — only
+///   `NeverLooked` entries trigger a network fetch.
+/// - [`Sync`](PatchDiscoveryMode::Sync): the `ocx patch sync` behaviour.
+///   Re-fetches EVERY descriptor source (global root + per-base) regardless
+///   of the recorded state. Used to advance descriptor blobs when the
+///   upstream registry has published a new version.
+///
+/// Prefer this enum over a boolean parameter per the project style guide
+/// (quality-core: boolean parameters should be enums for two-state flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchDiscoveryMode {
+    /// Normal lazy mode: skip already-recorded states; only fetch on `NeverLooked`.
+    Lazy,
+    /// Force-recheck mode: re-fetch every descriptor source regardless of state.
+    Sync,
+}
+
+/// Which descriptor sources a discovery pass consults.
+///
+/// `ocx patch sync` re-checks only the KNOWN SET — the installed base repos
+/// plus the single global root descriptor. This selector keeps the global
+/// root from being probed through a *synthetic* package-specific sub-path:
+///
+/// - [`Both`](PatchDescriptorScope::Both): the global root descriptor AND the
+///   package-specific descriptor for `base_id`. The normal install-time and
+///   per-installed-base path — companion matching for a real base must union
+///   both sources, otherwise a required global companion (e.g. a corp CA that
+///   matches `*`) would never be installed for that base and a later offline
+///   `exec` would fail closed.
+/// - [`GlobalOnly`](PatchDescriptorScope::GlobalOnly): only the global root
+///   descriptor. Used by the sync path when there are zero installed bases so
+///   the root is still refreshed WITHOUT fabricating a synthetic base whose
+///   empty-repository template would probe an extra package-specific source
+///   outside the known set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PatchDescriptorScope {
+    /// Global root descriptor + the package-specific descriptor for `base_id`.
+    Both,
+    /// Only the global root descriptor (`base_id` is not used to derive a
+    /// package-specific source — no synthetic probe).
+    GlobalOnly,
+}
+
 // ── PackageManager::discover_and_install_patches ──────────────────────────────
 
 impl PackageManager {
@@ -222,12 +270,43 @@ impl PackageManager {
         base_id: &Identifier,
         platforms: &[oci::Platform],
     ) -> Result<(), PackageErrorKind> {
+        self.discover_and_install_patches_with_mode(
+            base_id,
+            platforms,
+            PatchDiscoveryMode::Lazy,
+            PatchDescriptorScope::Both,
+        )
+        .await
+    }
+
+    /// Inner implementation of patch discovery, parameterised by
+    /// [`PatchDiscoveryMode`].
+    ///
+    /// [`discover_and_install_patches`](Self::discover_and_install_patches) is the
+    /// public entry point and always passes [`PatchDiscoveryMode::Lazy`].
+    /// [`sync_patches`](Self::sync_patches) drives this with
+    /// [`PatchDiscoveryMode::Sync`] to force-recheck every descriptor source.
+    pub(super) async fn discover_and_install_patches_with_mode(
+        &self,
+        base_id: &Identifier,
+        platforms: &[oci::Platform],
+        mode: PatchDiscoveryMode,
+        scope: PatchDescriptorScope,
+    ) -> Result<(), PackageErrorKind> {
         // Short-circuit 1: no patch tier configured.
         let Some(patches) = self.patches() else {
             return Ok(());
         };
 
         // Short-circuit 2: offline — discovery requires a network call.
+        //
+        // Unlike lazy discovery (a side-effect of install where offline is
+        // silently accepted), sync mode is an explicit user action. The offline
+        // posture in Sync mode is identical structurally — return Ok(()) here
+        // and let the caller (sync_patches) report the offline condition to the
+        // user. The manager's offline guard stays here rather than in the caller
+        // so that library consumers that call discover_and_install_patches_with_mode
+        // directly also benefit from the guard.
         if self.is_offline() {
             return Ok(());
         }
@@ -241,17 +320,22 @@ impl PackageManager {
         // Build identifiers for the two descriptor sources:
         // (a) global root descriptor — empty repository at the patch registry
         // (b) package-specific descriptor — per-identifier sub-path
+        // Build the descriptor source list per the requested scope. Under
+        // `GlobalOnly` the package-specific id is NEVER computed, so a synthetic
+        // `base_id` (e.g. the empty-repository placeholder the sync path uses for
+        // the zero-installed-bases case) cannot probe an extra source outside the
+        // known set.
         let global_id = global_descriptor_id(patches);
-        let pkg_specific_id = patch_descriptor_id(patches, base_id);
+        let descriptor_ids: Vec<Identifier> = match scope {
+            // Global first (lower precedence for dedup); package-specific second
+            // (higher precedence — its companions override on the same identifier).
+            PatchDescriptorScope::Both => vec![global_id, patch_descriptor_id(patches, base_id)],
+            PatchDescriptorScope::GlobalOnly => vec![global_id],
+        };
 
-        // Resolve descriptor for each source, collecting `Option<PatchDescriptor>`.
-        // Global first (lower precedence for dedup); package-specific second (higher
-        // precedence — its companions override on same identifier if collected later,
-        // but dedup is first-wins so global companions take priority unless overridden
-        // by the spec's companion-ordering semantics: global first, then pkg-specific).
         let mut descriptors: Vec<PatchDescriptor> = Vec::new();
 
-        for descriptor_id in [&global_id, &pkg_specific_id] {
+        for descriptor_id in &descriptor_ids {
             let tags_path = tag_store.tags(descriptor_id);
             let state = PatchTagMap::read(&tags_path)
                 .await
@@ -259,7 +343,7 @@ impl PackageManager {
 
             match state {
                 PatchDiscoveryState::NeverLooked => {
-                    // Never looked — attempt network fetch.
+                    // Never looked — attempt network fetch (both Lazy and Sync modes).
                     match fetch_and_persist_descriptor(self, descriptor_id, &tags_path).await? {
                         Some(descriptor) => {
                             descriptors.push(descriptor);
@@ -271,13 +355,51 @@ impl PackageManager {
                     }
                 }
                 PatchDiscoveryState::LookedNoDescriptor => {
-                    // Previously looked; confirmed no descriptor — skip.
-                    log::debug!(
-                        "patch discovery: skipping '{}' — previously looked, no descriptor found",
-                        descriptor_id
-                    );
+                    if mode == PatchDiscoveryMode::Sync {
+                        // Sync mode: force-recheck even though we previously found nothing.
+                        // The upstream registry may have added a descriptor since the last look.
+                        log::debug!(
+                            "patch discovery (sync): re-fetching '{}' — previously no descriptor, force-rechecking",
+                            descriptor_id
+                        );
+                        match fetch_and_persist_descriptor(self, descriptor_id, &tags_path).await? {
+                            Some(descriptor) => {
+                                descriptors.push(descriptor);
+                            }
+                            None => {
+                                // Still no descriptor — state already written by the helper.
+                            }
+                        }
+                    } else {
+                        // Lazy mode: previously looked; confirmed no descriptor — skip.
+                        log::debug!(
+                            "patch discovery: skipping '{}' — previously looked, no descriptor found",
+                            descriptor_id
+                        );
+                    }
                 }
                 PatchDiscoveryState::LookedHasDescriptor { manifest_digest } => {
+                    if mode == PatchDiscoveryMode::Sync {
+                        // Sync mode: force-recheck even though we already have a descriptor.
+                        // If the upstream digest has advanced, fetch_and_persist_descriptor
+                        // will overwrite the tag-store entry and persist the new blobs.
+                        // If unchanged, the function is effectively a no-op (blobs already
+                        // in CAS; write_has_descriptor is idempotent on the same digest).
+                        log::debug!(
+                            "patch discovery (sync): re-fetching '{}' — force-rechecking existing descriptor (recorded digest: {})",
+                            descriptor_id,
+                            manifest_digest
+                        );
+                        match fetch_and_persist_descriptor(self, descriptor_id, &tags_path).await? {
+                            Some(descriptor) => {
+                                descriptors.push(descriptor);
+                            }
+                            None => {
+                                // Descriptor vanished from upstream — state written as LookedNoDescriptor.
+                            }
+                        }
+                        continue;
+                    }
                     // Descriptor already persisted — load it from the CAS.
                     let digest = match crate::oci::Digest::try_from(manifest_digest.as_str()) {
                         Ok(d) => d,
@@ -692,6 +814,7 @@ mod tests {
     /// Build a minimal `ResolvedPatchConfig` for testing patch-tier presence.
     fn test_patch_config() -> ResolvedPatchConfig {
         ResolvedPatchConfig {
+            system_required: false,
             registry: "patches.corp.com".to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -1543,6 +1666,12 @@ mod tests {
     /// Traceability: Fix 4 — CAS integrity re-verification in `load_descriptor_from_cas`.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix4_corrupted_manifest_blob_rejected_with_digest_mismatch() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`:
+        // this test calls BlobStore::write_blob, which increments the process-global
+        // WRITE_BLOB_CALL_COUNT. Holding this lock prevents concurrent calls from
+        // inflating the delta measured by the coalescing test.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
@@ -1616,6 +1745,9 @@ mod tests {
     /// Traceability: Fix 4 — CAS integrity re-verification (layer path).
     #[tokio::test(flavor = "multi_thread")]
     async fn fix4_corrupted_layer_blob_rejected_with_digest_mismatch() {
+        // Same serialisation guard as `fix4_corrupted_manifest_blob_rejected_with_digest_mismatch`.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();

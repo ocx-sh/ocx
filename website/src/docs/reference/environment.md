@@ -185,6 +185,22 @@ rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub A
 The command line option [`--index`][arg-index] takes precedence over this variable.
 This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
 
+### `OCX_PATCH_SNAPSHOT` {#ocx-patch-snapshot}
+
+Path to a snapshot file (`patches.snapshot.json`) that pins companion package digests.
+
+```sh
+export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
+```
+
+When set, the compose overlay prefers the snapshot's pinned companion digests over live tag
+lookups, enabling reproducible builds without a network round-trip.
+Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]).
+
+This variable is resolution-affecting and is forwarded to child ocx processes (such as generated
+entrypoint launchers) so they resolve the same frozen companion digests as the parent.
+Unset to disable snapshot-pinning and fall back to live lookups.
+
 ### `OCX_JOBS` {#ocx-jobs}
 
 Caps the number of root packages pulled in parallel — applies to every command

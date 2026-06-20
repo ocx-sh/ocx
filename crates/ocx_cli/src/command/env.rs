@@ -118,7 +118,13 @@ impl Env {
         // the CLI can annotate which entries came from companion overlays. For all
         // other paths (--ci, --shell, structured report without --show-patches) the
         // boundary information is unused and `resolve_env` would be equivalent.
-        let (entries, patch_start) = manager.resolve_env_with_patch_boundary(&info, self.self_view).await?;
+        //
+        // OCI-tier (`ocx package env`): no `ocx.toml`, so no per-package opt-out —
+        // pass an empty boundary set.
+        let no_patches = std::collections::BTreeSet::new();
+        let (entries, patch_start) = manager
+            .resolve_env_with_patch_boundary(&info, self.self_view, &no_patches)
+            .await?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline
         // steps). Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(provider) = ci {
