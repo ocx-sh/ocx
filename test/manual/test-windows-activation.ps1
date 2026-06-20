@@ -18,9 +18,7 @@
 
 param(
     # Path to the freshly built release ocx.exe.
-    [string]$OcxBin = '',
-    # Path to the installer script (dot-sourced to obtain Create-EnvFile).
-    [string]$InstallPs1 = ''
+    [string]$OcxBin = ''
 )
 
 Set-StrictMode -Version Latest
@@ -36,20 +34,13 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..' ))
 if (-not $OcxBin) {
     $OcxBin = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release\ocx.exe'
 }
-if (-not $InstallPs1) {
-    $InstallPs1 = Join-Path $repoRoot 'website\src\public\install.ps1'
-}
 
 if (-not (Test-Path $OcxBin -PathType Leaf)) {
     throw "ocx.exe not found at: $OcxBin`nBuild first: cargo build --release --locked -p ocx_cli --target x86_64-pc-windows-msvc"
 }
-if (-not (Test-Path $InstallPs1 -PathType Leaf)) {
-    throw "install.ps1 not found at: $InstallPs1"
-}
 
 $ocxBin = [System.IO.Path]::GetFullPath($OcxBin)
 Write-Host "  ocx.exe : $ocxBin"
-Write-Host "  install : $InstallPs1"
 
 # ---------------------------------------------------------------------------
 # Create a fresh temp OCX_HOME with the expected package layout.
@@ -63,16 +54,19 @@ Copy-Item -Path $ocxBin -Destination (Join-Path $contentBinDir 'ocx.exe')
 Write-Host "  OCX_HOME: $env:OCX_HOME"
 
 # ---------------------------------------------------------------------------
-# Generate the real env.ps1 by dot-sourcing install.ps1 and calling
-# Create-EnvFile.  The Main-invocation guard in install.ps1 prevents the
-# installer from running when dot-sourced.
+# Write the real env.ps1 shim via `ocx self setup` - the single source of
+# truth for the shim body (shims.rs ENV_PS1). --offline resolves the seeded
+# candidate as already-present; --no-modify-path writes the shims only and
+# never touches the runner's real PowerShell profile.
 # ---------------------------------------------------------------------------
-. $InstallPs1
-Create-EnvFile -OcxHome $env:OCX_HOME
+& $ocxBin --offline self setup --no-modify-path
+if ($LASTEXITCODE -ne 0) {
+    throw "ocx self setup failed (exit $LASTEXITCODE)"
+}
 
 $envPs1 = Join-Path $env:OCX_HOME 'env.ps1'
 if (-not (Test-Path $envPs1 -PathType Leaf)) {
-    throw "env.ps1 was not written by Create-EnvFile at: $envPs1"
+    throw "env.ps1 was not written by 'ocx self setup' at: $envPs1"
 }
 Write-Host "  env.ps1 written: $envPs1"
 
