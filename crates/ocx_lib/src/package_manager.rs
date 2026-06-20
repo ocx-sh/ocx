@@ -497,13 +497,25 @@ impl PackageManager {
             client: None,
             default_registry: self.default_registry.clone(),
             progress: self.progress.clone(),
-            // Offline view drops the patch config: discovery only runs online.
-            // A caller that forces offline mode has already decided no network
-            // operations are permitted; running patch discovery would violate
-            // that contract. The hook at install-boundary skips when offline
-            // (self.is_offline() returns true regardless of patches being set),
-            // but zeroing patches here makes the intent explicit.
-            patches: None,
+            // Preserve the patch config. `offline_view` disables the *network*
+            // (client = None → `is_offline()` true), NOT the patch tier. These are
+            // two separate concerns:
+            //
+            // - Phase 3 discovery (`discover_and_install_patches`) requires network
+            //   to fetch descriptor blobs, and already short-circuits on
+            //   `self.is_offline()` — so keeping `patches` here does NOT re-enable
+            //   any network discovery on an offline view.
+            // - Phase 4 site-overlay (`build_site_patch_set`) is compose-time and
+            //   purely local (tag store + descriptor blobs + installed companions).
+            //   It MUST still run on offline env paths (`ocx direnv export`, the
+            //   global toolchain) so already-discovered companion overlays apply,
+            //   and so a `required` companion that is unavailable **fails closed**.
+            //
+            // Dropping `patches` here would silently skip required overlays on
+            // exactly those local-only exporters — a fail-OPEN gap violating the
+            // ADR offline contract (C4 "works offline once synced", C6 zip-`OCX_HOME`
+            // parity, C7 fail-closed). So the tier is carried through unchanged.
+            patches: self.patches.clone(),
         }
     }
 }

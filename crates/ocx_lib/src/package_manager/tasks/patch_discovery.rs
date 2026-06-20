@@ -479,7 +479,7 @@ impl PackageManager {
 /// registry root — `Identifier::new_registry("", patches.registry)` — but
 /// the default path template always produces a non-empty sub-path, so the
 /// two identifiers never collide.
-fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
+pub(super) fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
     let sub_path = expand_patch_path(&patches.path_template, base_id.registry(), base_id.repository());
     Identifier::new_registry(&sub_path, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
@@ -492,7 +492,7 @@ fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> I
 /// sub-path (the default template `{registry}/{repository}` always expands
 /// to at least one non-empty component for a well-formed base identifier, so
 /// the two identifiers never collide).
-fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
+pub(super) fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
     Identifier::new_registry("", &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
@@ -570,16 +570,39 @@ async fn fetch_and_persist_descriptor(
 /// Reads the manifest blob to find the layer digest, then reads the layer
 /// blob and parses it as a `PatchDescriptor`. Used when the three-state
 /// tag-store entry is `LookedHasDescriptor` (descriptor already on disk).
-async fn load_descriptor_from_cas(
+///
+/// # Content-address verification
+///
+/// After reading each blob, this function recomputes the SHA-256 digest of
+/// the returned bytes and compares it to the expected digest. A mismatch
+/// indicates on-disk tampering or corruption of the cached blob and is
+/// returned as a [`crate::patch::PatchError::ManifestDigestMismatch`] or
+/// [`crate::patch::PatchError::LayerDigestMismatch`] error, ensuring the
+/// tampered blob is rejected rather than silently trusted.
+pub(super) async fn load_descriptor_from_cas(
     blob_store: &crate::file_structure::BlobStore,
     registry: &str,
     manifest_digest: &crate::oci::Digest,
 ) -> Result<PatchDescriptor, crate::Error> {
+    use crate::patch::PatchError;
+
     // Read the manifest blob — returns None if not present in the CAS.
     let manifest_bytes = blob_store.read_blob(registry, manifest_digest).await?.ok_or_else(|| {
         let path = blob_store.data(registry, manifest_digest);
         crate::error::file_error(&path, std::io::Error::other("manifest blob not found in CAS"))
     })?;
+
+    // Content-address re-verification: recompute SHA-256 of the manifest bytes
+    // and compare to the expected digest. Detects on-disk tampering/corruption.
+    let computed_manifest_digest = crate::oci::Algorithm::Sha256.hash(&manifest_bytes);
+    if &computed_manifest_digest != manifest_digest {
+        return Err(crate::Error::from(
+            crate::package_manager::error::PackageErrorKind::PatchDiscovery(PatchError::ManifestDigestMismatch {
+                declared: manifest_digest.to_string(),
+                computed: computed_manifest_digest.to_string(),
+            }),
+        ));
+    }
 
     // Parse the manifest to find the layer digest.
     // The manifest is a plain OCI image manifest JSON; parse minimally.
@@ -605,9 +628,25 @@ async fn load_descriptor_from_cas(
         crate::error::file_error(&path, std::io::Error::other("descriptor layer blob not found in CAS"))
     })?;
 
+    // Content-address re-verification: recompute SHA-256 of the layer bytes
+    // and compare to the digest declared in the manifest. Detects tampering or
+    // corruption of the cached layer blob independently of the manifest check.
+    let computed_layer_digest = crate::oci::Algorithm::Sha256.hash(&layer_bytes);
+    if computed_layer_digest != layer_digest {
+        return Err(crate::Error::from(
+            crate::package_manager::error::PackageErrorKind::PatchDiscovery(PatchError::LayerDigestMismatch {
+                declared: layer_digest.to_string(),
+                computed: computed_layer_digest.to_string(),
+            }),
+        ));
+    }
+
     PatchDescriptor::from_json_bytes(&layer_bytes).map_err(|error| {
-        let path = blob_store.data(registry, &layer_digest);
-        crate::error::file_error(&path, std::io::Error::other(error.to_string()))
+        // Preserve the structured PatchError chain instead of erasing it via
+        // `.to_string()`. `InvalidDescriptorJson` carries a `serde_json::Error`
+        // source; use `PackageErrorKind::PatchDiscovery` so the full chain is
+        // walkable for exit-code classification and diagnostics.
+        crate::Error::from(crate::package_manager::error::PackageErrorKind::PatchDiscovery(error))
     })
 }
 
@@ -1076,16 +1115,19 @@ mod tests {
         );
     }
 
-    /// `PackageManager::offline_view()` drops the patch config (patches: None).
+    /// `PackageManager::offline_view()` **preserves** the patch config.
     ///
-    /// Discovery requires a network call; dropping patches in `offline_view()`
-    /// makes the intent explicit even though the `is_offline()` check inside
-    /// `discover_and_install_patches` would also short-circuit.
+    /// `offline_view` disables the network (client = None → `is_offline()`), not
+    /// the patch tier: Phase 3 discovery already short-circuits on `is_offline()`,
+    /// while the purely-local Phase 4 compose-time overlay must still apply on
+    /// offline env paths (`ocx direnv export`, the global toolchain) so
+    /// already-discovered companion overlays apply and a `required` companion that
+    /// is unavailable fails closed (ADR C4/C6/C7).
     ///
-    /// Traces: STUB MANIFEST §1 `offline_view()` sets `patches: None`;
-    /// DELIVERABLES §2a (short-circuit when offline).
+    /// Traces: DELIVERABLES §2a (discovery short-circuit keys off `is_offline()`,
+    /// not the absence of patch config).
     #[test]
-    fn offline_view_drops_patch_config() {
+    fn offline_view_preserves_patch_config() {
         let tmp = TempDir::new().unwrap();
         let local_index = LocalIndex::new(LocalConfig {
             tag_store: TagStore::new(tmp.path().join("tags")),
@@ -1099,8 +1141,8 @@ mod tests {
 
         let offline = manager.offline_view(local_index);
         assert!(
-            offline.patches().is_none(),
-            "offline_view must set patches to None (discovery only runs online)"
+            offline.patches().is_some(),
+            "offline_view must preserve patches (overlay is local; only the network is disabled)"
         );
         assert!(offline.is_offline(), "offline_view must produce an offline manager");
     }
@@ -1482,6 +1524,148 @@ mod tests {
         assert!(
             display.contains("exceeds maximum"),
             "PatchDiscovery(DescriptorTooLarge) Display must mention 'exceeds maximum'; got: {display}"
+        );
+    }
+
+    // ── Fix 4: CAS integrity regression ──────────────────────────────────────
+
+    /// Regression: a corrupted on-disk manifest blob (bytes do not match the
+    /// declared SHA-256 digest) must be rejected with `ManifestDigestMismatch`,
+    /// not silently parsed and accepted.
+    ///
+    /// Setup:
+    ///   1. Write a valid manifest + layer blob to CAS under their correct digests.
+    ///   2. Overwrite the manifest blob file on disk with different bytes — corrupting
+    ///      it in place, but without changing the digest key used to reference it.
+    ///   3. Call `load_descriptor_from_cas` with the ORIGINAL (correct) manifest digest.
+    ///   4. Expect `Err` referencing `ManifestDigestMismatch`.
+    ///
+    /// Traceability: Fix 4 — CAS integrity re-verification in `load_descriptor_from_cas`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fix4_corrupted_manifest_blob_rejected_with_digest_mismatch() {
+        use crate::oci::Algorithm;
+
+        let dir = TempDir::new().unwrap();
+        let blob_store = BlobStore::new(dir.path().join("blobs"));
+        let registry = "patches.corp.com";
+
+        // Build a valid descriptor layer.
+        let layer_json = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": [] }]
+        })
+        .to_string();
+        let layer_bytes = layer_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+
+        // Build the manifest referencing the layer.
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+
+        // Write both blobs with correct content under correct digests.
+        blob_store
+            .write_blob(registry, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(registry, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+
+        // Verify the baseline: un-corrupted load succeeds.
+        let ok_result = load_descriptor_from_cas(&blob_store, registry, &manifest_digest).await;
+        assert!(
+            ok_result.is_ok(),
+            "Fix 4 baseline: valid blobs must load successfully; got: {ok_result:?}"
+        );
+
+        // Corrupt the manifest blob on disk by overwriting it with different bytes —
+        // but keep the same path (same digest key). The `write_blob` function is
+        // idempotent, so we must write directly to the underlying data path.
+        let manifest_blob_path = blob_store.data(registry, &manifest_digest);
+        std::fs::write(&manifest_blob_path, b"CORRUPTED MANIFEST CONTENT").unwrap();
+
+        // Load must now fail with ManifestDigestMismatch.
+        let result = load_descriptor_from_cas(&blob_store, registry, &manifest_digest).await;
+        assert!(
+            result.is_err(),
+            "Fix 4: corrupted manifest blob must be rejected; got Ok({:?})",
+            result.ok()
+        );
+
+        // Downcast through the error chain to verify the specific error variant.
+        let err = result.unwrap_err();
+        let err_str = format!("{err:?}");
+        assert!(
+            err_str.contains("ManifestDigestMismatch") || err_str.contains("manifest digest mismatch"),
+            "Fix 4: error must be ManifestDigestMismatch; got: {err_str}"
+        );
+    }
+
+    /// Regression: a corrupted on-disk layer blob (bytes do not match the digest
+    /// declared in the manifest) must be rejected with `LayerDigestMismatch`.
+    ///
+    /// The manifest itself is valid and passes its own digest check; only the
+    /// layer blob has been tampered with after writing.
+    ///
+    /// Traceability: Fix 4 — CAS integrity re-verification (layer path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fix4_corrupted_layer_blob_rejected_with_digest_mismatch() {
+        use crate::oci::Algorithm;
+
+        let dir = TempDir::new().unwrap();
+        let blob_store = BlobStore::new(dir.path().join("blobs"));
+        let registry = "patches.corp.com";
+
+        // Build a valid descriptor layer.
+        let layer_json = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": [] }]
+        })
+        .to_string();
+        let layer_bytes = layer_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+
+        // Build the manifest referencing the layer.
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+
+        // Write both blobs correctly.
+        blob_store
+            .write_blob(registry, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(registry, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+
+        // Corrupt the LAYER blob on disk (manifest stays valid).
+        let layer_blob_path = blob_store.data(registry, &layer_digest);
+        std::fs::write(&layer_blob_path, b"CORRUPTED LAYER CONTENT").unwrap();
+
+        // Load must fail with LayerDigestMismatch.
+        let result = load_descriptor_from_cas(&blob_store, registry, &manifest_digest).await;
+        assert!(
+            result.is_err(),
+            "Fix 4: corrupted layer blob must be rejected; got Ok({:?})",
+            result.ok()
+        );
+
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("LayerDigestMismatch") || err_str.contains("layer digest mismatch"),
+            "Fix 4: error must be LayerDigestMismatch; got: {err_str}"
         );
     }
 
