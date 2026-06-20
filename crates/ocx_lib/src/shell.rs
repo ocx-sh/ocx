@@ -135,8 +135,9 @@ impl Shell {
     /// segment use a **single-quoted literal** (bash/zsh/POSIX via `'\''`,
     /// elvish/PowerShell via `''`) so `$`, backtick, `\`, `!`, and glob chars
     /// stay exact; fish and nushell keep [`Self::escape_value`] (their
-    /// double-quoted form round-trips those bytes). `batch` remains prepend-only
-    /// (cmd.exe lacks a tractable dedup primitive).
+    /// double-quoted form round-trips those bytes). `batch` is idempotent too:
+    /// cmd's `%VAR:search=%` substring deletion gives move-to-front without the
+    /// `FOR /F` + delayed-expansion `!`-corruption that made dedup look infeasible.
     ///
     /// **Precondition:** `value` is a single directory with no embedded
     /// `PATH_SEPARATOR` (the env resolver yields one resolved `bin/` dir per
@@ -237,12 +238,30 @@ impl Shell {
                     "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | prepend \"{value}\")"
                 )
             }
-            // batch (cmd.exe) — prepend only. cmd has no array/list primitive and
-            // `FOR /F` + delayed expansion corrupts `!`-bearing values, so dedup
-            // is impractical (documented limitation; chocolatey/scoop do the same).
+            // batch (cmd.exe) — idempotent move-to-front via substring substitution.
+            // cmd has no list primitive, but `%VAR:search=%` deletes every literal
+            // occurrence of `search` using *normal* (non-delayed) expansion, so it
+            // never corrupts a `!`-bearing segment the way `FOR /F` + delayed
+            // expansion would. Four statements, each on its OWN line because cmd
+            // re-expands `%KEY%` per statement (an `&`-chained one-liner expands the
+            // whole line once and would read the pre-edit value):
+            //   1. append a trailing separator so the final segment also ends in one,
+            //      letting step 2 match a value that was the last entry;
+            //   2. delete every boundary-anchored `value<sep>` occurrence;
+            //   3. prepend `value<sep>` once (move-to-front);
+            //   4. strip the helper trailing separator if it survived.
+            // Substitution is case-insensitive, matching Windows' case-insensitive
+            // PATH semantics (the exact-match parity the POSIX arms keep). The value
+            // is escaped (`%`->`%%`, `^&<>|`) so it can neither break the SET parse
+            // nor inject a command.
             Self::Batch => {
                 let value = self.escape_value(raw);
-                format!("SET \"{key}={value}{separator}%{key}%\"")
+                format!(
+                    "SET \"{key}=%{key}%{separator}\"\n\
+                     SET \"{key}=%{key}:{value}{separator}=%\"\n\
+                     SET \"{key}={value}{separator}%{key}%\"\n\
+                     IF \"%{key}:~-1%\"==\"{separator}\" SET \"{key}=%{key}:~0,-1%\""
+                )
             }
         })
     }
@@ -1013,8 +1032,15 @@ mod tests {
     }
 
     #[test]
-    fn export_path_batch_is_prepend_only() {
-        let expected = format!("SET \"PATH=/opt/bin{}%PATH%\"", sep());
+    fn export_path_batch_idempotent_move_to_front() {
+        // Four statements: trailing-sep normalize, delete-all, prepend, strip-sep.
+        let s = sep();
+        let expected = format!(
+            "SET \"PATH=%PATH%{s}\"\n\
+             SET \"PATH=%PATH:/opt/bin{s}=%\"\n\
+             SET \"PATH=/opt/bin{s}%PATH%\"\n\
+             IF \"%PATH:~-1%\"==\"{s}\" SET \"PATH=%PATH:~0,-1%\""
+        );
         assert_eq!(Shell::Batch.export_path("PATH", "/opt/bin"), Some(expected));
     }
 
@@ -1230,6 +1256,44 @@ mod tests {
         let script = format!("$env:PATH='/a:/opt/bin:/b'; {line}; {line}; $env:PATH");
         if let Some(out) = run_script(&["pwsh", "-NoProfile", "-Command"], &script) {
             assert_eq!(out, "/opt/bin:/a:/b");
+        }
+    }
+
+    /// Run a batch `body` as a temp `.bat` under `cmd /c`, returning trimmed
+    /// stdout, or `None` when cmd.exe is absent (non-Windows → the test skips
+    /// green). A real script file is required, not `cmd /c "<body>"`: the
+    /// move-to-front emit is multi-line and relies on per-statement `%PATH%`
+    /// re-expansion, which only a sequentially-parsed `.bat` provides. CRLF line
+    /// endings keep legacy cmd parsers happy.
+    fn run_batch(body: &str) -> Option<String> {
+        let path = std::env::temp_dir().join("ocx_batch_live_mtf.bat");
+        std::fs::write(&path, format!("@echo off\r\n{body}\r\n")).ok()?;
+        let result = match Command::new("cmd").args(["/c", &path.to_string_lossy()]).output() {
+            Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("failed to spawn cmd: {error}"),
+        };
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn live_batch_idempotent_move_to_front() {
+        // cmd.exe only (Windows CI's `nextest --workspace` leg); skips green
+        // elsewhere via NotFound. Proves the substring-delete emit moves a
+        // mid-PATH entry to the front and is idempotent across a double source —
+        // the work the removed `OCX_ACTIVATED` guard used to do for prepend-only.
+        let separator = sep();
+        let value = r"C:\opt\bin";
+        let line = Shell::Batch.export_path("PATH", value).unwrap().replace('\n', "\r\n");
+        let seed = format!(r"C:\sys{separator}{value}{separator}C:\other");
+        let body = format!("SET \"PATH={seed}\"\r\n{line}\r\n{line}\r\necho %PATH%");
+        if let Some(out) = run_batch(&body) {
+            assert_eq!(
+                out,
+                format!(r"{value}{separator}C:\sys{separator}C:\other"),
+                "batch move-to-front not idempotent across a double source"
+            );
         }
     }
 }

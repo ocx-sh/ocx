@@ -46,8 +46,8 @@ ocx package env cmake --shell bash >> ~/.bashrc
 
 — where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
 
-::: warning Batch (cmd.exe) is prepend-only
-`--shell=batch` prepends without deduplication: `cmd.exe` has no list primitive and `FOR /F` with delayed expansion corrupts values containing `!`. Re-sourcing a batch block can therefore grow `PATH`. Every other shell — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell — is fully idempotent. elvish needs the `str:` module (0.16+); nushell needs the auto-list `PATH` conversion (0.101+).
+::: info Shell-specific requirements
+All ten supported shells — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell, and Windows `cmd` — emit idempotent move-to-front output. The `cmd` form rebuilds `PATH` with `%VAR:search=%` substring deletion (no `FOR /F`, no delayed expansion, so `!`-bearing paths stay intact) and matches segments case-insensitively, the way Windows `PATH` lookup does. A couple of shells have version floors: elvish needs the `str:` module (0.16+); nushell needs the auto-list `PATH` conversion (0.101+).
 :::
 
 ### What "hermetic" means for `ocx run` {#strict-isolation-run}

@@ -353,6 +353,7 @@ manifest impact.
 | 2026-06-19 | Architect | Initial draft — S1 self-contained inline over issue's helper-function design; capture invariant; Nushell gap flagged |
 | 2026-06-19 | Architect | Add "Rejected: idempotency CLI toggle" (no flag, no internal strategy enum — peer survey + YAGNI) and verified direnv-interaction section (inherits fix free; safe under revert-then-reapply; bash-subprocess gotcha) |
 | 2026-06-20 | Builder | Amendment: guards removed for idempotent shells; batch keeps OCX_ACTIVATED (prepend-only) — see section below |
+| 2026-06-21 | Builder | Amendment: batch `export_path` made idempotent (substring-delete move-to-front); `OCX_ACTIVATED` removed for ALL shells — supersedes the batch-retention decision below |
 
 ---
 
@@ -417,3 +418,40 @@ correctness no longer depends on them."
 **Scope of change:** `crates/ocx_lib/src/setup/shims.rs` (`_OCX_ENV_LOADED`
 emission and guard check removed); `crates/ocx_cli/src/command/self_group/activate.rs`
 (`OCX_ACTIVATED` emission removed). No other files required change.
+
+---
+
+## Amendment 2026-06-21 — batch made idempotent; `OCX_ACTIVATED` removed for ALL shells
+
+**Supersedes:** the 2026-06-20 amendment's batch-retention decision, and the
+"batch (cmd.exe): dedup is genuinely impractical / prepend-only" claim at line 92.
+
+**Decision:**
+
+- `Shell::Batch.export_path` is now **idempotent move-to-front**, matching the
+  other nine shells. `OCX_ACTIVATED` is **removed entirely** — guard and marker —
+  so every shell activates unguarded.
+- The batch emit uses cmd's `%VAR:search=%` **substring substitution** (normal,
+  non-delayed expansion) to delete every occurrence of the entry, then prepends
+  once. Four statements, each on its own line (cmd re-expands `%KEY%` per
+  statement): trailing-separator normalize → delete-all → prepend → strip-sep.
+
+**Why the earlier "impractical" verdict was wrong:** it assumed the only cmd dedup
+path was `FOR /F` + `setlocal enabledelayedexpansion`, which mangles `!`-bearing
+segments. Substring substitution needs **no** delayed expansion, so `!`-paths stay
+byte-exact. It is case-insensitive, which matches Windows' case-insensitive `PATH`
+lookup. The one residual difference from the POSIX arms — case-insensitive match —
+is more correct for Windows, not less.
+
+**Verification:** a `live_batch_idempotent_move_to_front` unit test runs the emitted
+`.bat` under real `cmd.exe` (seeded PATH, double source, assert move-to-front +
+idempotent). It executes on the `windows-latest` `nextest --workspace` leg of
+`verify-deep.yml` and skips green where cmd is absent (the existing `run_script`
+NotFound pattern). This closes the only gap that justified keeping the guard:
+batch idempotency is now CI-proven, not just reasoned about.
+
+**Scope of change:** `crates/ocx_lib/src/shell.rs` (`Self::Batch` arm of
+`export_path` + shape/live tests); `crates/ocx_cli/src/command/self_group/activate.rs`
+(batch guard + marker removed, no-guard test now covers all shells);
+`test/tests/test_self_activate.py` (batch test asserts guard-free + move-to-front);
+`website/src/docs/reference/env-composition.md` (batch caveat → idempotent).

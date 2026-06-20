@@ -141,23 +141,15 @@ fn emit_activation(shell: Shell, bin_path: &std::path::Path, completion: Option<
     emit_path_prepend(shell, bin_path);
 
     // ── Global toolchain env ─────────────────────────────────────────────────
-    // Evaluate the global toolchain env. For the idempotent shells the emitted
-    // env lines never duplicate — PATH uses move-to-front, constants are
-    // absolute sets — so the eval runs unconditionally with NO `OCX_ACTIVATED`
-    // state guard: an exported guard leaks into child processes (e.g. a VS Code
-    // Remote server whose terminals inherit it) and wrongly suppresses
-    // activation in a shell that needs it. Running unconditionally also lets a
-    // re-source pick up a changed global toolchain.
-    //
-    // Batch is the exception: cmd PATH emission is prepend-only (no move-to-front
-    // primitive — see `Shell::export_path`), so its eval keeps the
-    // `OCX_ACTIVATED` session guard plus the marker below to avoid PATH growth on
-    // repeated activation. cmd has no auto-sourced profile, so that guard never
-    // crosses the auto-activation boundary the removed POSIX guards did.
+    // Evaluate the global toolchain env. The emitted env lines never duplicate on
+    // every shell — PATH uses idempotent move-to-front (cmd included, via
+    // substring-delete; see `Shell::export_path`), constants are absolute sets —
+    // so the eval runs unconditionally with NO `OCX_ACTIVATED` state guard. An
+    // exported guard leaks into child processes (e.g. a VS Code Remote server
+    // whose terminals inherit it) and wrongly suppresses activation in a shell
+    // that needs it. Running unconditionally also lets a re-source pick up a
+    // changed global toolchain.
     emit_global_env_eval(shell);
-    if shell == Shell::Batch {
-        println!("set OCX_ACTIVATED=1");
-    }
 }
 
 /// Emit the PATH prepend line for the given shell using an absolute `bin_path`.
@@ -217,13 +209,11 @@ fn emit_global_env_eval(shell: Shell) {
 
 /// Format the global-env-eval line for `shell` without emitting.
 ///
-/// For the idempotent shells this runs `ocx --global env` guarded only by an
-/// `ocx`-existence probe — PATH uses move-to-front and constants are absolute
-/// sets, so there is no `OCX_ACTIVATED` state guard (an exported guard would
-/// leak into child shells, e.g. a VS Code Remote server whose terminals inherit
-/// it, and suppress activation where it is needed). Batch is the exception: its
-/// PATH emission is prepend-only, so it retains the `OCX_ACTIVATED` session
-/// guard to avoid PATH growth on repeated activation.
+/// On every shell this runs `ocx --global env` guarded only by an `ocx`-existence
+/// probe — PATH uses idempotent move-to-front (cmd included, via substring-delete)
+/// and constants are absolute sets, so there is no `OCX_ACTIVATED` state guard (an
+/// exported guard would leak into child shells, e.g. a VS Code Remote server whose
+/// terminals inherit it, and suppress activation where it is needed).
 fn format_global_env_eval(shell: Shell) -> String {
     let shell_name = shell_name_for_eval(shell);
     match shell {
@@ -244,15 +234,12 @@ fn format_global_env_eval(shell: Shell) -> String {
         Shell::PowerShell => format!(
             "if (Get-Command ocx -ErrorAction SilentlyContinue) {{ $__ocx_global_env = (& ocx --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
         ),
-        // CMD: `FOR /F` evaluates each line of the subprocess output. Batch
-        // PATH emission is prepend-only (cmd has no move-to-front primitive), so
-        // unlike the idempotent shells it KEEPS the `OCX_ACTIVATED` session guard
-        // to avoid re-prepending the global toolchain on a repeated activation.
-        // The marker is set by `emit_activation` after this line.
+        // CMD: `FOR /F` evaluates each line of the subprocess output. Batch PATH
+        // emission is now idempotent move-to-front (substring-delete, see
+        // `Shell::export_path`), so like every other shell it runs unguarded —
+        // no `OCX_ACTIVATED` session guard, no marker.
         Shell::Batch => {
-            format!(
-                "if not defined OCX_ACTIVATED FOR /F \"usebackq\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i"
-            )
+            format!("FOR /F \"usebackq\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i")
         }
         Shell::Elvish => {
             format!("if (has-external ocx) {{ ocx --global env --shell={shell_name} | slurp | eval }}")
@@ -373,44 +360,22 @@ mod tests {
 
     // ── No OCX_ACTIVATED guard (idempotent activation, no cross-process leak) ─
 
-    /// No shell's global-env-eval line may carry an `OCX_ACTIVATED` state guard.
-    /// An exported guard leaks into child processes (e.g. a VS Code Remote
-    /// server whose terminals inherit it) and suppresses activation in a shell
-    /// that needs it — the exact SSH-vs-VS-Code divergence this removal fixes.
-    /// Idempotent env emission (PATH move-to-front, constants absolute) makes
-    /// the guard unnecessary for correctness — for every shell EXCEPT Batch,
-    /// whose PATH emission is prepend-only (see `global_env_eval_batch_keeps_
-    /// activated_guard`).
+    /// No shell's global-env-eval line may carry an `OCX_ACTIVATED` state guard —
+    /// Batch included now that its PATH emission is idempotent move-to-front
+    /// (substring-delete). An exported guard leaks into child processes (e.g. a
+    /// VS Code Remote server whose terminals inherit it) and suppresses
+    /// activation in a shell that needs it — the exact SSH-vs-VS-Code divergence
+    /// this removal fixes. Idempotent env emission (PATH move-to-front, constants
+    /// absolute) makes the guard unnecessary for correctness.
     #[test]
-    fn global_env_eval_has_no_activated_guard_for_idempotent_shells() {
+    fn global_env_eval_has_no_activated_guard_for_any_shell() {
         for shell in ALL_SHELLS {
-            if shell == Shell::Batch {
-                continue;
-            }
             let line = format_global_env_eval(shell);
             assert!(
                 !line.contains("OCX_ACTIVATED"),
                 "{shell:?} eval line must not reference OCX_ACTIVATED; got: {line:?}"
             );
         }
-    }
-
-    /// Batch is the one shell whose PATH emission is prepend-only (cmd has no
-    /// move-to-front primitive), so it KEEPS the `OCX_ACTIVATED` session guard —
-    /// removing it would re-prepend the global toolchain on every activation and
-    /// grow `%PATH%` toward the Windows length limit. The marker that satisfies
-    /// the guard is emitted separately by `emit_activation`.
-    #[test]
-    fn global_env_eval_batch_keeps_activated_guard() {
-        let line = format_global_env_eval(Shell::Batch);
-        assert!(
-            line.contains("if not defined OCX_ACTIVATED"),
-            "Batch eval line must keep the OCX_ACTIVATED guard (prepend-only PATH); got: {line:?}"
-        );
-        assert!(
-            line.contains("ocx --global env --shell=batch"),
-            "Batch eval line must still invoke ocx --global env; got: {line:?}"
-        );
     }
 
     /// Every shell still invokes `ocx --global env` — removing the guard must
