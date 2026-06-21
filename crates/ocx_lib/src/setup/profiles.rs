@@ -368,6 +368,11 @@ mod tests {
 
     // ── ZDOTDIR handling ────────────────────────────────────────────
 
+    // ZDOTDIR is a zsh-only (Unix) concept and the assertions pin a POSIX
+    // `/home/dev/...` target layout; on Windows the path joins normalize
+    // differently, so this is gated to unix (zsh profile relocation is not a
+    // Windows scenario).
+    #[cfg(unix)]
     #[test]
     fn zdotdir_override_relocates_zsh_targets_only() {
         let mut env = home_env("/home/dev", "/usr/bin/zsh");
