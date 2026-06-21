@@ -215,13 +215,6 @@ def test_fish_dedicated_activation_survives_unset_ocx_home(tmp_path: Path) -> No
     _assert_activation("fish", result, bin_seg)
 
 
-@pytest.mark.xfail(
-    reason="NU_AUTOLOAD uses a dynamic `source (expr)`, which current nushell rejects at parse "
-    "time (not_a_constant). This is orthogonal to the unset-OCX_HOME fix (nu already resolves the "
-    "OCX_HOME fallback) and is tracked as a separate follow-up; xfail so the known limitation is "
-    "exercised without gating the matrix.",
-    strict=False,
-)
 def test_nushell_dedicated_activation_survives_unset_ocx_home(tmp_path: Path) -> None:
     shell_abs = shutil.which("nu")
     if shell_abs is None:
@@ -272,12 +265,15 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     )
     combined = result.stdout + result.stderr
     # Scope: prove the unset-OCX_HOME regression is gone — the fence located and
-    # ran env.elv (bin dir on PATH) without a missing-file error. We deliberately
-    # do NOT assert "no exception at all": an *empty* global toolchain makes the
-    # downstream `ocx --global env --shell=elvish | slurp | eval` raise an
-    # arity error, which is an orthogonal pre-existing `self activate` template
-    # issue (tracked separately), not this bug.
+    # ran env.elv (bin dir on PATH) without a missing-file error.
     _assert_no_missing_env_error(combined, "elvish")
+    # Regression: the global-env eval now captures the exporter output
+    # (`eval (… | slurp)`) instead of piping it (`… | slurp | eval`), so an empty
+    # global toolchain no longer raises "arity mismatch" on startup.
+    assert "arity mismatch" not in combined, (
+        f"elvish: global-env eval must not raise an arity mismatch (pipe-to-eval bug); "
+        f"got:\n{combined}"
+    )
     assert bin_seg in result.stdout, (
         f"elvish: the ocx bin dir must land on PATH after the fence sources env.elv "
         f"with OCX_HOME unset; not found in:\n{result.stdout}\nstderr:\n{result.stderr}"
