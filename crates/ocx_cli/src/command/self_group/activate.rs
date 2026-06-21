@@ -244,12 +244,31 @@ fn format_global_env_eval(shell: Shell) -> String {
         Shell::Batch => {
             format!("FOR /F \"usebackq delims=\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i")
         }
+        // Elvish — capture the exporter output and pass it to `eval` as a
+        // POSITIONAL argument: `eval (… | slurp)`. The older pipe form
+        // `… | slurp | eval` gives `eval` zero positional args and raises
+        // "arity mismatch: arguments must be 1 value, but is 0 values" on every
+        // start (so the global toolchain env never applied). Empty output is
+        // safe: `eval ""` is a no-op.
         Shell::Elvish => {
-            format!("if (has-external ocx) {{ ocx --global env --shell={shell_name} | slurp | eval }}")
+            format!("if (has-external ocx) {{ eval (ocx --global env --shell={shell_name} | slurp) }}")
         }
-        Shell::Nushell => {
-            format!("if (which ocx | length) > 0 {{ ocx --global env --shell={shell_name} | nu -c $in }}")
-        }
+        // Nushell has no string `eval` and `source` needs a parse-time-const path
+        // (it reads the file at PARSE time), so global env output cannot be
+        // evaluated the way every other shell does. Apply it as DATA instead:
+        // parse `--format json` and apply each entry by modifier type via the
+        // shared `NU_ENV_APPLY_LOOP` (path -> move-to-front prepend, constant ->
+        // replace). `--shell=nushell` output is deliberately NOT used here. The
+        // loop is shared verbatim with `$OCX_HOME/env.nu` so the two cannot drift;
+        // `ocx` is already on PATH (the preceding prepend), guarded by `which ocx`.
+        // No `{shell_name}` interpolation: the global env is read as JSON via the
+        // root `--format json` flag, not a `--shell=NAME` channel.
+        Shell::Nushell => [
+            "if (which ocx | length) > 0 { try { let _ocx_json = (ocx --format json --global env | from json); ",
+            ocx_lib::setup::shims::NU_ENV_APPLY_LOOP,
+            " } catch { } }",
+        ]
+        .concat(),
     }
 }
 
@@ -381,17 +400,70 @@ mod tests {
         }
     }
 
-    /// Every shell still invokes `ocx --global env` — removing the guard must
-    /// strip only the state gate, never the eval itself.
+    /// Every shell still invokes `ocx … global env` — removing the guard must
+    /// strip only the state gate, never the eval itself. Nushell is the one
+    /// exception to the `--shell=NAME` channel: it has no string `eval`, so it
+    /// consumes the structured `--format json --global env` output and applies it
+    /// with `load-env` instead of evaluating shell code.
     #[test]
     fn global_env_eval_invokes_global_env_for_any_shell() {
         for shell in ALL_SHELLS {
             let line = format_global_env_eval(shell);
-            assert!(
-                line.contains("ocx --global env --shell="),
-                "{shell:?} eval line must invoke ocx --global env; got: {line:?}"
-            );
+            let invokes = if shell == Shell::Nushell {
+                line.contains("ocx --format json --global env")
+            } else {
+                line.contains("ocx --global env --shell=")
+            };
+            assert!(invokes, "{shell:?} eval line must invoke ocx global env; got: {line:?}");
         }
+    }
+
+    /// Elvish must pass the exporter output to `eval` as a POSITIONAL argument
+    /// (`eval (… | slurp)`), not pipe it (`… | slurp | eval`) — the pipe form
+    /// gives `eval` zero args and raises an arity mismatch on every shell start,
+    /// so the global toolchain env never applied.
+    #[test]
+    fn global_env_eval_elvish_uses_capture_not_pipe_to_eval() {
+        let line = format_global_env_eval(Shell::Elvish);
+        assert!(
+            line.contains("eval (ocx --global env --shell=elvish | slurp)"),
+            "elvish must capture-then-eval; got: {line:?}"
+        );
+        assert!(
+            !line.contains("slurp | eval"),
+            "elvish must NOT pipe to eval (arity mismatch); got: {line:?}"
+        );
+    }
+
+    /// Nushell must apply the global env as DATA (`from json` + `load-env`),
+    /// never via the no-op `nu -c $in` subprocess (which mutates only a child's
+    /// env, so the global toolchain never reached the parent shell). The apply
+    /// body is the shared `NU_ENV_APPLY_LOOP`, embedded verbatim so this line and
+    /// `$OCX_HOME/env.nu` cannot drift, and it dispatches on the entry modifier
+    /// type (so a non-PATH `type:path` var prepends, not overwrites).
+    #[test]
+    fn global_env_eval_nushell_applies_json_via_load_env() {
+        let line = format_global_env_eval(Shell::Nushell);
+        assert!(
+            line.contains("from json"),
+            "nushell must parse JSON global env; got: {line:?}"
+        );
+        assert!(
+            line.contains("load-env"),
+            "nushell must apply constants via load-env; got: {line:?}"
+        );
+        assert!(
+            line.contains(ocx_lib::setup::shims::NU_ENV_APPLY_LOOP),
+            "nushell eval line must embed the shared apply loop verbatim (drift guard); got: {line:?}"
+        );
+        assert!(
+            line.contains(r#"$_ocx_e.type == "path""#),
+            "nushell must dispatch on the entry modifier type, not the key name; got: {line:?}"
+        );
+        assert!(
+            !line.contains("nu -c"),
+            "nushell must NOT shell out to a child `nu -c` (no parent env effect); got: {line:?}"
+        );
     }
 
     /// The eval stays gated on an `ocx`-existence probe (not a state guard) for

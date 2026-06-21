@@ -3,12 +3,15 @@
 
 //! The per-shell env shims OCX writes into `$OCX_HOME` (contract 3).
 //!
-//! Each shim is a thin loader that delegates to `ocx self activate` at shell
-//! startup. The bodies are **byte-identical across users** — there is NO
+//! Most shims are thin loaders that delegate to `ocx self activate` at shell
+//! startup (the POSIX/fish/elvish/PowerShell families `eval`/`source`/`slurp`
+//! its output). Nushell is the exception: it has no string `eval` and `source`
+//! needs a parse-time-constant path, so [`ENV_NU`] applies activation as
+//! structured DATA (`load-env` from `ocx --format json --global env`) — see its
+//! doc comment. The bodies are **byte-identical across users** — there is NO
 //! install-time substitution; `OCX_HOME` is resolved at runtime by the shim
 //! itself (`: "${OCX_HOME:=$HOME/.ocx}"` and the per-shell equivalents). The
-//! consts below are the single source of truth, lifted verbatim from the
-//! former `install.sh` / `install.ps1` heredocs.
+//! consts below are the single source of truth.
 //!
 //! [`write_shims`] writes all five `env.*` files atomically with a diff-gate
 //! (a file whose bytes already match is left untouched). [`refresh_shims`] is
@@ -148,20 +151,57 @@ if (Test-Path $_ocxBin -PathType Leaf) {
 Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 "#;
 
+/// The Nushell loop that applies one `ocx --format json --global env` document to
+/// `$env`, dispatching on each entry's modifier **type** exactly like the shell
+/// emitters (`Shell::Nushell::export_path` / `export_constant`):
+///
+/// - `type == "path"` — prepend the value's segment(s) to the named key,
+///   move-to-front (drop the existing occurrence + empties via `uniq`), and store
+///   the result as a separator-joined **string**. Strings (not lists) are
+///   required because Nushell silently drops a LIST-valued non-`PATH` env var when
+///   it spawns an external; `PATH` itself round-trips fine as a string.
+/// - `type == "constant"` — replace any existing value with `load-env`.
+///
+/// Dispatching on `type` (not `key == "PATH"`) is essential: a package may declare
+/// any key (`LD_LIBRARY_PATH`, `PKG_CONFIG_PATH`, …) as `type: path`, and that must
+/// prepend, not overwrite. The caller must bind `$_ocx_json` to the parsed record
+/// first. Shared **verbatim** between [`ENV_NU`] and the
+/// `self activate --shell=nushell` line so the two cannot drift.
+pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == \"path\" { let _ocx_cur = ($env | get --optional $_ocx_e.key | default \"\"); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }";
+
 /// `$OCX_HOME/env.nu` — Nushell shim.
 ///
-/// Byte-identical to the former `install.sh` `env.nu` heredoc body.
+/// Unlike the other shims, Nushell activation cannot delegate to
+/// `ocx self activate` via an `eval`/`source`: Nushell has no string `eval`, and
+/// `source` requires a **parse-time-constant** path AND reads the file at PARSE
+/// time — so the older "write `self activate` output to a temp file, then
+/// `source` it" form failed two ways (a runtime `source (expr)` is rejected as
+/// `not_a_constant`, and even with a constant path the file does not exist when
+/// `source` parses). Nushell therefore applies activation as **data**: the ocx
+/// bin dir is prepended to `$env.PATH` directly (a fixed path under `$OCX_HOME`),
+/// and the global toolchain env is read from `ocx --format json --global env` and
+/// applied by [`NU_ENV_APPLY_LOOP`] (which dispatches on each entry's modifier
+/// type). No temp file, no `source`, no subprocess `nu -c` (which would mutate
+/// only a child's env). Idempotent: every path apply is a move-to-front
+/// (`uniq`), so a re-source never duplicates a segment; the `try/catch` keeps a
+/// malformed global lock from aborting the (already-applied) bin-on-PATH step.
 pub const ENV_NU: &str = r#"# Managed by ocx installer - do not edit.
-# No double-source guard: the emitted activation is idempotent move-to-front, so
-# re-sourcing never duplicates a PATH entry. An exported guard would leak into
-# child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
+# No double-source guard: activation is idempotent move-to-front, so re-sourcing
+# never duplicates a PATH entry. An exported guard would leak into child shells
+# (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
 $env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
 
-let _ocx_bin = ($env.OCX_HOME | path join 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx')
-if ($_ocx_bin | path exists) {
-    ^$_ocx_bin self activate --shell=nushell 2>/dev/null | save --force ($nu.temp-path | path join 'ocx_activate.nu')
-    source ($nu.temp-path | path join 'ocx_activate.nu')
+let _ocx_bin = ($env.OCX_HOME | path join 'symlinks/ocx.sh/ocx/cli/current/content/bin')
+if (($_ocx_bin | path join 'ocx') | path exists) {
+    # ocx bin on PATH, move-to-front. $env.PATH is a list at startup; normalize to
+    # segments, prepend, dedup, and store as a separator-joined string so the
+    # global-env apply below operates uniformly on string-valued path vars.
+    $env.PATH = ([$_ocx_bin] ++ ($env.PATH | (if ($in | describe) == 'string' { split row (char esep) } else { $in })) | where {|p| $p != "" } | uniq | str join (char esep))
+    try {
+        let _ocx_json = (^($_ocx_bin | path join 'ocx') --format json --global env | from json)
+        for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == "path" { let _ocx_cur = ($env | get --optional $_ocx_e.key | default ""); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }
+    } catch { }
 }
 "#;
 
@@ -186,15 +226,6 @@ if ?(test -x $_ocx_bin) {
 }
 "#;
 
-/// Body of the Nushell vendor-autoload file (`vendor/autoload/ocx.nu`).
-///
-/// Ported verbatim from the former `install.sh` `create_nu_autoload` heredoc.
-/// Sources `$OCX_HOME/env.nu` after resolving `OCX_HOME` at runtime.
-const NU_AUTOLOAD: &str = r#"# OCX shell environment - managed by ocx installer.
-$env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
-source ($env.OCX_HOME + '/env.nu')
-"#;
-
 /// Body of the fish `conf.d/ocx.fish` autoload file.
 ///
 /// Ported verbatim from the former `install.sh` `create_fish_config` heredoc.
@@ -216,14 +247,22 @@ const SHIMS: [(&str, &str); 5] = [
     ("env.elv", ENV_ELV),
 ];
 
-/// The Nushell vendor-autoload body that sources `$OCX_HOME/env.nu` at startup.
+/// The Nushell vendor-autoload body that activates ocx at startup.
 ///
 /// The orchestrator writes this to
 /// `${XDG_DATA_HOME:-$HOME/.local/share}/nushell/vendor/autoload/ocx.nu`
 /// (contract 5, `DedicatedFile`). The body takes no substitution.
+///
+/// It is the **full activation** ([`ENV_NU`]) rather than a one-line loader that
+/// sources `$OCX_HOME/env.nu`: fish's `conf.d/ocx.fish` can `source "$_ocx_env"`
+/// because POSIX/fish `source` accepts a runtime path, but Nushell `source`
+/// requires a parse-time-constant path — it cannot source `$OCX_HOME/env.nu`
+/// where `OCX_HOME` is only known at runtime. Inlining the activation sidesteps
+/// that limitation. The update hook (`refresh_profiles`) re-applies this body, so
+/// it stays in sync with the binary just like the `env.*` shims.
 #[must_use]
 pub fn nu_autoload_body() -> &'static str {
-    NU_AUTOLOAD
+    ENV_NU
 }
 
 /// The fish `conf.d/ocx.fish` body that sources `$OCX_HOME/env.fish` at startup.
@@ -394,23 +433,29 @@ mod tests {
         }
     }
 
-    /// Each shim delegates to the running binary via `self activate`, resolving
-    /// it through the `current` install symlink — never a literal path.
+    /// Each shim invokes the running binary, resolving it through the `current`
+    /// install symlink — never a literal path.
     #[test]
     fn each_shim_resolves_the_binary_through_the_current_symlink() {
-        // The shared prefix is literal in every shim; the binary basename is
-        // `ocx` for the four POSIX-family shims and `$_ocxExe` (ocx / ocx.exe)
-        // for the PowerShell shim, so assert only the `current` symlink prefix.
+        // The shared prefix is literal in every shim. Most append `/ocx`
+        // (or `/$_ocxExe`) directly; the nushell shim joins the bin DIR and the
+        // `ocx` basename in separate `path join` steps, so assert the prefix
+        // through `content/bin` (no trailing slash) which all shims share.
         for (name, body) in SHIMS {
             assert!(
-                body.contains("symlinks/ocx.sh/ocx/cli/current/content/bin/"),
+                body.contains("symlinks/ocx.sh/ocx/cli/current/content/bin"),
                 "{name} must resolve ocx through the current install symlink"
             );
-            // POSIX-family shims write `self activate` contiguously; the
-            // PowerShell shim builds the args as a clap-safe array.
-            let delegates =
-                body.contains("self activate") || body.contains("@('self', 'activate', '--shell=powershell')");
-            assert!(delegates, "{name} must delegate to `self activate`");
+            // POSIX-family + elvish shims write `self activate` contiguously; the
+            // PowerShell shim builds the args as a clap-safe array. The nushell
+            // shim cannot `eval`/`source` `self activate` output (no string eval;
+            // `source` needs a parse-time const path), so it invokes the binary
+            // for the global env as STRUCTURED DATA (`--format json --global env`)
+            // and applies it with `load-env` — see the ENV_NU doc comment.
+            let invokes_binary = body.contains("self activate")
+                || body.contains("@('self', 'activate', '--shell=powershell')")
+                || body.contains("--format json --global env");
+            assert!(invokes_binary, "{name} must invoke the ocx binary to activate");
         }
     }
 
@@ -533,12 +578,71 @@ mod tests {
     /// runtime OCX_HOME fallback (contract 5 — ported from install.sh).
     #[test]
     fn dedicated_file_bodies_use_runtime_ocx_home() {
-        assert!(nu_autoload_body().contains("# OCX shell environment - managed by ocx installer."));
+        // The nu autoload is the full activation (it cannot `source` a runtime
+        // `$OCX_HOME/env.nu` path — Nushell `source` needs a parse-time const),
+        // so it equals ENV_NU and resolves OCX_HOME at runtime itself.
+        assert_eq!(
+            nu_autoload_body(),
+            ENV_NU,
+            "nu autoload must inline the full activation (ENV_NU)"
+        );
         assert!(nu_autoload_body().contains(r#"$env.OCX_HOME = ($env.OCX_HOME? | default"#));
-        assert!(nu_autoload_body().contains("source ($env.OCX_HOME + '/env.nu')"));
 
         assert!(fish_conf_body().contains("# OCX shell environment - managed by ocx installer."));
         assert!(fish_conf_body().contains("set -q OCX_HOME"));
         assert!(fish_conf_body().contains(r#"source "$_ocx_env""#));
+    }
+
+    /// Regression: the Nushell shim must apply activation as DATA (`load-env`
+    /// from `ocx --format json --global env`), never via the parse-time-broken
+    /// constructs that left ocx off `PATH` entirely — a runtime `source (expr)`
+    /// (rejected `not_a_constant`), the non-existent `$nu.temp-path` field, or a
+    /// subprocess `nu -c` (which mutates only a child's env). See the ENV_NU doc
+    /// comment for the full rationale.
+    #[test]
+    fn env_nu_applies_activation_as_data_not_via_source() {
+        // Must use the data-application primitives.
+        assert!(ENV_NU.contains("from json"), "env.nu must read the global env as JSON");
+        assert!(ENV_NU.contains("load-env"), "env.nu must apply constants via load-env");
+        assert!(
+            ENV_NU.contains("--format json --global env"),
+            "env.nu must resolve the global toolchain env as structured data"
+        );
+        assert!(
+            ENV_NU.contains("[$_ocx_bin] ++"),
+            "env.nu must prepend the ocx bin dir to PATH directly"
+        );
+        // The global-env apply must dispatch on the entry MODIFIER TYPE
+        // (`type == "path"`), not on `key == "PATH"`: a non-PATH path var such as
+        // LD_LIBRARY_PATH must prepend (move-to-front), not be overwritten.
+        assert!(
+            ENV_NU.contains(NU_ENV_APPLY_LOOP),
+            "env.nu must embed the shared apply loop verbatim (drift guard)"
+        );
+        assert!(
+            NU_ENV_APPLY_LOOP.contains(r#"$_ocx_e.type == "path""#),
+            "the apply loop must dispatch on the entry modifier type"
+        );
+        assert!(
+            !NU_ENV_APPLY_LOOP.contains(r#"$_ocx_e.key == "PATH""#),
+            "the apply loop must NOT branch on the key name (LD_LIBRARY_PATH etc. are type:path too)"
+        );
+        // Must NOT carry any of the parse-time-broken constructs.
+        assert!(
+            !ENV_NU.contains("$nu.temp-path"),
+            "env.nu must not use the non-existent $nu.temp-path"
+        );
+        assert!(
+            !ENV_NU.contains("| save "),
+            "env.nu must not write a temp activation file"
+        );
+        assert!(
+            !ENV_NU.contains("source ("),
+            "env.nu must not `source` a runtime path (Nushell source needs a parse-time const)"
+        );
+        assert!(
+            !ENV_NU.contains("nu -c"),
+            "env.nu must not shell out to a child `nu -c` (no parent env effect)"
+        );
     }
 }
