@@ -2522,7 +2522,7 @@ ocx [--global] patch freeze
 
 #### `patch sync` {#patch-sync}
 
-Re-fetches every patch descriptor for all installed packages and the global root. Installs
+Re-fetches every patch descriptor for all installed packages and the global descriptor. Installs
 any newly-referenced companion packages. Requires network access.
 
 This command also picks up patches for packages installed before the `[patches]` tier was
@@ -2553,7 +2553,7 @@ ocx [--global] patch sync [OPTIONS]
 #### `patch publish` {#patch-publish}
 
 Reads a descriptor JSON file, validates it, and pushes it to the configured
-[`[patches]`][config-patches] registry. Use `--global-root` for a descriptor that
+[`[patches]`][config-patches] registry. Use `--global` for a descriptor that
 applies to every package; supply a base identifier to publish a per-package descriptor.
 Publish companion packages separately with `ocx package push` before publishing the
 descriptor that references them.
@@ -2563,20 +2563,20 @@ Requires network access; fails in offline mode.
 **Usage**
 
 ```shell
-ocx [--global] patch publish --descriptor-file <FILE> [--global-root | <BASE-ID>] [-p PLATFORM]
+ocx [--global] patch publish --descriptor-file <FILE> [--global | <BASE-ID>] [-p PLATFORM]
 ```
 
 **Arguments**
 
 - `<BASE-ID>`: The base package whose per-package patch path receives the descriptor.
-  Required unless `--global-root` is set.
+  Required unless `--global` is set.
 
 **Options**
 
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--descriptor-file <FILE>` | | Path to the patch descriptor JSON file. Required. |
-| `--global-root` | | Publish at the patch-registry root so the descriptor applies to every base. Mutually exclusive with `<BASE-ID>`. |
+| `--global` | | Publish the descriptor to the reserved `global` repository under the patch registry so it applies to every base. Mutually exclusive with `<BASE-ID>`. |
 | `--platform <PLATFORM>` | `-p` | Target platform for resolving the patch path template. Defaults to host platform. |
 | `-h`, `--help` | | Print help information. |
 

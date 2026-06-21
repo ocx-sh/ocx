@@ -192,69 +192,6 @@ Credentials are resolved against the **mirror** host, not the upstream. Configur
 | `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
 | `ocx index catalog` | Against a proxy-type mirror, the catalog lists only repositories the proxy has cached. This is a registry-side constraint, not an OCX behavior. |
 
-## Environment Variable Override Table {#env-overrides}
-
-This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
-
-| Environment Variable | Config Equivalent | Notes |
-|---------------------|-------------------|-------|
-| [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
-| [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
-| [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
-| [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
-| [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
-| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
-| [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
-| [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
-| [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
-| [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | None (deferred) | Will move to a per-entry `insecure` field under [`[registries.<name>]`](#keys-registries) once the flag is implemented; the env var remains the source of truth today |
-| [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | CI-only concern; env var is sufficient |
-| [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | None | Install-time concern; env var is sufficient |
-
-[`OCX_OFFLINE`][env-offline] and [`OCX_REMOTE`][env-remote] are intentionally absent from the config file. Both are per-invocation modes — a persistent `offline = true` would silently break `ocx install` on a fresh setup.
-
-## Error Reference {#errors}
-
-Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_CONFIG_SIZE` in the loader source). Angle-bracket placeholders such as `<SIZE>` stand in for runtime values that depend on the offending file.
-
-| Error | Cause | Resolution |
-|-------|-------|-----------|
-| `error: config file not found: /path/to/file.toml (check --config or OCX_CONFIG)` | [`--config`][arg-config] or [`OCX_CONFIG`][env-config] points to a non-existent file | Check the path; unlike the three discovery tiers, explicit paths must exist. To disable an ambient [`OCX_CONFIG`][env-config] without unsetting it, set it to the empty string. |
-| `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG` env var pointed at a non-config file (e.g. an archive or binary). |
-| `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
-| `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG`][env-config] must point to a regular, readable file. |
-
-## JSON Schemas {#schemas}
-
-OCX publishes JSON Schemas for every config and project file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
-
-| File | Schema URL |
-|------|------------|
-| `config.toml` (any tier) | [`https://ocx.sh/schemas/config/v1.json`][schema-config] |
-| `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
-| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v2.json`][schema-project-lock] |
-| `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
-
-`ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
-
-## Future Config Keys {#future}
-
-::: details Not yet implemented in v1
-
-These sections are documented here so the format design is stable before they land. They do not exist in the current release.
-
-### Per-registry fields beyond `url` {#future-registries-fields}
-
-The [`[registries.<name>]`](#keys-registries) table is live in v1, but only `url` is defined. Future per-registry fields will slot in without breaking existing configs:
-
-```toml
-# Future shape (not in v1 — only `url` is implemented today):
-[registries.private]
-url = "registry.company.example"
-insecure = false                 # per-registry TLS opt-out
-location = "mirror.company.example"  # URL rewrite / mirror
-```
-
 ### `[patches]` section {#keys-patches}
 
 The `[patches]` tier points at an operator-controlled OCI registry that hosts
@@ -282,8 +219,8 @@ required = true
 **Overridden by**: [`OCX_PATCHES`][env-ocx-patches] (JSON wire format forwarded to subprocesses)
 
 The OCI registry root that hosts patch descriptors. The global descriptor (`__ocx.patch`
-at the registry root) applies to all packages; per-package descriptors live at
-sub-paths computed from the `path` template.
+at the reserved `global` repository, e.g. `<registry>/global:__ocx.patch`) applies to
+all packages; per-package descriptors live at sub-paths computed from the `path` template.
 
 ```toml
 [patches]
@@ -312,8 +249,8 @@ registry = "registry.corp.example/ocx-patches"
 path     = "bases/{repository}"
 ```
 
-The expanded path always produces a non-empty sub-path. The registry root is reserved
-for the global descriptor.
+The expanded path always produces a non-empty sub-path. The reserved `global` repository
+name is the fixed location of the global descriptor and must not be used as a per-package path.
 
 #### `required` {#keys-patches-required}
 
@@ -355,6 +292,70 @@ no-patches = true
 
 A system-required tier is never skipped by `no-patches`.
 
+## Environment Variable Override Table {#env-overrides}
+
+This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
+
+| Environment Variable | Config Equivalent | Notes |
+|---------------------|-------------------|-------|
+| [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
+| [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
+| [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
+| [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
+| [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
+| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
+| [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
+| [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
+| [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
+| [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | None (deferred) | Will move to a per-entry `insecure` field under [`[registries.<name>]`](#keys-registries) once the flag is implemented; the env var remains the source of truth today |
+| [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | CI-only concern; env var is sufficient |
+| [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | None | Install-time concern; env var is sufficient |
+
+[`OCX_OFFLINE`][env-offline] and [`OCX_REMOTE`][env-remote] are intentionally absent from the config file. Both are per-invocation modes — a persistent `offline = true` would silently break `ocx install` on a fresh setup.
+
+## Error Reference {#errors}
+
+Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_CONFIG_SIZE` in the loader source). Angle-bracket placeholders such as `<SIZE>` stand in for runtime values that depend on the offending file.
+
+| Error | Cause | Resolution |
+|-------|-------|-----------|
+| `error: config file not found: /path/to/file.toml (check --config or OCX_CONFIG)` | [`--config`][arg-config] or [`OCX_CONFIG`][env-config] points to a non-existent file | Check the path; unlike the three discovery tiers, explicit paths must exist. To disable an ambient [`OCX_CONFIG`][env-config] without unsetting it, set it to the empty string. |
+| `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG` env var pointed at a non-config file (e.g. an archive or binary). |
+| `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
+| `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG`][env-config] must point to a regular, readable file. |
+
+## JSON Schemas {#schemas}
+
+OCX publishes JSON Schemas for every config, project, and patch file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
+
+| File | Schema URL |
+|------|------------|
+| `config.toml` (any tier) | [`https://ocx.sh/schemas/config/v1.json`][schema-config] |
+| `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
+| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v2.json`][schema-project-lock] |
+| `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
+| Patch descriptor (`ocx patch publish --descriptor-file`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
+
+`ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
+
+## Future Config Keys {#future}
+
+::: details Not yet implemented in v1
+
+These sections are documented here so the format design is stable before they land. They do not exist in the current release.
+
+### Per-registry fields beyond `url` {#future-registries-fields}
+
+The [`[registries.<name>]`](#keys-registries) table is live in v1, but only `url` is defined. Future per-registry fields will slot in without breaking existing configs:
+
+```toml
+# Future shape (not in v1 — only `url` is implemented today):
+[registries.private]
+url = "registry.company.example"
+insecure = false                 # per-registry TLS opt-out
+location = "mirror.company.example"  # URL rewrite / mirror
+```
+
 ### `[clean]` section {#future-clean}
 
 Retention policy configuration will live under `[clean]`. Deferred to the retention policy feature.
@@ -377,6 +378,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [schema-project-lock]: https://ocx.sh/schemas/project-lock/v2.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
+[schema-patch]: https://ocx.sh/schemas/patch/v1.json
 
 <!-- in-depth -->
 [config-indepth]: ../in-depth/configuration.md

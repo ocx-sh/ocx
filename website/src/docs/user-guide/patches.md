@@ -88,10 +88,13 @@ four-step loop.
 ### 1. Write a descriptor {#patches-maintainer-descriptor}
 
 Create a JSON file following the descriptor schema. The only required fields are `version`
-(must be `1`) and `rules`:
+(must be `1`) and `rules`. Add the optional `$schema` key to get autocompletion and
+validation from any [taplo][taplo]- or VS-Code-style editor while you author the file — the
+schema is published at [`https://ocx.sh/schemas/patch/v1.json`][schema-patch]:
 
 ```json
 {
+  "$schema": "https://ocx.sh/schemas/patch/v1.json",
   "version": 1,
   "rules": [
     {
@@ -152,14 +155,14 @@ ocx package push \
   ca-bundle.tar.xz
 ```
 
-Then publish the descriptor. Use `--global-root` for a descriptor that applies to all
+Then publish the descriptor. Use `--global` for a descriptor that applies to all
 packages, or pass a base identifier to create a per-package descriptor:
 
 ```sh
 # Global descriptor (applies to all packages):
 ocx patch publish \
   --descriptor-file ./my-descriptor.json \
-  --global-root
+  --global
 
 # Per-package descriptor (applies to java only):
 ocx patch publish \
@@ -203,7 +206,7 @@ After the `[patches]` tier is configured, keep descriptors and companions curren
 ocx patch sync
 ```
 
-`patch sync` re-fetches every descriptor for all installed packages and the global root,
+`patch sync` re-fetches every descriptor for all installed packages and the global descriptor,
 installs any newly-referenced companion packages, and re-checks packages installed before
 the `[patches]` tier was added. This is the only command that contacts the patch registry.
 It is safe to run frequently; it piggybacks on the same index-update mechanism as
@@ -290,6 +293,10 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- external -->
 [asciinema]: https://asciinema.org/
+[taplo]: https://taplo.tamasfe.dev/
+
+<!-- schemas -->
+[schema-patch]: https://ocx.sh/schemas/patch/v1.json
 
 <!-- configuration -->
 [config-patches]: ../reference/configuration.md#keys-patches
