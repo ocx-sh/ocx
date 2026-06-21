@@ -37,10 +37,11 @@ tasks:
       - install
     cmds:
       # `schema:default` regenerates every published schema (metadata,
-      # config, project, project-lock) so the website ships the canonical
-      # JSON Schema files at `https://ocx.sh/schemas/<kind>/v1.json`. The
-      # `project` and `project-lock` schemas back IDE auto-completion via
-      # the `#:schema` directive emitted by `ocx init`.
+      # config, project, project-lock, patch) so the website ships the
+      # canonical JSON Schema files at `https://ocx.sh/schemas/<kind>/v1.json`.
+      # The `project` and `project-lock` schemas back IDE auto-completion via
+      # the `#:schema` directive emitted by `ocx init`; the `patch` schema
+      # validates descriptor files authored for `ocx patch publish`.
       - task: schema:default
       - task: scripts:publish
       - task: recordings:parallel

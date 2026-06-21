@@ -252,6 +252,97 @@ fn project_lock_schema_describes_platforms_map() {
     );
 }
 
+/// The patch descriptor schema must publish at its canonical `$id`. This is
+/// the schema for the JSON document authored for
+/// `ocx patch publish --descriptor-file` and carried in the `__ocx.patch`
+/// artifact layer.
+#[test]
+fn patch_schema_publishes_at_canonical_id() {
+    let schema = parse("patch");
+    let id = schema
+        .get("$id")
+        .and_then(Value::as_str)
+        .expect("patch schema must carry a top-level $id");
+    assert_eq!(
+        id, "https://ocx.sh/schemas/patch/v1.json",
+        "patch schema $id must match the canonical published URL"
+    );
+}
+
+/// The patch descriptor schema must describe the two top-level fields a
+/// descriptor author writes: a `version` constrained to `[1]` and a `rules`
+/// array whose items expose the `match` and `packages` keys.
+#[test]
+fn patch_schema_exposes_version_and_rules() {
+    let schema = parse("patch");
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("patch schema must have a top-level `properties` object");
+
+    // Resolve a node that may be inline or a `$ref` into `#/$defs/`.
+    let resolve = |node: &Value| -> Value {
+        if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+            let name = reference
+                .strip_prefix("#/$defs/")
+                .expect("$ref must point into #/$defs/");
+            schema
+                .get("$defs")
+                .and_then(|defs| defs.get(name))
+                .unwrap_or_else(|| panic!("$ref target {name} missing from $defs"))
+                .clone()
+        } else {
+            node.clone()
+        }
+    };
+
+    // `version` constrains to the single supported discriminant `[1]`.
+    let version = resolve(
+        properties
+            .get("version")
+            .expect("patch schema must declare a `version` property"),
+    );
+    let version_enum = version
+        .get("enum")
+        .and_then(Value::as_array)
+        .expect("`version` must carry an `enum` constraint");
+    assert_eq!(
+        version_enum.len(),
+        1,
+        "`version` enum must contain exactly one value (`[1]`); got {version_enum:?}"
+    );
+    assert_eq!(
+        version_enum[0].as_i64(),
+        Some(1),
+        "`version` enum must constrain to `[1]`"
+    );
+
+    // `rules` is an array; each item exposes the `match` glob and `packages`.
+    let rules = properties
+        .get("rules")
+        .expect("patch schema must declare a `rules` property");
+    assert_eq!(
+        rules.get("type").and_then(Value::as_str),
+        Some("array"),
+        "`rules` must be an array"
+    );
+    let item = resolve(rules.get("items").expect("`rules` must declare `items`"));
+    let item_props = item
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("a patch rule must expose a `properties` object");
+    assert!(
+        item_props.contains_key("match"),
+        "a patch rule must declare the renamed `match` glob key; got {:?}",
+        item_props.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        item_props.contains_key("packages"),
+        "a patch rule must declare a `packages` array; got {:?}",
+        item_props.keys().collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn unknown_schema_kind_returns_none() {
     assert!(
