@@ -754,17 +754,38 @@ impl PackageManager {
     /// Look up a companion's installed `InstallInfo` from the local index and
     /// package store, without contacting the network.
     ///
-    /// Resolves the companion tag → digest via [`IndexOperation::Query`] on the
-    /// public `Index` wrapper so the correct `TagLock`-envelope schema is used.
+    /// Resolves the companion tag → platform manifest digest via the local blob
+    /// cache, using platform selection when an image index is present.
     /// `Op::Query` is strictly local in every [`ChainMode`] (never walks the
     /// chain, never writes) — this keeps `build_site_patch_set` network-free.
     ///
-    /// Returns `Ok(None)` when the companion is not installed locally (the
-    /// index has no tag record for it).
+    /// ## Resolution algorithm
+    ///
+    /// Phase 3 (`pull`) caches the full manifest chain (image index + per-platform
+    /// manifests) in the local blob store and commits the IMAGE INDEX digest to the
+    /// tag store.  The package, however, is stored at the PLATFORM MANIFEST digest.
+    /// Naively looking up the tag-store digest in the package store therefore fails
+    /// for any multi-platform companion.  This method resolves correctly:
+    ///
+    /// 1. Read the tag-store digest (the top-level manifest digest — image index for
+    ///    multi-platform companions, single-platform image manifest otherwise).
+    /// 2. If the manifest blob at that digest is locally cached, read it and perform
+    ///    platform selection:
+    ///    - `Manifest::ImageIndex` → select the child manifest matching the host
+    ///      platform, returning its digest as the pinned identifier.
+    ///    - `Manifest::Image` → the tag-store digest already IS the platform digest;
+    ///      use it directly.
+    /// 3. If the manifest blob is absent from the local cache (no pull has occurred
+    ///    since the tag was last indexed), fall back to using the tag-store digest
+    ///    directly and call `find_in_store`.  This handles the single-platform case
+    ///    where the tag-store digest and platform-manifest digest are the same.
+    ///
+    /// Returns `Ok(None)` when the companion is not installed locally.
     async fn find_companion_local(&self, companion_id: &oci::Identifier) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
 
-        // Resolve the companion tag → digest through a **guaranteed-local** index.
+        // Build a guaranteed-local index (empty sources → strictly local,
+        // never walks the chain, never contacts the network).
         //
         // The companion overlay operates on already-installed state: Phase 3
         // installed the companion and committed its tag to the local index. The
@@ -774,9 +795,8 @@ impl PackageManager {
         // local read and routes to the registry (`ChainedIndex::fetch_manifest_digest`):
         // that would contact the network from the offline-safe overlay path and
         // ignore the locally-installed companion tag. Build a fresh `Offline`
-        // index over the same tag + blob stores (empty sources → strictly local,
-        // never walks a chain) so the lookup is TagLock-aware and network-free.
-        // On miss → companion not installed locally → return None.
+        // index over the same tag + blob stores so the lookup is TagLock-aware
+        // and network-free.
         let local_index = oci::index::Index::from_chained(
             oci::index::LocalIndex::new(oci::index::LocalConfig {
                 tag_store: self.file_structure().tags.clone(),
@@ -785,19 +805,75 @@ impl PackageManager {
             Vec::new(),
             oci::index::ChainMode::Offline,
         );
-        let Some(digest) = local_index
+
+        // Step 1: resolve the tag → top-level digest via the tag store.
+        // `fetch_manifest_digest` reads only the TagLock file — no blob store access.
+        // On miss → companion not in the local tag store → not installed.
+        let Some(top_digest) = local_index
             .fetch_manifest_digest(companion_id, IndexOperation::Query)
             .await?
         else {
             return Ok(None);
         };
 
-        // Construct the pinned identifier and look up in the package store.
-        let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
+        // Step 2: attempt to read the top-level manifest blob and perform platform
+        // selection for image-index companions. If the blob is not cached (returns
+        // None — no pull has happened since the last `index update`), fall through
+        // to Step 3 which uses the tag-store digest directly.
+        let top_id = companion_id.clone_with_digest(top_digest.clone());
+        if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
+            let pinned_id = match top_manifest {
+                // Single-platform image: tag-store digest IS the platform manifest digest.
+                (digest, oci::Manifest::Image(_)) => {
+                    match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
+                        Ok(id) => id,
+                        Err(_) => return Ok(None),
+                    }
+                }
+                // Multi-platform image index: select the host-platform child manifest
+                // and use ITS digest for the package-store lookup.  The image index
+                // blob was cached by Phase 3 `pull`, so `select` reads it locally.
+                (_, oci::Manifest::ImageIndex(_)) => {
+                    let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+                    let selected_id = match local_index
+                        .select(
+                            &top_id,
+                            vec![host_platform, oci::Platform::any()],
+                            IndexOperation::Query,
+                        )
+                        .await?
+                    {
+                        SelectResult::Found(id) => id,
+                        SelectResult::NotFound => return Ok(None),
+                        SelectResult::Ambiguous(_) => return Ok(None),
+                    };
+                    match oci::PinnedIdentifier::try_from(selected_id) {
+                        Ok(id) => id,
+                        Err(_) => return Ok(None),
+                    }
+                }
+            };
+            let result = find_in_store(&self.file_structure().packages, &pinned_id)
+                .await
+                .map_err(crate::Error::from)?;
+            return Ok(result);
+        }
+
+        // Step 3 (fallback): manifest blob absent from local cache.
+        //
+        // This happens when the tag was indexed (`index update`) but the full
+        // manifest chain was never pulled (no install since the index update).
+        // In this case the tag-store digest and the platform-manifest digest
+        // may differ (for multi-platform companions after `index update` alone).
+        // However, for single-platform companions the tag-store digest IS the
+        // platform manifest digest. Try `find_in_store` with the tag-store digest:
+        // if the package is there it was a single-platform install; if not, the
+        // companion is genuinely not installed locally and `find_in_store` returns
+        // `None` → caller treats as missing.
+        let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
             Ok(id) => id,
             Err(_) => return Ok(None),
         };
-
         // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
         // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
         // impl already extracts the inner error for the `Internal` arm and wraps
@@ -985,50 +1061,155 @@ impl PackageManager {
             }
         }
 
-        // ── Step 3: Resolve companion tags → pinned identifiers (local-only). ──
+        // ── Step 3: Resolve companion tags → platform-manifest pinned identifiers (local-only). ──
+        //
+        // The tag store records the IMAGE INDEX digest (the top-level manifest from
+        // `index update` or Phase 3 discovery).  The package store, however, keys by
+        // PLATFORM MANIFEST digest.  Resolution algorithm mirrors `find_companion_local`:
+        //
+        //   a) Read the tag-store digest (top-level digest) via `fetch_manifest_digest`.
+        //   b) If the manifest blob at that digest is locally cached, read it and
+        //      perform platform selection for image-index companions (multi-platform case).
+        //      For single-platform companions (`Manifest::Image`), the tag-store digest
+        //      already IS the platform manifest digest.
+        //   c) If the blob is absent (no pull since last `index update`), fall back to
+        //      the tag-store digest directly (correct for single-platform companions).
+        //
+        // This is required for both GC root correctness and `patch freeze` snapshot
+        // accuracy: the pinned identifier must match the path at which the package was
+        // actually installed.
         let mut companions: Vec<oci::PinnedIdentifier> = Vec::new();
         // Dedup companion identifiers before resolution (same companion may appear
         // in multiple descriptor sources).
         companion_set.sort_by_key(|id| id.to_string());
         companion_set.dedup_by_key(|id| id.to_string());
 
-        for companion_id in &companion_set {
-            match local_index
+        let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+
+        'companion: for companion_id in &companion_set {
+            // Step a: read the tag-store digest.
+            let top_digest = match local_index
                 .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Query)
                 .await
             {
-                Ok(Some(digest)) => {
-                    // Strip the tag: GC companion roots are identified by registry+repo+digest
-                    // only. The tag is lookup metadata, not part of the package identity.
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    log::debug!(
+                        "resolve-site-patch-roots: companion '{}' not in local index; skipping",
+                        companion_id
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    log::debug!(
+                        "resolve-site-patch-roots: error querying local index for companion '{}': {error}; skipping",
+                        companion_id
+                    );
+                    continue;
+                }
+            };
+
+            // Step b: if the manifest blob is cached, read it and select the platform.
+            let top_id = companion_id.clone_with_digest(top_digest.clone());
+            let resolved_pinned: oci::PinnedIdentifier = match local_index
+                .fetch_manifest(&top_id, oci::index::IndexOperation::Query)
+                .await
+            {
+                Ok(Some((_, oci::Manifest::Image(_)))) => {
+                    // Single-platform: tag-store digest = platform manifest digest.
                     let digest_only_id =
                         oci::Identifier::new_registry(companion_id.repository(), companion_id.registry())
-                            .clone_with_digest(digest);
+                            .clone_with_digest(top_digest.clone());
                     match oci::PinnedIdentifier::try_from(digest_only_id) {
-                        Ok(pinned) => companions.push(pinned),
+                        Ok(pinned) => pinned,
                         Err(_) => {
                             log::debug!(
                                 "resolve-site-patch-roots: could not pin companion '{}'; skipping",
                                 companion_id
                             );
+                            continue 'companion;
+                        }
+                    }
+                }
+                Ok(Some((_, oci::Manifest::ImageIndex(_)))) => {
+                    // Multi-platform: select the host-platform child manifest.
+                    let selected_id = match local_index
+                        .select(
+                            &top_id,
+                            vec![host_platform.clone(), oci::Platform::any()],
+                            oci::index::IndexOperation::Query,
+                        )
+                        .await
+                    {
+                        Ok(SelectResult::Found(id)) => id,
+                        Ok(SelectResult::NotFound | SelectResult::Ambiguous(_)) => {
+                            log::debug!(
+                                "resolve-site-patch-roots: could not select platform for companion '{}'; skipping",
+                                companion_id
+                            );
+                            continue 'companion;
+                        }
+                        Err(error) => {
+                            log::debug!(
+                                "resolve-site-patch-roots: error selecting platform for companion '{}': {error}; skipping",
+                                companion_id
+                            );
+                            continue 'companion;
+                        }
+                    };
+                    let Some(platform_digest) = selected_id.digest() else {
+                        log::debug!(
+                            "resolve-site-patch-roots: selected '{}' missing digest; skipping",
+                            companion_id
+                        );
+                        continue 'companion;
+                    };
+                    let digest_only_id =
+                        oci::Identifier::new_registry(selected_id.repository(), selected_id.registry())
+                            .clone_with_digest(platform_digest);
+                    match oci::PinnedIdentifier::try_from(digest_only_id) {
+                        Ok(pinned) => pinned,
+                        Err(_) => {
+                            log::debug!(
+                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
+                                companion_id
+                            );
+                            continue 'companion;
                         }
                     }
                 }
                 Ok(None) => {
-                    // Companion not installed locally — skip (GC of a not-yet-installed
-                    // companion is moot; no over-collect concern here).
+                    // Step c (fallback): manifest blob absent — use the tag-store digest directly.
+                    // Correct for single-platform companions; for multi-platform companions
+                    // without a locally cached image index this is best-effort.
                     log::debug!(
-                        "resolve-site-patch-roots: companion '{}' not in local index; skipping",
+                        "resolve-site-patch-roots: manifest blob absent for '{}'; using tag-store digest as fallback",
                         companion_id
                     );
+                    let digest_only_id =
+                        oci::Identifier::new_registry(companion_id.repository(), companion_id.registry())
+                            .clone_with_digest(top_digest.clone());
+                    match oci::PinnedIdentifier::try_from(digest_only_id) {
+                        Ok(pinned) => pinned,
+                        Err(_) => {
+                            log::debug!(
+                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
+                                companion_id
+                            );
+                            continue 'companion;
+                        }
+                    }
                 }
                 Err(error) => {
-                    // Local index read error — skip and log; do not fail GC derivation.
                     log::debug!(
-                        "resolve-site-patch-roots: error querying local index for companion '{}': {error}; skipping",
+                        "resolve-site-patch-roots: error reading manifest for companion '{}': {error}; skipping",
                         companion_id
                     );
+                    continue 'companion;
                 }
-            }
+            };
+
+            companions.push(resolved_pinned);
         }
 
         // Dedup and sort both vecs for deterministic output.

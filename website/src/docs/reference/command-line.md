@@ -2469,6 +2469,171 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this lets callers that adopt the printed env find launchers by bare name without further configuration.
 :::
 
+### `patch` {#patch}
+
+Manage site-infrastructure patch overlays. Patch descriptors map glob patterns over
+package identifiers to **companion packages** that carry operator-controlled environment
+overlays (CA bundles, proxy variables, license-server endpoints). The `[patches]`
+configuration tier must be set before any patch sub-command that contacts the registry.
+
+For a full walkthrough, see the [Patching packages guide][patches-user-guide].
+
+**Usage**
+
+```shell
+ocx [--global] patch <SUBCOMMAND>
+```
+
+**Sub-commands**
+
+| Sub-command | Purpose |
+|-------------|---------|
+| `freeze` | Write a `patches.snapshot.json` file that pins companion digests for reproducible builds. |
+| `sync` | Refresh descriptors and install newly-referenced companion packages from the registry. |
+| `publish` | Push a patch descriptor to the configured patch registry. |
+| `test` | Compose a descriptor onto a base package locally without publishing (maintainer preview). |
+
+#### `patch freeze` {#patch-freeze}
+
+Resolves every companion and descriptor digest in the active patch overlay and writes
+`patches.snapshot.json` beside `ocx.lock` (or in `$OCX_HOME` under `--global`). Once
+written, set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file path so all
+subsequent composition prefers the pinned digests over live tag lookups.
+
+Works offline: only the local object store is consulted.
+
+**Usage**
+
+```shell
+ocx [--global] patch freeze
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Snapshot written successfully. |
+| 74 | I/O error writing the snapshot file. |
+| 78 | No `ocx.lock` found for the project tier (run `ocx lock` first). |
+
+#### `patch sync` {#patch-sync}
+
+Re-fetches every patch descriptor for all installed packages and the global root. Installs
+any newly-referenced companion packages. Requires network access.
+
+This command also picks up patches for packages installed before the `[patches]` tier was
+configured. All states are re-checked regardless of what was previously recorded. Running
+`patch sync` is equivalent to `ocx index update` for the patch tier.
+
+**Usage**
+
+```shell
+ocx [--global] patch sync [OPTIONS]
+```
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--platform PLATFORM` | `-p` | Target platform for companion resolution. Defaults to the host platform. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Sync complete. |
+| 69 | Registry unreachable. |
+| 78 | No `[patches]` tier configured. |
+
+#### `patch publish` {#patch-publish}
+
+Reads a descriptor JSON file, validates it, and pushes it to the configured
+[`[patches]`][config-patches] registry. Use `--global-root` for a descriptor that
+applies to every package; supply a base identifier to publish a per-package descriptor.
+Publish companion packages separately with `ocx package push` before publishing the
+descriptor that references them.
+
+Requires network access; fails in offline mode.
+
+**Usage**
+
+```shell
+ocx [--global] patch publish --descriptor-file <FILE> [--global-root | <BASE-ID>] [-p PLATFORM]
+```
+
+**Arguments**
+
+- `<BASE-ID>`: The base package whose per-package patch path receives the descriptor.
+  Required unless `--global-root` is set.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--descriptor-file <FILE>` | | Path to the patch descriptor JSON file. Required. |
+| `--global-root` | | Publish at the patch-registry root so the descriptor applies to every base. Mutually exclusive with `<BASE-ID>`. |
+| `--platform <PLATFORM>` | `-p` | Target platform for resolving the patch path template. Defaults to host platform. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Descriptor published. |
+| 65 | Descriptor JSON is malformed or version is unsupported. |
+| 69 | Registry unreachable. |
+| 78 | No `[patches]` tier configured. |
+
+#### `patch test` {#patch-test}
+
+Composes a patch descriptor onto a base package in a scratch environment without
+publishing or modifying `$OCX_HOME`. Use this to verify a descriptor before publishing.
+
+Without a trailing command, prints the composed environment so you can inspect the
+entries contributed by the matched companions. With `-- <COMMAND>`, runs the command in
+the composed environment. With `--script`, runs a [Starlark test script][authoring-testing-scripted]
+against the composed environment.
+
+Required companion packages must be resolvable (installed locally or pullable from the
+registry). An unresolvable required companion fails the command. An optional companion
+that cannot be resolved is warned-and-skipped, matching the production fail-open path.
+
+**Usage**
+
+```shell
+ocx patch test --descriptor-file <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
+```
+
+**Arguments**
+
+- `<BASE-ID>`: The base package identifier to compose the descriptor onto. Required.
+- `[-- COMMAND [ARGS...]]`: Command to run in the composed environment. Mutually
+  exclusive with `--script`. When neither is given, the composed environment is printed.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--descriptor-file <FILE>` | | Path to the patch descriptor JSON file. Required. |
+| `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. |
+| `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
+| `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Environment printed, command succeeded, or all script assertions passed. |
+| 1 | Script assertion failed or child command exited non-zero. |
+| 69 | Registry unreachable (required companion could not be pulled). |
+| 78 | No `[patches]` tier configured. |
+
 <!-- external -->
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
 [cargo]: https://doc.rust-lang.org/cargo/

@@ -1,0 +1,18 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "JAVA_TOOL_OPTIONS",
+      "type": "constant",
+      "value": "-Djavax.net.ssl.trustStore=${installPath}/truststore/corp-trust.jks -Djavax.net.ssl.trustStoreType=JKS",
+      "visibility": "interface"
+    },
+    {
+      "key": "JVM_TRUSTSTORE_PATH",
+      "type": "constant",
+      "value": "${installPath}/truststore/corp-trust.jks",
+      "visibility": "interface"
+    }
+  ]
+}

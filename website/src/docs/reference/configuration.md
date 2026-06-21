@@ -200,6 +200,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 |---------------------|-------------------|-------|
 | [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
 | [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
+| [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
 | [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
@@ -254,9 +255,105 @@ insecure = false                 # per-registry TLS opt-out
 location = "mirror.company.example"  # URL rewrite / mirror
 ```
 
-### `[patches]` section {#future-patches}
+### `[patches]` section {#keys-patches}
 
-Infrastructure patch entries will live under `[patches]`. This section is reserved for the patches feature and is ignored by the v1 loader.
+The `[patches]` tier points at an operator-controlled OCI registry that hosts
+[patch descriptors][patches-user-guide]. Descriptors map glob patterns over package
+identifiers to **companion packages** — small packages that carry site-specific
+environment overlays (CA bundles, proxy endpoint variables, license-server hints). At
+exec time OCX composes matched companions' `interface` environment entries on top of the
+base package's entries without modifying the base package.
+
+The `[patches]` tier is the execution-environment twin of `[mirrors]`: `[mirrors]`
+adapts where bytes come from; `[patches]` adapts what environment a tool runs in. Both
+are opt-in and configured here.
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+path     = "{registry}/{repository}"
+required = true
+```
+
+#### `registry` {#keys-patches-registry}
+
+**Type**: string  
+**Required**: yes — absent or empty is a hard error at config resolve time.  
+**Overridden by**: [`OCX_PATCHES`][env-ocx-patches] (JSON wire format forwarded to subprocesses)
+
+The OCI registry root that hosts patch descriptors. The global descriptor (`__ocx.patch`
+at the registry root) applies to all packages; per-package descriptors live at
+sub-paths computed from the `path` template.
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+```
+
+#### `path` {#keys-patches-path}
+
+**Type**: string  
+**Default**: `{registry}/{repository}`
+
+Template for per-package patch repository paths. Two placeholder tokens are substituted
+at runtime:
+
+| Token | Expands to |
+|-------|-----------|
+| `{registry}` | Slugified registry host of the base package (e.g. `ocx.sh` stays `ocx.sh`; `localhost:5000` becomes `localhost_5000`) |
+| `{repository}` | Repository path of the base package verbatim (e.g. `java` for `ocx.sh/java:21`) |
+
+The default `{registry}/{repository}` is suitable for most setups. Customise only if
+the patch registry lays out sub-paths differently:
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+path     = "bases/{repository}"
+```
+
+The expanded path always produces a non-empty sub-path. The registry root is reserved
+for the global descriptor.
+
+#### `required` {#keys-patches-required}
+
+**Type**: boolean  
+**Default**: `true`
+
+Fail posture when a matched companion package is unavailable.
+
+| Value | Behavior |
+|-------|----------|
+| `true` (default) | Execution aborts if a matched companion cannot be resolved. Use for security-critical companions (CA bundles, proxy config) where running without the companion is unsafe. |
+| `false` | OCX logs a warning and continues. Use for non-security companions (metrics endpoints, license server hints). |
+
+#### Scopes and merge {#keys-patches-scopes}
+
+The `[patches]` section follows the same multi-tier merge as `[mirrors]`. A
+higher-precedence config tier (user scope > `$OCX_HOME` scope > system scope) overrides
+fields field-by-field.
+
+**System-required posture.** When `[patches]` is declared at the system scope
+(`/etc/ocx/config.toml`) with `required = true` — or with no `required` line, which
+defaults to `true` — the tier is locked as **system-required**. A system-required tier
+cannot be redirected, suppressed, or flipped to fail-open by any lower-precedence tier,
+including `OCX_PATCHES` or per-package `no-patches`. This is the fail-closed enforcement
+point for corporate CA distribution.
+
+An explicit `required = false` in the system config is NOT locked; a lower-precedence
+tier may still override it.
+
+#### Per-package opt-out {#keys-patches-no-patches}
+
+A project can opt a specific base package out of the user-scope or project-scope patch
+tier by adding a `[package."<id>"]` table with `no-patches = true` to `ocx.toml`:
+
+```toml
+[package."ocx.sh/cmake:3.28"]
+no-patches = true
+```
+
+A system-required tier is never skipped by `no-patches`.
 
 ### `[clean]` section {#future-clean}
 
@@ -297,6 +394,10 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-remote]: ./environment.md#ocx-remote
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-mirrors]: ./environment.md#ocx-mirrors
+[env-ocx-patches]: ./environment.md#ocx-patches
+
+<!-- patches user guide -->
+[patches-user-guide]: ../user-guide/patches.md
 [env-no-update-check]: ./environment.md#ocx-no-update-check
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin

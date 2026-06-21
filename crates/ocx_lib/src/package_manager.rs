@@ -6,7 +6,7 @@ pub mod concurrency;
 pub mod error;
 pub mod launcher;
 
-mod tasks;
+pub mod tasks;
 
 #[cfg(test)]
 mod resolve_env_package_root_tests {
@@ -246,6 +246,7 @@ pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::InspectResult;
+pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain, SitePatchRoots};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
