@@ -246,12 +246,17 @@ def _script_pty_command(script_abs: str, command: list[str]) -> list[str]:
     * util-linux (Linux):  ``script -qec "<cmd string>" <typescript-file>``
     * BSD (macOS):         ``script -q <typescript-file> <cmd> [args...]``
 
-    The Linux form is preserved byte-for-byte (the shell-zoo matrix runs it); macOS
-    gets the trailing-argv form because BSD ``script`` has no ``-c`` flag.
+    The Linux form keeps the original ``-c`` shape; macOS gets the trailing-argv
+    form because BSD ``script`` has no ``-c`` flag.
     """
     if sys.platform == "darwin":
         return [script_abs, "-q", "/dev/null", *command]
     return [script_abs, "-qec", " ".join(command), "/dev/null"]
+
+
+# Marker the appended elvish probe prints so the PATH line is unambiguous amid any
+# terminal-init escapes the interactive pty session emits.
+_ELVISH_PATH_PROBE = "OCX_ELVISH_PATH_PROBE:"
 
 
 def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None:
@@ -268,15 +273,22 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     bin_seg = str(ocx_home / _BIN_REL)
     rc = _dedicated_setup("elvish", shell_abs, home, ocx_home)
 
-    # rc.elv is only sourced for an *interactive* elvish (its completion block
-    # needs the interactive-only `edit:` module), so the fence cannot be tested
-    # with `-c`. Drive a real interactive elvish in a pty via script(1) with `-rc`
-    # so it sources the fence exactly as a login shell would, with OCX_HOME unset.
+    # rc.elv is sourced top-to-bottom during elvish's *interactive* startup (its
+    # completion block needs the interactive-only `edit:` module), before the REPL
+    # begins. Rather than drive the REPL with fed keystrokes — racy across script(1)
+    # flavors, since BSD script forwards a closed stdin as an immediate Ctrl-D so the
+    # line editor never runs the input — append a PATH probe plus `exit` to the rc.
+    # The managed fence above sets PATH; the probe echoes it and elvish exits before
+    # any REPL/paste/EOF timing matters. A tty is still required for rc.elv to be
+    # sourced at all, so it runs under script(1).
+    with rc.open("a", encoding="utf-8") as handle:
+        handle.write(f'\necho "{_ELVISH_PATH_PROBE}" $E:PATH\nexit\n')
+
     env = _clean_env(home, shell_abs)
     env["TERM"] = "dumb"
     result = subprocess.run(
         _script_pty_command(script_abs, [shell_abs, "-rc", str(rc)]),
-        input="print $E:PATH\nexit\n",
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         env=env,
@@ -291,6 +303,11 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     assert "arity mismatch" not in combined, (
         f"elvish: global-env eval must not raise an arity mismatch (pipe-to-eval bug); "
         f"got:\n{combined}"
+    )
+    # The probe runs only if rc.elv was actually sourced in the pty session.
+    assert _ELVISH_PATH_PROBE in result.stdout, (
+        f"elvish: the appended rc probe did not run — rc.elv was not sourced; "
+        f"got:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert bin_seg in result.stdout, (
         f"elvish: the ocx bin dir must land on PATH after the fence sources env.elv "
