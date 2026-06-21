@@ -1517,6 +1517,12 @@ mod chain_refs_tests {
     /// path works when the local CAS already holds the blob.
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_cache_hit_no_source_call() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). `stage_blob_bytes` calls
+        // `BlobStore::write_blob` which increments it; holding this lock prevents our
+        // call from inflating the coalescing-test delta.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
         let pinned = pinned_for_test();

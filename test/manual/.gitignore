@@ -15,3 +15,8 @@ packages/*/metadata.json
 # `.so` stubs are NOT covered by these globs.
 packages/*/build/
 packages/multi-layer-app/layer-app/
+
+# Patches sub-packages — same conventions as top-level packages.
+packages/patches/*/out/
+packages/patches/*/build/
+packages/patches/*/metadata.json

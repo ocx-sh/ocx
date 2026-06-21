@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "match": "localhost:5000/patches/base-java*",
+      "packages": ["localhost:5000/patches/java-truststore:1.0.0"],
+      "required": true
+    }
+  ]
+}

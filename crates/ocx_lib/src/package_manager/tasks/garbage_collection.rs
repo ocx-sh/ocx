@@ -13,6 +13,8 @@ use crate::{file_structure::FileStructure, log};
 
 use reachability_graph::ReachabilityGraph;
 
+use super::resolve::SitePatchRoots;
+
 /// Garbage collector for the object store.
 ///
 /// Built from the current filesystem state, provides both full GC
@@ -30,10 +32,77 @@ impl GarbageCollector {
     /// projects' `ocx.lock` files (Unit 6). Pass `&[]` to omit project-registry
     /// roots (used when `--force` is specified or when the registry is unavailable).
     ///
+    /// `patch_roots` supplies additional GC roots derived from the site-patch
+    /// tier (companion packages + descriptor blobs). Pass `&SitePatchRoots::default()`
+    /// when patch roots are irrelevant (e.g. purge, uninstall). Patch roots are
+    /// always included in `clean` even under `--force` so required companions
+    /// survive GC (invariant C7).
+    ///
     /// See [`adr_clean_project_backlinks.md`] for the multi-root design.
-    pub async fn build(file_structure: &FileStructure, project_roots: &[ProjectRootDigests]) -> crate::Result<Self> {
+    pub async fn build(
+        file_structure: &FileStructure,
+        project_roots: &[ProjectRootDigests],
+        patch_roots: &SitePatchRoots,
+    ) -> crate::Result<Self> {
         let graph = ReachabilityGraph::build(file_structure, project_roots).await?;
-        Ok(Self { graph })
+        let mut collector = Self { graph };
+
+        // Seed patch_roots as additional BFS roots alongside project-registry
+        // roots so companion packages and descriptor blobs survive GC even
+        // when they have no live install symlinks (invariant C7).
+        //
+        // Companion packages: seed the package-store directory for each pinned
+        // companion identifier as a root.  The BFS then follows refs/layers/
+        // and refs/blobs/ edges from those directories, retaining their layers
+        // and blobs too.
+        for companion_pinned in &patch_roots.companions {
+            let raw_path = file_structure.packages.path(companion_pinned);
+            // Canonicalize BEFORE the guard: `all_entries` is keyed by canonical
+            // paths (`ReachabilityGraph::build` canonicalizes every entry), so a
+            // raw-path `contains_key` probe misses whenever `$OCX_HOME` itself
+            // sits behind a symlink (macOS `/tmp` -> `/private/tmp`, an NFS or
+            // bind-mounted home) — which would drop a present companion's root
+            // and over-collect it. Canonicalize, then guard + insert on the
+            // canonical path. An absent companion fails to canonicalize, falls
+            // back to the raw path, misses the guard, and is correctly skipped.
+            let canonical_path = dunce::canonicalize(&raw_path).unwrap_or_else(|error| {
+                log::debug!("cannot canonicalize companion path {}: {error}", raw_path.display());
+                raw_path
+            });
+            if collector.graph.all_entries.contains_key(&canonical_path) {
+                collector.graph.roots.insert(canonical_path);
+            }
+        }
+
+        // Descriptor blobs: seed the blob-store directory for each descriptor
+        // digest.  The manifest blob and its layer blobs are separate entries;
+        // each must be seeded individually (the reachability graph has no
+        // "descriptor blob → layer blob" edges — those would require parsing
+        // every candidate blob on every GC, which is expensive).
+        //
+        // SitePatchRoots.descriptors carries (registry, digest) pairs so we
+        // can call BlobStore::path(registry, digest) directly — no linear
+        // shard-suffix scan needed, and multi-registry correctness is preserved.
+        // A blob absent from disk is not in `all_entries` and needs no GC root.
+        for (registry, descriptor_digest) in &patch_roots.descriptors {
+            let raw_path = file_structure.blobs.path(registry, descriptor_digest);
+            // Canonicalize before guard + insert, identical to the companion
+            // loop above: `all_entries` keys are canonical, so a raw-path probe
+            // would miss a present descriptor blob under a symlinked `$OCX_HOME`
+            // and over-collect it.
+            let canonical_path = dunce::canonicalize(&raw_path).unwrap_or_else(|error| {
+                log::debug!(
+                    "cannot canonicalize descriptor blob path {}: {error}",
+                    raw_path.display()
+                );
+                raw_path
+            });
+            if collector.graph.all_entries.contains_key(&canonical_path) {
+                collector.graph.roots.insert(canonical_path);
+            }
+        }
+
+        Ok(collector)
     }
 
     /// Returns the attribution map: package-store path → `Vec<ocx.lock paths>`.
@@ -434,5 +503,153 @@ mod tests {
             &[("L1", CasTier::Layer)],
         );
         assert_eq!(collector.orphaned_by_seeds(&[path("A")]), set(&["A"]));
+    }
+
+    // ── Phase 5A integration tests — patch_roots GC retention ─────────────────
+    //
+    // These tests call `GarbageCollector::build` with a real `FileStructure` on
+    // disk to verify that `patch_roots` seeding keeps companion packages and
+    // descriptor blobs alive (spec test 4) and that an empty `patch_roots` lets
+    // the same objects be collected (spec test 5).
+    //
+    // Both tests FAIL against the Phase 5A stub (`let _ = patch_roots;` line in
+    // `build`) because the companion package is orphaned even when `patch_roots`
+    // is non-empty.  They will pass once `build` seeds `patch_roots` into the
+    // reachability graph.
+
+    /// Seed a companion package directory at the CAS path for `pinned`.
+    ///
+    /// Creates `packages/{registry_slug}/{cas_shard}/content/` so `list_all`
+    /// discovers it during the GC build scan.
+    fn seed_companion_pkg_dir(root: &std::path::Path, pinned: &crate::oci::PinnedIdentifier) -> std::path::PathBuf {
+        let store = crate::file_structure::PackageStore::new(root.join("packages"));
+        let pkg_path = store.path(pinned);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        // Minimal metadata.json so the walker classifies the dir as a valid package.
+        let meta = serde_json::json!({ "type": "bundle", "version": 1 });
+        std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+        let resolved_json = serde_json::to_string(&crate::package::resolved_package::ResolvedPackage::new()).unwrap();
+        std::fs::write(pkg_path.join("resolve.json"), resolved_json).unwrap();
+        pkg_path
+    }
+
+    /// Seed a descriptor blob at the CAS path for `(registry, digest)`.
+    ///
+    /// Creates `blobs/{registry_slug}/{cas_shard}/data` so `list_all` on the
+    /// blob store discovers it.
+    fn seed_blob_dir(root: &std::path::Path, registry: &str, digest: &crate::oci::Digest) -> std::path::PathBuf {
+        let store = crate::file_structure::BlobStore::new(root.join("blobs"));
+        let blob_path = store.path(registry, digest);
+        std::fs::create_dir_all(&blob_path).unwrap();
+        std::fs::write(blob_path.join("data"), b"fake-blob").unwrap();
+        blob_path
+    }
+
+    /// Spec test 4 — patch_roots retains companion package + descriptor blob.
+    ///
+    /// Seeds a companion package dir and a descriptor blob dir on disk (no live
+    /// install symlink, so neither is reachable from the normal GC graph).
+    /// With `patch_roots` seeding both as additional roots, `unreachable_objects`
+    /// must NOT include them.
+    ///
+    /// FAILS against the Phase 5A stub (companion is collected instead of retained).
+    ///
+    /// Traceability: Phase 5A spec test 4.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_roots_retains_companion_pkg_and_descriptor_blob() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+
+        let registry = "patches.example.com";
+        let companion_digest = crate::oci::Digest::Sha256("c".repeat(64));
+        let companion_id =
+            crate::oci::Identifier::new_registry("ca-bundle", registry).clone_with_digest(companion_digest.clone());
+        let companion_pinned = crate::oci::PinnedIdentifier::try_from(companion_id).unwrap();
+
+        let descriptor_digest = crate::oci::Digest::Sha256("d".repeat(64));
+
+        // Seed companion package dir (no refs/symlinks/ → not a GC root by itself).
+        let companion_pkg_path = seed_companion_pkg_dir(root, &companion_pinned);
+        // Seed descriptor blob dir.
+        let descriptor_blob_path = seed_blob_dir(root, registry, &descriptor_digest);
+
+        let fs = crate::file_structure::FileStructure::with_root(root.to_path_buf());
+
+        // Build patch_roots that seed the companion + descriptor blob as GC roots.
+        let patch_roots = SitePatchRoots {
+            companions: vec![companion_pinned.clone()],
+            descriptors: vec![(registry.to_string(), descriptor_digest.clone())],
+            // descriptor_pins is the freeze-source list (source key → manifest
+            // digest); GC reachability uses `descriptors`, so leave it empty here.
+            descriptor_pins: vec![],
+        };
+
+        let gc = GarbageCollector::build(&fs, &[], &patch_roots)
+            .await
+            .expect("GarbageCollector::build must succeed");
+
+        let unreachable = gc.unreachable_objects();
+
+        assert!(
+            !unreachable.contains(&companion_pkg_path),
+            "spec test 4: companion package dir must NOT be in unreachable_objects when patch_roots seeds it; \
+             got unreachable: {unreachable:?}"
+        );
+        assert!(
+            !unreachable.contains(&descriptor_blob_path),
+            "spec test 4: descriptor blob dir must NOT be in unreachable_objects when patch_roots seeds it; \
+             got unreachable: {unreachable:?}"
+        );
+    }
+
+    /// Spec test 5 — empty patch_roots allows companion + descriptor to be collected.
+    ///
+    /// Same seed as spec test 4 but with `patch_roots = SitePatchRoots::default()`.
+    /// The companion has no live install symlink and is not reachable from any
+    /// project root, so it must appear in `unreachable_objects()`.
+    ///
+    /// This proves the derive-only invariant: patch roots are the ONLY thing keeping
+    /// the companion alive; without them it is correctly collected.
+    ///
+    /// PASSES against the Phase 5A stub (companion is collected; no seeding needed to
+    /// collect).  This test verifies the negative: no over-retain without patch_roots.
+    ///
+    /// Traceability: Phase 5A spec test 5.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_patch_roots_allows_companion_collection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+
+        let registry = "patches.example.com";
+        let companion_digest = crate::oci::Digest::Sha256("e".repeat(64));
+        let companion_id =
+            crate::oci::Identifier::new_registry("ca-bundle2", registry).clone_with_digest(companion_digest.clone());
+        let companion_pinned = crate::oci::PinnedIdentifier::try_from(companion_id).unwrap();
+
+        let descriptor_digest = crate::oci::Digest::Sha256("f".repeat(64));
+
+        // Seed companion package dir and descriptor blob dir.
+        let companion_pkg_path = seed_companion_pkg_dir(root, &companion_pinned);
+        let descriptor_blob_path = seed_blob_dir(root, registry, &descriptor_digest);
+
+        let fs = crate::file_structure::FileStructure::with_root(root.to_path_buf());
+
+        // Empty patch_roots — nothing pins the companion or descriptor.
+        let gc = GarbageCollector::build(&fs, &[], &SitePatchRoots::default())
+            .await
+            .expect("GarbageCollector::build must succeed");
+
+        let unreachable = gc.unreachable_objects();
+
+        assert!(
+            unreachable.contains(&companion_pkg_path),
+            "spec test 5: companion package dir must be in unreachable_objects when patch_roots is empty; \
+             got unreachable: {unreachable:?}"
+        );
+        assert!(
+            unreachable.contains(&descriptor_blob_path),
+            "spec test 5: descriptor blob dir must be in unreachable_objects when patch_roots is empty; \
+             got unreachable: {unreachable:?}"
+        );
     }
 }

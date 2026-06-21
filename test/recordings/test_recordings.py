@@ -40,7 +40,10 @@ class ScriptFixture(TypedDict):
 # `build/`, `metadata.json`. The recorder silently `cd`s to
 # ``provider.work_dir`` (SP8) before the first typed command so the cast
 # does not leak the long pytest tmp path.
-_PUBLISHER_STATES = {"setup:publisher"}
+# States whose region commands use relative paths in the provider work dir
+# (publisher build trees; the maintainer's authored descriptor.json), so the
+# recorder must cd there before the first typed command.
+_PUBLISHER_STATES = {"setup:publisher", "setup:patches-maintainer"}
 
 
 # Python 3.14 warns on forkpty() in a multi-threaded process.  Under

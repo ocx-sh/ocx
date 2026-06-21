@@ -1,0 +1,12 @@
+# Cocogitto configuration.
+#
+# Only consumed by the `Conventional Commits` CI check (verify-basic.yml), which
+# runs `cog check <base>..<head>` over a pull request's commit range. Changelog
+# generation is handled by git-cliff, not cocogitto.
+#
+# `ignore_merge_commits` skips auto-generated merge commits (e.g. the per-phase
+# `Merge ... (#NNN)` commits produced by `git merge --no-ff` on a feature
+# branch). Their subjects are git-authored, not Conventional Commits, so linting
+# them as such is a false positive; the underlying feature/fix/chore commits are
+# still checked.
+ignore_merge_commits = true

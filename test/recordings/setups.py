@@ -413,6 +413,126 @@ def publisher(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
     }
 
 
+def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Provision a working corporate-patches scenario for the consumer cast.
+
+    Publishes ``cmake`` (the base tool) and an env-only companion ``corp-ca``
+    that carries an INTERFACE ``SSL_CERT_FILE`` overlay, configures the
+    ``[patches]`` tier, installs cmake, then publishes a per-base descriptor
+    mapping cmake → corp-ca.
+
+    The descriptor is published *after* the base install so lazy discovery
+    records "no descriptor" at install time — the recorded ``ocx patch sync``
+    is what actually discovers and installs the companion on screen, and
+    ``ocx package env --show-patches`` then shows the overlaid ``SSL_CERT_FILE``.
+
+    The ``[patches]`` registry is prefixed per provision (SP7) so concurrent
+    xdist workers never collide on a shared descriptor location.
+    """
+    cmake_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    # Companion env MUST be `interface` to surface onto a consuming base's view.
+    companion_env = [
+        {"key": "SSL_CERT_FILE", "type": "constant", "value": "/etc/ssl/certs/corp-ca.pem",
+         "visibility": "interface"},
+    ]
+    cmake = make_package(
+        ocx, f"{prefix}cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
+        outputs={"cmake": {"--version": (
+            "cmake version 4.2.3\n"
+            "\n"
+            "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
+        )}},
+    )
+    companion = make_package(
+        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env,
+    )
+
+    # Configure the [patches] tier in the data-dir config; the recorder shell
+    # and any child ocx read $OCX_HOME/config.toml.  Prefix the patch registry
+    # so the global-descriptor probe + per-base descriptors stay isolated per
+    # worker on the shared registry:2.
+    # Bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2).
+    # Per-worker isolation comes from the prefixed base repo embedded in each
+    # per-base descriptor path; no `--global` descriptor is published here, so
+    # the shared `<host>/global` slot stays untouched.
+    patch_registry = ocx.registry
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        "[patches]\n"
+        f'registry = "{patch_registry}"\n'
+        "required = true\n"
+    )
+
+    # Install the base BEFORE the descriptor exists so lazy discovery finds
+    # nothing — the on-screen `ocx patch sync` is what installs the companion.
+    ocx.run("package", "install", cmake.short, format=None)
+
+    # Publish a per-base descriptor (cmake → corp-ca).  Per-base keeps the
+    # descriptor path scoped to the prefixed base repo (no cross-worker clash).
+    descriptor = tmp_path / "consumer-descriptor.json"
+    descriptor.write_text(json.dumps({
+        "version": 1,
+        "rules": [{"match": "*", "packages": [companion.fq], "required": True}],
+    }))
+    ocx.run("patch", "publish", "--descriptor-file", str(descriptor), cmake.fq, format=None)
+
+    return {"cmake": [cmake], "corp-ca": [companion]}
+
+
+def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Provision the maintainer cast: author → test → publish → freeze.
+
+    Publishes a base tool ``mytool`` and an env-only ``corp-ca`` companion
+    (INTERFACE ``SSL_CERT_FILE``), configures the ``[patches]`` tier, and writes
+    the ``descriptor.json`` the cast previews with ``ocx patch test``, publishes
+    with ``ocx patch publish``, and pins with ``ocx --global patch freeze``.
+
+    The descriptor lives in the work dir (``$SCENARIO_TMP``) so the recorded
+    ``--descriptor-file descriptor.json`` resolves it; its companion reference
+    is the prefixed fq, which the cast sanitiser rewrites back to ``corp-ca``.
+    """
+    base_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    companion_env = [
+        {"key": "SSL_CERT_FILE", "type": "constant", "value": "/etc/ssl/certs/corp-ca.pem",
+         "visibility": "interface"},
+    ]
+    mytool = make_package(
+        ocx, f"{prefix}mytool", "1.0.0", tmp_path, bins=["mytool"], env=base_env,
+        outputs={"mytool": {"--version": "mytool 1.0.0"}},
+    )
+    companion = make_package(
+        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env,
+    )
+
+    # Bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2).
+    # Per-worker isolation comes from the prefixed base repo embedded in each
+    # per-base descriptor path; no `--global` descriptor is published here, so
+    # the shared `<host>/global` slot stays untouched.
+    patch_registry = ocx.registry
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        "[patches]\n"
+        f'registry = "{patch_registry}"\n'
+        "required = true\n"
+    )
+
+    # The cast authors a descriptor; provide it in the work dir so the recorded
+    # `ocx patch test/publish --descriptor-file descriptor.json` resolve it.
+    descriptor = tmp_path / "descriptor.json"
+    descriptor.write_text(json.dumps({
+        "version": 1,
+        "rules": [{"match": "*", "packages": [companion.fq], "required": True}],
+    }, indent=2))
+
+    return {"mytool": [mytool], "corp-ca": [companion]}
+
+
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 
 SETUPS: dict[str, SetupFn] = {
@@ -423,4 +543,6 @@ SETUPS: dict[str, SetupFn] = {
     "dependencies": dependencies,
     "deps-visibility": deps_visibility,
     "publisher": publisher,
+    "patches-consumer": patches_consumer,
+    "patches-maintainer": patches_maintainer,
 }

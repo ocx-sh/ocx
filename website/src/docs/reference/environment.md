@@ -172,6 +172,22 @@ rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub A
 The command line option [`--index`][arg-index] takes precedence over this variable.
 This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
 
+### `OCX_PATCH_SNAPSHOT` {#ocx-patch-snapshot}
+
+Path to a snapshot file (`patches.snapshot.json`) that pins companion package digests.
+
+```sh
+export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
+```
+
+When set, the compose overlay prefers the snapshot's pinned companion digests over live tag
+lookups, enabling reproducible builds without a network round-trip.
+Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]).
+
+This variable is resolution-affecting and is forwarded to child ocx processes (such as generated
+entrypoint launchers) so they resolve the same frozen companion digests as the parent.
+Unset to disable snapshot-pinning and fall back to live lookups.
+
 ### `OCX_JOBS` {#ocx-jobs}
 
 Caps the number of root packages pulled in parallel — applies to every command
@@ -224,6 +240,32 @@ OCX never silently continues with an empty mirror map when `OCX_MIRRORS` is set 
 :::
 
 For the full mirror semantics (replace behavior, auth, lockfile portability, interaction with `--offline`), see the [`[mirrors."<host>"]`][config-mirrors] configuration reference.
+
+### `OCX_PATCHES` {#ocx-patches}
+
+A JSON object encoding the resolved [`[patches]`][config-patches] tier. OCX serialises
+the active patch configuration into this variable and forwards it to every subprocess it
+spawns so child invocations — generated launchers, nested `ocx run` calls — apply the
+same companion overlay.
+
+```sh
+# Managed by OCX; usually not set manually. Shape produced by `apply_ocx_config`:
+export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_template":"{registry}/{repository}","required":true,"system_required":false}'
+```
+
+This variable is **resolution-affecting** and is forwarded to every subprocess
+automatically. Manually setting it overrides the `[patches]` config-file tier for that
+subprocess tree.
+
+::: warning Malformed values abort at startup
+A malformed `OCX_PATCHES` value (not valid JSON, or missing the `registry` field) is a
+**hard startup error**. OCX aborts rather than silently running without the operator-
+mandated companion overlay — a fail-closed posture that mirrors `OCX_MIRRORS` behavior.
+:::
+
+For the full patch semantics (descriptor format, companion installation, per-package
+opt-out), see the [`[patches]`][config-patches] configuration reference and the
+[Patching packages guide][patches-user-guide].
 
 ### `OCX_LOG` {#ocx-log}
 
@@ -520,6 +562,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-ref]: ./configuration.md
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 [config-mirrors]: ./configuration.md#keys-mirrors
+[config-patches]: ./configuration.md#keys-patches
+[patches-user-guide]: ../user-guide/patches.md
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

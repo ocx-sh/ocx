@@ -17,6 +17,8 @@ const INTERNAL_TAG_PREFIX: &str = "__ocx.";
 pub enum InternalTag {
     /// Package description artifact (`__ocx.desc`).
     Description,
+    /// Infrastructure patch descriptor artifact (`__ocx.patch`).
+    Patch,
     /// An internal tag not recognized by this version of OCX.
     Unknown(String),
 }
@@ -25,9 +27,17 @@ impl InternalTag {
     /// The OCI tag string for description artifacts.
     pub const DESCRIPTION_TAG: &str = "__ocx.desc";
 
+    /// The OCI tag string for patch descriptor artifacts.
+    ///
+    /// The `__ocx.` prefix causes [`Tag::is_internal_str`] to return `true`,
+    /// which automatically hides this tag from user-facing tag listings — no
+    /// additional filtering is required.
+    pub const PATCH_TAG: &str = "__ocx.patch";
+
     fn from_tag(value: &str) -> Self {
         match value {
             Self::DESCRIPTION_TAG => InternalTag::Description,
+            Self::PATCH_TAG => InternalTag::Patch,
             _ => InternalTag::Unknown(value.to_string()),
         }
     }
@@ -37,6 +47,7 @@ impl std::fmt::Display for InternalTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InternalTag::Description => write!(f, "{}", Self::DESCRIPTION_TAG),
+            InternalTag::Patch => write!(f, "{}", Self::PATCH_TAG),
             InternalTag::Unknown(tag) => write!(f, "{}", tag),
         }
     }
@@ -194,6 +205,31 @@ mod tests {
         assert!(!Tag::is_internal_str("latest"));
         assert!(!Tag::is_internal_str("3.28.1"));
         assert!(!Tag::is_internal_str("debug"));
+    }
+
+    /// `PATCH_TAG` must be auto-hidden by the `__ocx.` prefix without any
+    /// extra filtering. `is_internal_str` is the filter gate.
+    #[test]
+    fn patch_tag_is_internal() {
+        assert_eq!(InternalTag::PATCH_TAG, "__ocx.patch");
+        assert!(
+            Tag::is_internal_str(InternalTag::PATCH_TAG),
+            "PATCH_TAG must pass is_internal_str (auto-hidden by __ocx. prefix)"
+        );
+        let tag = Tag::from(InternalTag::PATCH_TAG.to_string());
+        assert!(tag.is_internal(), "Tag::from(PATCH_TAG) must be Tag::Internal");
+    }
+
+    /// `Tag::from(PATCH_TAG)` must produce `Tag::Internal(InternalTag::Patch)`,
+    /// not the `Unknown` fallback.
+    #[test]
+    fn patch_tag_maps_to_patch_variant() {
+        let tag = Tag::from(InternalTag::PATCH_TAG.to_string());
+        assert!(
+            matches!(tag, Tag::Internal(InternalTag::Patch)),
+            "Tag::from(PATCH_TAG) must yield Tag::Internal(InternalTag::Patch), got: {tag:?}"
+        );
+        assert_eq!(tag.to_string(), "__ocx.patch");
     }
 
     #[test]

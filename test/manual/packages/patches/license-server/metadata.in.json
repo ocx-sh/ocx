@@ -1,0 +1,18 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "LICENSE_SERVER",
+      "type": "constant",
+      "value": "flex://license.corp.internal:27000",
+      "visibility": "interface"
+    },
+    {
+      "key": "LM_LICENSE_FILE",
+      "type": "constant",
+      "value": "27000@license.corp.internal",
+      "visibility": "interface"
+    }
+  ]
+}

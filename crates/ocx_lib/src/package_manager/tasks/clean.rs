@@ -474,7 +474,9 @@ impl PackageManager {
             }
         };
 
-        let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots).await?;
+        let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let patch_roots = self.resolve_site_patch_roots(&[host_platform]).await?;
+        let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots, &patch_roots).await?;
 
         let targets = garbage_collector.unreachable_objects();
         let attribution = garbage_collector.roots_attribution();

@@ -7,8 +7,8 @@ Owner: Architect (/architect). Handoff: Builder (/builder), Security Auditor (/s
 
 ## Metadata
 
-**Status:** Proposed
-**Date:** 2026-06-02
+**Status:** Accepted
+**Date:** 2026-06-02 (accepted 2026-06-19 — delivered on `sion`; see #123)
 **Deciders:** @michael-herwig, architect
 **GitHub Issue:** #122 (this ADR) — implements toward #123, part of milestone #111 (Corporate infrastructure v1)
 **Related PRD:** N/A (milestone #111 serves as the PRD)

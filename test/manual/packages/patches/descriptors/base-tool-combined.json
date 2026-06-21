@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "match": "*",
+      "packages": ["localhost:5000/patches/corp-ca-bundle:1.0.0"],
+      "required": true
+    },
+    {
+      "match": "localhost:5000/patches/base-tool*",
+      "packages": ["localhost:5000/patches/license-server:1.0.0"],
+      "required": false
+    }
+  ]
+}

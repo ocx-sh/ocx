@@ -26,9 +26,8 @@ test/manual/
 
 ## Prerequisites
 
-1. Build a release binary the manual scripts can use:
+1. Build a release binary the manual scripts can use (from the repo root):
    ```sh
-   cd /home/mherwig/dev/ocx
    cargo build --release -p ocx
    cp target/release/ocx test/bin/ocx
    ```
@@ -63,7 +62,7 @@ plain ones.
 
 | Package | Layers | Entrypoints | Deps | Exercise |
 |---|---|---|---|---|
-| `dojo/single-layer-hello` | 1 | `hello` | — | smoke: `package test`, `package push`, `exec` |
+| `dojo/single-layer-hello` | 1 | `hello` | — | smoke: `package test`, `package push`, `package exec` |
 | `dojo/multi-layer-app` | 3 | `myapp` | — | multi-layer assembly, layer-reuse via digest refs |
 | `dojo/multi-entry-toolkit` | 1 | `tool-a` … `tool-d` | — | entrypoint dedup; collision detection |
 | `dojo/deps-leaf-a` | 1 | `leaf-a` | — | leaf for chains |
@@ -166,7 +165,7 @@ ocx package push -p linux/amd64 -m $m -i $OCX_DEFAULT_REGISTRY/dojo/multi-layer-
 ```sh
 # Both packages declare the same entrypoint name → install of the second one
 # fails with EntrypointCollision (exit 65, DataError).
-ocx install --select dojo/single-layer-hello:1.0.0
+ocx package install --select dojo/single-layer-hello:1.0.0
 # Build a sibling package whose entrypoint is also named `hello` and try to
 # install it — expected exit 65. (Use a fresh `metadata.json` declaring
 # `{ "entrypoints": [{ "name": "hello", "target": "..." }] }`.)
@@ -175,20 +174,20 @@ ocx install --select dojo/single-layer-hello:1.0.0
 ### Dep visibility — interface vs private surface
 
 ```sh
-ocx install --select dojo/deps-app:1.0.0
+ocx package install --select dojo/deps-app:1.0.0
 
 # Interface surface: only mid + leaf-a env vars reach the consumer.
-ocx exec dojo/deps-app:1.0.0 -- env | grep _HOME
+ocx package exec dojo/deps-app:1.0.0 -- env | grep _HOME
 
-# Private surface (`--self` on `exec` exposes private deps too).
-ocx exec --self dojo/deps-app:1.0.0 -- env | grep _HOME
+# Private surface (`--self` on `package exec` exposes private deps too).
+ocx package exec --self dojo/deps-app:1.0.0 -- env | grep _HOME
 ```
 
 ### Cross-layer entrypoint via `${deps.NAME.installPath}`
 
 ```sh
-ocx install --select dojo/cross-layer-entrypoint:1.0.0
-ocx exec dojo/cross-layer-entrypoint:1.0.0 -- wrap-leaf-a
+ocx package install --select dojo/cross-layer-entrypoint:1.0.0
+ocx package exec dojo/cross-layer-entrypoint:1.0.0 -- wrap-leaf-a
 ```
 The launcher target resolves to leaf-a's binary even though
 `cross-layer-entrypoint` ships nothing of its own.
@@ -196,22 +195,22 @@ The launcher target resolves to leaf-a's binary even though
 ### Offline reinstall after `rm -rf $OCX_HOME/packages`
 
 ```sh
-ocx install --select dojo/multi-layer-app:1.0.0
+ocx package install --select dojo/multi-layer-app:1.0.0
 rm -rf $OCX_HOME/packages
-ocx --offline exec dojo/multi-layer-app:1.0.0 -- myapp
+ocx --offline package exec dojo/multi-layer-app:1.0.0 -- myapp
 ```
 Re-assembles from `$OCX_HOME/blobs/` + `$OCX_HOME/layers/` without any
 network round-trip. Fails clearly when the cache is also gone:
 
 ```sh
 rm -rf $OCX_HOME/packages $OCX_HOME/blobs $OCX_HOME/layers
-ocx --offline exec dojo/multi-layer-app:1.0.0 -- myapp   # exits non-zero
+ocx --offline package exec dojo/multi-layer-app:1.0.0 -- myapp   # exits non-zero
 ```
 
 ### `ocx package deps` — inspect the dep graph
 
 ```sh
-ocx install --select dojo/deps-app:1.0.0
+ocx package install --select dojo/deps-app:1.0.0
 
 ocx package deps dojo/deps-app:1.0.0                  # tree, interface surface only
 ocx package deps --self dojo/deps-app:1.0.0           # tree incl. private (leaf-b)
@@ -225,66 +224,68 @@ The `--why` output lists every parent edge in the resolved graph. With
 `--self` the same query also surfaces `leaf-b` as a private dep of
 `deps-app`; without it, `leaf-b` is hidden.
 
-### `ocx env` — resolved environment per surface
+### `ocx package env` — resolved environment per surface
 
 ```sh
-ocx env dojo/deps-app:1.0.0           # APP_HOME, MID_HOME, LEAF_A_HOME, PATH
-ocx env --self dojo/deps-app:1.0.0    # adds LEAF_B_HOME (private)
-ocx env --candidate dojo/deps-app:1.0.0   # resolve via candidates/ symlink
-ocx env --current   dojo/deps-app     # resolve via current symlink
+ocx package env dojo/deps-app:1.0.0           # APP_HOME, MID_HOME, LEAF_A_HOME, PATH
+ocx package env --self dojo/deps-app:1.0.0    # adds LEAF_B_HOME (private)
+ocx package env --candidate dojo/deps-app:1.0.0   # resolve via candidates/ symlink
+ocx package env --current   dojo/deps-app     # resolve via current symlink
 ```
-Mirrors `ocx exec` env semantics — `--self` flips from interface to private
-visibility. `--candidate`/`--current` swap content-store paths for symlink
-paths so the output stays stable across re-installs.
+Mirrors `ocx package exec` env semantics — `--self` flips from interface to
+private visibility. `--candidate`/`--current` swap content-store paths for
+symlink paths so the output stays stable across re-installs.
 
-### `ocx find` — resolve the content directory
+### `ocx package which` — resolve the content directory
 
 ```sh
-ocx find dojo/single-layer-hello:1.0.0       # /<OCX_HOME>/packages/.../<digest>
-ocx find --candidate dojo/single-layer-hello:1.0.0
-ocx find --current   dojo/single-layer-hello
-ocx find -p linux/amd64 dojo/multi-layer-app:1.0.0
+ocx package which dojo/single-layer-hello:1.0.0       # /<OCX_HOME>/packages/.../<digest>
+ocx package which --candidate dojo/single-layer-hello:1.0.0
+ocx package which --current   dojo/single-layer-hello
+ocx package which -p linux/amd64 dojo/multi-layer-app:1.0.0
 ```
 Useful inside scripts that need the on-disk path to the assembled package
 (e.g. shelling out to a binary, or asserting layout in a test).
 
-### `ocx select` / `ocx deselect` — pin the current version
+### `ocx package select` / `ocx package deselect` — pin the current version
 
 ```sh
-ocx install dojo/deps-leaf-a:1.0.0
-ocx select  dojo/deps-leaf-a:1.0.0      # promote to "current"
-ocx find --current dojo/deps-leaf-a     # follows the current symlink
-ocx deselect dojo/deps-leaf-a           # drop the current pointer
+ocx package install dojo/deps-leaf-a:1.0.0
+ocx package select  dojo/deps-leaf-a:1.0.0       # promote to "current"
+ocx package which --current dojo/deps-leaf-a     # follows the current symlink
+ocx package deselect dojo/deps-leaf-a            # drop the current pointer
 ```
 Selecting and deselecting only flips a symlink; the candidate stays
 installed. To demo a/b switching, re-run bootstrap with `OCX_MANUAL_TAG=2.0.0`
-first, then alternate between `select dojo/leaf-a:1.0.0` and `:2.0.0`.
+first, then alternate between `package select dojo/leaf-a:1.0.0` and `:2.0.0`.
 
-### `ocx uninstall --purge` and `ocx clean`
+### `ocx package uninstall --purge` and `ocx clean`
 
 ```sh
-ocx install dojo/deps-leaf-a:1.0.0
-ocx uninstall --deselect dojo/deps-leaf-a:1.0.0       # drop candidate + current
-ocx uninstall --purge    dojo/deps-leaf-a:1.0.0       # also GC unreferenced blobs
+ocx package install dojo/deps-leaf-a:1.0.0
+ocx package uninstall --deselect dojo/deps-leaf-a:1.0.0   # drop candidate + current
+ocx package uninstall --purge    dojo/deps-leaf-a:1.0.0   # also GC unreferenced blobs
 
 ocx clean --dry-run    # list orphaned blobs/layers/packages
 ocx clean              # actually remove them
 ```
-`uninstall` alone leaves blobs in the object store so a re-install is
-cheap. `--purge` is the equivalent of `uninstall` + `clean` for that one
-package. Run `clean` periodically when many packages have been churned.
+`package uninstall` alone leaves blobs in the object store so a re-install
+is cheap. `--purge` is the equivalent of `package uninstall` + `clean` for
+that one package. Run `clean` periodically when many packages have been
+churned.
 
-### `ocx ci export` — emit env to a CI runner
+### `ocx package env --ci` — emit env to a CI runner
 
 ```sh
-ocx install --select dojo/deps-app:1.0.0
-ocx ci export --flavor github-actions dojo/deps-app:1.0.0      # writes $GITHUB_ENV
-ocx ci export --self  --flavor github-actions dojo/deps-app:1.0.0   # private surface
+ocx package install --select dojo/deps-app:1.0.0
+ocx package env --ci=github dojo/deps-app:1.0.0           # writes $GITHUB_PATH / $GITHUB_ENV
+ocx package env --self --ci=github dojo/deps-app:1.0.0    # private surface
 ```
-The flavor is auto-detected when run inside a real CI; pass `--flavor`
-explicitly when smoke-testing locally. Writes `KEY=value` lines into the
-runner's env file (e.g. `$GITHUB_ENV`) so subsequent steps see resolved
-package envs without sourcing anything.
+The provider is auto-detected with a bare `--ci` when run inside a real CI;
+pass `--ci=<provider>` (`github` or `gitlab`) explicitly when smoke-testing
+locally. `--ci=github` appends tool dirs and `KEY=value` vars to
+`$GITHUB_PATH` / `$GITHUB_ENV` so subsequent steps see resolved package envs
+without sourcing anything; `--ci=gitlab` writes JSON-lines to `--export-file`.
 
 ## Where this couples to the automated suite
 

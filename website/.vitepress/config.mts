@@ -60,6 +60,10 @@ export default defineConfig({
           link: "/docs/user-guide",
         },
         {
+          text: "Patching",
+          link: "/docs/user-guide/patches",
+        },
+        {
           text: "Authoring",
           link: "/docs/authoring/",
           collapsed: true,

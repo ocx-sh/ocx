@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "match": "localhost:5000/patches/base-tool:*",
+      "packages": ["localhost:5000/patches/license-server:1.0.0"],
+      "required": false
+    }
+  ]
+}

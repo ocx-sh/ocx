@@ -11,7 +11,7 @@ fn main() {
     match schema_for(&schema_type) {
         Some(json) => println!("{json}"),
         None => {
-            eprintln!("Unknown schema type: {schema_type}. Available: metadata, config, project, project-lock");
+            eprintln!("Unknown schema type: {schema_type}. Available: metadata, config, project, project-lock, patch");
             std::process::exit(1);
         }
     }

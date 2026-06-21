@@ -161,6 +161,16 @@ impl ContextOptions {
             // `OCX_MIRRORS` env. `Context::try_init` builds it and populates
             // this field on the returned view; the parser tier starts empty.
             mirrors: Vec::new(),
+            // The resolved patch config is not derivable from `ContextOptions`
+            // alone — it merges the `[patches]` config tier with the inherited
+            // `OCX_PATCHES` env. `Context::try_init` builds it via
+            // `resolve_patch_config` and populates this field on the returned
+            // view; the parser tier starts empty.
+            patches: None,
+            // The active patch snapshot path is resolved by `Context::try_init`
+            // from `OCX_PATCH_SNAPSHOT` (or a future `--patch-snapshot` flag)
+            // and populated on the returned view; the parser tier starts empty.
+            patch_snapshot: None,
         }
     }
 }

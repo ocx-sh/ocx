@@ -55,6 +55,7 @@ impl Install {
                 true,
                 self.select,
                 context.concurrency(),
+                false, // user-requested install — run patch discovery
             )
             .await?;
 

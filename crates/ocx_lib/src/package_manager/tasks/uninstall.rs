@@ -9,6 +9,7 @@ use crate::{
 };
 
 use super::garbage_collection::GarbageCollector;
+use super::resolve::SitePatchRoots;
 
 use super::super::PackageManager;
 
@@ -52,7 +53,7 @@ impl PackageManager {
         // post-flatten layout points at the package root directly (no further
         // `.parent()` needed).
         if purge && let Some(ref obj_dir) = pkg_root {
-            let gc = GarbageCollector::build(self.file_structure(), &[])
+            let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default())
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             let removed = gc
@@ -110,12 +111,14 @@ impl PackageManager {
         };
 
         let purged_set: std::collections::HashSet<PathBuf> = if !purge_seeds.is_empty() {
-            let gc = GarbageCollector::build(self.file_structure(), &[]).await.map_err(|e| {
-                package_manager::error::Error::UninstallFailed(vec![PackageError::new(
-                    packages[0].clone(),
-                    PackageErrorKind::Internal(e),
-                )])
-            })?;
+            let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default())
+                .await
+                .map_err(|e| {
+                    package_manager::error::Error::UninstallFailed(vec![PackageError::new(
+                        packages[0].clone(),
+                        PackageErrorKind::Internal(e),
+                    )])
+                })?;
             gc.purge(&purge_seeds)
                 .await
                 .map_err(|e| {

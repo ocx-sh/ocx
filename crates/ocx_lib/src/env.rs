@@ -45,12 +45,26 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// Path to the active patch snapshot file (`patches.snapshot.json`).
+    ///
+    /// When set, the compose overlay prefers the snapshot's pinned digests
+    /// over live tag lookups for companions — enabling reproducible builds
+    /// without a network round-trip.  Written by `ocx patch freeze`.
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`] so launchers apply the same frozen tier.
+    pub const OCX_PATCH_SNAPSHOT: &str = "OCX_PATCH_SNAPSHOT";
     /// JSON object mapping an upstream registry host to its mirror `url`
     /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
     /// object is used (not a comma/`=` list) because mirror values are
     /// structured URLs with no delimiter-safe separator.
     pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
+    /// JSON object encoding the resolved `[patches]` config
+    /// (`ResolvedPatchConfig`). Resolution-affecting → forwarded to child ocx
+    /// processes so launchers re-apply the same patch tier (C5 across process
+    /// boundaries). Forwarded only when `[patches]` is configured; absent
+    /// otherwise. Mirrors `OCX_MIRRORS` in forwarding semantics.
+    pub const OCX_PATCHES: &str = "OCX_PATCHES";
     /// Boolean — when truthy, `ocx self setup` writes the env shims but does
     /// NOT modify any shell profile. Mirrors `--no-modify-path`. Not a
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
@@ -109,6 +123,16 @@ pub struct OcxConfigView {
     /// The resolved map merges `[mirrors]` config with the inherited
     /// `OCX_MIRRORS` env, env winning per-host key.
     pub mirrors: Vec<(String, String)>,
+    /// Resolved `[patches]` site-tier config. Resolution-affecting → forwarded
+    /// to child ocx processes via [`Env::apply_ocx_config`] as a JSON object
+    /// in [`keys::OCX_PATCHES`] so launchers apply the same patch tier (C5).
+    /// `None` when no `[patches]` registry is configured.
+    pub patches: Option<crate::config::patch::ResolvedPatchConfig>,
+    /// Path to the active patch snapshot file. Resolution-affecting →
+    /// forwarded to child ocx processes via [`Env::apply_ocx_config`] as
+    /// [`keys::OCX_PATCH_SNAPSHOT`] so launchers resolve the same frozen
+    /// companion digests. `None` when no snapshot is active.
+    pub patch_snapshot: Option<PathBuf>,
 }
 
 impl OcxConfigView {
@@ -123,6 +147,8 @@ impl OcxConfigView {
             global: false,
             index: None,
             mirrors: Vec::new(),
+            patches: None,
+            patch_snapshot: None,
         }
     }
 }
@@ -281,6 +307,14 @@ impl Env {
         match encode_mirrors(&cfg.mirrors) {
             Some(json) => self.set(keys::OCX_MIRRORS, json),
             None => self.remove(keys::OCX_MIRRORS),
+        }
+        match crate::config::patch::encode_patches(cfg.patches.as_ref()) {
+            Some(json) => self.set(keys::OCX_PATCHES, json),
+            None => self.remove(keys::OCX_PATCHES),
+        }
+        match &cfg.patch_snapshot {
+            Some(path) => self.set(keys::OCX_PATCH_SNAPSHOT, path.as_os_str()),
+            None => self.remove(keys::OCX_PATCH_SNAPSHOT),
         }
     }
 
@@ -1096,6 +1130,163 @@ mod tests {
         assert!(
             matches!(result, Err(MirrorConfigError::NonStringEnvValue { ref host }) if host == "ghcr.io"),
             "non-string OCX_MIRRORS value must yield NonStringEnvValue naming ghcr.io, got: {result:?}"
+        );
+    }
+
+    // ── OCX_PATCHES forwarding via apply_ocx_config ──────────────────────────
+
+    /// `apply_ocx_config` with `patches = None` does NOT set `OCX_PATCHES` and
+    /// removes any stale inherited value.
+    ///
+    /// Traces: Phase 1 — "No `[patches]` -> apply_ocx_config does NOT set
+    /// OCX_PATCHES (no-op / byte-identical env)"; stub manifest — "forwarded
+    /// ONLY when present (mirror OCX_MIRRORS exactly)".
+    #[test]
+    fn apply_ocx_config_does_not_set_ocx_patches_when_patches_none() {
+        let cfg = view("/abs/ocx");
+        // patches is None by default in OcxConfigView::new()
+        assert!(cfg.patches.is_none());
+
+        let mut env = Env::clean();
+        // Pre-set a stale value to confirm it is removed.
+        env.set(
+            keys::OCX_PATCHES,
+            r#"{"registry":"stale","path_template":"x","required":true}"#,
+        );
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_PATCHES).is_none(),
+            "patches=None must remove any stale OCX_PATCHES from the child env"
+        );
+    }
+
+    /// `apply_ocx_config` with `patches = Some(resolved)` sets `OCX_PATCHES` to
+    /// a non-empty JSON string.
+    ///
+    /// Traces: Phase 1 — "OCX_PATCHES round-trip: an OcxConfigView carrying
+    /// resolved patches -> apply_ocx_config sets OCX_PATCHES to JSON".
+    #[test]
+    fn apply_ocx_config_sets_ocx_patches_when_patches_some() {
+        let mut cfg = view("/abs/ocx");
+        cfg.patches = Some(crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
+            registry: "corp.example.com/patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        });
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        let raw = env
+            .get(keys::OCX_PATCHES)
+            .expect("OCX_PATCHES must be set when patches is Some")
+            .to_str()
+            .expect("OCX_PATCHES must be valid UTF-8");
+        // Must be parseable JSON containing the registry.
+        assert!(
+            raw.contains("corp.example.com/patches"),
+            "OCX_PATCHES JSON must contain the registry; got: {raw}"
+        );
+    }
+
+    /// OCX_PATCHES full round-trip through `apply_ocx_config` then
+    /// `patches_from_env`: child env carries the same `ResolvedPatchConfig`.
+    ///
+    /// Traces: Phase 1 — "OCX_PATCHES round-trip: an OcxConfigView carrying
+    /// resolved patches -> apply_ocx_config sets OCX_PATCHES to JSON -> parsing
+    /// OCX_PATCHES back yields the same resolved patches"; block-tier requirement
+    /// C5.
+    #[test]
+    fn apply_ocx_config_ocx_patches_round_trip_via_patches_from_env() {
+        use crate::config::patch::patches_from_env;
+
+        let env_guard = crate::test::env::lock();
+
+        let original = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
+            registry: "internal.company.com/ocx-patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        };
+
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.patches = Some(original.clone());
+
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        // Inject the encoded OCX_PATCHES from child_env into the test env override
+        // so patches_from_env() can read it.
+        let encoded = child_env
+            .get(keys::OCX_PATCHES)
+            .expect("OCX_PATCHES must be set when patches is Some")
+            .to_str()
+            .expect("OCX_PATCHES must be valid UTF-8")
+            .to_string();
+        env_guard.set(keys::OCX_PATCHES, encoded);
+
+        let parsed = patches_from_env()
+            .expect("well-formed OCX_PATCHES must parse")
+            .expect("non-empty OCX_PATCHES must yield Some(resolved)");
+
+        assert_eq!(
+            parsed, original,
+            "patches_from_env must recover the same ResolvedPatchConfig forwarded by apply_ocx_config"
+        );
+    }
+
+    // ── OCX_PATCH_SNAPSHOT forwarding via apply_ocx_config ───────────────────
+
+    /// `apply_ocx_config` with `patch_snapshot = Some(path)` must set
+    /// `OCX_PATCH_SNAPSHOT` to that path on the child env.
+    ///
+    /// Traceability: Phase 5B spec test 3 — OCX_PATCH_SNAPSHOT forwarded when Some.
+    ///
+    /// NOTE: This test PASSES against the current code because `apply_ocx_config`
+    /// already forwards `patch_snapshot` (the implementation is already in place).
+    /// The test is included here as a pinning guard to prevent regression and to
+    /// satisfy the spec test contract.
+    #[test]
+    fn apply_ocx_config_sets_ocx_patch_snapshot_when_some() {
+        let mut cfg = view("/abs/ocx");
+        cfg.patch_snapshot = Some(std::path::PathBuf::from("/project/patches.snapshot.json"));
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        let value = env
+            .get(keys::OCX_PATCH_SNAPSHOT)
+            .expect("OCX_PATCH_SNAPSHOT must be set when patch_snapshot is Some");
+        assert_eq!(
+            value.to_str().unwrap(),
+            "/project/patches.snapshot.json",
+            "OCX_PATCH_SNAPSHOT must equal the configured path"
+        );
+    }
+
+    /// `apply_ocx_config` with `patch_snapshot = None` must remove any stale
+    /// `OCX_PATCH_SNAPSHOT` value from the child env, so the outer ocx's state
+    /// (no snapshot) wins over any inherited value.
+    ///
+    /// Traceability: Phase 5B spec test 3 — OCX_PATCH_SNAPSHOT removed when None.
+    ///
+    /// NOTE: This test PASSES against the current code. Included as a regression guard.
+    #[test]
+    fn apply_ocx_config_removes_ocx_patch_snapshot_when_none() {
+        // Build a view with patch_snapshot = None (the default).
+        let cfg = view("/abs/ocx");
+        assert!(cfg.patch_snapshot.is_none());
+
+        let mut env = Env::clean();
+        // Pre-set a stale value to confirm it is cleared.
+        env.set(keys::OCX_PATCH_SNAPSHOT, "/stale/patches.snapshot.json");
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_PATCH_SNAPSHOT).is_none(),
+            "patch_snapshot=None must remove any stale OCX_PATCH_SNAPSHOT from the child env"
         );
     }
 
