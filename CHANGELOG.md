@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-06-21
+
+### Added
+
+- Idempotent move-to-front PATH manipulation *(shell)*
+- Idempotent batch PATH, remove OCX_ACTIVATED for all shells *(shell)*
+
+### Fixed
+
+- Resolve latest through configured index, honour OCX_INDEX *(self-update)*
+- Serialize tag locks with deterministic key order *(index)*
+- Deterministic key order for CLI output structs *(cli)*
+- Repair Windows activation harness to use `ocx self setup` *(test)*
+- Batch single-statement move-to-front + FOR/F delims= *(shell)*
+- Apply non-POSIX shell activation as data (nushell) + capture elvish eval *(shell)*
+- Break release-readiness concurrency self-deadlock *(ci)*
+
 ## [0.3.8] - 2026-06-15
 
 ### Added
@@ -40,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deterministic exit code on concurrent symlink failures *(install)*
 - Route eval-safe-output advisory through the log module *(cli)*
 - Use job-level defaults.run.shell for matrixed Windows shells *(ci)*
+
+### Release
+
+- V0.3.8
 
 ## [0.3.7] - 2026-06-07
 
@@ -481,6 +502,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.9]: https://github.com/ocx-sh/ocx/compare/v0.3.8..v0.3.9
 [0.3.8]: https://github.com/ocx-sh/ocx/compare/v0.3.7..v0.3.8
 [0.3.7]: https://github.com/ocx-sh/ocx/compare/v0.3.6..v0.3.7
 [0.3.6]: https://github.com/ocx-sh/ocx/compare/v0.3.5..v0.3.6
