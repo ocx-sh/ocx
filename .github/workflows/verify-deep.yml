@@ -2,6 +2,9 @@ name: Verify Deep
 
 on:
   workflow_dispatch:
+  # Reusable: composed into the pre-release `release-readiness.yml` gate so a
+  # single dispatch reports one GO/NO-GO across all platforms.
+  workflow_call:
 
 permissions:
   contents: read

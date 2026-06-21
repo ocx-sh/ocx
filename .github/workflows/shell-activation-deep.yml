@@ -19,6 +19,9 @@ on:
   schedule:
     # Weekly, Monday 06:00 UTC — catches platform drift without per-PR cost.
     - cron: "0 6 * * 1"
+  # Reusable: composed into the pre-release `release-readiness.yml` gate so a
+  # single dispatch reports one GO/NO-GO across all platforms.
+  workflow_call:
 
 permissions:
   contents: read

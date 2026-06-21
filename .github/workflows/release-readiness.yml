@@ -1,0 +1,64 @@
+name: Release Readiness
+
+# One pre-release GO/NO-GO gate. Dispatch this on the ref you intend to release
+# (e.g. `gh workflow run release-readiness.yml --ref main` before tagging vX.Y.Z).
+# It runs the full cross-platform deep coverage as reusable workflows and rolls
+# their results into a single verdict:
+#
+#   - Verify Deep            — build + unit test on Linux/macOS/Windows, plus
+#                              Windows ARM64 cross-compile and Linux acceptance.
+#   - Shell Activation Deep  — `ocx self setup` activation on macOS + Windows.
+#
+# Linux per-PR gates (verify-basic.yml, shell-activation.yml) already cover the
+# Linux surface on every change; this gate adds the expensive macOS/Windows
+# coverage on demand so a green run means "safe to cut the release". It is NOT
+# wired into the cargo-dist release.yml — run it yourself before tagging.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  deep:
+    name: Verify Deep
+    uses: ./.github/workflows/verify-deep.yml
+
+  shells:
+    name: Shell Activation Deep
+    uses: ./.github/workflows/shell-activation-deep.yml
+
+  gate:
+    name: Verdict
+    needs: [deep, shells]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report GO/NO-GO
+        env:
+          DEEP_RESULT: ${{ needs.deep.result }}
+          SHELLS_RESULT: ${{ needs.shells.result }}
+        run: |
+          {
+            echo "## Release Readiness"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Verify Deep (Linux/macOS/Windows unit + Linux acceptance) | \`${DEEP_RESULT}\` |"
+            echo "| Shell Activation Deep (macOS + Windows) | \`${SHELLS_RESULT}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${DEEP_RESULT}" = "success" ] && [ "${SHELLS_RESULT}" = "success" ]; then
+            echo "**Verdict: GO - safe to release.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Verdict: NO-GO - do not release.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Release readiness NO-GO (verify-deep=${DEEP_RESULT}, shell-activation-deep=${SHELLS_RESULT})"
+            exit 1
+          fi
