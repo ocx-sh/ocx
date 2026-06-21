@@ -59,8 +59,9 @@ certificate, without any per-package configuration.
 
 ### What the descriptor says
 
-The global descriptor at `patches/descriptors/base-tool-combined.json` has a
-catch-all rule that fires for every base package:
+The global descriptor at `patches/descriptors/global.json` is published once
+with `ocx patch publish --global` and has a catch-all rule that fires for every
+base package:
 
 ```json
 {
@@ -70,8 +71,9 @@ catch-all rule that fires for every base package:
 }
 ```
 
-`required: true` means the env resolution fails closed if `corp-ca-bundle` is
-not installed.
+It lives at the reserved `global` repository in the patch registry, so it
+applies to every base without per-package configuration. `required: true` means
+the env resolution fails closed if `corp-ca-bundle` is not installed.
 
 ### Phase 3 — companion discovery at install time
 
@@ -170,7 +172,8 @@ but skip gracefully when it is absent. Never block the env resolution.
 
 ### What the descriptor says
 
-Second rule in `patches/descriptors/base-tool-combined.json`:
+The rule in `patches/descriptors/license-fail-open.json` (published to
+base-tool's path):
 
 ```json
 {
@@ -268,24 +271,20 @@ push`). Then publish the descriptor to a base's package-specific path:
 
 ```sh
 $OCX patch publish \
-    --descriptor-file test/manual/packages/patches/descriptors/base-tool-combined.json \
+    --descriptor-file test/manual/packages/patches/descriptors/license-fail-open.json \
     localhost:5000/patches/base-tool:1.0.0
 ```
 
-`--global-root` publishes a descriptor that applies to every base instead of one
-named base:
+`--global` publishes a descriptor that applies to every base instead of one
+named base. It lands at the reserved `global` repository in the patch registry
+(`<patch-registry>/global:__ocx.patch`), so it works on any OCI registry —
+including the local `registry:2`:
 
 ```sh
 $OCX patch publish \
     --descriptor-file test/manual/packages/patches/descriptors/global.json \
-    --global-root
+    --global
 ```
-
-> Docker's `registry:2` rejects the empty-path repository the global root needs,
-> so on this local rig `--global-root` fails (404). `setup-patches.sh` works
-> around it by publishing the `match="*"` rule to each base's path instead. A
-> production patch-registry host supports the global root. See the note in
-> `setup-patches.sh`.
 
 ### 3. Pin companion digests for reproducible builds (`ocx patch freeze`)
 

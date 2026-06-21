@@ -3,8 +3,7 @@
 """Acceptance tests for the OCX patch overlay feature (Phases 1-6A).
 
 Covers the end-to-end lifecycle of the patches feature:
-  - Publishing patch descriptors (per-base path; global-root tested separately
-    with a product-limitation note)
+  - Publishing patch descriptors (per-base path and global descriptor)
   - Discovering and installing companion packages at base install time
   - Composing companion INTERFACE env vars onto base package env
   - Scoped glob matching (per-base descriptor pattern matching)
@@ -14,13 +13,11 @@ Covers the end-to-end lifecycle of the patches feature:
   - `ocx patch test` for local descriptor dry-run
   - `ocx package env` JSON output verification
   - `ocx package exec` command receives companion env vars
+  - Companion visibility inheritance via dependency surface (sealed/private/public/interface)
 
-NOTE (product limitation): `ocx patch publish --global-root` generates an empty
-OCI repository path which registry:2 rejects with `404 page not found` on
-`/v2/blobs/uploads/`. All scenarios that publish a descriptor use the per-base
-path (`base_id` form) instead. The per-base path correctly exercises the full
-compose pipeline, including `*` glob matches. Tests that specifically require
-the global-root publish path are marked as skipped with the reason recorded.
+NOTE: The global descriptor lives at the reserved `global` repository in the patch
+registry (e.g. `<patch-registry>/global:__ocx.patch`). It is exercised by
+`test_global_descriptor_applies_to_multiple_bases`.
 
 Each test function carries a docstring naming the ADR behaviour (C-code) it
 covers. ADR reference: adr_infrastructure_patches.md
@@ -35,6 +32,7 @@ from uuid import uuid4
 import pytest
 
 from src.helpers import make_package
+from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -120,6 +118,12 @@ def _unique_repo(label: str) -> str:
     return f"t_{uuid4().hex[:8]}_{label}"
 
 
+def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str) -> dict:
+    """Build a dependency descriptor for `make_package(dependencies=...)`."""
+    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    return {"identifier": f"{pkg.fq}@{digest}", "visibility": visibility}
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1: Per-base descriptor with * glob composes companion env onto base
 # (flagship corp-CA pattern)
@@ -163,42 +167,75 @@ def test_corp_ca_wildcard_descriptor_composes_on_base(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 1b: global-root publish limitation documented
+# Scenario 1b: global descriptor applies to multiple bases via --global flag
 # ---------------------------------------------------------------------------
 
 
-def test_global_root_publish_with_registry2_is_unsupported(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+def test_global_descriptor_applies_to_multiple_bases(
+    ocx: OcxRunner, tmp_path: Path, registry: str
 ) -> None:
-    """Product limitation: `--global-root` publish fails with registry:2.
+    """ADR behaviour: `--global` publishes the descriptor to the reserved `global`
+    repository in the patch registry (a normal OCI repo path). The global descriptor
+    with a `*` rule is applied to every installed base.
 
-    `global_descriptor_id()` generates an OCI identifier with an empty repository
-    path. The registry:2 container returns HTTP 404 on /v2/blobs/uploads/ because
-    the empty path is not a valid OCI repository name.
-
-    This test documents the limitation precisely. The global-root descriptor is
-    intended for production registries that support root-level OCI operations.
-    All other patch tests use per-base publish as a workaround.
+    Regression guard: this MUST succeed on registry:2 — the fix moved global
+    descriptor storage from an empty-repository root (which registry:2 rejected)
+    to the reserved single-segment `global` repository.
     """
-    companion_fq = f"{registry}/companion-placeholder:1.0.0"
+    # Publish a companion with a recognisable env var
+    companion_repo = _unique_repo("global_ca_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "GLOBAL_CA", "corp-ca")
+
+    # Write a descriptor that matches everything
     descriptor_path = tmp_path / "global_descriptor.json"
-    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": "*", "packages": [companion_fq], "required": True}],
+    )
     _write_config(ocx, registry)
 
+    # Publish as global — MUST succeed on registry:2 (core regression guard)
     result = ocx.run(
         "patch", "publish",
         "--descriptor-file", str(descriptor_path),
-        "--global-root",
+        "--global",
         format=None,
         check=False,
     )
-    assert result.returncode != 0, (
-        "global-root publish unexpectedly succeeded; the registry:2 limitation may have been fixed. "
-        "If so, update the module docstring and convert affected tests to use --global-root."
+    assert result.returncode == 0, (
+        f"--global publish must succeed on registry:2 (reserved `global` repo fix).\n"
+        f"stderr: {result.stderr}"
     )
-    assert "404" in result.stderr or "blobs/uploads" in result.stderr, (
-        f"Expected 404/blobs error for empty-repo global root; got:\n{result.stderr}"
+
+    # Build two distinct base packages
+    base1_repo = _unique_repo("global_base1")
+    base1 = make_package(ocx, base1_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    base2_repo = _unique_repo("global_base2")
+    base2 = make_package(ocx, base2_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    # Install both bases; lazy discovery fires for each
+    ocx.plain("package", "install", base1.short)
+    ocx.plain("package", "install", base2.short)
+
+    # GLOBAL_CA must appear in BOTH bases' env (global descriptor applies to all)
+    entries1 = _env_entries(ocx, base1.short)
+    entries2 = _env_entries(ocx, base2.short)
+
+    ca_entry1 = _entry_by_key(entries1, "GLOBAL_CA")
+    assert ca_entry1 is not None, (
+        f"GLOBAL_CA must appear in env of {base1.short} (global descriptor applies to all);\n"
+        f"got keys: {[e['key'] for e in entries1]}"
     )
+    assert ca_entry1["value"] == "corp-ca"
+
+    ca_entry2 = _entry_by_key(entries2, "GLOBAL_CA")
+    assert ca_entry2 is not None, (
+        f"GLOBAL_CA must appear in env of {base2.short} (global descriptor applies to all);\n"
+        f"got keys: {[e['key'] for e in entries2]}"
+    )
+    assert ca_entry2["value"] == "corp-ca"
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +720,7 @@ def test_patch_publish_without_config_errors(
     result = ocx.run(
         "patch", "publish",
         "--descriptor-file", str(descriptor_path),
-        "--global-root",
+        "--global",
         format=None,
         check=False,
     )
@@ -817,3 +854,336 @@ def test_rule_required_false_overrides_tier_default(
         f"install must succeed even with missing companion. "
         f"Got exit {result.returncode}.\nstderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 17–20: patch × dependency-visibility inheritance
+#
+# A global descriptor patches dependency D, which is wired into root R with
+# varying visibility. The companion's env var must be admitted or blocked
+# according to D's visibility surface.
+#
+# Common setup (DAMP — repeated per test for self-contained readability):
+#   1. _write_config(ocx, registry, required=False)  -- fail-open; only C matters
+#   2. Companion C with DISTINCTIVE var DEP_PATCH=present
+#   3. Dependency D with own env var (public, so we can confirm D itself is fine)
+#   4. Root R: make_package(..., dependencies=[_dep_entry(ocx, D, visibility=V)])
+#   5. Publish global descriptor matching D by fq prefix
+#   6. ocx package install R  (installs R + D)
+#   7. ocx package install C  (pre-install so overlay can resolve C locally)
+#   8. Assert consumer view (_env_entries) and --self view
+# ---------------------------------------------------------------------------
+
+
+def test_patch_on_sealed_dep_not_inherited(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """Sealed dependency: companion overlay is blocked in both consumer and --self views.
+
+    A sealed dep is never admitted into the dependent's env surface at all,
+    so its patch companions must not appear either.
+    """
+    _write_config(ocx, registry, required=False)
+
+    companion_repo = _unique_repo("vis_sealed_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DEP_PATCH", "present")
+
+    dep_repo = _unique_repo("vis_sealed_dep")
+    dep = make_package(
+        ocx,
+        dep_repo,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": "SEALED_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
+        new=True,
+        cascade=True,
+    )
+
+    root_repo = _unique_repo("vis_sealed_root")
+    root = make_package(
+        ocx,
+        root_repo,
+        "1.0.0",
+        tmp_path,
+        dependencies=[_dep_entry(ocx, dep, visibility="sealed")],
+        new=True,
+        cascade=True,
+    )
+
+    descriptor_path = tmp_path / "sealed_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{dep.fq}*", "packages": [companion_fq], "required": False}],
+    )
+    publish_result = ocx.run(
+        "patch", "publish",
+        "--descriptor-file", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert publish_result.returncode == 0, (
+        f"global publish must succeed; stderr: {publish_result.stderr}"
+    )
+
+    # Force sync so the newly published descriptor overwrites any stale cached
+    # descriptor.  `ocx index update` piggybacks a sync at package-push time,
+    # which may have populated global.json with the registry's previous content
+    # before this test's publish.  `patch sync` Sync-mode re-fetches and updates
+    # the tag-store entry to the freshly published digest.
+    ocx.run("patch", "sync", format=None, check=False)
+
+    ocx.plain("package", "install", root.short)
+    ocx.plain("package", "install", companion_fq)
+
+    consumer_entries = _env_entries(ocx, root.short)
+    self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
+    assert self_result.returncode == 0, f"--self must succeed; stderr: {self_result.stderr}"
+    self_entries: list[dict] = json.loads(self_result.stdout)["entries"]
+
+    dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
+    dep_patch_self = _entry_by_key(self_entries, "DEP_PATCH")
+
+    if dep_patch_consumer is not None or dep_patch_self is not None:
+        # Report as product gap rather than forcing green
+        consumer_keys = [e["key"] for e in consumer_entries]
+        self_keys = [e["key"] for e in self_entries]
+        pytest.fail(
+            "PRODUCT GAP: sealed dep companion appeared in env output.\n"
+            f"consumer keys: {consumer_keys}\n"
+            f"--self keys: {self_keys}\n"
+            "Sealed deps must block their patch companions from all surfaces."
+        )
+
+
+def test_patch_on_private_dep_only_under_self(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """Private dependency: companion overlay appears under --self, absent in consumer view.
+
+    A private dep's env entries are admitted only on the owner's private surface
+    (--self), so its patch companion must follow the same restriction.
+    """
+    _write_config(ocx, registry, required=False)
+
+    companion_repo = _unique_repo("vis_private_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DEP_PATCH", "present")
+
+    dep_repo = _unique_repo("vis_private_dep")
+    dep = make_package(
+        ocx,
+        dep_repo,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": "PRIVATE_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
+        new=True,
+        cascade=True,
+    )
+
+    root_repo = _unique_repo("vis_private_root")
+    root = make_package(
+        ocx,
+        root_repo,
+        "1.0.0",
+        tmp_path,
+        dependencies=[_dep_entry(ocx, dep, visibility="private")],
+        new=True,
+        cascade=True,
+    )
+
+    descriptor_path = tmp_path / "private_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{dep.fq}*", "packages": [companion_fq], "required": False}],
+    )
+    publish_result = ocx.run(
+        "patch", "publish",
+        "--descriptor-file", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert publish_result.returncode == 0, (
+        f"global publish must succeed; stderr: {publish_result.stderr}"
+    )
+
+    # Force sync so the newly published descriptor overwrites any stale cached
+    # descriptor.  `ocx index update` piggybacks a sync at package-push time,
+    # which may have populated global.json with the registry's previous content
+    # before this test's publish.  `patch sync` Sync-mode re-fetches and updates
+    # the tag-store entry to the freshly published digest.
+    ocx.run("patch", "sync", format=None, check=False)
+
+    ocx.plain("package", "install", root.short)
+    ocx.plain("package", "install", companion_fq)
+
+    consumer_entries = _env_entries(ocx, root.short)
+    self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
+    assert self_result.returncode == 0, f"--self must succeed; stderr: {self_result.stderr}"
+    self_entries: list[dict] = json.loads(self_result.stdout)["entries"]
+
+    dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
+    dep_patch_self = _entry_by_key(self_entries, "DEP_PATCH")
+
+    if dep_patch_consumer is not None:
+        consumer_keys = [e["key"] for e in consumer_entries]
+        pytest.fail(
+            "PRODUCT GAP: private dep companion appeared in CONSUMER view (must be absent).\n"
+            f"consumer keys: {consumer_keys}"
+        )
+
+    if dep_patch_self is None:
+        self_keys = [e["key"] for e in self_entries]
+        pytest.fail(
+            "PRODUCT GAP: private dep companion absent from --self view (must be present).\n"
+            f"--self keys: {self_keys}"
+        )
+
+
+def test_patch_on_public_dep_inherited_by_consumer(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """Public dependency: companion overlay is visible in the consumer view.
+
+    A public dep surfaces its env entries to all consumers, so its patch
+    companion must also appear in the consumer view.
+    """
+    _write_config(ocx, registry, required=False)
+
+    companion_repo = _unique_repo("vis_public_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DEP_PATCH", "present")
+
+    dep_repo = _unique_repo("vis_public_dep")
+    dep = make_package(
+        ocx,
+        dep_repo,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": "PUBLIC_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
+        new=True,
+        cascade=True,
+    )
+
+    root_repo = _unique_repo("vis_public_root")
+    root = make_package(
+        ocx,
+        root_repo,
+        "1.0.0",
+        tmp_path,
+        dependencies=[_dep_entry(ocx, dep, visibility="public")],
+        new=True,
+        cascade=True,
+    )
+
+    descriptor_path = tmp_path / "public_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{dep.fq}*", "packages": [companion_fq], "required": False}],
+    )
+    publish_result = ocx.run(
+        "patch", "publish",
+        "--descriptor-file", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert publish_result.returncode == 0, (
+        f"global publish must succeed; stderr: {publish_result.stderr}"
+    )
+
+    # Force sync so the newly published descriptor overwrites any stale cached
+    # descriptor.  `ocx index update` piggybacks a sync at package-push time,
+    # which may have populated global.json with the registry's previous content
+    # before this test's publish.  `patch sync` Sync-mode re-fetches and updates
+    # the tag-store entry to the freshly published digest.
+    ocx.run("patch", "sync", format=None, check=False)
+
+    ocx.plain("package", "install", root.short)
+    ocx.plain("package", "install", companion_fq)
+
+    consumer_entries = _env_entries(ocx, root.short)
+    dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
+
+    if dep_patch_consumer is None:
+        consumer_keys = [e["key"] for e in consumer_entries]
+        pytest.fail(
+            "PRODUCT GAP: public dep companion absent from CONSUMER view (must be present).\n"
+            f"consumer keys: {consumer_keys}"
+        )
+
+
+def test_patch_on_interface_dep_inherited_by_consumer(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """Interface dependency: companion overlay is visible in the consumer view.
+
+    An interface dep exposes its env entries to direct consumers (but not
+    transitively to consumers of consumers). Its patch companion must appear
+    in the same consumer view.
+    """
+    _write_config(ocx, registry, required=False)
+
+    companion_repo = _unique_repo("vis_interface_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DEP_PATCH", "present")
+
+    dep_repo = _unique_repo("vis_interface_dep")
+    dep = make_package(
+        ocx,
+        dep_repo,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": "IFACE_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
+        new=True,
+        cascade=True,
+    )
+
+    root_repo = _unique_repo("vis_interface_root")
+    root = make_package(
+        ocx,
+        root_repo,
+        "1.0.0",
+        tmp_path,
+        dependencies=[_dep_entry(ocx, dep, visibility="interface")],
+        new=True,
+        cascade=True,
+    )
+
+    descriptor_path = tmp_path / "interface_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{dep.fq}*", "packages": [companion_fq], "required": False}],
+    )
+    publish_result = ocx.run(
+        "patch", "publish",
+        "--descriptor-file", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert publish_result.returncode == 0, (
+        f"global publish must succeed; stderr: {publish_result.stderr}"
+    )
+
+    # Force sync so the newly published descriptor overwrites any stale cached
+    # descriptor.  `ocx index update` piggybacks a sync at package-push time,
+    # which may have populated global.json with the registry's previous content
+    # before this test's publish.  `patch sync` Sync-mode re-fetches and updates
+    # the tag-store entry to the freshly published digest.
+    ocx.run("patch", "sync", format=None, check=False)
+
+    ocx.plain("package", "install", root.short)
+    ocx.plain("package", "install", companion_fq)
+
+    consumer_entries = _env_entries(ocx, root.short)
+    dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
+
+    if dep_patch_consumer is None:
+        consumer_keys = [e["key"] for e in consumer_entries]
+        pytest.fail(
+            "PRODUCT GAP: interface dep companion absent from CONSUMER view (must be present).\n"
+            f"consumer keys: {consumer_keys}"
+        )

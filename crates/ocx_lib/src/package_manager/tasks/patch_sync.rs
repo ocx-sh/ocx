@@ -283,10 +283,10 @@ impl PackageManager {
         // no-op tag write on an unchanged digest) and the redundant round-trips are a
         // documented Phase-6 perf optimisation, not a correctness issue.
         //
-        // With ZERO installed bases, a single `GlobalOnly` pass refreshes the root
-        // WITHOUT fabricating a synthetic base — the previous synthetic empty-repo
-        // base expanded the path template into an extra package-specific source
-        // outside the known set (a known-set violation).
+        // With ZERO installed bases, a single `GlobalOnly` pass refreshes the
+        // global descriptor WITHOUT fabricating a synthetic base — a synthetic
+        // base would expand the path template into an extra package-specific
+        // source outside the known set (a known-set violation).
         if installed_bases.is_empty() {
             if let Err(err) = self
                 .discover_and_install_patches_with_mode(
@@ -1090,10 +1090,9 @@ mod tests {
     ///   4. Assert `report.descriptors_updated >= 1`.
     ///
     /// The Reference key used by `StubTransport::pull_manifest_raw` is the
-    /// canonical string form of the identifier. `Reference::with_tag` for an
-    /// empty-repository identifier renders as `"patches.corp.com:__ocx.patch"`
-    /// (no slash when repository is empty). We seed multiple key forms in the
-    /// stub to cover any rendering variation.
+    /// canonical string form of the identifier. The global descriptor lives at
+    /// the reserved `global` repository, so the key is the unambiguous
+    /// `"patches.corp.com/global:__ocx.patch"`.
     ///
     /// Traces: Phase 5C D1 — descriptors_updated counter.
     #[tokio::test(flavor = "multi_thread")]
@@ -1190,45 +1189,20 @@ mod tests {
 
         // ── Seed the StubTransport with the NEW manifest + layer blob ──
         //
-        // `StubTransport::pull_manifest_raw` uses `image.to_string()` as the key.
-        // For `Identifier::new_registry("", "patches.corp.com").clone_with_tag("__ocx.patch")`,
-        // the transport reference string is "patches.corp.com/:__ocx.patch" or
-        // "patches.corp.com:__ocx.patch" — we derive it via Display on the Identifier
-        // and use both possible forms as fallback keys. In practice the key is the
-        // `native::Reference::with_tag(host, repo, tag).to_string()` which for an
-        // empty-repo identifier uses "" as the repository component.
-        //
-        // The exact key form is determined at runtime by the oci-client Reference
-        // Display impl. We use the Identifier's `to_string()` to match the Debug output
-        // visible in the OCI reference, but the real key is `transport_reference(..).to_string()`.
-        // Since we cannot call the private `transport_reference` here, we derive the
-        // expected key by constructing the same Reference manually.
-        //
-        // The global descriptor id has repository = "" (empty string). The oci_client
-        // Reference::with_tag("patches.corp.com", "", "__ocx.patch") renders as
-        // "patches.corp.com/:__ocx.patch" (colon before the tag, slash before empty repo).
-        // We seed both the canonical key and a fallback.
+        // `StubTransport::pull_manifest_raw` keys manifests by the transport
+        // reference string. The global descriptor lives at the reserved `global`
+        // repository, so the key is the unambiguous
+        // `patches.corp.com/global:__ocx.patch`.
         use crate::oci::Client;
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         let stub_data = StubTransportData::new();
         {
             let mut inner = stub_data.write();
-            // The manifest key is `image.to_string()` where image is a
-            // `native::Reference`. For a no-mirror path the reference equals the
-            // canonical reference, which for `patches.corp.com/` with tag `__ocx.patch`
-            // typically renders as `patches.corp.com/:__ocx.patch`.
-            // We seed both the empty-repo and slash-repo forms.
             let manifest_pair = (new_manifest_bytes.to_vec(), new_manifest_digest.to_string());
             inner
                 .manifests
-                .insert("patches.corp.com/:__ocx.patch".to_string(), manifest_pair.clone());
-            inner
-                .manifests
-                .insert("patches.corp.com:__ocx.patch".to_string(), manifest_pair.clone());
-            inner
-                .manifests
-                .insert("patches.corp.com/__ocx.patch".to_string(), manifest_pair.clone());
+                .insert("patches.corp.com/global:__ocx.patch".to_string(), manifest_pair);
             // Seed the layer blob so `fetch_patch_layer_blob` can pull it.
             inner
                 .blobs
@@ -1351,15 +1325,10 @@ mod tests {
         {
             let mut inner = stub_data.write();
             let manifest_pair = (new_manifest_bytes.to_vec(), new_manifest_digest.to_string());
+            // Global descriptor lives at the reserved `global` repository.
             inner
                 .manifests
-                .insert("patches.corp.com/:__ocx.patch".to_string(), manifest_pair.clone());
-            inner
-                .manifests
-                .insert("patches.corp.com:__ocx.patch".to_string(), manifest_pair.clone());
-            inner
-                .manifests
-                .insert("patches.corp.com/__ocx.patch".to_string(), manifest_pair);
+                .insert("patches.corp.com/global:__ocx.patch".to_string(), manifest_pair);
             inner
                 .blobs
                 .insert(new_layer_digest.to_string(), new_layer_bytes.to_vec());

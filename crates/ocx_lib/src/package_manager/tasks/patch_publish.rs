@@ -134,7 +134,7 @@ mod tests {
     async fn publish_offline_returns_error() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let patch_repo = Identifier::new_registry("", "patches.example.com");
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
 
         let result = manager
             .publish_patch_descriptor(&patch_repo, &valid_descriptor_bytes())
@@ -152,7 +152,7 @@ mod tests {
     async fn publish_rejects_malformed_descriptor() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let patch_repo = Identifier::new_registry("", "patches.example.com");
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
 
         let result = manager.publish_patch_descriptor(&patch_repo, b"not json {{{").await;
         assert!(

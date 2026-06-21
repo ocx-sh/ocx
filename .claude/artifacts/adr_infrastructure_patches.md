@@ -12,6 +12,7 @@ Owner: Architect (/architect). Handoff: Builder (/builder), Security Auditor (/s
 **Deciders:** @michael-herwig, architect
 **GitHub Issue:** part of milestone #111 (Corporate infrastructure v1); sub-issues #112–#117
 **Supersedes:** the `feature/patches` draft `adr_infrastructure_patches.md` (2026-03-22), which modelled patches as `EdgeKind`/Kahn graph edges. That graph model never landed on `sion` — it was overtaken by the **two-env composition** refactor (`adr_two_env_composition.md`). This revision re-bases the patch design onto the shipped compositional model.
+**Amendment (2026-06-21):** the global ("root") descriptor moved from the patch-registry **root** (empty repository path) to a reserved single-segment repository named **`global`** (`<patch-registry>/global:__ocx.patch`). An empty repository path is not a valid OCI repository name — path components must start with `[a-z0-9]` — so Docker `registry:2`/Harbor/GHCR reject it (`NAME_INVALID`); the reserved `global` name is portable and structurally cannot collide with any per-package sub-path (the path template always yields ≥2 segments). The `ocx patch publish --global-root` flag is renamed `--global`. References below to "the patch path root" / "root descriptor" mean this reserved `global` repository.
 **Tech Strategy Alignment:**
 - [x] Rust 2024, Tokio, no new runtime deps. Reuses config (`config/mirror.rs` precedent), OCI client, file-structure CAS, GC reachability.
 **Domain Tags:** infrastructure, integration, security, package-manager

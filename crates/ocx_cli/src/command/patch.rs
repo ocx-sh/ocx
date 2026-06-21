@@ -60,8 +60,8 @@ pub enum PatchGroup {
     /// Refresh patch descriptors and companion packages from the registry.
     ///
     /// Re-fetches every patch descriptor for all installed packages and the
-    /// global root. Installs any newly-referenced companion packages. Requires
-    /// network access.
+    /// global descriptor. Installs any newly-referenced companion packages.
+    /// Requires network access.
     ///
     /// This command also picks up patches for packages installed before patch
     /// configuration was added. All states are re-checked regardless of what
@@ -71,8 +71,9 @@ pub enum PatchGroup {
     /// Publish a patch descriptor to the patch registry.
     ///
     /// Reads a descriptor JSON file, validates it, and pushes it to the
-    /// configured patch registry under either the global root (`--global-root`)
-    /// or the package-specific sub-path for a given base identifier.
+    /// configured patch registry under either the reserved global repository
+    /// (`--global`) or the package-specific sub-path for a given base
+    /// identifier.
     ///
     /// The descriptor only references companion packages by identifier. Publish
     /// the companion packages separately with `ocx package push`. Requires
@@ -114,14 +115,15 @@ pub struct PatchPublishArgs {
     #[clap(long = "descriptor-file", required = true)]
     descriptor_file: PathBuf,
 
-    /// Publish the descriptor at the patch-registry root so it applies to every
-    /// base. Mutually exclusive with a base identifier.
-    #[clap(long = "global-root", conflicts_with = "base")]
-    global_root: bool,
+    /// Publish the descriptor as the global descriptor so it applies to every
+    /// base. Stored at the reserved `global` repository in the patch registry.
+    /// Mutually exclusive with a base identifier.
+    #[clap(long = "global", conflicts_with = "base")]
+    global: bool,
 
     /// Base identifier whose package-specific patch path receives the
-    /// descriptor. Omit with `--global-root` for the global root.
-    #[clap(value_name = "BASE-ID", required_unless_present = "global_root")]
+    /// descriptor. Omit with `--global` for the global descriptor.
+    #[clap(value_name = "BASE-ID", required_unless_present = "global")]
     base: Option<options::Identifier>,
 
     /// Target platform for resolving the patch path template. Defaults to the
@@ -261,14 +263,14 @@ impl PatchPublishArgs {
 
         // ── Step 3: Compute the target patch repo identifier. ──
         //
-        // `base` is guaranteed present by `required_unless_present = "global_root"`
-        // when `--global-root` is absent; resolve its default registry here so the
+        // `base` is guaranteed present by `required_unless_present = "global"`
+        // when `--global` is absent; resolve its default registry here so the
         // selection helper stays a pure function over already-resolved identifiers.
         let base_id = match &self.base {
             Some(base_raw) => Some(base_raw.with_domain(context.default_registry())?),
             None => None,
         };
-        let patch_repo_id = select_publish_target(&patches, self.global_root, base_id.as_ref());
+        let patch_repo_id = select_publish_target(&patches, self.global, base_id.as_ref());
 
         // ── Step 4: Publish via the lib orchestration method. ──
         let report = context
@@ -294,19 +296,19 @@ impl PatchTestArgs {
 
 /// Select the patch repo identifier `ocx patch publish` targets.
 ///
-/// `--global-root` targets the patch-registry root (applies to every base);
-/// otherwise the descriptor lands at the package-specific sub-path for `base_id`.
-/// `base_id` is `Some` whenever `global_root` is false (clap's
-/// `required_unless_present` guarantees it); when both are absent the global root
-/// is used as a safe fallback so the function stays total.
+/// `--global` targets the reserved global descriptor repository (applies to
+/// every base); otherwise the descriptor lands at the package-specific sub-path
+/// for `base_id`. `base_id` is `Some` whenever `global` is false (clap's
+/// `required_unless_present` guarantees it); when both are absent the global
+/// descriptor is used as a safe fallback so the function stays total.
 fn select_publish_target(
     patches: &ocx_lib::ResolvedPatchConfig,
-    global_root: bool,
+    global: bool,
     base_id: Option<&oci::Identifier>,
 ) -> oci::Identifier {
-    match (global_root, base_id) {
+    match (global, base_id) {
         (false, Some(base)) => patch_descriptor_id(patches, base),
-        // `--global-root`, or (defensively) no base supplied → the registry root.
+        // `--global`, or (defensively) no base supplied → the global descriptor.
         _ => global_descriptor_id(patches),
     }
 }
@@ -704,27 +706,29 @@ mod tests {
         }
     }
 
-    /// `--global-root` selects the registry-root descriptor (empty repository).
+    /// `--global` selects the reserved `global` repository descriptor.
     #[test]
-    fn select_publish_target_global_root_is_registry_root() {
+    fn select_publish_target_global_is_reserved_global_repository() {
         let patches = patches();
         let target = select_publish_target(&patches, true, None);
-        // Global root: rooted at the patch registry, empty repository, PATCH tag.
+        // Global descriptor: rooted at the patch registry, reserved single-segment
+        // `global` repository, PATCH tag.
         assert_eq!(target.registry(), "patches.corp.com");
-        assert!(
-            target.repository().is_empty(),
-            "global-root target must have an empty repository sub-path; got '{}'",
+        assert_eq!(
+            target.repository(),
+            "global",
+            "global target must use the reserved `global` repository; got '{}'",
             target.repository()
         );
         assert_eq!(
             target,
             global_descriptor_id(&patches),
-            "global-root selection must equal global_descriptor_id"
+            "global selection must equal global_descriptor_id"
         );
     }
 
-    /// Without `--global-root`, a base identifier selects its package-specific
-    /// sub-path target — NOT the registry root.
+    /// Without `--global`, a base identifier selects its package-specific
+    /// sub-path target — NOT the reserved global repository.
     #[test]
     fn select_publish_target_base_is_package_specific_sub_path() {
         let patches = patches();
@@ -744,7 +748,7 @@ mod tests {
         assert_ne!(
             target.repository(),
             global_descriptor_id(&patches).repository(),
-            "package-specific target must differ from the global root"
+            "package-specific target must differ from the global descriptor"
         );
     }
 }

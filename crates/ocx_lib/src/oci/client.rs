@@ -3748,8 +3748,8 @@ mod tests {
         .to_string()
         .into_bytes();
 
-        // Global-root patch repo identifier (empty repository at the patch registry).
-        let patch_repo = Identifier::new_registry("", "patches.example.com");
+        // Global patch repo identifier (reserved `global` repository at the patch registry).
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
 
         let digest = client
             .push_patch_descriptor(&patch_repo, &descriptor_bytes)
@@ -3805,7 +3805,7 @@ mod tests {
     async fn push_patch_descriptor_rejects_malformed_descriptor() {
         let data = StubTransportData::new();
         let client = stub(&data);
-        let patch_repo = Identifier::new_registry("", "patches.example.com");
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
 
         let result = client.push_patch_descriptor(&patch_repo, b"not valid json {{{").await;
         assert!(

@@ -48,7 +48,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::{
-    config::patch::{ResolvedPatchConfig, expand_patch_path},
+    config::patch::{PatchConfig, ResolvedPatchConfig, expand_patch_path},
     log,
     oci::{self, Identifier},
     package::install_info::InstallInfo,
@@ -208,11 +208,11 @@ pub enum PatchDiscoveryMode {
 ///   both sources, otherwise a required global companion (e.g. a corp CA that
 ///   matches `*`) would never be installed for that base and a later offline
 ///   `exec` would fail closed.
-/// - [`GlobalOnly`](PatchDescriptorScope::GlobalOnly): only the global root
+/// - [`GlobalOnly`](PatchDescriptorScope::GlobalOnly): only the global
 ///   descriptor. Used by the sync path when there are zero installed bases so
-///   the root is still refreshed WITHOUT fabricating a synthetic base whose
-///   empty-repository template would probe an extra package-specific source
-///   outside the known set.
+///   the global descriptor is still refreshed WITHOUT fabricating a synthetic
+///   base whose path-template expansion would probe an extra package-specific
+///   source outside the known set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PatchDescriptorScope {
     /// Global root descriptor + the package-specific descriptor for `base_id`.
@@ -318,13 +318,11 @@ impl PackageManager {
         let blob_store = &self.file_structure().blobs;
 
         // Build identifiers for the two descriptor sources:
-        // (a) global root descriptor — empty repository at the patch registry
+        // (a) global descriptor — reserved `global` repository at the patch registry
         // (b) package-specific descriptor — per-identifier sub-path
         // Build the descriptor source list per the requested scope. Under
         // `GlobalOnly` the package-specific id is NEVER computed, so a synthetic
-        // `base_id` (e.g. the empty-repository placeholder the sync path uses for
-        // the zero-installed-bases case) cannot probe an extra source outside the
-        // known set.
+        // `base_id` cannot probe an extra source outside the known set.
         let global_id = global_descriptor_id(patches);
         let descriptor_ids: Vec<Identifier> = match scope {
             // Global first (lower precedence for dedup); package-specific second
@@ -597,25 +595,55 @@ impl PackageManager {
 /// repository, then constructs an `Identifier` rooted at `patches.registry`
 /// tagged with [`InternalTag::PATCH_TAG`].
 ///
-/// The global (root) descriptor identifier has an empty sub-path at the
-/// registry root — `Identifier::new_registry("", patches.registry)` — but
-/// the default path template always produces a non-empty sub-path, so the
-/// two identifiers never collide.
+/// The global descriptor identifier uses the reserved single-segment
+/// [`GLOBAL_PATCH_REPOSITORY`] repository. The default path template always
+/// produces a two-or-more-segment sub-path, so the two identifiers never
+/// collide. A custom template can break that assumption (e.g. `path = "global"`,
+/// or `{repository}` for a base repository named `global`); the reservation
+/// guard below detects such a collapse and falls back to the default
+/// two-segment form so a per-package descriptor can never address — and thus
+/// overwrite or shadow — the reserved global slot.
 pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
     let sub_path = expand_patch_path(&patches.path_template, base_id.registry(), base_id.repository());
+    // Reservation guard: a custom `path` template must never collapse a
+    // per-package descriptor onto the reserved single-segment `global` slot.
+    // Fall back to the default `<registry-slug>/<repository>` form, which is
+    // always two or more segments and so can never equal the reserved name.
+    let sub_path = if sub_path == GLOBAL_PATCH_REPOSITORY {
+        expand_patch_path(
+            PatchConfig::DEFAULT_PATH_TEMPLATE,
+            base_id.registry(),
+            base_id.repository(),
+        )
+    } else {
+        sub_path
+    };
     Identifier::new_registry(&sub_path, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
-/// Compute the global (root) patch-registry `Identifier`.
+/// The reserved repository name for the global patch descriptor.
 ///
-/// The global descriptor lives at the registry root with the `__ocx.patch`
-/// tag. Its sub-path is empty (the `Identifier` repository is the empty
-/// string), which is structurally distinct from any package-specific
-/// sub-path (the default template `{registry}/{repository}` always expands
-/// to at least one non-empty component for a well-formed base identifier, so
-/// the two identifiers never collide).
+/// The global descriptor applies to every base. It lives at this single fixed
+/// repository under the patch registry — `<patch-registry>/global` — tagged
+/// with `__ocx.patch`. A single path segment cannot collide with the default
+/// package-specific sub-path, which always has two or more segments
+/// (`<registry-slug>/<repository>`). [`patch_descriptor_id`] additionally
+/// enforces the reservation for custom templates: if an expanded per-package
+/// path would equal this name, it falls back to the default two-segment form,
+/// so the global slot is never reachable through the per-package path. Unlike
+/// an empty repository (the former encoding), a normal repository name is a
+/// valid OCI path component accepted by every registry, including Docker
+/// `registry:2`.
+pub const GLOBAL_PATCH_REPOSITORY: &str = "global";
+
+/// Compute the global patch-registry `Identifier`.
+///
+/// The global descriptor lives at the reserved [`GLOBAL_PATCH_REPOSITORY`]
+/// repository under the patch registry, tagged with `__ocx.patch`. It is
+/// structurally distinct from any package-specific sub-path (which always has
+/// two or more segments), so the two identifiers never collide.
 pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
-    Identifier::new_registry("", &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
+    Identifier::new_registry(GLOBAL_PATCH_REPOSITORY, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
 /// Fetch, persist, and record the discovery state for one descriptor source.
@@ -1163,13 +1191,15 @@ mod tests {
         );
     }
 
-    /// `global_descriptor_id` produces a registry-root identifier (empty or
-    /// root repository) tagged with `PATCH_TAG` at the patch registry.
+    /// `global_descriptor_id` produces the reserved single-segment `global`
+    /// repository tagged with `PATCH_TAG` at the patch registry.
     ///
     /// The global descriptor is structurally distinct from any package-specific
     /// sub-path: the default template `{registry}/{repository}` always expands
-    /// to at least one non-empty component for a well-formed base identifier, so
-    /// the two identifiers never collide.
+    /// to two or more segments for a well-formed base identifier, while the
+    /// global repository is one segment, so the two identifiers never collide.
+    /// A normal repository name (not an empty path) is a valid OCI path
+    /// component accepted by every registry, including Docker `registry:2`.
     ///
     /// Traces: TESTABILITY §patch-repo Identifier derivation (global root is
     /// DISTINCT from any sub-path); DELIVERABLES 2c.
@@ -1184,11 +1214,85 @@ mod tests {
         assert_eq!(global_id.registry(), "patches.corp.com");
         // Both must carry PATCH_TAG.
         assert_eq!(global_id.tag(), Some(InternalTag::PATCH_TAG));
+        // The global descriptor uses the reserved single-segment repository.
+        assert_eq!(global_id.repository(), GLOBAL_PATCH_REPOSITORY);
+        assert!(
+            !global_id.repository().contains('/'),
+            "global descriptor repository must be a single path segment (collision-proof); got '{}'",
+            global_id.repository()
+        );
+        // It must be a non-empty, valid OCI path component (not the empty root).
+        assert!(
+            !global_id.repository().is_empty(),
+            "global descriptor repository must not be empty"
+        );
         // The global and package-specific repositories must differ.
         assert_ne!(
             global_id.repository(),
             pkg_specific_id.repository(),
             "global descriptor repository must differ from package-specific sub-path"
+        );
+    }
+
+    /// A misconfigured literal template `path = "global"` must NOT route a
+    /// per-package descriptor onto the reserved global slot. The reservation
+    /// guard in `patch_descriptor_id` rewrites the collapse to the default
+    /// two-segment form, keeping per-package and global descriptors distinct so
+    /// a per-base `patch publish` can never overwrite the org-wide descriptor.
+    ///
+    /// Traces: reservation guard (Codex review 2026-06-21) — the `global`
+    /// repository is enforced, not merely documented.
+    #[test]
+    fn patch_descriptor_id_literal_global_template_does_not_collide() {
+        let mut patches = test_patch_config();
+        patches.path_template = "global".to_string();
+        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+
+        let pkg_id = patch_descriptor_id(&patches, &base_id);
+        let global_id = global_descriptor_id(&patches);
+
+        assert_ne!(
+            pkg_id.repository(),
+            GLOBAL_PATCH_REPOSITORY,
+            "literal `path = \"global\"` must not collapse onto the reserved global slot"
+        );
+        assert_ne!(
+            pkg_id.repository(),
+            global_id.repository(),
+            "per-package and global descriptor repositories must stay distinct"
+        );
+        // The fallback uses the default form, so the base repository survives.
+        assert!(
+            pkg_id.repository().contains("cmake"),
+            "fallback must preserve the base repository component; got '{}'",
+            pkg_id.repository()
+        );
+    }
+
+    /// Template `{repository}` for a base repository literally named `global`
+    /// would expand onto the reserved slot. The reservation guard must rewrite
+    /// it to the default two-segment form.
+    ///
+    /// Traces: reservation guard (Codex review 2026-06-21) — dynamic collapse
+    /// (data-dependent, not statically visible in the template) is also caught.
+    #[test]
+    fn patch_descriptor_id_repository_named_global_does_not_collide() {
+        let mut patches = test_patch_config();
+        patches.path_template = "{repository}".to_string();
+        let base_id = Identifier::parse("ocx.sh/global:1.0").expect("valid identifier");
+
+        let pkg_id = patch_descriptor_id(&patches, &base_id);
+        let global_id = global_descriptor_id(&patches);
+
+        assert_ne!(
+            pkg_id.repository(),
+            GLOBAL_PATCH_REPOSITORY,
+            "`{{repository}}` with a base repo named `global` must not collapse onto the reserved slot"
+        );
+        assert_ne!(
+            pkg_id.repository(),
+            global_id.repository(),
+            "per-package and global descriptor repositories must stay distinct"
         );
     }
 

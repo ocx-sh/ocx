@@ -39,8 +39,9 @@ pub struct PatchConfig {
     ///
     /// Default: `"{registry}/{repository}"`.
     ///
-    /// The template always produces a non-empty sub-path so the registry root
-    /// is reserved for the global descriptor (`__ocx.patch` at the root).
+    /// The template always produces a two-or-more-segment sub-path, which never
+    /// collides with the reserved single-segment `global` repository that holds
+    /// the global descriptor (`<registry>/global:__ocx.patch`).
     ///
     /// [`to_relaxed_slug`]: crate::utility::string_ext::StringExt::to_relaxed_slug
     pub path: Option<String>,
@@ -237,10 +238,15 @@ pub fn resolve_patch_config(config: &crate::config::Config) -> Result<Option<Res
 ///   (e.g. `"ghcr.io"` → `"ghcr.io"`, `"localhost:5000"` → `"localhost_5000"`).
 /// - `{repository}` — the repository path verbatim (e.g. `"acme/cli"`).
 ///
-/// Always yields a non-empty sub-path so the registry root is reserved for the
-/// global descriptor (`__ocx.patch` at the root). This is guaranteed by the
-/// default template `"{registry}/{repository}"` which always expands to at
-/// least one non-empty component when the identifier is well-formed.
+/// Returns the verbatim template expansion (never empty — see the guard
+/// below). This is a pure string substitution: it does NOT enforce the
+/// reserved-name reservation. The default template `"{registry}/{repository}"`
+/// always expands to two or more segments, so it can never equal the reserved
+/// single-segment `global` repository; a custom template, however, could
+/// (e.g. `path = "global"`). Collision-safety against the global slot is
+/// enforced one layer up, in
+/// [`patch_descriptor_id`](crate::package_manager::tasks::patch_discovery::patch_descriptor_id),
+/// which rewrites any expansion that collapses onto the reserved name.
 ///
 /// Used by `SitePatchResolver` (Phase 3+) to compute the per-package patch
 /// repo address from the configured template.

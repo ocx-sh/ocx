@@ -27,7 +27,7 @@
 //! - **CLI** owns the scratch `FileStructure`, descriptor file I/O, and companion
 //!   archive materialization (`pull_local` / registry pull).
 //! - **This lib method** owns the deterministic seed-and-compose: persist the
-//!   descriptor blobs, record the global-root patch tag, run `resolve_env` over
+//!   descriptor blobs, record the global patch tag, run `resolve_env` over
 //!   the base, and return the matched companions + composed entries.
 
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub struct PatchTestComposition {
 // ── PackageManager::seed_and_compose_patch_test ────────────────────────────────
 
 impl PackageManager {
-    /// Seed `descriptor_bytes` as a global-root patch descriptor in this
+    /// Seed `descriptor_bytes` as a global patch descriptor in this
     /// manager's (scratch) store and compose the resulting companion overlay
     /// onto `base`.
     ///
@@ -71,7 +71,7 @@ impl PackageManager {
     /// 1. Persist the descriptor blobs (synthesized single-layer manifest +
     ///    descriptor layer) into the CAS via
     ///    [`crate::patch::persist_patch_descriptor`].
-    /// 2. Write the global-root `LookedHasDescriptor` patch tag (so any matching
+    /// 2. Write the global `LookedHasDescriptor` patch tag (so any matching
     ///    rule applies) via [`super::patch_discovery::PatchTagMap::write_has_descriptor`].
     /// 3. Run [`PackageManager::resolve_env`] over `base` (`self_view = false`) so
     ///    the seeded descriptor's companions are composed. A required companion
@@ -83,7 +83,7 @@ impl PackageManager {
     /// descriptor names for `base` into this manager's store (the maintainer
     /// supplies them via `--companion-archive` or a registry pull).
     ///
-    /// `patches` is the already-resolved patch tier — the global-root identifier
+    /// `patches` is the already-resolved patch tier — the global identifier
     /// and the `required` posture both come from it. The CLI resolves and
     /// validates the tier before calling, so this method cannot reach a
     /// no-tier state (DIP: depend on the resolved value, not a config lookup).
@@ -124,7 +124,7 @@ impl PackageManager {
         .await
         .map_err(PackageErrorKind::PatchDiscovery)?;
 
-        // ── Step 2: Record the global-root LookedHasDescriptor patch tag. ──
+        // ── Step 2: Record the global LookedHasDescriptor patch tag. ──
         //
         // Seeding at the global root means any matching rule applies to the base,
         // mirroring how Phase 3 discovery records a found descriptor. The

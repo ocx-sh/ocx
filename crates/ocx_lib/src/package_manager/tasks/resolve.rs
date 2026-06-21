@@ -432,7 +432,7 @@ impl PackageManager {
 
         // ── Step 1: Load global descriptor from persisted local state (offline-only). ──
         //
-        // The global descriptor lives at the patch registry root (empty repository).
+        // The global descriptor lives at the reserved `global` repository in the patch registry.
         // Its discovery state was recorded by `discover_and_install_patches` in Phase 3.
         // SECURITY: Phase 5 gap — `load_descriptor_for_id` reads the tag-store path
         // derived from `patches.registry` (operator-controlled via `[patches]` config).
@@ -2520,6 +2520,108 @@ mod phase4_spec_tests {
         assert!(
             first_idx < last_idx,
             "C1 live: root's MY_VAR index ({first_idx}) must be less than companion's index ({last_idx})"
+        );
+    }
+
+    /// Live overlay × visibility: a companion whose INTERFACE var is overlaid on
+    /// a PRIVATE dependency is ABSENT from the consumer view and PRESENT under
+    /// `--self`. The global rule targets ONLY the dep (not the root), so the
+    /// companion var can reach the env exclusively when the dep is admitted —
+    /// proving the live patch-overlay path honours the dependency-visibility
+    /// surface end-to-end, not just the admitted-set gate in isolation.
+    ///
+    /// Traceability: C3 visibility tiering on the live companion-overlay path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_on_private_dep_overlaid_only_under_self_view() {
+        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
+        use crate::oci::Algorithm;
+
+        let dir = TempDir::new().unwrap();
+        let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
+        let store = manager.file_structure().packages.clone();
+        let blob_store = manager.file_structure().blobs.clone();
+        let tag_store = manager.file_structure().tags.clone();
+
+        // ── Companion: INTERFACE var DEP_PATCH_VAR=present ─────────────────────
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("dep-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("dep-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "DEP_PATCH_VAR",
+            "present",
+            Visibility::INTERFACE,
+        );
+        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+
+        // ── Global descriptor: rule matches ONLY the private dep, not the root ──
+        let descriptor_json = serde_json::json!({
+            "version": 1,
+            "rules": [{
+                "match": "*privatedep*",
+                "packages": [companion_tag_id.to_string()],
+            }]
+        })
+        .to_string();
+        let layer_bytes = descriptor_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+        let global_id = global_descriptor_id(&test_patch_config());
+        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
+            .await
+            .unwrap();
+
+        // ── Root with a PRIVATE dep "privatedep" ───────────────────────────────
+        let dep_id = pinned("privatedep", 'd');
+        seed_package_in_store(&store, &dep_id, &ResolvedPackage::new());
+        let root = Arc::new(make_install_info(
+            dir.path(),
+            "rootpkg",
+            'r',
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: dep_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                }],
+            },
+        ));
+
+        // Consumer view: private dep NOT admitted → rule never matches → var ABSENT.
+        let consumer = manager.resolve_env(std::slice::from_ref(&root), false).await.unwrap();
+        assert!(
+            !consumer.iter().any(|e| e.key == "DEP_PATCH_VAR"),
+            "patch on a PRIVATE dep must be absent from the consumer view; entries: {consumer:?}"
+        );
+
+        // Self view: private dep admitted → rule matches dep → var PRESENT.
+        let self_view = manager.resolve_env(std::slice::from_ref(&root), true).await.unwrap();
+        assert!(
+            self_view
+                .iter()
+                .any(|e| e.key == "DEP_PATCH_VAR" && e.value == "present"),
+            "patch on a PRIVATE dep must be present under --self; entries: {self_view:?}"
         );
     }
 

@@ -8,9 +8,9 @@
 #       patches/java-truststore:1.0.0 — JAVA_TOOL_OPTIONS, JVM_TRUSTSTORE_PATH
 #       patches/license-server:1.0.0  — LICENSE_SERVER, LM_LICENSE_FILE
 #   - Publishes THREE descriptors:
-#       1. Global root (--global-root): match="*", companion=corp-ca-bundle, required=true
-#       2. Java-specific: match="*/base-java:*", companion=java-truststore, required=true
-#       3. Fail-open (base-tool): match="*/base-tool:*", companion=license-server, required=false
+#       1. Global (--global): match="*", companion=corp-ca-bundle, required=true
+#       2. Java-specific (base-java path): companion=java-truststore, required=true
+#       3. Fail-open (base-tool path): companion=license-server, required=false
 #
 # Prerequisites:
 #   source test/manual/scripts/env.sh      (sets OCX_DEFAULT_REGISTRY, OCX_HOME, etc.)
@@ -222,74 +222,31 @@ push_patch_pkg base-java
 
 # ── Step 3: Publish patch descriptors ─────────────────────────────────────────
 #
-# NOTE ON GLOBAL ROOT: The `ocx patch publish --global-root` command pushes
-# the global descriptor to the OCI registry with an empty repository path.
-# Docker's registry:2 rejects empty-path repositories (returns 404 for
-# `POST /v2//blobs/uploads/`). This is a registry:2 limitation, not an OCX bug.
-# In production, the patch registry is a separate host (e.g.
-# patches.corp.internal) that supports the empty-path root.
-#
-# WORKAROUND FOR LOCAL RIG: publish the "global" corp CA bundle descriptor to
-# each base package's path individually with match="*" so it matches any base.
-# For two bases (base-tool, base-java) this is two publish operations.
-# A real corp operator would use a proper patch registry host that supports
-# the global root path.
+# The global descriptor (match="*") applies to EVERY base and lives at the
+# reserved `global` repository in the patch registry
+# (`<patch-registry>/global:__ocx.patch`). The two base-specific descriptors
+# layer per-package companions on top of it.
 
 DESCRIPTORS="${PKG_ROOT}/descriptors"
 
-# 3a. Corp CA bundle published to base-tool's path (match=*, required=true).
-#     In production this would be `--global-root`; here we publish per-base.
-ocx_step "publishing corp-ca-bundle descriptor to base-tool path (match=*, required=true)"
+# 3a. Global corp CA bundle (match="*", required=true) — applies to every base.
+ocx_step "publishing global corp-ca-bundle descriptor (match=*, required=true)"
 ocx patch publish \
     --descriptor-file "${DESCRIPTORS}/global.json" \
+    --global
+
+# 3b. base-tool gets the fail-open license-server companion (required=false).
+ocx_step "publishing license-server descriptor to base-tool path (required=false)"
+ocx patch publish \
+    --descriptor-file "${DESCRIPTORS}/license-fail-open.json" \
     "$(id_of "patches/base-tool")"
 
-# 3b. Corp CA bundle published to base-java's path as well.
-ocx_step "publishing corp-ca-bundle descriptor to base-java path (match=*, required=true)"
-ocx patch publish \
-    --descriptor-file "${DESCRIPTORS}/global.json" \
-    "$(id_of "patches/base-java")"
-
-# 3c. Java-specific descriptor: only base-java gets java-truststore (in addition to CA).
-ocx_step "publishing java-truststore descriptor to base-java path"
-# NOTE: Two descriptors exist at base-java's path from steps 3b and 3c.
-# OCX replaces the descriptor on publish — there is only ONE descriptor per path.
-# To combine corp-ca + java-truststore for base-java we put both rules in one descriptor.
-# The java-specific.json only has the truststore rule; we publish it separately
-# (overwriting 3b) so the walkthrough shows "re-publish a companion" (see PATCHES.md).
-# The PATCHES.md walkthrough uses `ocx patch test` to preview before publishing.
+# 3c. base-java gets the java-truststore companion (required=true), on top of
+#     the global corp CA bundle.
+ocx_step "publishing java-truststore descriptor to base-java path (required=true)"
 ocx patch publish \
     --descriptor-file "${DESCRIPTORS}/java-specific.json" \
     "$(id_of "patches/base-java")"
-
-# 3d. Fail-open license descriptor: base-tool optionally gets license-server.
-#     This ALSO overwrites the corp-ca descriptor at base-tool's path!
-#     For the walkthrough, we'll use `ocx patch test` to preview the combined descriptor.
-#     We create a combined descriptor inline for base-tool below.
-ocx_step "creating combined descriptor for base-tool (corp-ca + license-server)"
-COMBINED_TOOL_DESC="${DESCRIPTORS}/base-tool-combined.json"
-cat >"${COMBINED_TOOL_DESC}" <<EOF
-{
-  "version": 1,
-  "rules": [
-    {
-      "match": "*",
-      "packages": ["localhost:5000/patches/corp-ca-bundle:1.0.0"],
-      "required": true
-    },
-    {
-      "match": "localhost:5000/patches/base-tool*",
-      "packages": ["localhost:5000/patches/license-server:1.0.0"],
-      "required": false
-    }
-  ]
-}
-EOF
-
-ocx_step "publishing combined descriptor to base-tool path (corp-ca required + license fail-open)"
-ocx patch publish \
-    --descriptor-file "${COMBINED_TOOL_DESC}" \
-    "$(id_of "patches/base-tool")"
 
 # ── Step 4: Update the local index ───────────────────────────────────────────
 
@@ -317,8 +274,9 @@ echo "  localhost:5000/patches/base-tool:1.0.0        (base: mytool binary)"
 echo "  localhost:5000/patches/base-java:1.0.0        (base: java binary)"
 echo
 echo "Published descriptors:"
-echo "  base-tool path : corp-ca-bundle (required=true) + license-server (required=false)"
-echo "  base-java path : java-truststore (required=true; corp-ca-bundle NOT included — see PATCHES.md)"
+echo "  global         : corp-ca-bundle (match=*, required=true) — applies to every base"
+echo "  base-tool path : license-server (required=false, fail-open)"
+echo "  base-java path : java-truststore (required=true)"
 echo
 echo "Now try — CONSUMER perspective:"
 echo
