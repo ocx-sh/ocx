@@ -1,31 +1,43 @@
 # Patches Feature — Manual Exploration
 
-This document walks through the three use-cases implemented in `test/manual/`
-for the OCX patch overlay feature. All commands assume the current directory is
-the repo root (`/path/to/ocx-sion`).
+This document walks through the patch use-cases set up by
+`test/manual/scripts/setup-patches.sh`, from both the **consumer** perspective
+(use-cases 1–3: installing and running patched packages) and the **maintainer**
+perspective (authoring, testing, publishing, freezing, and syncing
+descriptors). All commands assume the current directory is the repo root
+(`/path/to/ocx-sion`).
 
 ## Prerequisites
 
-1. Local registry running on `localhost:5000`:
+Run these from the repo root, in order:
+
+1. Start a local registry on `localhost:5000`:
    ```sh
    docker run -d -p 5000:5000 --name registry registry:2
    ```
-2. Packages published to the registry and OCX home populated:
+   (or, from the repo: `cd test && docker compose up -d`)
+2. Build the binary the rig will use:
+   ```sh
+   cargo build --release -p ocx
+   ```
+3. Point the shell at the local registry and a disposable `OCX_HOME`:
+   ```sh
+   source test/manual/scripts/env.sh
+   ```
+   This exports `OCX_DEFAULT_REGISTRY=localhost:5000`,
+   `OCX_INSECURE_REGISTRIES=localhost:5000`, and a gitignored
+   `OCX_HOME=test/manual/.ocx-home/` so manual experiments never touch your
+   daily `~/.ocx`.
+4. Publish the packages + descriptors and write the `[patches]` config:
    ```sh
    test/manual/scripts/setup-patches.sh
    ```
-3. Build the debug binary:
-   ```sh
-   cargo build -p ocx
-   ```
 
-The helper below reduces repetition. Source it or prefix every `ocx` call
-manually:
+For the ad-hoc `ocx` calls below, point `$OCX` at the binary you built
+(`setup-patches.sh` auto-detects release or debug on its own):
 
 ```sh
-export OCX=./target/debug/ocx
-export OCX_HOME=test/manual/.ocx-home
-export OCX_INSECURE_REGISTRIES=localhost:5000
+export OCX=./target/release/ocx
 ```
 
 ## Teardown
@@ -200,6 +212,118 @@ a debug-level skip message.
 
 ---
 
+## Maintainer perspective — author, test, publish, freeze, sync
+
+`setup-patches.sh` already published everything, so the consumer use-cases
+above work out of the box. This section walks the four maintainer commands so
+you can feel the authoring loop yourself: edit a descriptor, preview it,
+publish it, pin it, and refresh it.
+
+The descriptors live in `packages/patches/descriptors/`:
+
+| File | Rule |
+|------|------|
+| `global.json` | `match="*"` → `corp-ca-bundle`, `required=true` |
+| `java-specific.json` | `match="localhost:5000/patches/base-java*"` → `java-truststore`, `required=true` |
+| `license-fail-open.json` | `match="localhost:5000/patches/base-tool:*"` → `license-server`, `required=false` |
+| `base-tool-combined.json` | the global CA rule **and** the fail-open license rule |
+
+### 1. Preview a descriptor without publishing (`ocx patch test`)
+
+`patch test` composes a descriptor onto a base in a scratch store — no registry
+write, no change to `$OCX_HOME`. With no trailing command it prints the composed
+environment:
+
+```sh
+$OCX patch test \
+    --descriptor-file test/manual/packages/patches/descriptors/global.json \
+    localhost:5000/patches/base-tool:1.0.0
+```
+
+Add a trailing command to run it in the composed env (here the base's own
+`mytool` stub, which echoes whether `SSL_CERT_FILE` is set):
+
+```sh
+$OCX patch test \
+    --descriptor-file test/manual/packages/patches/descriptors/global.json \
+    localhost:5000/patches/base-tool:1.0.0 -- mytool
+```
+
+Required companions must resolve — installed locally or pullable from the
+registry. For a companion you have built but not yet pushed, hand `patch test` a
+local archive so you can preview before publishing:
+
+```sh
+$OCX patch test \
+    --descriptor-file test/manual/packages/patches/descriptors/global.json \
+    --companion-archive test/manual/packages/patches/corp-ca-bundle/out/corp-ca-bundle-1.0.0.tar.xz \
+    localhost:5000/patches/base-tool:1.0.0 -- mytool
+```
+
+### 2. Publish the companion, then the descriptor (`ocx patch publish`)
+
+A descriptor only references companions by identifier, so publish the companion
+package itself first (this is what `setup-patches.sh` did via `ocx package
+push`). Then publish the descriptor to a base's package-specific path:
+
+```sh
+$OCX patch publish \
+    --descriptor-file test/manual/packages/patches/descriptors/base-tool-combined.json \
+    localhost:5000/patches/base-tool:1.0.0
+```
+
+`--global-root` publishes a descriptor that applies to every base instead of one
+named base:
+
+```sh
+$OCX patch publish \
+    --descriptor-file test/manual/packages/patches/descriptors/global.json \
+    --global-root
+```
+
+> Docker's `registry:2` rejects the empty-path repository the global root needs,
+> so on this local rig `--global-root` fails (404). `setup-patches.sh` works
+> around it by publishing the `match="*"` rule to each base's path instead. A
+> production patch-registry host supports the global root. See the note in
+> `setup-patches.sh`.
+
+### 3. Pin companion digests for reproducible builds (`ocx patch freeze`)
+
+OCI tags are mutable: the same `:1.0.0` tag may point at a new digest tomorrow.
+`patch freeze` resolves every companion + descriptor in the active overlay and
+writes `patches.snapshot.json` beside the active `ocx.lock`. On the manual rig
+the global toolchain under `$OCX_HOME` is the project in effect:
+
+```sh
+$OCX --global patch freeze
+```
+
+Point `OCX_PATCH_SNAPSHOT` at the written snapshot to make composition prefer
+the pinned digests and skip live tag lookups — even offline:
+
+```sh
+export OCX_PATCH_SNAPSHOT="$OCX_HOME/patches.snapshot.json"
+$OCX --offline package env --candidate --show-patches \
+    localhost:5000/patches/base-tool:1.0.0
+```
+
+Unset `OCX_PATCH_SNAPSHOT` to float back to live tags.
+
+### 4. Refresh descriptors + companions (`ocx patch sync`)
+
+After you re-publish a descriptor (point a companion at a new digest, or add a
+rule), `patch sync` re-fetches every descriptor for the installed bases plus the
+global root and installs any newly-referenced companions:
+
+```sh
+$OCX patch sync
+```
+
+`patch sync` is the only consumer-side command that contacts the patch registry;
+the install dirs and `resolve.json` of the base packages are never rewritten.
+
+---
+
 ## Known Product Bugs (found during exploration)
 
 ### Bug 1 — Phase 3 / Phase 4 identifier mismatch for match patterns
@@ -291,8 +415,10 @@ test/manual/
     java-truststore/build/   # JKS truststore companion (truststore/corp-trust.jks)
     license-server/build/    # No binary files; .keep placeholder required
     descriptors/
-      base-tool-combined.json  # Global catch-all (corp-ca) + base-tool scoped (license)
-      java-specific.json       # base-java scoped (java-truststore)
+      global.json              # match="*" -> corp-ca-bundle (required)
+      java-specific.json       # base-java scoped -> java-truststore (required)
+      license-fail-open.json   # base-tool scoped -> license-server (required=false)
+      base-tool-combined.json  # corp-ca (required) + license-server (fail-open)
   .ocx-home/                 # OCX state directory (populated by setup-patches.sh)
   PATCHES.md                 # This file
 ```

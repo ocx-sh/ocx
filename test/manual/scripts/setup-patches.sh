@@ -41,10 +41,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 MANUAL_ROOT="${REPO_ROOT}/test/manual"
 PKG_ROOT="${MANUAL_ROOT}/packages/patches"
 
-# Use the release binary so patch verbs are available.
-OCX_BIN="${REPO_ROOT}/target/release/ocx"
-if [[ ! -x "${OCX_BIN}" ]]; then
-    echo "error: ${OCX_BIN} not found. Run: cargo build --release" >&2
+# Resolve the ocx binary: honor an explicit OCX_BIN override, else prefer the
+# release build, else fall back to the debug build. Patch verbs are compiled
+# into both profiles.
+if [[ -n "${OCX_BIN:-}" && -x "${OCX_BIN}" ]]; then
+    : # use the caller-provided OCX_BIN as-is
+elif [[ -x "${REPO_ROOT}/target/release/ocx" ]]; then
+    OCX_BIN="${REPO_ROOT}/target/release/ocx"
+elif [[ -x "${REPO_ROOT}/target/debug/ocx" ]]; then
+    OCX_BIN="${REPO_ROOT}/target/debug/ocx"
+else
+    echo "error: no ocx binary found under ${REPO_ROOT}/target/{release,debug}/." >&2
+    echo "       build one first: cargo build -p ocx   (or: cargo build --release -p ocx)" >&2
     exit 1
 fi
 
