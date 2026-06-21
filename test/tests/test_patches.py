@@ -35,6 +35,15 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
+# The global descriptor lives at a FIXED, registry-wide repository
+# (`<patch-registry>/global:__ocx.patch`). Several tests here publish to it,
+# and any base install with a `[patches]` tier probes it — so two patch tests
+# running concurrently on the shared registry:2 can overwrite each other's
+# global descriptor or observe a sibling's. Pin the whole module to a single
+# xdist worker so these tests run sequentially (deterministic order); other
+# test modules still parallelize, and none of them touch the `[patches]` tier.
+pytestmark = pytest.mark.xdist_group("patch_global_slot")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
