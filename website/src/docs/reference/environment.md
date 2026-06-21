@@ -254,6 +254,32 @@ OCX never silently continues with an empty mirror map when `OCX_MIRRORS` is set 
 
 For the full mirror semantics (replace behavior, auth, lockfile portability, interaction with `--offline`), see the [`[mirrors."<host>"]`][config-mirrors] configuration reference.
 
+### `OCX_PATCHES` {#ocx-patches}
+
+A JSON object encoding the resolved [`[patches]`][config-patches] tier. OCX serialises
+the active patch configuration into this variable and forwards it to every subprocess it
+spawns so child invocations — generated launchers, nested `ocx run` calls — apply the
+same companion overlay.
+
+```sh
+# Managed by OCX; usually not set manually. Shape produced by `apply_ocx_config`:
+export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_template":"{registry}/{repository}","required":true,"system_required":false}'
+```
+
+This variable is **resolution-affecting** and is forwarded to every subprocess
+automatically. Manually setting it overrides the `[patches]` config-file tier for that
+subprocess tree.
+
+::: warning Malformed values abort at startup
+A malformed `OCX_PATCHES` value (not valid JSON, or missing the `registry` field) is a
+**hard startup error**. OCX aborts rather than silently running without the operator-
+mandated companion overlay — a fail-closed posture that mirrors `OCX_MIRRORS` behavior.
+:::
+
+For the full patch semantics (descriptor format, companion installation, per-package
+opt-out), see the [`[patches]`][config-patches] configuration reference and the
+[Patching packages guide][patches-user-guide].
+
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
@@ -549,6 +575,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-ref]: ./configuration.md
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 [config-mirrors]: ./configuration.md#keys-mirrors
+[config-patches]: ./configuration.md#keys-patches
+[patches-user-guide]: ../user-guide/patches.md
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

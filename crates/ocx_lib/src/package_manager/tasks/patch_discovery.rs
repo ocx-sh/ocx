@@ -601,7 +601,7 @@ impl PackageManager {
 /// registry root — `Identifier::new_registry("", patches.registry)` — but
 /// the default path template always produces a non-empty sub-path, so the
 /// two identifiers never collide.
-pub(super) fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
+pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
     let sub_path = expand_patch_path(&patches.path_template, base_id.registry(), base_id.repository());
     Identifier::new_registry(&sub_path, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
@@ -614,7 +614,7 @@ pub(super) fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Ident
 /// sub-path (the default template `{registry}/{repository}` always expands
 /// to at least one non-empty component for a well-formed base identifier, so
 /// the two identifiers never collide).
-pub(super) fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
+pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
     Identifier::new_registry("", &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 

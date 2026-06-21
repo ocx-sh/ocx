@@ -285,13 +285,43 @@ impl PatchDescriptor {
         Ok(descriptor)
     }
 
+    /// Serialize this descriptor to canonical JSON bytes.
+    ///
+    /// The inverse of [`Self::from_json_bytes`]: a descriptor round-trips
+    /// through `from_json_bytes(&descriptor.to_json_bytes()?)`. Used by
+    /// `ocx patch publish` to encode an in-memory descriptor for the
+    /// `__ocx.patch` layer blob.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::patch::error::PatchError::InvalidDescriptorJson`] — the
+    ///   descriptor cannot be serialized to JSON (in practice unreachable for
+    ///   a well-formed descriptor, but surfaced as a typed error to keep the
+    ///   library free of panics).
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, crate::patch::error::PatchError> {
+        serde_json::to_vec(self).map_err(|source| crate::patch::error::PatchError::InvalidDescriptorJson { source })
+    }
+
     /// Collect all companion entries that apply to `base_identifier`.
     ///
     /// Iterates rules in order, applies the flat glob matcher from
-    /// [`crate::patch::matcher::glob_match`] over the base identifier's
-    /// canonical `Display` string, unions all matched companion identifiers, and
+    /// [`crate::patch::matcher::glob_match`] over the base identifier's canonical
+    /// `Display` string, unions all matched companion identifiers, and
     /// deduplicates by identifier (the **first** rule that matched a given
     /// identifier wins its `required` value).
+    ///
+    /// # Match form (C7 phase consistency)
+    ///
+    /// Each rule pattern is matched against BOTH the full canonical Display
+    /// (`registry/repository:tag[@digest]`) AND the digest-excluded tag-form
+    /// (`registry/repository:tag`). This keeps install-time discovery (which sees
+    /// a tag-form base id) and compose-time overlay (which sees a tag + install
+    /// digest) matching IDENTICALLY: a tag-anchored rule such as the ADR's `*:21`
+    /// matches whether or not an install digest is present, so a `required`
+    /// overlay that matched at install can never be silently dropped at exec.
+    /// Matching against an extra form only ever ADMITS more — and a companion
+    /// admitted but absent locally still fails closed downstream — so this cannot
+    /// open a fail-open path.
     ///
     /// The `tier_required_default` argument supplies the fallback fail posture
     /// from `ResolvedPatchConfig::required` — it is applied when a rule has
@@ -303,6 +333,12 @@ impl PatchDescriptor {
         use crate::patch::matcher::glob_match;
 
         let base_str = base_identifier.to_string();
+        // Digest-excluded tag-form so tag-anchored patterns (`*:21`) match
+        // regardless of an install digest — see the "Match form" doc above.
+        // `without_digest` keeps the tag and drops the `@sha256:...` suffix; when
+        // the base carries no digest the two strings are equal (one extra cheap
+        // glob, no behaviour change).
+        let base_tag_form = base_identifier.without_digest().to_string();
 
         // Accumulate companions in rule order, deduplicating by identifier.
         // A Vec + linear scan is fine here: descriptors have O(10) rules and
@@ -310,7 +346,7 @@ impl PatchDescriptor {
         let mut result: Vec<CompanionEntry> = Vec::new();
 
         for rule in &self.rules {
-            if !glob_match(&rule.match_pattern, &base_str) {
+            if !glob_match(&rule.match_pattern, &base_str) && !glob_match(&rule.match_pattern, &base_tag_form) {
                 continue;
             }
 
@@ -511,6 +547,44 @@ mod tests {
         assert!(!companions[1].required, "rule 1 overrides required=false");
     }
 
+    /// C7 regression (Codex final-pass BLOCK): an END-ANCHORED tag rule (the
+    /// ADR's `*:21` shape — no trailing glob to absorb a digest) must match a
+    /// base that carries an install DIGEST, which is the form the COMPOSE-time
+    /// overlay sees (the admitted set carries `registry/repo:tag@digest`). Before
+    /// the fix, compose matched against the advisory-stripped `registry/repo@digest`
+    /// form, so a `required` overlay that matched at install was silently dropped
+    /// at exec — a tool ran without its mandated companion env (fail-open, not
+    /// fail-closed).
+    #[test]
+    fn collect_companions_end_anchored_tag_rule_matches_digest_bearing_base() {
+        let descriptor = PatchDescriptor::from_json_bytes(
+            br#"{"version":1,"rules":[{"match":"*:21","packages":["internal.company.com/jdk-trust:1.0"],"required":true}]}"#,
+        )
+        .expect("must parse");
+        // Compose-time base id: tag AND install digest (what `admitted` carries).
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let base = Identifier::parse(&format!("ocx.sh/java:21@{digest}")).expect("valid digest-pinned identifier");
+        let companions = descriptor.collect_companions(&base, true);
+        assert_eq!(
+            companions.len(),
+            1,
+            "end-anchored tag rule `*:21` must match the digest-bearing compose form (C7); got {companions:?}"
+        );
+        assert!(
+            companions[0].required,
+            "the required overlay must survive into the compose-time match"
+        );
+
+        // And it must ALSO match the digest-less discovery form — both phases
+        // resolve identically (no drift).
+        let discovery_base = Identifier::parse("ocx.sh/java:21").expect("valid");
+        assert_eq!(
+            descriptor.collect_companions(&discovery_base, true).len(),
+            1,
+            "discovery (digest-less) and compose (digest-bearing) must match identically"
+        );
+    }
+
     /// When the same identifier appears in two rules, the first rule wins its
     /// `required` value (dedup = first-match-wins).
     #[test]
@@ -574,6 +648,37 @@ mod tests {
         let base = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let companions = descriptor.collect_companions(&base, true);
         assert!(companions.is_empty(), "cmake must not match a java-only descriptor");
+    }
+
+    // ── to_json_bytes round-trip ──────────────────────────────────────────────
+
+    /// `from_json_bytes ∘ to_json_bytes` is the identity on the parsed
+    /// descriptor: re-encoding then re-parsing yields an equivalent descriptor
+    /// (same version, same rule shape).
+    #[test]
+    fn to_json_bytes_round_trips_through_from_json_bytes() {
+        let original = PatchDescriptor::from_json_bytes(&adr_example_json()).expect("ADR example must parse");
+        let encoded = original.to_json_bytes().expect("descriptor must serialize");
+        let reparsed = PatchDescriptor::from_json_bytes(&encoded).expect("re-encoded descriptor must parse");
+
+        assert_eq!(reparsed.version, original.version, "version must survive round-trip");
+        assert_eq!(
+            reparsed.rules.len(),
+            original.rules.len(),
+            "rule count must survive round-trip"
+        );
+        for (a, b) in reparsed.rules.iter().zip(original.rules.iter()) {
+            assert_eq!(
+                a.match_pattern, b.match_pattern,
+                "match pattern must survive round-trip"
+            );
+            assert_eq!(a.required, b.required, "required flag must survive round-trip");
+            assert_eq!(
+                a.packages.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                b.packages.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                "companion identifiers must survive round-trip"
+            );
+        }
     }
 
     // ── Media-type constants ──────────────────────────────────────────────────

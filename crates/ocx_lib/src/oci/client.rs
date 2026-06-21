@@ -1023,6 +1023,92 @@ impl Client {
         Ok(())
     }
 
+    // ── Patch descriptor operations ───────────────────────────────────────
+
+    /// Pushes a `__ocx.patch` descriptor artifact to the patch registry.
+    ///
+    /// Builds an OCI ImageManifest with `artifactType` set to
+    /// [`crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE`], an empty `{}` config blob,
+    /// and a single layer carrying the descriptor JSON
+    /// ([`crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE`]). The artifact is
+    /// pushed to the `__ocx.patch` internal tag on `patch_repo_id`.
+    ///
+    /// `descriptor_bytes` is validated by parsing it as a
+    /// [`crate::patch::PatchDescriptor`] before any network call — a malformed
+    /// descriptor is rejected up front rather than published.
+    ///
+    /// Returns the manifest digest of the pushed `__ocx.patch` artifact.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::InvalidManifest`] — `descriptor_bytes` is not a valid
+    ///   patch descriptor, or manifest assembly failed.
+    /// - [`ClientError::Authentication`] / [`ClientError::Registry`] — auth or a
+    ///   blob/manifest push failed.
+    pub async fn push_patch_descriptor(
+        &self,
+        patch_repo_id: &Identifier,
+        descriptor_bytes: &[u8],
+    ) -> std::result::Result<oci::Digest, ClientError> {
+        // Validate the descriptor parses before pushing — reject malformed input.
+        crate::patch::PatchDescriptor::from_json_bytes(descriptor_bytes)
+            .map_err(|e| ClientError::InvalidManifest(format!("invalid patch descriptor: {e}")))?;
+
+        let patch_identifier = patch_repo_id.clone_with_tag(InternalTag::PATCH_TAG);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let image = patch_identifier.canonical_reference();
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+
+        let config_data = b"{}".to_vec();
+        let config_digest = Algorithm::Sha256.hash(&config_data);
+        self.transport
+            .push_blob(&image, config_data, &config_digest, transport::no_progress())
+            .await?;
+
+        let layer_len = descriptor_bytes.len();
+        let layer_digest = Algorithm::Sha256.hash(descriptor_bytes);
+        self.transport
+            .push_blob(
+                &image,
+                descriptor_bytes.to_vec(),
+                &layer_digest,
+                transport::no_progress(),
+            )
+            .await?;
+
+        let layer_size = i64::try_from(layer_len)
+            .map_err(|_| ClientError::InvalidManifest(format!("descriptor blob size {layer_len} exceeds i64::MAX")))?;
+        let layers = vec![oci::Descriptor {
+            media_type: crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE.to_string(),
+            digest: layer_digest.to_string(),
+            size: layer_size,
+            urls: None,
+            annotations: Some([(oci::annotations::TITLE.to_string(), InternalTag::PATCH_TAG.to_string())].into()),
+        }];
+
+        let parts = super::manifest_builder::ManifestBuilder::new()
+            .artifact_type(crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE)
+            .config_bytes(MEDIA_TYPE_OCI_EMPTY_CONFIG, b"{}".to_vec())
+            .layers(layers)
+            .build()?;
+        // Sanity: the empty-config blob digest computed by the builder must
+        // match the one we already pushed above.
+        debug_assert_eq!(parts.config_digest.to_string(), config_digest.to_string());
+        let manifest_digest = parts.manifest_digest.clone();
+
+        // Push to the tag reference directly (not by digest) so the tag is created.
+        self.transport
+            .push_manifest_raw(&image, parts.manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .await?;
+
+        log::debug!(
+            "Pushed patch descriptor for {} (manifest: {})",
+            patch_repo_id,
+            manifest_digest
+        );
+        Ok(manifest_digest)
+    }
+
     /// Pulls the description artifact from the `__ocx.desc` tag.
     ///
     /// Returns `Ok(None)` if no description tag exists for the identifier.
@@ -3641,6 +3727,95 @@ mod tests {
             "T-arch-A1: `canonical_reference` found in file(s) outside the allow-list \
              (read paths must route through Client::transport_reference / transport_registry):\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    // ── push_patch_descriptor ─────────────────────────────────────────
+
+    /// `push_patch_descriptor` pushes a `__ocx.patch` manifest with the
+    /// expected artifactType + a descriptor layer, and returns the manifest
+    /// digest. Verified against the `StubTransport` via `capture_pushes`.
+    #[tokio::test]
+    async fn push_patch_descriptor_pushes_patch_artifact_and_returns_digest() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let client = stub(&data);
+
+        let descriptor_bytes = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": ["internal.company.com/certs/ca:latest"] }]
+        })
+        .to_string()
+        .into_bytes();
+
+        // Global-root patch repo identifier (empty repository at the patch registry).
+        let patch_repo = Identifier::new_registry("", "patches.example.com");
+
+        let digest = client
+            .push_patch_descriptor(&patch_repo, &descriptor_bytes)
+            .await
+            .expect("push_patch_descriptor must succeed");
+
+        // A manifest was pushed.
+        let inner = data.read();
+        assert!(
+            inner.calls.iter().any(|c| c == "push_manifest_raw"),
+            "push_patch_descriptor must push a manifest; calls = {:?}",
+            inner.calls
+        );
+
+        // The descriptor layer blob was pushed (push_blob:<layer_digest>).
+        let layer_digest = Algorithm::Sha256.hash(&descriptor_bytes).to_string();
+        assert!(
+            inner.calls.iter().any(|c| c == &format!("push_blob:{layer_digest}")),
+            "push_patch_descriptor must push the descriptor layer blob; calls = {:?}",
+            inner.calls
+        );
+
+        // The captured manifest carries the patch artifactType + the descriptor layer media type.
+        let (_image, (manifest_bytes, manifest_digest)) = inner
+            .manifests
+            .iter()
+            .next()
+            .expect("a manifest must have been captured");
+        let manifest: oci::ImageManifest =
+            serde_json::from_slice(manifest_bytes).expect("captured manifest must parse");
+        assert_eq!(
+            manifest.artifact_type.as_deref(),
+            Some(crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE),
+            "manifest artifactType must be the patch artifact type"
+        );
+        assert_eq!(manifest.layers.len(), 1, "patch manifest must have exactly one layer");
+        assert_eq!(
+            manifest.layers[0].media_type,
+            crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE,
+            "layer media type must be the descriptor layer media type"
+        );
+
+        // The returned digest matches the pushed manifest's digest.
+        assert_eq!(
+            digest.to_string(),
+            *manifest_digest,
+            "returned digest must equal the pushed manifest digest"
+        );
+    }
+
+    /// `push_patch_descriptor` rejects malformed descriptor bytes before any push.
+    #[tokio::test]
+    async fn push_patch_descriptor_rejects_malformed_descriptor() {
+        let data = StubTransportData::new();
+        let client = stub(&data);
+        let patch_repo = Identifier::new_registry("", "patches.example.com");
+
+        let result = client.push_patch_descriptor(&patch_repo, b"not valid json {{{").await;
+        assert!(
+            matches!(result, Err(ClientError::InvalidManifest(_))),
+            "malformed descriptor must be rejected with InvalidManifest, got: {result:?}"
+        );
+        // No manifest was pushed.
+        assert!(
+            data.read().calls.iter().all(|c| c != "push_manifest_raw"),
+            "no manifest must be pushed when the descriptor is malformed"
         );
     }
 }

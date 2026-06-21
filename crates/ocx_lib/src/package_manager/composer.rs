@@ -172,13 +172,18 @@ pub async fn compose(
             // Insert AFTER the surface gate so a sealed/private TC entry that
             // gates out doesn't permanently mask a later visit of the same
             // package via a different root or path.
-            if !seen.insert(key.clone()) {
+            if !seen.insert(key) {
                 continue;
             }
 
             // Record in admitted set (visit order, deduped — used by
-            // SitePatchResolver to gate companion overlay).
-            admitted.push(key);
+            // SitePatchResolver to gate the companion overlay). Push the
+            // TAG-BEARING identifier: dedup already happened on the
+            // advisory-stripped `key`, but the patch overlay matches descriptor
+            // globs against this identifier and a tag-anchored rule (ADR `*:21`)
+            // needs the tag preserved — otherwise a required overlay that
+            // matched at install time is silently dropped at compose time (C7).
+            admitted.push(tc_entry.identifier.clone());
 
             visible_entries.push((visible_entries.len(), tc_entry.identifier.clone()));
         }
@@ -234,10 +239,12 @@ pub async fn compose(
         // against each other so passing the same root twice does not
         // double-emit.
         let root_key = root.identifier().strip_advisory();
-        if seen.insert(root_key.clone()) {
-            // Record root in admitted set (appended after its TC deps, per
-            // visit order — SitePatchResolver relies on this ordering).
-            admitted.push(root_key);
+        if seen.insert(root_key) {
+            // Record root in admitted set (appended after its TC deps, per visit
+            // order — SitePatchResolver relies on this ordering). Push the
+            // TAG-BEARING root identifier (dedup already used the stripped key) so
+            // the patch overlay can match tag-anchored descriptor rules.
+            admitted.push(root.identifier().clone());
 
             // Build root's direct-dep context map for `${deps.NAME.installPath}`
             // interpolation in root's own env vars.
