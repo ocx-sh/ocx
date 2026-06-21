@@ -236,13 +236,31 @@ def test_nushell_dedicated_activation_survives_unset_ocx_home(tmp_path: Path) ->
     _assert_activation("nu", result, bin_seg)
 
 
+def _script_pty_command(script_abs: str, command: list[str]) -> list[str]:
+    """Wrap ``command`` in a ``script(1)`` pty invocation, portable across flavors.
+
+    elvish only sources ``rc.elv`` for an *interactive* shell, so it must run on a
+    tty; ``script(1)`` supplies one. The two ``script`` flavors disagree on how the
+    command is passed, so the invocation cannot be shared verbatim:
+
+    * util-linux (Linux):  ``script -qec "<cmd string>" <typescript-file>``
+    * BSD (macOS):         ``script -q <typescript-file> <cmd> [args...]``
+
+    The Linux form is preserved byte-for-byte (the shell-zoo matrix runs it); macOS
+    gets the trailing-argv form because BSD ``script`` has no ``-c`` flag.
+    """
+    if sys.platform == "darwin":
+        return [script_abs, "-q", "/dev/null", *command]
+    return [script_abs, "-qec", " ".join(command), "/dev/null"]
+
+
 def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None:
     shell_abs = shutil.which("elvish")
     if shell_abs is None:
         pytest.skip("elvish not installed on this host")
     script_abs = shutil.which("script")
     if script_abs is None:
-        pytest.skip("util-linux script(1) is needed to drive elvish in a pty")
+        pytest.skip("script(1) is needed to drive elvish in a pty")
 
     home = tmp_path / "home"
     home.mkdir()
@@ -257,7 +275,7 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     env = _clean_env(home, shell_abs)
     env["TERM"] = "dumb"
     result = subprocess.run(
-        [script_abs, "-qec", f"{shell_abs} -rc {rc}", "/dev/null"],
+        _script_pty_command(script_abs, [shell_abs, "-rc", str(rc)]),
         input="print $E:PATH\nexit\n",
         capture_output=True,
         text=True,
