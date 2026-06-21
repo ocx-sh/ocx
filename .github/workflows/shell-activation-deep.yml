@@ -26,8 +26,17 @@ on:
 permissions:
   contents: read
 
+# Literal group name (not the subsystem-ci.md §6 `${{ github.workflow }}-...`
+# convention): this workflow is ALSO reused via `workflow_call` from
+# `release-readiness.yml`, where `github.workflow` resolves to the CALLER's name
+# ("Release Readiness"). With the convention, the composed child would compute the
+# SAME group as the parent's own concurrency, and since `cancel-in-progress` is
+# false on main the parent would hold the group while waiting on the child —
+# a self-deadlock that GitHub resolves by failing the called workflow. A literal
+# prefix keeps standalone dispatch/cron de-duplication without colliding with any
+# caller.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: shell-activation-deep-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
