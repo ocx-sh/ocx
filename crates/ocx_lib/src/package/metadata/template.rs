@@ -16,6 +16,44 @@ use super::env::dep_context::DependencyContext;
 use super::slug::DEP_TOKEN_PATTERN;
 use crate::package::metadata::dependency::DependencyName;
 
+/// Caller-facing intent: what surface is interpolation serving?
+///
+/// Maps into [`AllowedTokens`] via `From<Usage>`. Use at call sites so the engine
+/// sees a capability set, not a consumer identity (SRP: engine policy ≠ consumer
+/// identity).
+#[derive(Debug, Clone, Copy)]
+pub enum Usage {
+    /// Interpolating an environment-variable value. Both `${installPath}` and
+    /// `${deps.NAME.*}` tokens are permitted.
+    Environment,
+    /// Interpolating an entrypoint `args` element. Only `${installPath}` is
+    /// permitted; `${deps.*}` tokens are rejected with
+    /// [`TemplateError::DisallowedToken`].
+    EntryPointArgs,
+}
+
+/// Engine-facing capability set: which token classes the resolver may substitute.
+///
+/// Constructed from [`Usage`] via `From<Usage>` or built directly for tests. The
+/// engine gates on this struct, never on consumer identity — callers set intent via
+/// [`Usage`], the engine sees only what is allowed.
+///
+/// `installPath` is always permitted regardless of the capability set.
+#[derive(Debug, Clone, Copy)]
+pub struct AllowedTokens {
+    /// Whether `${deps.NAME.*}` tokens are permitted.
+    pub deps: bool,
+}
+
+impl From<Usage> for AllowedTokens {
+    fn from(usage: Usage) -> Self {
+        match usage {
+            Usage::Environment => AllowedTokens { deps: true },
+            Usage::EntryPointArgs => AllowedTokens { deps: false },
+        }
+    }
+}
+
 /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in template strings.
 ///
 /// Build once with [`TemplateResolver::new`], call [`TemplateResolver::resolve`] for each
@@ -25,9 +63,13 @@ use crate::package::metadata::dependency::DependencyName;
 /// Runtime mode only: [`TemplateResolver::resolve`] substitutes real install paths and
 /// verifies each dep's `install_path.exists()` on disk. Used by `env::resolver::EnvResolver`
 /// at install/exec time.
+///
+/// Use [`TemplateResolver::usage`] to restrict which token classes are allowed (e.g.,
+/// `Usage::EntryPointArgs` forbids `${deps.*}` tokens).
 pub struct TemplateResolver<'a> {
     install_path: &'a Path,
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
+    allowed: AllowedTokens,
 }
 
 // Every method on `TemplateResolver` returns `Result<_, TemplateError>`.
@@ -41,7 +83,27 @@ impl<'a> TemplateResolver<'a> {
         Self {
             install_path,
             dep_contexts,
+            // Default: Environment caps — both ${installPath} and ${deps.*} permitted.
+            // Preserves today's behavior for every existing caller that does not call .usage().
+            allowed: Usage::Environment.into(),
         }
+    }
+
+    /// Sets the interpolation usage, restricting which token classes are permitted.
+    ///
+    /// Pass a [`Usage`] variant or an [`AllowedTokens`] value directly. The default
+    /// is [`Usage::Environment`] (all tokens permitted), matching the existing behavior
+    /// for env-value interpolation callers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let resolver = TemplateResolver::new(path, &deps).usage(Usage::EntryPointArgs);
+    /// ```
+    #[must_use]
+    pub fn usage(mut self, usage: impl Into<AllowedTokens>) -> Self {
+        self.allowed = usage.into();
+        self
     }
 
     /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in `template`.
@@ -55,6 +117,16 @@ impl<'a> TemplateResolver<'a> {
     }
 
     fn resolve_inner(&self, template: &str, check_exists: bool) -> Result<String, TemplateError> {
+        // Capability gate (ADR D6): when ${deps.*} tokens are not permitted by the
+        // active AllowedTokens set, reject before any substitution so a real
+        // dep_contexts map can never substitute a dep path into the output.
+        if !self.allowed.deps && template.contains("${deps.") {
+            let idx = template.find("${deps.").expect("contains() guaranteed a match");
+            let end = template[idx..].find('}').map(|e| idx + e + 1).unwrap_or(template.len());
+            let token = template[idx..end].to_string();
+            return Err(TemplateError::DisallowedToken { token });
+        }
+
         // Step 1: substitute ${installPath}. Avoid the `String::replace` allocation
         // when the token isn't present — most templates contain only one of the two
         // forms (`${installPath}` xor `${deps.*}`) so the fast-path covers many calls.
@@ -225,6 +297,16 @@ pub enum TemplateError {
     /// tokens are not baked into env values as literals.
     #[error("contains unknown placeholder '{placeholder}'")]
     UnknownPlaceholder { placeholder: String },
+
+    /// A recognized token class is present but not permitted by the current
+    /// [`AllowedTokens`] capability set.
+    ///
+    /// Raised as the **first** step in resolution when `!allowed.deps` and the
+    /// template contains `${deps.` — before the dep regex fires — so a real
+    /// `dep_contexts` map can never silently substitute a dep path (ADR D6
+    /// gate-before-regex correctness claim).
+    #[error("token '{token}' is not permitted here; '${{deps.*}}' is only valid in env values")]
+    DisallowedToken { token: String },
 }
 
 impl ClassifyExitCode for TemplateError {
@@ -233,7 +315,8 @@ impl ClassifyExitCode for TemplateError {
             Self::UnknownDependencyRef { .. }
             | Self::UnknownDependencyField { .. }
             | Self::AmbiguousDependencyRef { .. }
-            | Self::UnknownPlaceholder { .. } => ExitCode::DataError,
+            | Self::UnknownPlaceholder { .. }
+            | Self::DisallowedToken { .. } => ExitCode::DataError,
             Self::DependencyNotInstalled { .. } => ExitCode::NotFound,
         })
     }
@@ -455,5 +538,95 @@ mod tests {
 
         let result = resolver.resolve("${deps.Python.installPath}").unwrap();
         assert_eq!(result, "${deps.Python.installPath}");
+    }
+
+    // ── Contract 10: Usage / AllowedTokens mapping ────────────────────────────
+
+    // Contract 10 (From<Usage> mapping): Usage::Environment maps to deps=true;
+    // Usage::EntryPointArgs maps to deps=false.
+    #[test]
+    fn usage_maps_to_allowed_tokens() {
+        let env_caps = AllowedTokens::from(Usage::Environment);
+        assert!(
+            env_caps.deps,
+            "Usage::Environment must map to AllowedTokens {{ deps: true }}"
+        );
+
+        let args_caps = AllowedTokens::from(Usage::EntryPointArgs);
+        assert!(
+            !args_caps.deps,
+            "Usage::EntryPointArgs must map to AllowedTokens {{ deps: false }}"
+        );
+    }
+
+    // Contract 10: resolver with Usage::EntryPointArgs resolves ${installPath} to the
+    // install path — the only token class allowed in entrypoint args.
+    #[test]
+    fn entrypoint_args_usage_resolves_install_path() {
+        let dir = TempDir::new().unwrap();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = TemplateResolver::new(dir.path(), &contexts).usage(Usage::EntryPointArgs);
+
+        let install = dir.path().to_string_lossy();
+        let result = resolver.resolve("${installPath}/app.py").unwrap();
+        assert_eq!(
+            result,
+            format!("{install}/app.py"),
+            "Usage::EntryPointArgs must resolve ${{installPath}} to the install path"
+        );
+    }
+
+    // Contract 10b — gate-before-regex correctness proof (ADR D6).
+    //
+    // A resolver built with *real, on-disk* dep_contexts and Usage::EntryPointArgs must
+    // reject a ${deps.*} template with DisallowedToken BEFORE the dep regex fires.
+    // The dep is declared AND its path exists on disk — the gate must fire regardless,
+    // proving that the capability gate (not an empty dep_contexts map) is the safety
+    // mechanism. A real dep_contexts must never substitute a dep path into an
+    // EntryPointArgs template.
+    //
+    // MUST FAIL against the current stub: resolve_inner does not yet gate on
+    // self.allowed.deps before entering the dep regex loop — the dep resolves
+    // successfully instead of returning DisallowedToken.
+    #[test]
+    fn entrypoint_args_usage_rejects_deps_token_before_regex() {
+        let self_dir = TempDir::new().unwrap();
+        let dep_dir = TempDir::new().unwrap(); // dep path EXISTS on disk
+
+        let mut contexts = HashMap::new();
+        // Non-empty dep_contexts with a real, on-disk dep — the dep regex would
+        // resolve this successfully if the capability gate were absent.
+        contexts.insert(dep_name("uv"), ctx(dep_dir.path(), "uv"));
+
+        let resolver = TemplateResolver::new(self_dir.path(), &contexts).usage(Usage::EntryPointArgs);
+
+        let err = resolver.resolve("${deps.uv.installPath}/x").unwrap_err();
+        assert!(
+            matches!(&err, TemplateError::DisallowedToken { token } if token.contains("deps.uv")),
+            "expected DisallowedToken with token containing 'deps.uv'; \
+             rejected even with a real, on-disk dep context (proves gate fires before the \
+             dep regex — no substitution); got: {err}"
+        );
+    }
+
+    // Contract 10: Usage::Environment still resolves ${deps.*} tokens correctly —
+    // the env interpolation path is unaffected by the new capability model.
+    #[test]
+    fn environment_usage_still_resolves_deps() {
+        let self_dir = TempDir::new().unwrap();
+        let dep_dir = TempDir::new().unwrap();
+
+        let mut contexts = HashMap::new();
+        contexts.insert(dep_name("dep1"), ctx(dep_dir.path(), "dep1"));
+
+        let resolver = TemplateResolver::new(self_dir.path(), &contexts).usage(Usage::Environment);
+
+        let dep_path = dep_dir.path().to_string_lossy();
+        let result = resolver.resolve("${deps.dep1.installPath}").unwrap();
+        assert_eq!(
+            result,
+            dep_path.as_ref(),
+            "Usage::Environment must resolve ${{deps.*}} tokens (env path unchanged)"
+        );
     }
 }

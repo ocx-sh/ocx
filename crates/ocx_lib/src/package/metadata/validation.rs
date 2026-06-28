@@ -27,6 +27,18 @@ use super::template::TemplateError;
 static UNKNOWN_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"\$\{[^}]*\}").expect("valid regex"));
 
+/// Returns the first `${...}` placeholder in `value` that is neither
+/// `${installPath}` nor a valid `${deps.NAME.FIELD}` token, or `None` if every
+/// placeholder is recognized. Shared by `validate_env_tokens` and
+/// `validate_entrypoint_args` so the "unknown placeholder" rule has one source.
+pub(super) fn first_unknown_placeholder(value: &str) -> Option<String> {
+    UNKNOWN_TOKEN_RE
+        .find_iter(value)
+        .map(|m| m.as_str())
+        .find(|seg| *seg != "${installPath}" && !DEP_TOKEN_PATTERN.is_match(seg))
+        .map(str::to_string)
+}
+
 // ── ValidMetadata ─────────────────────────────────────────────────────────────
 
 /// Metadata that has passed publish-time validation.
@@ -180,16 +192,12 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
             // W1: reject any leftover `${...}` that is not `${installPath}` and was not
             // consumed by the DEP_TOKEN_PATTERN loop above (e.g. `${unknown}`,
             // `${installpath}`, `${deps.foo.install_path}`, `${deps.Python.installPath}`).
-            // Strip the two recognized token forms before checking so UNKNOWN_TOKEN_RE
-            // only fires on truly unrecognized placeholders.
-            let stripped = DEP_TOKEN_PATTERN.replace_all(value, "");
-            let stripped = stripped.replace("${installPath}", "");
-            if let Some(m) = UNKNOWN_TOKEN_RE.find(&stripped) {
+            // Routed through `first_unknown_placeholder` so the recognition logic is
+            // shared with `validate_entrypoint_args` (Phase 2 will add it).
+            if let Some(placeholder) = first_unknown_placeholder(value) {
                 return Err(Error::EnvVarInterpolation {
                     var_key: var.key.clone(),
-                    source: TemplateError::UnknownPlaceholder {
-                        placeholder: m.as_str().to_string(),
-                    },
+                    source: TemplateError::UnknownPlaceholder { placeholder },
                 }
                 .into());
             }
