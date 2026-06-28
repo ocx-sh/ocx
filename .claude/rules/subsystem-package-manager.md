@@ -168,7 +168,7 @@ Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`
 
 ## OCX Configuration Forwarding
 
-Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Any subprocess spawn site that may chain back into ocx MUST forward the running ocx's resolution-affecting config onto the child env via `env::Env::apply_ocx_config(ctx.config_view())`. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
+Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Inside `launcher exec`, baked entrypoint `args` (if any) are resolved — with `${installPath}` substituted to the package content directory — and prepended before the user-supplied arguments before the command is executed (wire ABI unchanged). Any subprocess spawn site that may chain back into ocx MUST forward the running ocx's resolution-affecting config onto the child env via `env::Env::apply_ocx_config(ctx.config_view())`. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
 
 ### Hermetic subprocess pattern (env_clear + envs + timeout)
 

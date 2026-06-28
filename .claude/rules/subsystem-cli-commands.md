@@ -209,4 +209,4 @@ Rules:
 - **`index list <pkg>@<digest>` rejected** — tag-only identifiers still work.
 - **`shell hook` vs `direnv export`** — `shell hook` is deleted; `direnv export` is stateless bash export generator for direnv `.envrc` (still alive, untouched).
 - **`package test` tempdir lifecycle** — without `--keep` or `--output`, temp dir deleted on any exit. `--keep` + `--output` are mutually exclusive.
-- **`launcher exec` internal subcommand** — hidden from `--help`. Wire ABI: `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true`.
+- **`launcher exec` internal subcommand** — hidden from `--help`. Wire ABI: `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true`. Resolves `${installPath}` in baked entrypoint `args` and prepends them before user args (wire ABI unchanged).

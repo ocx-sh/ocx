@@ -334,7 +334,33 @@ package follows from JSON object key semantics, and per-entry fields land inside
 |---|---|---|---|
 | Key | string | Yes | The invocable name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. Used as the launcher script filename and the command users invoke. |
 | Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name *is* the dispatched command. |
-| `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-byte rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. |
+| `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-byte rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. Not interpolated — must be a plain slug, not a path. |
+| `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments when the launcher dispatches. Each element is one argv token (no shell word-splitting). `${installPath}` is interpolated in each element; `${deps.*}` tokens are rejected at publish time. Omit or supply an empty array — both are wire-identical; the field is absent in the serialized form when empty. See [Baked Arguments](#entry-points-args). |
+
+### Baked Arguments {#entry-points-args}
+
+The `args` field embeds fixed leading arguments into a generated launcher. On every invocation
+the launcher prepends these arguments before the user's arguments, then passes the full list to
+the dispatched command.
+
+```json
+{ "command": "python", "args": ["${installPath}/app/main.py"] }
+```
+
+Invoking `mytool a b` with this entrypoint runs `python <content>/app/main.py a b` — baked args
+first, user args appended in left-to-right array order. Each element is one argv token; there is
+no shell word-splitting, so paths with spaces work without escaping.
+
+**`${installPath}` interpolation.** Each element of `args` supports the `${installPath}` token,
+which resolves to the package's content directory — the same path that [`env`](#env) values
+reference with the same token. The token may appear more than once within a single element.
+
+**Token restrictions.** `${deps.*}` tokens are rejected at publish time with a dedicated error.
+Dependency paths belong in the [`env`](#env) block where the visibility contract applies;
+consumers read them at runtime from the composed environment. `command` is a plain slug resolved
+on the composed `PATH`; it accepts no interpolation and cannot be a filesystem path. To reach a
+dependency's binary in `command`, expose it through the dependency's `interface` or `public` env
+entries.
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -358,13 +384,15 @@ packages are detected at select time.
   "entrypoints": {
     "cmake": {},
     "ctest": {},
-    "hello": { "command": "hello-bin" }
+    "hello": { "command": "hello-bin" },
+    "mytool": { "command": "python", "args": ["${installPath}/app/main.py"] }
   }
 }
 ```
 
-`cmake` and `ctest` dispatch the binaries of the same name. `hello` is the name users invoke,
-but the launcher dispatches `hello-bin` resolved on the composed `PATH`.
+`cmake` and `ctest` dispatch the binaries of the same name. `hello` dispatches `hello-bin`
+resolved on the composed `PATH`. `mytool` uses `args` to bake the script path: invoking
+`mytool x y` runs `python <content>/app/main.py x y`.
 
 ## Extraction {#extraction}
 
@@ -424,7 +452,7 @@ The metadata format carries an integer `version` field reserved for future schem
 - `strip_components` — optional leading path components to strip during extraction.
 - `env` — optional declarations of environment variables.
 - `dependencies` — optional digest-pinned package dependencies. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), and optional `visibility` controlling env propagation through the chain.
-- `entrypoints` — optional object keyed by the invocable name. Each value object carries an optional `command` field: the binary the generated launcher dispatches to when it must differ from the invocable name (e.g. expose `fmt` while running `cargo-fmt`). Omitted (the common case) means the invocable name *is* the dispatched command. `command` follows the same slug constraint as the invocable name (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes).
+- `entrypoints` — optional object keyed by the invocable name. Each value object carries two optional fields. `command`: the binary the generated launcher dispatches to when it differs from the invocable name (e.g. expose `fmt` while running `cargo-fmt`); follows the same slug constraint as the key (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes); not interpolated; omitted means the invocable name is the dispatch target. `args`: array of fixed leading arguments prepended before user-supplied arguments at dispatch time; each element is one argv token; `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time; omitted or empty are wire-identical — the field is absent in the serialized form when the array is empty.
 
 Visibility model:
 
@@ -445,6 +473,7 @@ Behavioral changes made within `version: 1` since the initial release:
 |---|---|
 | **Visibility default flip** | `Var.visibility` now defaults to `"private"` instead of `"public"`. Packages that relied on the old default emit no interface-surface env entries for un-tagged vars. Publishers must explicitly set `"visibility": "public"` to restore prior behavior for consumer-visible vars. |
 | **Entry-axis addition** | `Var.visibility` gained the `"interface"` value: env entries visible on the interface surface but not the private surface. Previously only `"private"` and `"public"` were recognized; `"interface"` entries in older parsers will be rejected at deserialization. |
+| **Baked entry-point arguments** | Entry-point values now accept an optional `args` array of fixed leading arguments prepended before user-supplied arguments at dispatch time. `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time. An absent or empty `args` array is wire-identical to prior behavior — packages without `args` are unaffected. |
 
 ::: warning These changes affect existing packages
 If you published packages before the visibility-default flip, their untagged env entries will no longer appear on the consumer surface. Add `"visibility": "public"` explicitly to vars that consumers should see.

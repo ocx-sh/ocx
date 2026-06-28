@@ -270,6 +270,99 @@ def test_launcher_invocation_runs_target_and_forwards_args(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher invocation test")
+def test_baked_args_resolved_and_prepended_before_user_args(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Baked `args` with `${installPath}` are resolved and prepended before user args.
+
+    Contract 5 (prepend order) + Contract 6 (`${installPath}` → content path):
+    an entrypoint with ``args: ["${installPath}/data/ref.txt"]`` and launcher
+    invocation ``launcher USERARG`` must dispatch the binary with argv:
+    ``<content>/data/ref.txt  USERARG``  (baked first, user appended, in order).
+
+    The shipped file ``data/ref.txt`` is bundled inside the package; the test
+    asserts the resolved path is an absolute path whose directory ancestry
+    includes ``content/`` — the `${installPath}` anchor defined by the runtime
+    as ``validated.join("content")``.
+
+    Verifies baked args are resolved and prepended — Phase 3 runtime implemented
+    in ``crates/ocx_cli/src/command/launcher/exec.rs``.
+    """
+    shipped_rel = "data/ref.txt"
+    user_arg = "USERARG"
+
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"hello": {"args": [f"${{installPath}}/{shipped_rel}"]}},
+        bins=["hello"],
+        tag="1.0.0",
+        extra_files={shipped_rel: "baked-arg-target-file"},
+    )
+    ocx.plain("package", "install", "--select", pkg.short)
+
+    launcher = current_entrypoints(ocx, pkg) / "hello"
+    assert launcher.exists(), f"unix launcher must exist: {launcher}"
+
+    launcher_env = dict(ocx.env)
+    launcher_env["PATH"] = f"{ocx.binary.parent}{os.pathsep}{launcher_env.get('PATH', '')}"
+    completed = subprocess.run(
+        [str(launcher), user_arg],
+        capture_output=True,
+        text=True,
+        env=launcher_env,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"launcher invocation must succeed; rc={completed.returncode} "
+        f"stderr={completed.stderr.strip()!r}"
+    )
+
+    stdout = completed.stdout
+
+    # Basic sanity: the dispatched binary ran (marker present in output).
+    assert pkg.marker in stdout, (
+        f"package marker missing — dispatched binary did not run; stdout={stdout!r}"
+    )
+
+    # Contract 6: ${installPath} resolves to an absolute path in content/.
+    # Without the Phase 3 runtime implementation the baked arg is not forwarded
+    # to the binary, so shipped_rel will be absent — the assert below fails.
+    baked_pos = stdout.find(shipped_rel)
+    assert baked_pos != -1, (
+        f"resolved baked arg suffix '{shipped_rel}' not found in stdout; "
+        f"baked args were not prepended or ${'{installPath}'} was not resolved "
+        f"(runtime stub in launcher/exec.rs not yet implemented); "
+        f"stdout={stdout!r}"
+    )
+
+    # Extract the full resolved token to verify it is an absolute content/ path.
+    baked_token = next((t for t in stdout.split() if shipped_rel in t), None)
+    assert baked_token is not None  # guaranteed: baked_pos != -1 above
+    assert os.path.isabs(baked_token), (
+        f"resolved baked arg must be an absolute path; "
+        f"got {baked_token!r}; stdout={stdout!r}"
+    )
+    assert "/content/" in baked_token or baked_token.endswith("/content"), (
+        f"resolved baked arg must be inside the installed package content/ directory "
+        f"(${{installPath}} = validated.join('content')); "
+        f"got {baked_token!r}; stdout={stdout!r}"
+    )
+
+    # Contract 5: baked arg is prepended BEFORE user args (strict left-to-right order).
+    user_pos = stdout.find(user_arg)
+    assert user_pos != -1, (
+        f"user arg '{user_arg}' not found in stdout; stdout={stdout!r}"
+    )
+    assert baked_pos < user_pos, (
+        f"baked arg (at char {baked_pos}) must appear BEFORE user arg "
+        f"(at char {user_pos}) in dispatched argv; stdout={stdout!r}"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher invocation test")
 def test_launcher_dispatches_divergent_command(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

@@ -47,9 +47,10 @@ for the field is restricted to `["private", "public", "interface"]` via
 
 ## Custom `JsonSchema` Implementations
 
-One type requires a manual `impl schemars::JsonSchema` — it deviates from default schemars inference:
+Two types require a manual `impl schemars::JsonSchema` — they deviate from default schemars inference:
 
 1. **`Version`** — semver-inspired struct with custom string serialization. Schema hand-authored to match the string pattern accepted by the parser.
+2. **`Entrypoints`** — custom `MapAccess` `Deserialize` rejects duplicate keys (serde_json last-wins default is unsafe for registry data). Manual schema emits an `additionalProperties` + `propertyNames` object schema with a `description` that documents both the `command` field and the `args` array (fixed leading args, `${installPath}` interpolation only, `${deps.*}` not permitted).
 
 One field uses `#[schemars(schema_with = "...")]` to override the inferred schema:
 

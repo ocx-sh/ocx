@@ -121,6 +121,13 @@ pub struct Entrypoint {
     /// differently named binary such as `hello-bin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<EntrypointName>,
+
+    /// Fixed leading arguments the generated launcher prepends before the user's
+    /// own arguments. Each element supports `${installPath}` interpolation (the
+    /// package content directory); `${deps.*}` is NOT permitted here. Absent/empty
+    /// serializes to nothing (wire-compatible with the pre-`args` shape).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
 }
 
 impl Entrypoint {
@@ -129,6 +136,15 @@ impl Entrypoint {
     /// entrypoint's map key — see [`Entrypoints::dispatch_command`].
     pub fn command(&self) -> Option<&EntrypointName> {
         self.command.as_ref()
+    }
+
+    /// Fixed leading arguments prepended before user-supplied arguments when
+    /// the generated launcher dispatches this entrypoint. Each element is one
+    /// argv token; `${installPath}` is interpolated to the package's content
+    /// directory at runtime. Returns an empty slice when no baked args are
+    /// declared.
+    pub fn args(&self) -> &[String] {
+        &self.args
     }
 }
 
@@ -206,6 +222,12 @@ impl Entrypoints {
         self.entries.keys()
     }
 
+    /// Returns the [`Entrypoint`] registered under `name`, or `None` if no
+    /// entry with that name exists.
+    pub fn get(&self, name: &str) -> Option<&Entrypoint> {
+        self.entries.get(name)
+    }
+
     /// Resolves the dispatch command for an invocable entrypoint `name`.
     ///
     /// Returns the entry's [`Entrypoint::command`] when set, otherwise `name`
@@ -214,8 +236,7 @@ impl Entrypoints {
     /// `ocx launcher exec`, where the launcher filename is the name) keep
     /// today's "resolve the name on PATH" behaviour with no special-casing.
     pub fn dispatch_command<'a>(&'a self, name: &'a str) -> &'a str {
-        self.entries
-            .get(name)
+        self.get(name)
             .and_then(Entrypoint::command)
             .map_or(name, EntrypointName::as_str)
     }
@@ -282,7 +303,7 @@ impl schemars::JsonSchema for Entrypoints {
         let value_schema = generator.subschema_for::<Entrypoint>();
         schemars::json_schema!({
             "type": "object",
-            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly).",
+            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element supports `${installPath}` interpolation (`${deps.*}` is not permitted in args).",
             "additionalProperties": value_schema,
             "propertyNames": {
                 "pattern": SLUG_PATTERN_STR,
@@ -592,5 +613,90 @@ mod tests {
         // today's resolve-name-on-PATH behaviour, never panics.
         let eps = Entrypoints::from_names(["hello"]);
         assert_eq!(eps.dispatch_command("ghost"), "ghost");
+    }
+
+    // ── Contract 1: Entrypoint deserialization with args and command ──────────
+
+    /// Contract 1: `{"command":"python","args":["run","x"]}` deserializes to
+    /// an Entrypoint with command == Some("python") and args == ["run", "x"].
+    #[test]
+    fn entrypoint_deser_with_args_and_command() {
+        let entry: Entrypoint = serde_json::from_str(r#"{"command":"python","args":["run","x"]}"#).unwrap();
+        assert_eq!(
+            entry.command().unwrap().as_str(),
+            "python",
+            "command must be Some(\"python\")"
+        );
+        assert_eq!(entry.args(), &["run", "x"], "args must be [\"run\", \"x\"]");
+    }
+
+    // ── Contract 2: Round-trip byte-identity ─────────────────────────────────
+
+    /// Contract 2 (first case): `{"command":"python","args":["run","x"]}` serializes
+    /// back to byte-identical JSON after deserialization.
+    #[test]
+    fn entrypoint_args_round_trip_byte_identical() {
+        let json = r#"{"command":"python","args":["run","x"]}"#;
+        let entry: Entrypoint = serde_json::from_str(json).unwrap();
+        let back = serde_json::to_string(&entry).unwrap();
+        assert_eq!(back, json, "round-trip must produce byte-identical JSON");
+    }
+
+    /// Contract 2 (second case): `{"args":["--flag"]}` (no command) deserializes
+    /// to command==None, args==["--flag"], and serializes back byte-identically.
+    #[test]
+    fn entrypoint_args_without_command_round_trip() {
+        let json = r#"{"args":["--flag"]}"#;
+        let entry: Entrypoint = serde_json::from_str(json).unwrap();
+        assert!(entry.command().is_none(), "command must be None when absent from JSON");
+        assert_eq!(entry.args(), &["--flag"]);
+        let back = serde_json::to_string(&entry).unwrap();
+        assert_eq!(back, json, "round-trip without command must be byte-identical");
+    }
+
+    // ── Contract 3: args() accessor ───────────────────────────────────────────
+
+    /// Contract 3a: `args()` returns the populated slice for a deserialized entry.
+    #[test]
+    fn args_accessor_returns_slice_for_populated_entry() {
+        let entry: Entrypoint = serde_json::from_str(r#"{"args":["a","b","c"]}"#).unwrap();
+        assert_eq!(entry.args(), &["a", "b", "c"]);
+    }
+
+    /// Contract 3b: `args()` returns an empty slice for `Entrypoint::default()`.
+    #[test]
+    fn args_accessor_returns_empty_slice_for_default() {
+        let entry = Entrypoint::default();
+        let empty: &[String] = &[];
+        assert_eq!(entry.args(), empty, "default Entrypoint must have empty args slice");
+    }
+
+    // ── Contract 4: args without command inside Entrypoints map ──────────────
+
+    /// Contract 4: `{"tool":{"args":["--flag"]}}` parsed as an Entrypoints map.
+    /// - `dispatch_command("tool")` == "tool" (no command field → name used)
+    /// - `get("tool").unwrap().args()` == ["--flag"]
+    /// - `get("absent")` is None
+    #[test]
+    fn entrypoints_map_with_args_no_command() {
+        let json = r#"{"tool":{"args":["--flag"]}}"#;
+        let eps: Entrypoints = serde_json::from_str(json).unwrap();
+
+        // No command field → dispatch_command returns the entrypoint name itself.
+        assert_eq!(
+            eps.dispatch_command("tool"),
+            "tool",
+            "absent command must cause dispatch_command to return the name"
+        );
+
+        // get() returns the entry and args() surfaces the baked args.
+        let entry = eps.get("tool").expect("entry 'tool' must exist");
+        assert_eq!(entry.args(), &["--flag"]);
+
+        // get() returns None for an undeclared name.
+        assert!(
+            eps.get("absent").is_none(),
+            "get() must return None for an undeclared name"
+        );
     }
 }

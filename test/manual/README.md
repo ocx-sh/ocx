@@ -71,6 +71,7 @@ plain ones.
 | `dojo/deps-mid` | 1 | `mid` | leaf-a (interface) | transitive surface gating |
 | `dojo/deps-app` | 1 | `app` | mid (interface) + leaf-b (private) | surface visibility (`--self`) |
 | `dojo/cross-layer-entrypoint` | 1 | `wrap-leaf-a` | leaf-a (interface) | `${deps.NAME.installPath}` template |
+| `dojo/baked-args-demo` | 1 | `hello-script` | — | baked `args` with `${installPath}` interpolation; ships `content/scripts/hello.sh` (committed), no dep required |
 
 ---
 

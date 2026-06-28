@@ -9,6 +9,9 @@
 //! - [`validate_env_tokens`] — walks env var values and checks that every
 //!   `${deps.NAME.FIELD}` token references a declared, non-ambiguous dep with
 //!   a supported field name.
+//! - [`validate_entrypoint_args`] — checks that every `args` element in every
+//!   entrypoint uses only permitted tokens (`${installPath}`); `${deps.*}` and
+//!   unknown placeholders are rejected at publish time.
 //!
 //! Entrypoint uniqueness is enforced at construction time by
 //! [`super::entrypoint::Entrypoints::new`] (also from the serde path), so no
@@ -19,7 +22,7 @@ use std::collections::HashMap;
 use super::Metadata;
 use super::dependency::{Dependencies, Dependency, DependencyName};
 use super::slug::DEP_TOKEN_PATTERN;
-use super::template::TemplateError;
+use super::template::{TemplateError, disallowed_dep_token};
 
 /// Matches any `${...}` token. After [`validate_env_tokens`] strips the two
 /// recognized forms (`${installPath}` and `${deps.NAME.FIELD}`), anything still
@@ -31,7 +34,7 @@ static UNKNOWN_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
 /// `${installPath}` nor a valid `${deps.NAME.FIELD}` token, or `None` if every
 /// placeholder is recognized. Shared by `validate_env_tokens` and
 /// `validate_entrypoint_args` so the "unknown placeholder" rule has one source.
-pub(super) fn first_unknown_placeholder(value: &str) -> Option<String> {
+fn first_unknown_placeholder(value: &str) -> Option<String> {
     UNKNOWN_TOKEN_RE
         .find_iter(value)
         .map(|m| m.as_str())
@@ -62,8 +65,10 @@ impl TryFrom<Metadata> for ValidMetadata {
     /// - A token references an unsupported field (currently only `installPath` is supported).
     /// - Two direct dependencies share the same interpolation name (collision) and a token
     ///   uses that name — in this case `name` must be set to disambiguate.
+    /// - An entrypoint `args` element contains a `${deps.*}` token or an unknown placeholder.
     fn try_from(metadata: Metadata) -> Result<Self, Self::Error> {
         validate_env_tokens(&metadata)?;
+        validate_entrypoint_args(&metadata)?;
         Ok(Self(metadata))
     }
 }
@@ -193,10 +198,58 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
             // consumed by the DEP_TOKEN_PATTERN loop above (e.g. `${unknown}`,
             // `${installpath}`, `${deps.foo.install_path}`, `${deps.Python.installPath}`).
             // Routed through `first_unknown_placeholder` so the recognition logic is
-            // shared with `validate_entrypoint_args` (Phase 2 will add it).
+            // shared with `validate_entrypoint_args` below.
             if let Some(placeholder) = first_unknown_placeholder(value) {
                 return Err(Error::EnvVarInterpolation {
                     var_key: var.key.clone(),
+                    source: TemplateError::UnknownPlaceholder { placeholder },
+                }
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates entrypoint `args` elements at publish time.
+///
+/// Checks that every element in every entrypoint's `args` list uses only
+/// permitted tokens (`${installPath}`). Rejects `${deps.*}` tokens with a
+/// dedicated [`crate::package::error::Error::EntrypointArgInterpolation`]
+/// error (not the misleading `UnknownDependencyRef`) and rejects unknown
+/// placeholders such as `${installpath}` (wrong case) or `${foo}`.
+///
+/// Pure syntax check — no filesystem access.
+///
+/// # Errors
+///
+/// Returns an error if any arg element contains a disallowed or unknown token.
+pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+
+    let Some(entrypoints) = metadata.entrypoints() else {
+        return Ok(());
+    };
+
+    for (name, entry) in entrypoints.iter() {
+        for arg in entry.args() {
+            // Check for disallowed ${deps.*} token FIRST — the dep regex recognises
+            // these tokens and would NOT cause first_unknown_placeholder to flag them,
+            // so the disallowed-token check must precede the unknown-placeholder scan.
+            if let Some(token) = disallowed_dep_token(arg) {
+                return Err(Error::EntrypointArgInterpolation {
+                    entrypoint: name.to_string(),
+                    arg: arg.clone(),
+                    source: TemplateError::DisallowedToken { token },
+                }
+                .into());
+            }
+
+            if let Some(placeholder) = first_unknown_placeholder(arg) {
+                return Err(Error::EntrypointArgInterpolation {
+                    entrypoint: name.to_string(),
+                    arg: arg.clone(),
                     source: TemplateError::UnknownPlaceholder { placeholder },
                 }
                 .into());
@@ -391,6 +444,131 @@ mod tests {
         assert!(
             msg.contains("Python") || msg.contains("${deps.Python.installPath}"),
             "expected Python placeholder in error: {msg}"
+        );
+    }
+
+    // ── validate_entrypoint_args ──────────────────────────────────────────────
+
+    /// Helper: parse a Metadata from an `entrypoints` JSON object string.
+    /// No deps or env declared — entrypoint arg validation must not require them.
+    fn make_metadata_with_entrypoints(entrypoints_json: &str) -> Metadata {
+        let json = format!(r#"{{"type":"bundle","version":1,"entrypoints":{entrypoints_json}}}"#);
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("bad test JSON: {e}\n{json}"))
+    }
+
+    // Contract 8 — MUST FAIL against the current no-op validate_entrypoint_args stub.
+    //
+    // A `${deps.*}` token in any entrypoint arg must cause ValidMetadata::try_from to
+    // return Err. The error message must name the entrypoint ("run"), carry the token
+    // text ("deps.foo"), and state the policy ("is only valid in env values").
+    //
+    // Note: deps need NOT be declared in the metadata — the gate rejects ${deps.*}
+    // in args unconditionally, distinct from env validation where undeclared refs
+    // produce UnknownDependencyRef instead.
+    #[test]
+    fn entrypoint_arg_deps_token_rejected() {
+        let meta =
+            make_metadata_with_entrypoints(r#"{"run":{"command":"python","args":["${deps.foo.installPath}/x"]}}"#);
+        let err =
+            ValidMetadata::try_from(meta).expect_err("${deps.*} in entrypoint args must be rejected at publish time");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("run"),
+            "error must name the offending entrypoint 'run': {msg}"
+        );
+        assert!(
+            msg.contains("deps.foo"),
+            "error must contain the token text 'deps.foo': {msg}"
+        );
+        assert!(
+            msg.contains("is only valid in env values"),
+            "error must state that deps tokens are only valid in env values: {msg}"
+        );
+    }
+
+    // Contract 9a — MUST FAIL against the current no-op stub.
+    //
+    // `${installpath}` (wrong case) in an arg is an unknown placeholder and must
+    // be rejected. The error message must mention "installpath".
+    #[test]
+    fn entrypoint_arg_unknown_placeholder_wrong_case_rejected() {
+        let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["${installpath}/x"]}}"#);
+        let err =
+            ValidMetadata::try_from(meta).expect_err("${installpath} (wrong case) in entrypoint args must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("installpath"),
+            "error must mention 'installpath' to help publisher spot the casing mistake: {msg}"
+        );
+    }
+
+    // Contract 9b — MUST FAIL against the current no-op stub.
+    //
+    // A completely unknown placeholder `${foo}` in an arg must be rejected, and
+    // the error message must mention "foo".
+    #[test]
+    fn entrypoint_arg_unknown_placeholder_rejected() {
+        let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["${foo}"]}}"#);
+        let err = ValidMetadata::try_from(meta).expect_err("${foo} in entrypoint args must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("foo"),
+            "error must mention the unknown placeholder 'foo': {msg}"
+        );
+    }
+
+    // Happy path — ${installPath} in entrypoint args must be accepted (Ok).
+    #[test]
+    fn entrypoint_arg_install_path_ok() {
+        let meta =
+            make_metadata_with_entrypoints(r#"{"run":{"command":"python","args":["${installPath}/app/main.py"]}}"#);
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "${{installPath}} in entrypoint args must be accepted at publish time"
+        );
+    }
+
+    // Backward-compat: entrypoint with no args field must not trigger any error.
+    #[test]
+    fn entrypoint_arg_backward_compat_no_args() {
+        let meta = make_metadata_with_entrypoints(r#"{"run":{}}"#);
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "entrypoint with no args field must be accepted (backward-compatible)"
+        );
+    }
+
+    // Backward-compat: entrypoint with command but no args must not trigger any error.
+    #[test]
+    fn entrypoint_arg_backward_compat_command_only() {
+        let meta = make_metadata_with_entrypoints(r#"{"run":{"command":"python"}}"#);
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "entrypoint with command but no args must be accepted (backward-compatible)"
+        );
+    }
+
+    // Backward-compat: metadata with no entrypoints key at all must not trigger any error.
+    #[test]
+    fn entrypoint_arg_backward_compat_no_entrypoints() {
+        let json = r#"{"type":"bundle","version":1}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "metadata without any entrypoints key must be accepted"
+        );
+    }
+
+    // No-FS invariant: arg validation is pure syntax — it never stats the filesystem.
+    // An ${installPath} arg pointing to a deeply nested non-existent path must not
+    // produce an error; publish-time validation is not a path-existence check.
+    #[test]
+    fn entrypoint_arg_validation_does_no_fs() {
+        let meta =
+            make_metadata_with_entrypoints(r#"{"run":{"args":["${installPath}/nonexistent/deeply/nested.xyz"]}}"#);
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "${{installPath}} arg with non-existent path must be accepted (validation is pure syntax, no FS)"
         );
     }
 }

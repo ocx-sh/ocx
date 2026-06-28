@@ -1,0 +1,10 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "entrypoints": {
+    "hello-script": {
+      "command": "sh",
+      "args": ["${installPath}/scripts/hello.sh"]
+    }
+  }
+}

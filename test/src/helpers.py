@@ -304,6 +304,7 @@ def make_package_with_entrypoints(
     file_prefix: str = "ep",
     dependencies: list[dict] | None = None,
     env: list[dict] | None = None,
+    extra_files: dict[str, str] | None = None,
 ) -> PackageInfo:
     """Publish a test package whose metadata declares ``entrypoints``.
 
@@ -316,7 +317,9 @@ def make_package_with_entrypoints(
     entrypoints:
         Either a list of entrypoint names (each materializes as an empty
         value object) or a pre-built map of name -> value object. The on-wire
-        shape is a JSON object keyed by name.
+        shape is a JSON object keyed by name.  When passing a dict, per-entry
+        value objects may carry any supported fields — including ``args`` for
+        baked leading arguments (``{"args": ["${installPath}/script.py"]}``).
     dependencies:
         Optional list of dependency descriptors to embed in metadata.  Each
         entry must be a dict with at least an ``identifier`` key (same shape
@@ -326,6 +329,13 @@ def make_package_with_entrypoints(
         ``PATH = ${installPath}/bin`` entry (no visibility — picks up the
         v2 default `private`). Pass an explicit list when a test needs
         consumer-visible PATH or other env shapes.
+    extra_files:
+        Optional mapping of POSIX-relative paths (from the package content
+        root) to text content.  Each entry creates the file at
+        ``pkg_dir/<rel_path>`` before bundling, so the file is present in the
+        package's installed ``content/`` tree and reachable via
+        ``${installPath}/<rel_path>`` at runtime.  Parent directories are
+        created automatically.  Defaults to ``None`` (no extra files).
     """
     if isinstance(entrypoints, list):
         for n in entrypoints:
@@ -360,6 +370,12 @@ def make_package_with_entrypoints(
         else:
             script.write_text(f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n')
             script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    if extra_files:
+        for rel_path, content in extra_files.items():
+            dest = pkg_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
 
     metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
     metadata_obj: dict = {

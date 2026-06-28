@@ -54,6 +54,18 @@ impl From<Usage> for AllowedTokens {
     }
 }
 
+/// Returns the first `${deps...}` substring in `s` if `s` contains a `${deps.`
+/// prefix, or `None` otherwise.
+///
+/// Used by both the runtime capability gate in [`TemplateResolver::resolve_inner`]
+/// and the publish-time validation in `validation::validate_entrypoint_args` so
+/// "dep token present" has exactly one definition.
+pub(super) fn disallowed_dep_token(s: &str) -> Option<String> {
+    let idx = s.find("${deps.")?;
+    let end = s[idx..].find('}').map(|e| idx + e + 1).unwrap_or(s.len());
+    Some(s[idx..end].to_string())
+}
+
 /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in template strings.
 ///
 /// Build once with [`TemplateResolver::new`], call [`TemplateResolver::resolve`] for each
@@ -120,10 +132,9 @@ impl<'a> TemplateResolver<'a> {
         // Capability gate (ADR D6): when ${deps.*} tokens are not permitted by the
         // active AllowedTokens set, reject before any substitution so a real
         // dep_contexts map can never substitute a dep path into the output.
-        if !self.allowed.deps && template.contains("${deps.") {
-            let idx = template.find("${deps.").expect("contains() guaranteed a match");
-            let end = template[idx..].find('}').map(|e| idx + e + 1).unwrap_or(template.len());
-            let token = template[idx..end].to_string();
+        if !self.allowed.deps
+            && let Some(token) = disallowed_dep_token(template)
+        {
             return Err(TemplateError::DisallowedToken { token });
         }
 
@@ -576,6 +587,24 @@ mod tests {
         );
     }
 
+    // Contract 10c: a bare "${installPath}" (no prefix or suffix) resolves to exactly
+    // the install path string under Usage::EntryPointArgs. Pins that the resolver
+    // performs a full string replacement, not just a prefix substitution.
+    #[test]
+    fn entrypoint_args_bare_install_path_resolves_to_exact_path() {
+        let dir = TempDir::new().unwrap();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = TemplateResolver::new(dir.path(), &contexts).usage(Usage::EntryPointArgs);
+
+        let install = dir.path().to_string_lossy();
+        let result = resolver.resolve("${installPath}").unwrap();
+        assert_eq!(
+            result,
+            install.as_ref(),
+            "bare '${{installPath}}' must resolve to exactly the install path; got {result:?}"
+        );
+    }
+
     // Contract 10b — gate-before-regex correctness proof (ADR D6).
     //
     // A resolver built with *real, on-disk* dep_contexts and Usage::EntryPointArgs must
@@ -584,10 +613,6 @@ mod tests {
     // proving that the capability gate (not an empty dep_contexts map) is the safety
     // mechanism. A real dep_contexts must never substitute a dep path into an
     // EntryPointArgs template.
-    //
-    // MUST FAIL against the current stub: resolve_inner does not yet gate on
-    // self.allowed.deps before entering the dep regex loop — the dep resolves
-    // successfully instead of returning DisallowedToken.
     #[test]
     fn entrypoint_args_usage_rejects_deps_token_before_regex() {
         let self_dir = TempDir::new().unwrap();
@@ -627,6 +652,53 @@ mod tests {
             result,
             dep_path.as_ref(),
             "Usage::Environment must resolve ${{deps.*}} tokens (env path unchanged)"
+        );
+    }
+
+    // ── Contract 7: within-element repetition + multi-element independent resolve ──
+
+    /// Contract 7: `${installPath}` may appear more than once within a single arg
+    /// element — both occurrences must be substituted. Also verifies that multiple
+    /// arg elements each resolve independently (two-element case).
+    ///
+    /// Uses `Usage::EntryPointArgs` as the caller intent, matching the runtime
+    /// resolution path for baked entrypoint args.
+    #[test]
+    fn entrypoint_args_install_path_repeats_in_one_element() {
+        let dir = TempDir::new().unwrap();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = TemplateResolver::new(dir.path(), &contexts).usage(Usage::EntryPointArgs);
+
+        let install = dir.path().to_string_lossy();
+
+        // Within-element case: ${installPath} appears twice in one arg element.
+        // Both occurrences must be substituted; no ${...} markers may remain.
+        let template = "--prefix=${installPath}:${installPath}/bin";
+        let result = resolver.resolve(template).unwrap();
+        assert_eq!(
+            result.matches(install.as_ref()).count(),
+            2,
+            "both occurrences of ${{installPath}} in a single element must be substituted; \
+             template={template:?} resolved={result:?}"
+        );
+        assert!(
+            !result.contains("${"),
+            "no template markers may remain after resolution; got: {result:?}"
+        );
+
+        // Two-element case: each element must resolve independently.
+        let result_root = resolver.resolve("--root=${installPath}").unwrap();
+        assert_eq!(
+            result_root,
+            format!("--root={install}"),
+            "--root=${{installPath}} must resolve to --root=<content_path>"
+        );
+
+        let result_x = resolver.resolve("${installPath}/x").unwrap();
+        assert_eq!(
+            result_x,
+            format!("{install}/x"),
+            "${{installPath}}/x must resolve to <content_path>/x"
         );
     }
 }

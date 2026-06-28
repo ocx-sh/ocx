@@ -16,8 +16,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::cli::UsageError;
+use ocx_lib::file_structure::PackageDir;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::metadata::env::entry::Entry as EnvEntry;
+use ocx_lib::package::metadata::template::{TemplateResolver, Usage};
 use ocx_lib::prelude::SerdeExt;
 use ocx_lib::utility::child_process;
 use ocx_lib::{env, env::OcxConfigView};
@@ -50,11 +52,16 @@ impl LauncherExec {
         // $OCX_HOME/temp/test/ (package-test materialization path), and contain
         // metadata.json. Errors surface as UsageError (exit 64).
         let validated = validate_launcher_pkg_root(&self.pkg_root, packages_root, Some(&temp_test_root)).await?;
+        // Wrap the validated package root in a PackageDir so every per-package
+        // path (`content/`, `metadata.json`, ...) comes from the file-structure
+        // layout accessors — the single source of truth for the package layout —
+        // instead of hand-rolled `.join("content")` / `.join("metadata.json")`.
+        let package_dir = PackageDir::with_root(validated);
 
         // Resolve env with self_view=true — the launcher always runs in the
         // package's own env (public + private surface). This is equivalent to
         // the former `--self` flag that was baked into every launcher template.
-        let info = manager.install_info_from_package_root(&validated).await?;
+        let info = manager.install_info_from_package_root(package_dir.root()).await?;
         let entries = manager.resolve_env(&[std::sync::Arc::new(info)], true).await?;
 
         // argv[0] is the launcher's own filename — the invocable entrypoint
@@ -68,12 +75,42 @@ impl LauncherExec {
         // (the common case) leaves `argv0` unchanged, so packages that do not
         // declare a divergent command keep the existing resolve-name-on-PATH
         // behaviour byte-for-byte.
-        let metadata = Metadata::read_json(&validated.join("metadata.json")).await?;
+        let metadata = Metadata::read_json(&package_dir.metadata()).await?;
         let command = metadata
             .entrypoints()
             .map_or(argv0.as_str(), |eps| eps.dispatch_command(argv0));
 
-        self.run_with_env(entries, args, command, context.config_view()).await
+        // Resolve baked args (if any declared for this entrypoint) and prepend
+        // them before user-supplied args. The content path comes from the
+        // PackageDir layout accessor, not a hand-rolled join.
+        let content_path = package_dir.content();
+        let baked: &[String] = metadata
+            .entrypoints()
+            .and_then(|eps| eps.get(argv0))
+            .map(|e| e.args())
+            .unwrap_or(&[]);
+
+        if baked.is_empty() {
+            self.run_with_env(entries, args, command, context.config_view()).await
+        } else {
+            // ADR D6: pass an empty dep_contexts map — the Usage::EntryPointArgs
+            // capability gate rejects any ${deps.*} token before the dep regex
+            // fires. The gate is the safety mechanism; publish-time
+            // validate_entrypoint_args already rejected such args before publish.
+            let dep_contexts = std::collections::HashMap::new();
+            let resolver = TemplateResolver::new(&content_path, &dep_contexts).usage(Usage::EntryPointArgs);
+            let mut combined = Vec::with_capacity(baked.len() + args.len());
+            for baked_arg in baked {
+                combined.push(resolver.resolve(baked_arg).map_err(|e| {
+                    anyhow::Error::from(e).context(format!(
+                        "failed to interpolate baked arg '{baked_arg}' for entrypoint '{argv0}'"
+                    ))
+                })?);
+            }
+            combined.extend_from_slice(args);
+            self.run_with_env(entries, &combined, command, context.config_view())
+                .await
+        }
     }
 
     /// Run the resolved entrypoint with the given env.

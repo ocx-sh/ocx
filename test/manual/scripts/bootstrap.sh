@@ -160,6 +160,11 @@ push_simple deps-app build \
 push_simple cross-layer-entrypoint build \
     "LEAF_A_FQ_DIGEST=$(fq deps-leaf-a)@${LEAF_A_DIGEST}"
 
+# ── 6. Baked args + ${installPath} interpolation demo ─────────────────────
+# No @@...@@ substitutions; metadata.in.json used verbatim.
+# content/ (committed) ships scripts/hello.sh; the entrypoint bakes its path.
+push_simple baked-args-demo content
+
 # Refresh local index so `ocx package which` works.
 ocx index update "${NAMESPACE}/single-layer-hello" >/dev/null
 ocx index update "${NAMESPACE}/multi-entry-toolkit" >/dev/null
@@ -169,6 +174,7 @@ ocx index update "${NAMESPACE}/deps-leaf-b" >/dev/null
 ocx index update "${NAMESPACE}/deps-mid" >/dev/null
 ocx index update "${NAMESPACE}/deps-app" >/dev/null
 ocx index update "${NAMESPACE}/cross-layer-entrypoint" >/dev/null
+ocx index update "${NAMESPACE}/baked-args-demo" >/dev/null
 
 echo
 ocx_done "bootstrap done. Try:"

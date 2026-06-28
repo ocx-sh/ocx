@@ -35,6 +35,15 @@ pub enum Error {
         #[source]
         source: super::metadata::template::TemplateError,
     },
+
+    /// Entrypoint baked-arg template interpolation failed at publish time.
+    #[error("entrypoint '{entrypoint}' arg '{arg}' {source}")]
+    EntrypointArgInterpolation {
+        entrypoint: String,
+        arg: String,
+        #[source]
+        source: super::metadata::template::TemplateError,
+    },
 }
 
 impl ClassifyExitCode for Error {
@@ -43,6 +52,7 @@ impl ClassifyExitCode for Error {
             Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
+            Self::EntrypointArgInterpolation { source, .. } => source.classify(),
         }
     }
 }
