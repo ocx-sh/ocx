@@ -54,6 +54,8 @@ All ten supported shells — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish
 
 `ocx run` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the tools those files declare — no more. If a tool is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.
 
+Naming a binding subset (`ocx run cmake -- …`) narrows composition further: only the named tools are resolved to a host leaf and installed. A `-g` group selects the *namespace* for name resolution, not a mandate that every tool in it be available — an unrelated tool in scope with no leaf for the current host does not block a narrowly-named run. Omit the names and the whole scope must resolve.
+
 By default `ocx run` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
 
 ### What "hermetic" means for `ocx exec` {#strict-isolation-exec}

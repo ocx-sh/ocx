@@ -14,7 +14,7 @@
 use crate::oci::identifier::error::IdentifierErrorKind;
 use crate::oci::{Identifier, Platform};
 use crate::project::config::ProjectConfig;
-use crate::project::lock::{LockedResolution, LockedTool, ProjectLock};
+use crate::project::lock::{LockedResolution, LockedTool, ProjectLock, resolutions_content_equal};
 
 use super::error::{ProjectError, ProjectErrorKind};
 
@@ -37,6 +37,37 @@ pub struct ResolvedTool {
     pub binding: String,
     pub identifier: Identifier,
     pub origin: Origin,
+}
+
+/// The unresolved source backing a [`SelectedTool`].
+///
+/// Selection ([`select_tool_set`]) records *where* a binding came from without
+/// touching the host platform; [`resolve_selected_tools`] later maps each
+/// source to a concrete pull [`Identifier`]. Splitting selection from
+/// resolution lets a caller narrow the set to a requested NAME subset *before*
+/// resolving host leaves, so an unrelated sibling that ships no leaf for the
+/// host never aborts a narrowly-named run.
+#[derive(Debug, Clone)]
+pub enum ToolSource {
+    /// A group entry from the lock. The host leaf is resolved later, only if
+    /// the entry survives name filtering.
+    Locked(LockedTool),
+    /// A positional `name=identifier` package — already a concrete tag-style
+    /// identifier, resolved verbatim.
+    Explicit(Identifier),
+}
+
+/// One tool selected by [`select_tool_set`], before host-leaf resolution.
+///
+/// `binding` is the local name; `origin` records provenance for diagnostics
+/// and logging; `source` carries the unresolved backing (a lock entry or an
+/// explicit identifier). [`resolve_selected_tools`] turns this into a
+/// [`ResolvedTool`].
+#[derive(Debug, Clone)]
+pub struct SelectedTool {
+    pub binding: String,
+    pub origin: Origin,
+    pub source: ToolSource,
 }
 
 /// One positional package parsed from the command line.
@@ -145,35 +176,47 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
     out
 }
 
-/// Compose the final tool set from selected groups and positional packages.
+/// Select the final tool set from groups and positionals — *without* resolving
+/// host leaves.
 ///
-/// Pure function — no I/O. Lock load + staleness checks happen at the CLI
-/// boundary; this function trusts the caller to have validated those.
+/// Pure function — no I/O, no host-platform lookup. This is the **selection**
+/// half of [`compose_tool_set`]: it builds the binding set, performs
+/// whole-scope duplicate-across-groups validation, and applies positional
+/// overrides, but leaves every group entry as an unresolved
+/// [`ToolSource::Locked`]. A caller that needs only a subset (e.g.
+/// `ocx run NAME`) can filter the result and then resolve just the survivors
+/// via [`resolve_selected_tools`], so a sibling that ships no host leaf for the
+/// current platform never aborts the run.
 ///
 /// Pipeline:
 ///
-/// 1. Build initial set from `groups` × `lock.tools` (deduplicating group
-///    names, preserving first-seen order).
-/// 2. Duplicate-across-groups check: same binding in two groups → error.
-/// 3. Apply positional overrides: right-most wins; matching binding replaces
-///    the entry, non-matching adds a fresh entry. Positionals also dedup
-///    among themselves with right-most-wins.
+/// 1. Build the initial set from `groups` × `lock.tools` (deduplicating group
+///    names, preserving first-seen order; within a group, lock entry order is
+///    preserved).
+/// 2. Duplicate-across-groups check, performed at the **lock level**: the same
+///    binding in two selected groups with identical [`LockedResolution`]
+///    content (via [`resolutions_content_equal`]) collapses to the first-seen
+///    entry; differing content errors with
+///    [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`]. This validation
+///    is whole-scope and fires regardless of any later name filter. Because it
+///    compares resolutions — not resolved host leaves — an unnamed sibling with
+///    no host leaf is never resolved here and so cannot error at selection time.
+/// 3. Apply positional overrides: right-most wins; a matching binding replaces
+///    the entry (origin becomes [`Origin::Explicit`]), a non-matching one adds
+///    a fresh entry. Positionals also dedup among themselves with
+///    right-most-wins.
 ///
-/// `current_platform` is the host platform: V2 lock entries resolve to the
-/// host→`"any"` leaf digest for that platform; V1 entries fall back to the
-/// legacy index-digest path. `config` is currently unused beyond signature
-/// parity.
-pub fn compose_tool_set(
+/// `config` is currently unused beyond signature parity.
+pub fn select_tool_set(
     _config: &ProjectConfig,
     lock: Option<&ProjectLock>,
     groups: &[String],
     positionals: &[PositionalPackage],
-    current_platform: &Platform,
-) -> Result<Vec<ResolvedTool>, super::Error> {
-    let mut resolved: Vec<ResolvedTool> = Vec::new();
-    // Parallel `binding -> resolved[i]` index that mirrors `resolved`. Replaces
+) -> Result<Vec<SelectedTool>, super::Error> {
+    let mut selected: Vec<SelectedTool> = Vec::new();
+    // Parallel `binding -> selected[i]` index that mirrors `selected`. Replaces
     // the previous O(G·T·R) `iter().find` chain inside the inner loop with an
-    // O(1) `HashMap` probe. Every push to `resolved` must be paired with an
+    // O(1) `HashMap` probe. Every push to `selected` must be paired with an
     // insert; every override (positional `right-most wins`) keeps the same
     // index so the map never goes stale.
     let mut binding_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -201,21 +244,19 @@ pub fn compose_tool_set(
             if entry.group != *raw {
                 continue;
             }
-            // Resolve this lock entry to the host-platform pull identifier:
-            // V2 → host→`"any"` leaf via `repository.clone_with_digest(leaf)`;
-            // V1 → the legacy index identifier. Absent host leaf (no key, no
-            // `"any"`) surfaces as a clean error.
-            let entry_identifier = host_leaf_identifier(entry, current_platform)?;
-            // Step 2: duplicate-across-groups check. Identical content
-            // (registry/repo/digest) in another group → collapse silently.
-            // Different content → error.
+            // Step 2: duplicate-across-groups check at the lock level. Identical
+            // resolution content in another selected group → collapse silently;
+            // different content → error. No host-leaf resolution happens here,
+            // so an entry with no host leaf for the current platform never
+            // errors at selection time.
             if let Some(&idx) = binding_index.get(&entry.name) {
-                let existing = &resolved[idx];
+                let existing = &selected[idx];
                 let from_other_group = matches!(&existing.origin, Origin::Group(g) if g != raw);
                 if from_other_group {
-                    let same_content = existing.identifier.digest() == entry_identifier.digest()
-                        && existing.identifier.registry() == entry_identifier.registry()
-                        && existing.identifier.repository() == entry_identifier.repository();
+                    let ToolSource::Locked(existing_tool) = &existing.source else {
+                        unreachable!("a Group-origin selection always carries a Locked source");
+                    };
+                    let same_content = resolutions_content_equal(&existing_tool.resolution, &entry.resolution);
                     if !same_content {
                         let other_group = match &existing.origin {
                             Origin::Group(g) => g.clone(),
@@ -234,11 +275,11 @@ pub fn compose_tool_set(
                     continue;
                 }
             }
-            let idx = resolved.len();
-            resolved.push(ResolvedTool {
+            let idx = selected.len();
+            selected.push(SelectedTool {
                 binding: entry.name.clone(),
-                identifier: entry_identifier,
                 origin: Origin::Group(raw.clone()),
+                source: ToolSource::Locked(entry.clone()),
             });
             binding_index.insert(entry.name.clone(), idx);
         }
@@ -248,21 +289,89 @@ pub fn compose_tool_set(
     // positionals themselves).
     for pos in positionals {
         if let Some(&idx) = binding_index.get(&pos.binding) {
-            let existing = &mut resolved[idx];
-            existing.identifier = pos.identifier.clone();
+            let existing = &mut selected[idx];
             existing.origin = Origin::Explicit;
+            existing.source = ToolSource::Explicit(pos.identifier.clone());
         } else {
-            let idx = resolved.len();
-            resolved.push(ResolvedTool {
+            let idx = selected.len();
+            selected.push(SelectedTool {
                 binding: pos.binding.clone(),
-                identifier: pos.identifier.clone(),
                 origin: Origin::Explicit,
+                source: ToolSource::Explicit(pos.identifier.clone()),
             });
             binding_index.insert(pos.binding.clone(), idx);
         }
     }
 
-    Ok(resolved)
+    Ok(selected)
+}
+
+/// Resolve a previously [`select_tool_set`]-selected slice to concrete pull
+/// identifiers for `platform`.
+///
+/// Maps each [`SelectedTool`] to a [`ResolvedTool`]: a [`ToolSource::Locked`]
+/// group entry resolves its host leaf via [`host_leaf_identifier`]; a
+/// [`ToolSource::Explicit`] positional keeps its identifier verbatim. Because
+/// only the entries in `selected` are resolved, [`ProjectErrorKind::NoHostLeaf`]
+/// can surface solely for a tool actually in this slice — a caller that
+/// filtered the selection to a NAME subset never trips on an unrelated sibling.
+///
+/// # Errors
+///
+/// Returns [`ProjectErrorKind::NoHostLeaf`] when a `Locked` V2 entry ships no
+/// leaf for `platform` and no `"any"` fallback at the locked version.
+pub fn resolve_selected_tools(
+    selected: &[SelectedTool],
+    platform: &Platform,
+) -> Result<Vec<ResolvedTool>, super::Error> {
+    selected
+        .iter()
+        .map(|tool| {
+            let identifier = match &tool.source {
+                ToolSource::Locked(locked) => host_leaf_identifier(locked, platform)?,
+                ToolSource::Explicit(identifier) => identifier.clone(),
+            };
+            Ok(ResolvedTool {
+                binding: tool.binding.clone(),
+                identifier,
+                origin: tool.origin.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Compose the final tool set from selected groups and positional packages.
+///
+/// Pure function — no I/O. Lock load + staleness checks happen at the CLI
+/// boundary; this function trusts the caller to have validated those.
+///
+/// Thin delegate over [`select_tool_set`] followed by [`resolve_selected_tools`]:
+/// selection performs whole-scope duplicate validation (at the lock level) and
+/// positional overrides, then resolution maps every surviving entry to its
+/// host-platform pull [`Identifier`]. The two concerns are split so a caller
+/// that needs only a subset can filter between the steps; `compose_tool_set`
+/// keeps the original "resolve everything" contract by resolving the entire
+/// selection.
+///
+/// Note the internal ordering: duplicate validation now fully precedes
+/// host-leaf resolution and compares [`LockedResolution`] content rather than
+/// resolved leaves. This is behaviour-preserving for real locks — a lock is
+/// generated from one resolved manifest, so the same repository implies an
+/// identical `platforms` map.
+///
+/// `current_platform` is the host platform: V2 lock entries resolve to the
+/// host→`"any"` leaf digest for that platform; V1 entries fall back to the
+/// legacy index-digest path. `config` is currently unused beyond signature
+/// parity.
+pub fn compose_tool_set(
+    config: &ProjectConfig,
+    lock: Option<&ProjectLock>,
+    groups: &[String],
+    positionals: &[PositionalPackage],
+    current_platform: &Platform,
+) -> Result<Vec<ResolvedTool>, super::Error> {
+    let selected = select_tool_set(config, lock, groups, positionals)?;
+    resolve_selected_tools(&selected, current_platform)
 }
 
 /// Resolve a locked tool to its host-platform pull [`Identifier`].
@@ -365,6 +474,24 @@ mod tests {
     fn locked(name: &str, group: &str, reg: &str, repo: &str, c: char) -> LockedTool {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256(sha(c)));
+        LockedTool {
+            name: name.into(),
+            group: group.into(),
+            resolution: LockedResolution::PerPlatform {
+                repository: Identifier::new_registry(repo, reg),
+                platforms,
+            },
+        }
+    }
+
+    /// Like [`locked`] but ships ONLY a `windows/amd64` leaf — no
+    /// `linux/amd64`, no `"any"`. On the linux test [`host`] the host→`"any"`
+    /// lookup finds nothing, so [`resolve_selected_tools`] errors with
+    /// `NoHostLeaf` for this entry while [`select_tool_set`] (resolution-free)
+    /// returns it without error.
+    fn locked_windows_only(name: &str, group: &str, reg: &str, repo: &str, c: char) -> LockedTool {
+        let mut platforms = BTreeMap::new();
+        platforms.insert("windows/amd64".to_string(), Digest::Sha256(sha(c)));
         LockedTool {
             name: name.into(),
             group: group.into(),
@@ -514,6 +641,33 @@ mod tests {
         let err = compose_tool_set(&cfg(), Some(&lock), &["default".into()], &[], &windows)
             .expect_err("absent host leaf must error before any network call");
         let crate::project::Error::Project(_) = err;
+    }
+
+    /// Regression (bugfix `run_named_scope_resolution`): selection is
+    /// resolution-free, so an unnamed sibling that ships no host leaf for the
+    /// current host does NOT abort selection; resolving only the named subset
+    /// then succeeds, while resolving the whole set still trips on the sibling.
+    #[test]
+    fn named_subset_skips_unnamed_sibling_without_host_leaf() {
+        // default group: cmake (linux leaf) + winonly (windows-only leaf).
+        let lock = lock_with(vec![
+            locked("cmake", "default", "ocx.sh", "cmake", 'a'),
+            locked_windows_only("winonly", "default", "ocx.sh", "winonly", 'b'),
+        ]);
+        let host = host(); // linux/amd64
+
+        // Selection is resolution-free: BOTH entries returned, no NoHostLeaf.
+        let selected = select_tool_set(&cfg(), Some(&lock), &["default".into()], &[])
+            .expect("select must not resolve host leaves");
+        assert_eq!(selected.len(), 2);
+
+        // Resolving ONLY the named subset (cmake) succeeds.
+        let cmake: Vec<_> = selected.iter().filter(|s| s.binding == "cmake").cloned().collect();
+        assert!(resolve_selected_tools(&cmake, &host).is_ok());
+
+        // Resolving the whole set still errors — proving the sibling is the
+        // condition the old eager whole-scope resolve tripped on.
+        assert!(resolve_selected_tools(&selected, &host).is_err());
     }
 
     // ── compose: positionals ────────────────────────────────────────────

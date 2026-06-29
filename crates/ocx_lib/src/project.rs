@@ -17,8 +17,8 @@ pub mod registry;
 pub mod resolve;
 
 pub use compose::{
-    Origin, PositionalPackage, ResolvedTool, compose_tool_set, expand_all_keyword, host_leaf_identifier,
-    parse_positional,
+    Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, compose_tool_set, expand_all_keyword,
+    host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
 };
 pub use config::ProjectConfig;
 pub use error::{Error, ProjectError, ProjectErrorKind};
