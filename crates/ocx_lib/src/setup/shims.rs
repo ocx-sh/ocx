@@ -167,7 +167,16 @@ Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction 
 /// prepend, not overwrite. The caller must bind `$_ocx_json` to the parsed record
 /// first. Shared **verbatim** between [`ENV_NU`] and the
 /// `self activate --shell=nushell` line so the two cannot drift.
-pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == \"path\" { let _ocx_cur = ($env | get --optional $_ocx_e.key | default \"\"); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }";
+///
+/// The existing-value read uses `($_ocx_e.key in ($env | columns))` + a dynamic
+/// `get` rather than the terser `get --optional`: `get --optional` was added to
+/// Nushell *after* 0.101.0, and Nushell parses an entire file before running it,
+/// so on an older-but-supported nu the unknown flag is a PARSE error that voids
+/// the whole vendor-autoload — dropping the PATH prepend with it. The
+/// flag-free form uses only pre-0.101 stable features. Do not "simplify" it back
+/// to `get --optional` (the `nu_apply_loop_reads_env_without_the_get_optional_flag`
+/// test guards this).
+pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == \"path\" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }";
 
 /// `$OCX_HOME/env.nu` — Nushell shim.
 ///
@@ -200,7 +209,7 @@ if (($_ocx_bin | path join 'ocx') | path exists) {
     $env.PATH = ([$_ocx_bin] ++ ($env.PATH | (if ($in | describe) == 'string' { split row (char esep) } else { $in })) | where {|p| $p != "" } | uniq | str join (char esep))
     try {
         let _ocx_json = (^($_ocx_bin | path join 'ocx') --format json --global env | from json)
-        for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == "path" { let _ocx_cur = ($env | get --optional $_ocx_e.key | default ""); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }
+        for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == "path" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else { load-env {($_ocx_e.key): $_ocx_e.value} } }
     } catch { }
 }
 "#;
@@ -643,6 +652,32 @@ mod tests {
         assert!(
             !ENV_NU.contains("nu -c"),
             "env.nu must not shell out to a child `nu -c` (no parent env effect)"
+        );
+    }
+
+    /// Regression: the Nushell apply loop must read an existing env value with a
+    /// FLAG-FREE construct, never `get --optional`.
+    ///
+    /// `get --optional` was added to nu *after* 0.101.0. Nushell parses an entire
+    /// file before running it, so on an older-but-supported nu (e.g. 0.101.0) the
+    /// unknown flag is a PARSE error that voids the whole vendor-autoload — taking
+    /// down the `$env.PATH` prepend that precedes it, so `ocx` never lands on
+    /// PATH. The replacement reads the value via `($_ocx_e.key in ($env |
+    /// columns))` + a dynamic `get`, all pre-0.101 stable features, and emits no
+    /// deprecation warning on a newer nu. Pinned on both the shared const and its
+    /// inlined copy in [`ENV_NU`] (drift guard).
+    #[test]
+    fn nu_apply_loop_reads_env_without_the_get_optional_flag() {
+        for (name, body) in [("NU_ENV_APPLY_LOOP", NU_ENV_APPLY_LOOP), ("ENV_NU", ENV_NU)] {
+            assert!(
+                !body.contains("get --optional"),
+                "{name} must not use `get --optional` (absent on nu < the version that added it; \
+                 its unknown flag voids the whole autoload at parse time, dropping the PATH prepend)"
+            );
+        }
+        assert!(
+            NU_ENV_APPLY_LOOP.contains("$_ocx_e.key in ($env | columns)"),
+            "the apply loop must read an existing value via the flag-free `key in ($env | columns)` form"
         );
     }
 }
