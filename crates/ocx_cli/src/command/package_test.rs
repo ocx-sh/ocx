@@ -63,7 +63,8 @@ pub struct PackageTest {
     identifier: options::Identifier,
 
     /// Layers, in order (base first, top last). Same syntax as `package push`:
-    /// either a path to a `.tar.gz`/`.tar.xz` archive, or `sha256:<hex>.<ext>`
+    /// either a path to a `.tar.gz`/`.tar.xz`/`.tar.zst` archive, or
+    /// `sha256:<hex>.<ext>`
     /// referring to a layer already present in the target registry. Digest
     /// refs are auto-pulled from the registry on demand; in `--offline`,
     /// missing digest blobs error with `PolicyBlocked`.

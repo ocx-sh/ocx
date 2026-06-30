@@ -30,7 +30,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A compression engine (XZ, GZ) failed to initialize.
+    /// A compression engine (XZ or Zstandard) failed to initialize.
     #[error("compression engine initialization failed")]
     EngineInit(#[source] Box<dyn std::error::Error + Send + Sync>),
 

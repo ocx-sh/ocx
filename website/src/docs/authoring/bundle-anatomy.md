@@ -37,9 +37,9 @@ The `sha256:<hex>.<ext>` form on [`ocx package push`][cmd-package-push] is the s
 
 ## Choosing the Compression {#compression}
 
-The archive extension picks the codec: `.tar.xz` (LZMA, default) or `.tar.gz` (Gzip). LZMA typically produces noticeably smaller archives for binary payloads, while Gzip decompresses faster on tiny archives where CPU time dominates. Layers are downloaded once and cached locally per digest ([three-tier storage][in-depth-storage]), so the size win usually outweighs the speed difference at registry scale.
+The archive extension picks the codec: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard). LZMA typically produces noticeably smaller archives for binary payloads, while Gzip decompresses faster on tiny archives where CPU time dominates. Zstandard ([OCI 1.1][oci-media-types]) sits between them: archives close to LZMA's size at its lower presets, but decompresses several times faster — the win when consumers install on cold caches. Layers are downloaded once and cached locally per digest ([three-tier storage][in-depth-storage]), so the size win usually outweighs the speed difference at registry scale.
 
-Compression level (`fast`, `default`, `best`) trades publish-time CPU for archive size. The threads flag (`-j`) only affects LZMA; `0` auto-detects up to 16 cores.
+Compression level (`fast`, `default`, `best`) trades publish-time CPU for archive size. The threads flag (`-j`) parallelises LZMA and Zstandard compression (Gzip is always single-threaded); `0` auto-detects up to 16 cores.
 
 ::: tip Stick with the defaults
 `.tar.xz` at level `default` is the right call for almost every payload. Move to `best` only after a measurement shows the savings justify the publish-time cost.
@@ -103,6 +103,7 @@ When repackaging upstream archives, [`strip_components`][strip-components] mirro
 <!-- external -->
 [in-tree-mirrors]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 [gnu-tar-strip]: https://www.gnu.org/software/tar/manual/html_section/transform.html
+[oci-media-types]: https://github.com/opencontainers/image-spec/blob/v1.1.0/media-types.md
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create

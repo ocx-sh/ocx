@@ -356,6 +356,70 @@ def test_push_digest_layer_reuse_tar_xz(
     assert (content / "bin" / "tool").exists(), "File layer B missing"
 
 
+def test_round_trip_zstd_layer(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A `.tar.zst` layer (OCI 1.1 tar+zstd) round-trips through
+    `package create` -> push -> install.
+
+    This is the end-to-end parity test for the zstd backend: `package
+    create -o foo.tar.zst` exercises the synchronous zstd encoder, push
+    infers the `application/vnd.oci.image.layer.v1.tar+zstd` media type
+    from the filename, and `package install` drives the asynchronous
+    streaming `ZstdDecoder` decode path in `Client::pull_layer` — the
+    same pipeline xz and gzip layers use.
+    """
+    layer_a = _make_layer_content(tmp_path, "a", {"lib/liba.so": "zstd-shared"})
+    layer_b = _make_layer_content(tmp_path, "b", {"bin/tool": "#!/bin/sh\necho hi\n"})
+    bundle_a = _bundle_layer(ocx, layer_a, tmp_path, ext="tar.zst")
+    bundle_b = _bundle_layer(ocx, layer_b, tmp_path, ext="tar.gz")
+
+    _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a)], tmp_path)
+    ocx.plain("index", "update", f"{unique_repo}:1.0.0")
+
+    # The v1 layer was pushed as a FILE (`.tar.zst`); its manifest media type
+    # must come from push-time filename inference (media_type_from_path), not
+    # the digest-suffix parsing exercised by the v2 reuse below.
+    v1_index = _fetch_manifest(ocx.registry, unique_repo, "1.0.0")
+    v1_manifest = _fetch_manifest(
+        ocx.registry, unique_repo, v1_index["manifests"][0]["digest"]
+    )
+    assert v1_manifest["layers"][0]["mediaType"] == "application/vnd.oci.image.layer.v1.tar+zstd", (
+        f"file-pushed .tar.zst layer should declare tar+zstd, got {v1_manifest['layers'][0]['mediaType']}"
+    )
+
+    layer_a_digest = _fetch_layer_digest(ocx.registry, unique_repo, "1.0.0")
+
+    # Reuse the zstd layer by digest in v2, declaring its format via the
+    # `.tar.zst` extension suffix — the same media-type-declaration contract
+    # the xz/gzip reuse paths use.
+    _push_multi_layer(
+        ocx, unique_repo, "2.0.0",
+        [f"{layer_a_digest}.tar.zst", str(bundle_b)],
+        tmp_path, new=False,
+    )
+    ocx.plain("index", "update", f"{unique_repo}:2.0.0")
+
+    # The reused layer descriptor must declare tar+zstd, not a fabricated
+    # default — same assertion shape as the tar+xz regression test.
+    index = _fetch_manifest(ocx.registry, unique_repo, "2.0.0")
+    image_manifest = _fetch_manifest(
+        ocx.registry, unique_repo, index["manifests"][0]["digest"]
+    )
+    reused = next(
+        layer for layer in image_manifest["layers"] if layer["digest"] == layer_a_digest
+    )
+    assert reused["mediaType"] == "application/vnd.oci.image.layer.v1.tar+zstd", (
+        f"reused layer A should declare tar+zstd, got {reused['mediaType']}"
+    )
+
+    result = ocx.json("package", "install", f"{unique_repo}:2.0.0")
+    content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
+    assert (content / "lib" / "liba.so").exists(), "zstd layer A not extracted on consumer"
+    assert (content / "lib" / "liba.so").read_text() == "zstd-shared"
+    assert (content / "bin" / "tool").exists(), "File layer B missing"
+
+
 def test_push_bare_digest_is_rejected(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):

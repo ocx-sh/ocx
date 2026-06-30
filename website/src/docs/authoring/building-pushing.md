@@ -24,7 +24,7 @@ Before pushing, verify the package works locally with [`ocx package test`][autho
 
 ## Bring Your Own Archives {#byo-archives}
 
-[`ocx package push`][cmd-package-push] does not bundle a directory for you. Every file layer must be a pre-built `.tar.gz` / `.tar.xz` archive (the aliases `.tgz` and `.txz` are also accepted) — and that asymmetry is deliberate. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy), and the registry treats every distinct digest as a fresh layer. Bundle once with [`ocx package create`][cmd-package-create] (see [Bundle Anatomy][authoring-bundle-anatomy]), then reference that archive across every subsequent push.
+[`ocx package push`][cmd-package-push] does not bundle a directory for you. Every file layer must be a pre-built `.tar.gz` / `.tar.xz` / `.tar.zst` archive (the aliases `.tgz`, `.txz`, `.tzst`, and `.tar.zstd` are also accepted) — and that asymmetry is deliberate. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy), and the registry treats every distinct digest as a fresh layer. Bundle once with [`ocx package create`][cmd-package-create] (see [Bundle Anatomy][authoring-bundle-anatomy]), then reference that archive across every subsequent push.
 
 ::: warning Zero-layer pushes need explicit `--metadata`
 A push with zero file layers is valid: it produces a config-only OCI artefact (the same shape OCX uses internally for the `__ocx.desc` description tag written by [`ocx package describe`][cmd-package-describe]). With no file layer next to which to look for `<stem>-metadata.json`, `--metadata` is mandatory — the same rule applies whenever every layer is a `sha256:…` digest reference.
@@ -48,7 +48,7 @@ OCX lets you reference any layer that is already in the target registry by diges
 <algo>:<hex>.<ext>
 ```
 
-`<algo>` is one of `sha256`, `sha384`, or `sha512`, with the matching hex length (64, 96, or 128 chars). The extension (`tar.gz` / `tar.xz` / aliases `tgz`/`txz`) is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. A bare `<algo>:<hex>` without an extension is rejected. OCX HEADs the registry to verify the digest exists, then records the existing layer in the new manifest without re-uploading. This is the foundation of the [three-tier storage model][in-depth-storage-layers]: shared base archives are written once, hardlinked into every package that references them, and never re-downloaded.
+`<algo>` is one of `sha256`, `sha384`, or `sha512`, with the matching hex length (64, 96, or 128 chars). The extension (`tar.gz` / `tar.xz` / `tar.zst` / aliases `tgz`/`txz`/`tzst`/`tar.zstd`) is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. A bare `<algo>:<hex>` without an extension is rejected. OCX HEADs the registry to verify the digest exists, then records the existing layer in the new manifest without re-uploading. This is the foundation of the [three-tier storage model][in-depth-storage-layers]: shared base archives are written once, hardlinked into every package that references them, and never re-downloaded.
 
 The hand-publishing pattern (the [`ocx_mirror`][mirror-pipeline] tool currently always uploads file layers; cross-release digest reuse is something hand-driven publishers compose manually):
 

@@ -463,7 +463,7 @@ impl Client {
         blob_total_size: u64,
         decompressed_cap: u64,
     ) -> std::result::Result<(), ClientError> {
-        use async_compression::tokio::bufread::{GzipDecoder, XzDecoder};
+        use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
         use hashing_reader::HashingAsyncReader;
         use progress_reader::ProgressReader;
         use tokio::io::BufReader;
@@ -623,6 +623,22 @@ impl Client {
             }
             compression::CompressionAlgorithm::Gzip => {
                 let decoder = GzipDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
+                tokio::task::spawn_blocking(move || -> PipelineResult {
+                    use std::io::Read as _;
+                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
+                    let (extract_result, bridge) =
+                        archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    let cap_exceeded = bridge.limit() == 0;
+                    let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
+                    (extract_result, hashing_reader.finalize(), cap_exceeded)
+                })
+                .await
+                .map_err(ClientError::internal)?
+            }
+            compression::CompressionAlgorithm::Zstd => {
+                // zstd decoding is single-threaded, mirroring the xz/gzip decode path.
+                // The pipeline shape and unwind depth are identical to the other arms.
+                let decoder = ZstdDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);

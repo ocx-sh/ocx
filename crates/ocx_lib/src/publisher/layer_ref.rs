@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::{MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, oci};
+use crate::{MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, MEDIA_TYPE_TAR_ZSTD, oci};
 
 /// Supported archive media types for digest layer references.
 ///
@@ -21,19 +21,22 @@ pub enum ArchiveMediaType {
     TarGz,
     /// `application/vnd.oci.image.layer.v1.tar+xz`
     TarXz,
+    /// `application/vnd.oci.image.layer.v1.tar+zstd`
+    TarZstd,
 }
 
 impl ArchiveMediaType {
     /// All supported archive media types. The single source of truth
     /// for iteration — `FromStr` walks this set when resolving an
     /// extension suffix back to a variant.
-    pub const ALL: &'static [Self] = &[Self::TarGz, Self::TarXz];
+    pub const ALL: &'static [Self] = &[Self::TarGz, Self::TarXz, Self::TarZstd];
 
     /// Returns the OCI media type string for the manifest descriptor.
     pub fn as_media_type(self) -> &'static str {
         match self {
             Self::TarGz => MEDIA_TYPE_TAR_GZ,
             Self::TarXz => MEDIA_TYPE_TAR_XZ,
+            Self::TarZstd => MEDIA_TYPE_TAR_ZSTD,
         }
     }
 
@@ -46,6 +49,7 @@ impl ArchiveMediaType {
         match self {
             Self::TarGz => &["tar.gz", "tgz"],
             Self::TarXz => &["tar.xz", "txz"],
+            Self::TarZstd => &["tar.zst", "tzst", "tar.zstd"],
         }
     }
 
@@ -132,8 +136,9 @@ impl std::str::FromStr for LayerRef {
     ///
     /// 1. **`sha256:<hex>.<ext>`** — a layer digest with an archive
     ///    extension suffix declaring the media type. Accepted
-    ///    extensions are `tar.gz`, `tgz`, `tar.xz`, `txz`. Produces
-    ///    [`LayerRef::Digest`].
+    ///    extensions are every extension declared by
+    ///    [`ArchiveMediaType::ALL`] (`tar.gz`, `tgz`, `tar.xz`, `txz`,
+    ///    `tar.zst`, `tzst`, `tar.zstd`). Produces [`LayerRef::Digest`].
     ///
     /// 2. **Bare digest** (`sha256:<hex>` with no suffix) — rejected
     ///    with [`LayerRefParseError::BareDigest`]. Fabricating a media
@@ -230,6 +235,50 @@ mod tests {
         match lr {
             LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarXz),
             _ => panic!("expected Digest variant"),
+        }
+    }
+
+    #[test]
+    fn parse_digest_tar_zst() {
+        let hex = "e".repeat(64);
+        let input = format!("sha256:{hex}.tar.zst");
+        let lr: LayerRef = input.parse().unwrap();
+        match lr {
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarZstd),
+            _ => panic!("expected Digest variant"),
+        }
+    }
+
+    #[test]
+    fn parse_digest_tzst() {
+        let hex = "f".repeat(64);
+        let input = format!("sha256:{hex}.tzst");
+        let lr: LayerRef = input.parse().unwrap();
+        match lr {
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarZstd),
+            _ => panic!("expected Digest variant"),
+        }
+    }
+
+    #[test]
+    fn parse_digest_tar_zstd_alias() {
+        let hex = "a".repeat(64);
+        let input = format!("sha256:{hex}.tar.zstd");
+        let lr: LayerRef = input.parse().unwrap();
+        match lr {
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarZstd),
+            _ => panic!("expected Digest variant"),
+        }
+    }
+
+    #[test]
+    fn zstd_aliases_round_trip_to_canonical_tar_zst() {
+        let hex = "a".repeat(64);
+        for alias in ["tzst", "tar.zstd"] {
+            let short = format!("sha256:{hex}.{alias}");
+            let lr: LayerRef = short.parse().unwrap();
+            // Canonical display normalizes the alias to `tar.zst`.
+            assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.zst"), "alias {alias}");
         }
     }
 
@@ -355,8 +404,19 @@ mod tests {
     }
 
     #[test]
+    fn display_digest_tar_zstd() {
+        let hex = "e".repeat(64);
+        let lr = LayerRef::Digest {
+            digest: oci::Digest::Sha256(hex.clone()),
+            media_type: ArchiveMediaType::TarZstd,
+        };
+        assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.zst"));
+    }
+
+    #[test]
     fn archive_media_type_as_media_type_matches_constants() {
         assert_eq!(ArchiveMediaType::TarGz.as_media_type(), MEDIA_TYPE_TAR_GZ);
         assert_eq!(ArchiveMediaType::TarXz.as_media_type(), MEDIA_TYPE_TAR_XZ);
+        assert_eq!(ArchiveMediaType::TarZstd.as_media_type(), MEDIA_TYPE_TAR_ZSTD);
     }
 }

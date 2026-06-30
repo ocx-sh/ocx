@@ -15,6 +15,8 @@ pub const MEDIA_TYPE_PACKAGE_METADATA_V1: &str = "application/vnd.sh.ocx.package
 pub const MEDIA_TYPE_TAR_GZ: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 /// The media type of a layer containing a tarball of the package contents, compressed with xz.
 pub const MEDIA_TYPE_TAR_XZ: &str = "application/vnd.oci.image.layer.v1.tar+xz";
+/// The media type of a layer containing a tarball of the package contents, compressed with zstd.
+pub const MEDIA_TYPE_TAR_ZSTD: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
 /// The artifact type for a description manifest (README + optional logo).
 pub const MEDIA_TYPE_DESCRIPTION_V1: &str = "application/vnd.sh.ocx.description.v1";
 /// The OCI empty config media type, per the OCI image spec.
@@ -29,7 +31,7 @@ pub const MEDIA_TYPE_SVG: &str = "image/svg+xml";
 pub const ACCEPTED_MANIFEST_MEDIA_TYPES: &[&str; 2] = &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX];
 
 /// Infers the media type of a package layer from the file name of the archive.
-/// Currently supports .tar.gz, .tgz, .tar.xz and .txz extensions.
+/// Currently supports .tar.gz, .tgz, .tar.xz, .txz, .tar.zst, .tzst and .tar.zstd extensions.
 /// Returns None if the file extension is not recognized.
 pub fn media_type_from_filename(file_name: impl AsRef<str>) -> Option<&'static str> {
     let file_name = file_name.as_ref();
@@ -37,6 +39,8 @@ pub fn media_type_from_filename(file_name: impl AsRef<str>) -> Option<&'static s
         Some(MEDIA_TYPE_TAR_GZ)
     } else if file_name.ends_with(".tar.xz") || file_name.ends_with(".txz") {
         Some(MEDIA_TYPE_TAR_XZ)
+    } else if file_name.ends_with(".tar.zst") || file_name.ends_with(".tzst") || file_name.ends_with(".tar.zstd") {
+        Some(MEDIA_TYPE_TAR_ZSTD)
     } else {
         None
     }
@@ -70,5 +74,31 @@ pub fn media_type_select<S: AsRef<str>>(media_type: &S, expected: &'static [&'st
         Ok(media_type)
     } else {
         Err(Error::UnsupportedMediaType(media_type, expected))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_infers_gzip_and_xz() {
+        assert_eq!(media_type_from_filename("pkg.tar.gz"), Some(MEDIA_TYPE_TAR_GZ));
+        assert_eq!(media_type_from_filename("pkg.tgz"), Some(MEDIA_TYPE_TAR_GZ));
+        assert_eq!(media_type_from_filename("pkg.tar.xz"), Some(MEDIA_TYPE_TAR_XZ));
+        assert_eq!(media_type_from_filename("pkg.txz"), Some(MEDIA_TYPE_TAR_XZ));
+    }
+
+    #[test]
+    fn filename_infers_zstd() {
+        assert_eq!(media_type_from_filename("pkg.tar.zst"), Some(MEDIA_TYPE_TAR_ZSTD));
+        assert_eq!(media_type_from_filename("pkg.tzst"), Some(MEDIA_TYPE_TAR_ZSTD));
+        assert_eq!(media_type_from_filename("pkg.tar.zstd"), Some(MEDIA_TYPE_TAR_ZSTD));
+    }
+
+    #[test]
+    fn filename_rejects_unknown() {
+        assert_eq!(media_type_from_filename("pkg.zip"), None);
+        assert_eq!(media_type_from_filename("pkg.tar"), None);
     }
 }

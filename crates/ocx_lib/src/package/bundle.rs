@@ -13,7 +13,8 @@ use crate::{Result, archive, compression, utility};
 ///
 /// The compression algorithm is determined by the file extension of the output
 /// path passed to [`BundleBuilder::create`]: `.tar.xz` selects LZMA (the
-/// default when the filename is inferred), `.tar.gz` / `.tgz` selects Gzip.
+/// default when the filename is inferred), `.tar.gz` / `.tgz` selects Gzip, and
+/// `.tar.zst` / `.tzst` / `.tar.zstd` selects Zstandard.
 /// The compression level can be overridden with [`BundleBuilder::with_compression`].
 pub struct BundleBuilder {
     source: PathBuf,

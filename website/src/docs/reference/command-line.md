@@ -1956,11 +1956,11 @@ ocx package create [OPTIONS] <PATH>
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
 - `-p`, `--platform <PLATFORM>`: Platform of the package, used to infer the output filename.
-- `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default) or `.tar.gz` (Gzip).
+- `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
 - `-m`, `--metadata <PATH>`: Path to a metadata file to bundle with the package. When provided, it is copied as a sidecar file next to the output archive. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
-- `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Only affects LZMA (`.tar.xz`) compression.
+- `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
 - `-h`, `--help`: Print help information.
 
 #### `pull` {#package-pull}
@@ -2009,9 +2009,9 @@ ocx package push [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> <LAYE
 **Arguments**
 
 - `<LAYERS>...`: Zero or more layers, in order (base layer first, top layer last). Each layer is either:
-  - a path to a pre-built archive file (`.tar.gz`, `.tgz`, `.tar.xz`, or `.txz`), or
+  - a path to a pre-built archive file (`.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`, or `.tar.zstd`), or
   - a digest reference of the form `sha256:<hex>.<ext>` (e.g. `sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.tar.gz`) pointing at a layer that already exists in the target registry. The `<ext>` suffix is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. Bare digests are rejected.
-  - Extension aliases: `.tgz` is accepted as an alias for `.tar.gz`, and `.txz` for `.tar.xz`. The canonical forms `tar.gz` / `tar.xz` are what ocx emits internally — aliases are normalized on parse.
+  - Extension aliases: `.tgz` is accepted as an alias for `.tar.gz`, `.txz` for `.tar.xz`, and `.tzst` / `.tar.zstd` for `.tar.zst`. The canonical forms `tar.gz` / `tar.xz` / `tar.zst` are what ocx emits internally — aliases are normalized on parse.
   - To force file interpretation of a pathological filename that happens to match the digest shape, prefix it with `./` (e.g. `./sha256:abc….tar.gz`).
   - Omitting all layers produces a config-only OCI artifact with `layers: []`, valid for referrer-only / description-only manifests. `--metadata` is required in that case.
 
@@ -2059,7 +2059,7 @@ ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYE
 
 **Arguments**
 
-- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs when a local policy (`--offline` or `--frozen`) is active produce exit code 81 (`PolicyBlocked`).
+- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz`/`.tar.zst` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs when a local policy (`--offline` or `--frozen`) is active produce exit code 81 (`PolicyBlocked`).
 - `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required unless `--script` is given.
 
 **Options**

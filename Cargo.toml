@@ -82,6 +82,11 @@ rpassword = "7.5.3"
 flate2 = "1.1.9"
 tar = "0.4.46"
 lzma-rust2 = "0.16.3"
+# Sync zstd encode/decode for tar+zstd layers (OCI 1.1). `zstdmt` enables the
+# multi-threaded encoder (`Encoder::multithread`), giving compression-side
+# parallelism parity with the xz `XzWriterMt` path. Decode stays single-threaded
+# (matches the xz decode path). BSD-3-Clause + MIT/Apache — in the allowlist.
+zstd = { version = "0.13", features = ["zstdmt"] }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # Async XZ/gzip decoding for the streaming pull pipeline (Phase 3).
 # Requires `tokio` feature for AsyncRead-based decoders.
@@ -90,7 +95,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # (single-threaded), so the vulnerable code path is never reached. If `cargo
 # deny` flags the advisory, add an ignore entry to deny.toml citing this
 # rationale. Verified bundled XZ version ≥ 5.8.1 in async-compression ≥ 0.4.38.
-async-compression = { version = "0.4.42", default-features = false, features = ["tokio", "xz", "gzip"] }
+async-compression = { version = "0.4.42", default-features = false, features = ["tokio", "xz", "gzip", "zstd"] }
 # SyncIoBridge for bridging AsyncRead → sync Read at the spawn_blocking boundary
 # in Client::pull_layer. New direct dep — confirmed absent from workspace before
 # this addition (grep 2026-06-12, 0 matches).

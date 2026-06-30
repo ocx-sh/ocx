@@ -63,13 +63,14 @@ pub struct PackagePush {
     /// Layers to push, in order (base layer first, top layer last).
     ///
     /// Each layer is either:
-    ///   - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`), or
+    ///   - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`,
+    ///     `.tar.zst`), or
     ///   - a digest reference to a layer already present in the target
     ///     registry, written as `sha256:<hex>.<ext>` where `<ext>` declares
     ///     the original archive format - one of `tar.gz`, `tgz`, `tar.xz`,
-    ///     `txz`. The OCI distribution spec does not expose a layer's media
-    ///     type via blob HEAD, so the suffix is required: OCX refuses to
-    ///     guess.
+    ///     `txz`, `tar.zst`, `tzst`, `tar.zstd`. The OCI distribution spec
+    ///     does not expose a layer's media type via blob HEAD, so the suffix
+    ///     is required: OCX refuses to guess.
     ///
     /// Digest references enable layer reuse: a base layer pushed once can be
     /// referenced by digest from many packages without re-uploading. Zero
@@ -77,7 +78,7 @@ pub struct PackagePush {
     /// `--metadata` is supplied.
     ///
     /// Examples:
-    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.gz ./new.tar.gz
+    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.gz ./new.tar.zst
     ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz
     layers: Vec<LayerRef>,
 }

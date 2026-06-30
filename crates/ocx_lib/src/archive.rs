@@ -278,6 +278,30 @@ mod tests {
         assert_eq!(std::fs::read(extract_dir.path().join("hello.txt")).unwrap(), b"world");
     }
 
+    /// zstd tar round-trip through the `Archive` facade (`.tar.zst`).
+    #[tokio::test]
+    async fn test_round_trip_zstd() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello.txt"), b"world").unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar.zst");
+
+        let mut archive = Archive::create(&archive_path).await.unwrap();
+        archive
+            .add_file("hello.txt", src.path().join("hello.txt"))
+            .await
+            .unwrap();
+        archive.finish().await.unwrap();
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("zstd tar extraction failed");
+
+        assert_eq!(std::fs::read(extract_dir.path().join("hello.txt")).unwrap(), b"world");
+    }
+
     #[test]
     fn test_validate_symlink_same_dir() {
         let root = Path::new("/tmp/root");
