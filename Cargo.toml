@@ -7,7 +7,7 @@ members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_schema", "crates/ocx_
 exclude = ["external/rust-oci-client", "external/docker_credential"]
 
 [workspace.package]
-version = "0.3.9"
+version = "0.3.10"
 license = "Apache-2.0"
 description = "The simple package manager"
 repository = "https://github.com/ocx-sh/ocx"

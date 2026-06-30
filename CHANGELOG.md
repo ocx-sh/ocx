@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-06-30
+
+### Added
+
+- Bake entrypoint args with ${installPath} interpolation
+- Support tar+zstd layer format (#58)
+
+### Changed
+
+- Unify metadata interpolation behind capability-gated engine
+
+### Fixed
+
+- Scope host-leaf resolution to named bindings *(run)*
+- Make nushell shim PATH activation parse on nu without get --optional *(setup)*
+- Wire ~/.profile for non-bash POSIX login shells *(setup)*
+- Decouple elvish completion from PATH activation *(setup)*
+
 ## [0.3.9] - 2026-06-21
 
 ### Added
@@ -21,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Batch single-statement move-to-front + FOR/F delims= *(shell)*
 - Apply non-POSIX shell activation as data (nushell) + capture elvish eval *(shell)*
 - Break release-readiness concurrency self-deadlock *(ci)*
+
+### Release
+
+- V0.3.9
 
 ## [0.3.8] - 2026-06-15
 
@@ -502,6 +524,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.10]: https://github.com/ocx-sh/ocx/compare/v0.3.9..v0.3.10
 [0.3.9]: https://github.com/ocx-sh/ocx/compare/v0.3.8..v0.3.9
 [0.3.8]: https://github.com/ocx-sh/ocx/compare/v0.3.7..v0.3.8
 [0.3.7]: https://github.com/ocx-sh/ocx/compare/v0.3.6..v0.3.7
