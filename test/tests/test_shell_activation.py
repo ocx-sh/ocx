@@ -174,6 +174,48 @@ def test_posix_fence_activation_survives_unset_ocx_home(shell: str, tmp_path: Pa
     _assert_activation(shell, result, bin_seg)
 
 
+def test_dash_login_activates_via_dot_profile_when_bash_profile_exists(tmp_path: Path) -> None:
+    """A skel shipping ``~/.bash_profile`` must still activate a dash/ksh login.
+
+    dash/ksh/sh login shells read ``~/.profile`` and never ``~/.bash_profile``.
+    When auto-detect setup runs on a home that already ships ``~/.bash_profile``
+    (e.g. the Fedora skel), the managed fence must land in ``~/.profile`` too, or
+    a dash login never activates ocx. Auto-detect (no ``--profile``) is used on
+    purpose so the profile-target detection is exercised end-to-end.
+    """
+    shell_abs = shutil.which("dash")
+    if shell_abs is None:
+        pytest.skip("dash not installed on this host")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    # Simulate a skel that ships ~/.bash_profile (the case that stranded dash).
+    (home / ".bash_profile").write_text("# pre-existing bash_profile\n")
+    ocx_home = home / ".ocx"
+    _seed_candidate(ocx_home, _OCX)
+    bin_seg = str(ocx_home / _BIN_REL)
+
+    setup = _run_setup(_OCX, _clean_env(home, shell_abs, ocx_home=ocx_home, shell_name="dash"))
+    assert setup.returncode == 0, f"dash: setup must exit 0; stderr:\n{setup.stderr}"
+
+    profile = home / ".profile"
+    assert profile.is_file(), (
+        "auto-detect setup must write the managed fence to ~/.profile so dash/ksh "
+        "login shells (which never read ~/.bash_profile) activate ocx"
+    )
+
+    # A dash login sourcing ~/.profile twice with OCX_HOME unset must activate
+    # cleanly and idempotently.
+    script = f'. "{profile}"; . "{profile}"; printf "%s" "$PATH"'
+    result = subprocess.run(
+        [shell_abs, "-c", script],
+        capture_output=True,
+        text=True,
+        env=_clean_env(home, shell_abs),
+    )
+    _assert_activation("dash", result, bin_seg)
+
+
 # ---------------------------------------------------------------------------
 # Dedicated-file / non-POSIX-fence shells: fish, nushell, elvish, pwsh
 # ---------------------------------------------------------------------------

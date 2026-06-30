@@ -4,10 +4,13 @@
 //! Profile-target detection for `ocx self setup` (plan contract 5).
 //!
 //! [`detect_targets`] ports the POSIX multi-profile decision tree from
-//! `install.sh:744-784`: for any POSIX login shell it wires BOTH the login and
-//! interactive RC files for BOTH bash and zsh, so activation fires regardless of
-//! how the terminal is launched. fish, nushell, and elvish own dedicated files
-//! instead of a fenced block.
+//! `install.sh:744-784`: for any POSIX login shell it wires the login and
+//! interactive RC files for both bash and zsh, so activation fires regardless of
+//! how the terminal is launched. The login fence always lands in `~/.profile`
+//! (the generic file every sh-family shell reads — sh/dash/ksh and bash's
+//! fallback) and *additionally* in `~/.bash_profile` when that exists (bash's
+//! preferred login file). fish, nushell, and elvish own dedicated files instead
+//! of a fenced block.
 //!
 //! Detection reads no real environment: it operates over an injectable
 //! [`HomeEnv`] so the decision tree is unit-testable without touching the
@@ -131,11 +134,14 @@ impl HomeEnv {
 /// order, from an injectable [`HomeEnv`].
 ///
 /// fish, nushell, and elvish each own a dedicated activation file. Every other
-/// POSIX login shell wires BOTH login and interactive RC files for BOTH bash and
+/// POSIX login shell wires the login and interactive RC files for both bash and
 /// zsh (`install.sh:744-784`): the shared `env.sh` detects the running shell, so
-/// a copy that fires in an unused shell is a harmless no-op. PowerShell `$PROFILE`
-/// is intentionally absent here — it requires a subprocess probe
-/// ([`detect_powershell_profile`]).
+/// a copy that fires in an unused shell is a harmless no-op. The login fence
+/// always targets `~/.profile` (read by sh/dash/ksh and bash's fallback) and
+/// additionally `~/.bash_profile` when present (bash's preferred login file), so
+/// non-bash POSIX login shells are never stranded on a skel that ships
+/// `~/.bash_profile`. PowerShell `$PROFILE` is intentionally absent here — it
+/// requires a subprocess probe ([`detect_powershell_profile`]).
 pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
     match home_env.shell_name().as_str() {
         // Dedicated-file shells opt out of the shared bash+zsh wiring.
@@ -170,19 +176,28 @@ pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
 
     // Shared bash+zsh wiring for any POSIX login shell. Both source the same
     // env.sh; the runtime shell detection inside it picks the completion backend.
-    let mut targets = Vec::with_capacity(4);
+    let mut targets = Vec::with_capacity(5);
 
-    // bash: login (.bash_profile, or .profile when absent — also the generic
-    // POSIX login file for sh/dash/ksh) + interactive (.bashrc).
-    let bash_login = if home_env.home.join(".bash_profile").is_file() {
-        home_env.home.join(".bash_profile")
-    } else {
-        home_env.home.join(".profile")
-    };
+    // POSIX login: ALWAYS wire ~/.profile — the generic login file every
+    // sh-family shell reads (sh/dash/ksh, and bash too when no bash-specific
+    // login file exists). When ~/.bash_profile *also* exists, wire it IN
+    // ADDITION (not instead): bash reads ~/.bash_profile and then ignores
+    // ~/.profile, so there is no double activation for bash, while dash/ksh/sh
+    // still pick up ~/.profile. Writing the fence to ~/.bash_profile alone
+    // (because it happens to exist) would strand dash/ksh/sh login shells — which
+    // never read ~/.bash_profile — on any distro whose skel ships it (e.g.
+    // Fedora), leaving ocx off PATH for those shells.
     targets.push(ProfileTarget {
-        path: bash_login,
+        path: home_env.home.join(".profile"),
         kind: ProfileKind::PosixFence,
     });
+    if home_env.home.join(".bash_profile").is_file() {
+        targets.push(ProfileTarget {
+            path: home_env.home.join(".bash_profile"),
+            kind: ProfileKind::PosixFence,
+        });
+    }
+    // bash interactive (non-login).
     targets.push(ProfileTarget {
         path: home_env.home.join(".bashrc"),
         kind: ProfileKind::PosixFence,
@@ -342,6 +357,50 @@ mod tests {
                 PathBuf::from("/home/dev/.zprofile"),
                 PathBuf::from("/home/dev/.zshrc"),
             ]
+        );
+    }
+
+    #[test]
+    fn bash_profile_present_also_wires_dot_profile_for_non_bash_login() {
+        // Regression: a distro skel that ships ~/.bash_profile (e.g. Fedora) must
+        // not strand dash/ksh/sh login shells. Those read ~/.profile and NEVER
+        // ~/.bash_profile, so the login fence has to land in ~/.profile too — not
+        // only in ~/.bash_profile because it happens to exist. A real temp HOME is
+        // used because the `.bash_profile` probe (`is_file`) reads the filesystem.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().to_path_buf();
+        std::fs::write(home.join(".bash_profile"), "# pre-existing skel\n").expect("seed .bash_profile");
+
+        let env = HomeEnv {
+            home: home.clone(),
+            zdotdir: None,
+            xdg_config_home: None,
+            xdg_data_home: None,
+            ocx_home: home.join(".ocx"),
+            shell: Some("/bin/dash".to_string()),
+        };
+        let detected = paths(&detect_targets(&env));
+
+        assert!(
+            detected.contains(&home.join(".profile")),
+            "dash/ksh/sh login reads ~/.profile — it must be wired even when ~/.bash_profile exists: {detected:?}"
+        );
+        assert!(
+            detected.contains(&home.join(".bash_profile")),
+            "bash login still gets ~/.bash_profile additionally: {detected:?}"
+        );
+        // Generic ~/.profile must precede the bash-specific ~/.bash_profile.
+        let profile_index = detected
+            .iter()
+            .position(|path| path == &home.join(".profile"))
+            .expect("profile present");
+        let bash_profile_index = detected
+            .iter()
+            .position(|path| path == &home.join(".bash_profile"))
+            .expect("bash_profile present");
+        assert!(
+            profile_index < bash_profile_index,
+            "generic ~/.profile must come before ~/.bash_profile: {detected:?}"
         );
     }
 
