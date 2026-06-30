@@ -357,6 +357,55 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     )
 
 
+def test_elvish_path_activation_survives_completion_failure_without_tty(tmp_path: Path) -> None:
+    """PATH activation must not depend on the completion block compiling.
+
+    clap_complete's elvish completer needs the interactive-only ``edit:`` module,
+    which is bound only with a real TTY. In a non-TTY elvish that block raises a
+    compile error; because elvish compiles an ``eval`` unit as a whole, the old
+    coupled ``eval (… --completion | slurp)`` form lost the PATH prepend with it.
+
+    This drives ``env.elv`` in a NON-interactive ``elvish -c`` (no ``edit:``, no
+    ``script(1)`` pty needed) and asserts the ocx bin dir still lands on PATH —
+    proving the PATH and completion eval units are decoupled. On the old shim this
+    raises a compile error and leaves ocx off PATH.
+    """
+    shell_abs = shutil.which("elvish")
+    if shell_abs is None:
+        pytest.skip("elvish not installed on this host")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    ocx_home = home / ".ocx"
+    bin_seg = str(ocx_home / _BIN_REL)
+    _dedicated_setup("elvish", shell_abs, home, ocx_home)  # writes rc.elv + env.* shims
+    env_elv = ocx_home / "env.elv"
+    assert env_elv.is_file(), "setup must write the elvish env shim"
+
+    # Non-interactive elvish: edit: is absent, so the completion block fails to
+    # compile. With decoupled eval units, the PATH eval still runs. OCX_HOME is
+    # unset in the child; env.elv computes it from $HOME.
+    probe = f"eval (slurp < '{env_elv}'); echo '{_ELVISH_PATH_PROBE}' $E:PATH"
+    result = subprocess.run(
+        [shell_abs, "-c", probe],
+        capture_output=True,
+        text=True,
+        env=_clean_env(home, shell_abs),
+    )
+    combined = result.stdout + result.stderr
+    # The try/catch must swallow the completion compile error so the whole eval
+    # exits 0; a non-zero exit means the error escaped and aborted the shim.
+    assert result.returncode == 0, (
+        f"elvish: eval of env.elv must exit 0 in a non-TTY shell (try/catch must swallow the "
+        f"completion compile error); rc={result.returncode}\nstderr:\n{combined}"
+    )
+    _assert_no_missing_env_error(combined, "elvish")
+    assert bin_seg in result.stdout, (
+        f"elvish: PATH activation must survive a completion compile error in a non-TTY shell "
+        f"(decoupled eval units); bin dir not on PATH:\n{result.stdout}\nstderr:\n{combined}"
+    )
+
+
 def test_powershell_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None:
     shell_abs = shutil.which("pwsh")
     if shell_abs is None:

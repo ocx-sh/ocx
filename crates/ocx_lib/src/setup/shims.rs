@@ -227,11 +227,23 @@ if (not (has-env OCX_HOME)) {
 }
 
 var _ocx_bin = $E:OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx
-# rc.elv is sourced only for interactive Elvish sessions, so --completion is
-# unconditional here. The hook redirects stderr (2>/dev/null), so the flag -
-# not an isatty(2) probe - is what gates completion work.
+# PATH + global toolchain env run in their OWN eval unit, kept apart from the
+# completion below. Elvish compiles an eval unit as a whole, so coupling the two
+# lets a completion that fails to compile void the PATH prepend too: the
+# clap_complete elvish completer sets edit:completion:arg-completer, and the
+# edit: namespace is bound only when an interactive line editor is active (a real
+# TTY). A non-TTY interactive shell has no edit:, so the completion unit raises a
+# compile error - and if PATH shared that unit it would be lost with it. Keeping
+# them separate makes PATH activation independent of completion succeeding.
 if ?(test -x $_ocx_bin) {
-    eval ($_ocx_bin self activate --shell=elvish --completion 2>/dev/null | slurp)
+    eval ($_ocx_bin self activate --shell=elvish --no-completion 2>/dev/null | slurp)
+    # Shell completions: best-effort, isolated. try/catch swallows the compile
+    # error raised when edit: is absent (a non-TTY interactive shell), so a failed
+    # completion can never disturb the PATH activation above. Sourced via
+    # `ocx shell completion` - the same generator the POSIX shim uses.
+    try {
+        eval ($_ocx_bin shell completion --shell=elvish 2>/dev/null | slurp)
+    } catch _ { }
 }
 "#;
 
@@ -678,6 +690,43 @@ mod tests {
         assert!(
             NU_ENV_APPLY_LOOP.contains("$_ocx_e.key in ($env | columns)"),
             "the apply loop must read an existing value via the flag-free `key in ($env | columns)` form"
+        );
+    }
+
+    /// Regression: the elvish shim must DECOUPLE shell completion from PATH
+    /// activation.
+    ///
+    /// clap_complete's elvish completer sets `edit:completion:arg-completer`, and
+    /// the `edit:` namespace is bound only when an interactive line editor (a real
+    /// TTY) is active; a non-TTY interactive shell has no `edit:`, so that block
+    /// raises a compile error. Elvish compiles an `eval` unit as a whole, so the
+    /// previous form — completion and the PATH prepend in ONE
+    /// `eval (… --completion | slurp)` — let that compile error void the PATH
+    /// prepend, leaving ocx off PATH. PATH must run in its own `--no-completion`
+    /// eval unit, and completion in a separate `try`/`catch`-guarded unit so its
+    /// failure cannot break PATH.
+    #[test]
+    fn env_elv_decouples_completion_from_path_activation() {
+        // PATH activation runs with --no-completion in its own eval unit.
+        assert!(
+            ENV_ELV.contains("self activate --shell=elvish --no-completion"),
+            "env.elv must activate PATH with --no-completion so a completion error cannot void it"
+        );
+        // The coupled single-unit form (completion in the PATH activation call)
+        // must be gone.
+        assert!(
+            !ENV_ELV.contains("self activate --shell=elvish --completion"),
+            "env.elv must NOT request completion in the PATH activation eval unit (the coupled form)"
+        );
+        // Completion loads via a separate `shell completion` invocation, guarded
+        // by try/catch so a compile error (no edit: in a non-TTY shell) is caught.
+        assert!(
+            ENV_ELV.contains("shell completion --shell=elvish"),
+            "env.elv must load completion via a separate `shell completion` invocation"
+        );
+        assert!(
+            ENV_ELV.contains("try {") && ENV_ELV.contains("} catch"),
+            "the completion eval must be wrapped in try/catch so its failure cannot break PATH"
         );
     }
 }
