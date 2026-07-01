@@ -557,11 +557,17 @@ ocx env [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
+| `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. An unknown group exits 64 in the project tier; the global tier is lenient (matches nothing, empty env). | `[tools]` only |
 | `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. Mutually exclusive with `--ci`. | *(unset — uses `--format`)* |
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
 | `-h`, `--help` | | Print help information. | — |
+
+**Reserved group keywords**
+
+- `default` — always valid; selects the top-level `[tools]` table.
+- `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition (identical to [`run`](#run)). Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
 
 ::: tip Target the global toolchain
 Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=bash`.
@@ -609,7 +615,7 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 | Code | Meaning |
 |------|---------|
 | 0 | Success. Under `--global`, any unusable global toolchain — not configured, or a corrupt/stale `$OCX_HOME/ocx.lock` — is a valid empty environment, not an error (report path and `--shell` path alike). The global tier is lenient. |
-| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); `--ci` and `--shell` used together; `--export-file` given without `--ci` or combined with `--ci=github`; bare `--ci` (auto-detect) used outside a recognized CI environment; more than one `--platform` (env composes a single environment); `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
+| 64 | Unknown `--group` name (project tier only — the global tier is lenient and yields an empty env); empty `--group` comma segment; `--shell NAME` passed as two tokens (use `--shell=NAME`); `--ci` and `--shell` used together; `--export-file` given without `--ci` or combined with `--ci=github`; bare `--ci` (auto-detect) used outside a recognized CI environment; more than one `--platform` (env composes a single environment); `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
 | 65 | `ocx.lock` is stale — run `ocx lock` (project tier). |
 | 78 | `ocx.toml` or `ocx.lock` parse error (project tier); or `--ci=github` used outside [GitHub Actions][github-actions-workflow-commands] where [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path] are unset. |
 
@@ -1240,7 +1246,7 @@ ocx pull [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every entry from the lock is pulled. | *(all groups)* |
+| `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; the reserved name `all` expands to `default` + every declared `[group.*]`. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for each named platform instead of the host. Repeatable and comma-separated (e.g. `-p linux/arm64`). Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |

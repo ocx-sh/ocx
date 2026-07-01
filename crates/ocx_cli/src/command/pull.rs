@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::cli;
 use ocx_lib::oci;
-use ocx_lib::project::DEFAULT_GROUP;
+use ocx_lib::project::{ALL_GROUP, DEFAULT_GROUP, expand_all_keyword};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock;
@@ -42,7 +42,8 @@ pub struct Pull {
     /// Restrict the pull to the named group(s).
     ///
     /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table.
+    /// reserved name `default` selects the top-level `[tools]` table; the
+    /// reserved name `all` expands to `default` + every declared `[group.*]`.
     /// When omitted, every `[tools]` and `[group.*]` entry from the lock
     /// is pulled.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
@@ -77,7 +78,7 @@ impl Pull {
         // groups produce exit 64. `default` is always valid since it
         // names the top-level `[tools]` table.
         for raw in &self.groups {
-            if raw == DEFAULT_GROUP {
+            if raw == DEFAULT_GROUP || raw == ALL_GROUP {
                 continue;
             }
             if !ctx.config.groups.contains_key(raw) {
@@ -109,10 +110,13 @@ impl Pull {
         let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
+            // Expand `all` → default + every declared `[group.*]` before the
+            // filter, so `-g all` warms every group (matches `run`/`env`).
+            let expanded = expand_all_keyword(&self.groups, &ctx.config);
             ctx.lock
                 .tools
                 .iter()
-                .filter(|t| self.groups.iter().any(|g| g == &t.group))
+                .filter(|t| expanded.iter().any(|g| g == &t.group))
                 .collect()
         };
         // A V1 legacy tool resolves the same index id for every platform, so a
@@ -292,5 +296,12 @@ mod tests {
             vec!["ci".to_owned()],
             "-g must still parse alongside --platform"
         );
+    }
+
+    /// `-g all` parses (the `all` keyword is resolved at execute time).
+    #[test]
+    fn parses_all_group_keyword() {
+        let pull = Pull::try_parse_from(["pull", "-g", "all"]).unwrap();
+        assert_eq!(pull.groups, vec!["all".to_owned()]);
     }
 }

@@ -380,6 +380,57 @@ lint_tool = "{ocx.registry}/{repo_lint}:{tag_lint}"
 
 
 # ---------------------------------------------------------------------------
+# 4b. `-g all` keyword expands to default + every declared group (#176)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_all_keyword_pulls_every_group(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx pull -g all`` → default + every ``[group.*]`` warmed (#176).
+
+    ``pull`` previously rejected ``-g all`` ("unknown group"); it now adopts the
+    same ``all`` keyword as ``run``/``env``. Distinct from the no-flag default
+    (which already warms every tool) — this proves the keyword *resolves*.
+    """
+    repo_default, tag_default = _published_tool(ocx, tmp_path, "allkw_default")
+    repo_ci, tag_ci = _published_tool(ocx, tmp_path, "allkw_ci")
+    repo_lint, tag_lint = _published_tool(ocx, tmp_path, "allkw_lint")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
+
+[group.ci]
+ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
+
+[group.lint]
+lint_tool = "{ocx.registry}/{repo_lint}:{tag_lint}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, lock.stderr
+
+    result = _run_pull(ocx, project, "-g", "all")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull -g all must succeed (all keyword adopted); "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    count = _packages_present_count(ocx_home, ocx.registry)
+    assert count == 3, (
+        f"-g all must warm every group (default + ci + lint); found "
+        f"{count} package content/ dirs"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 5. No ocx.toml → exit 64 (UsageError)
 # ---------------------------------------------------------------------------
 

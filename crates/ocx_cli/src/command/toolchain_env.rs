@@ -5,7 +5,14 @@
 //!
 //! Reads the in-scope `ocx.toml` + `ocx.lock` (project tier) or resolves the
 //! global toolchain's installed `current` set offline (under `--global`) and
-//! emits the composed environment for the default group.
+//! emits the composed environment for the selected group(s).
+//!
+//! `-g/--group` scopes composition: omitted → the top-level `[tools]` table;
+//! `-g <group>` → only that group; `-g default -g lint` → both; `-g all` →
+//! `default` + every declared `[group.*]`. (Omitting `-g` yields the default
+//! group only, like `ocx run` — unlike `ocx pull`, which warms every group
+//! when `-g` is omitted.) The reserved names `all`/`default` are rejected as
+//! literal `[group.*]` keys at config parse time.
 //!
 //! Scope = command location (toolchain-tier).
 //! Format = context-level concern (root `--format` flag; default plain).
@@ -54,7 +61,7 @@ use ocx_lib::{
     cli,
     oci::Platform,
     package::metadata::env::entry::Entry,
-    project::{DEFAULT_GROUP, ProjectLock, compose_tool_set, lock::lock_path_for},
+    project::{ALL_GROUP, DEFAULT_GROUP, ProjectLock, compose_tool_set, expand_all_keyword, lock::lock_path_for},
 };
 
 use crate::{
@@ -68,8 +75,8 @@ use crate::{
 ///
 /// Reads `ocx.toml` + `ocx.lock` (project tier, CWD-walk / `--project` /
 /// `OCX_PROJECT`) or resolves the global toolchain's offline `current` set
-/// (when `--global` is set), composes the default-group env, and writes it to
-/// stdout.
+/// (when `--global` is set), composes the selected group(s)' env, and writes it
+/// to stdout.
 ///
 /// # Output
 ///
@@ -89,13 +96,27 @@ use crate::{
 ///   empty env on the report path AND the eval-safe `--shell` path. The global
 ///   tier is lenient; a corrupt global lock surfaces via `ocx --global lock`/
 ///   `add`/`upgrade`, not this read-only exporter.
-/// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); `--shell`
+/// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); unknown
+///   `--group` (project tier); empty `--group` comma segment; more than one
+///   `--platform` value; `--shell`
 ///   (bare) with undetectable `$SHELL`/parent; `--global` ⟂ `--project`
-///   (clap `conflicts_with`, mapped to EX_USAGE 64 — NOT exit 2).
+///   (clap `conflicts_with`, mapped to EX_USAGE 64 — NOT exit 2). The global
+///   tier is lenient: an unknown `--group` matches nothing and yields an
+///   empty env (exit 0).
 /// - 78 (`ConfigError`): `ocx.lock` absent (project tier).
 /// - 65 (`DataError`): `ocx.lock` stale (project tier).
 #[derive(Parser)]
 pub struct ToolchainEnv {
+    /// Restrict the env composition to the named group(s).
+    ///
+    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
+    /// reserved name `default` selects the top-level `[tools]` table.
+    /// The reserved name `all` expands to `default` + every declared
+    /// `[group.*]`. When omitted, scope is exactly the top-level
+    /// `[tools]` table, not every group.
+    #[arg(short = 'g', long = "group", value_delimiter = ',')]
+    pub groups: Vec<String>,
+
     /// Target shell for eval-safe export lines.
     ///
     /// Must be supplied with `=` (`--shell=bash`).  Bare `--shell` (no `=`)
@@ -139,6 +160,18 @@ pub struct ToolchainEnv {
 
 impl ToolchainEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Reject empty comma segments (`-g ci,,lint`) BEFORE any tier split or
+        // config load (parse-level, mirrors `run`/`pull` Phase A). `clap`'s
+        // `value_delimiter = ','` splits into `["ci", "", "lint"]`; an empty
+        // string is a user-typing error.
+        for raw in &self.groups {
+            if raw.is_empty() {
+                return Err(
+                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+                );
+            }
+        }
+
         // `None` → default-format path; `Some(s)` → eval-safe emit.
         let shell = resolve_shell_arg(self.shell)?;
         // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
@@ -180,7 +213,7 @@ impl ToolchainEnv {
             // `upgrade`), so this read-only exporter need not. The PROJECT tier
             // (the `else` arm) stays strict: an explicit project's
             // missing/stale/corrupt `ocx.lock` IS an error.
-            match resolve_global_pinned_env(&context, &target).await {
+            match resolve_global_pinned_env(&context, &target, self.groups.as_slice()).await {
                 Ok(Some(entries)) => entries,
                 Ok(None) => Vec::new(),
                 Err(error) => {
@@ -191,9 +224,29 @@ impl ToolchainEnv {
         } else {
             // Project tier: resolve + a SINGLE batched install (mirror run.rs).
             let ctx = load_project_with_lock(&context).await?;
+
+            // Validate requested groups against the loaded config. `default`
+            // and `all` are always valid (`all` is expanded below); anything
+            // else must be a declared `[group.*]`. Unknown → exit 64.
+            for raw in &self.groups {
+                if raw == DEFAULT_GROUP || raw == ALL_GROUP {
+                    continue;
+                }
+                if !ctx.config.groups.contains_key(raw) {
+                    return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
+                }
+            }
+
+            // Expand `all` in place, then promote an empty scope to the default
+            // group — identical to `ocx run` Phase C.
+            let mut expanded = expand_all_keyword(&self.groups, &ctx.config);
+            if expanded.is_empty() {
+                expanded = vec![DEFAULT_GROUP.to_owned()];
+            }
+
             // Project tier is strict: a tool that ships no leaf for `target`
             // surfaces `NoHostLeaf` (exit 78) from `compose_tool_set`.
-            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[], &target)?;
+            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &target)?;
 
             let identifiers: Vec<ocx_lib::oci::Identifier> = composed.into_iter().map(|tool| tool.identifier).collect();
             let platforms = platforms_or_default(self.platforms.as_slice());
@@ -265,7 +318,9 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 
 /// Resolve the global toolchain's **lock-pinned** set into env entries.
 ///
-/// Source = `$OCX_HOME/ocx.lock` default group. Each global-lock tool is
+/// Source = `$OCX_HOME/ocx.lock`, scoped to `groups` via
+/// [`selected_groups_global`] (empty → the default group; `all` → every group
+/// present in the lock). Each global-lock tool is
 /// resolved by its **pinned digest** (the lock's `pinned` identifier), offline,
 /// against the local object store — the same model as the project tier. The
 /// `current` symlink is a **separate abstraction** (mutated only by
@@ -302,6 +357,7 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 pub(crate) async fn resolve_global_pinned_env(
     context: &crate::app::Context,
     target: &Platform,
+    groups: &[String],
 ) -> anyhow::Result<Option<Vec<Entry>>> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
@@ -310,6 +366,8 @@ pub(crate) async fn resolve_global_pinned_env(
     let Some(lock) = ProjectLock::from_path(&global_lock_path).await? else {
         return Ok(None);
     };
+
+    let selected_groups = selected_groups_global(groups, &lock);
 
     // Offline-only manager clone: MUST NOT contact the registry regardless
     // of `--remote` (architect boundary; §4 login-path guarantee).
@@ -321,7 +379,9 @@ pub(crate) async fn resolve_global_pinned_env(
 
     let mut infos = Vec::new();
     for tool in &lock.tools {
-        if tool.group != DEFAULT_GROUP {
+        // Global tier is lenient: a group named on the command line that no
+        // lock entry carries simply matches nothing (no error, empty env).
+        if !selected_groups.iter().any(|g| g == &tool.group) {
             continue;
         }
         // Resolve the lock entry to its `target`-platform identifier offline
@@ -360,6 +420,40 @@ pub(crate) async fn resolve_global_pinned_env(
     Ok(Some(entries))
 }
 
+/// Resolve the raw `-g` values into the concrete global-tier group set.
+///
+/// - empty → `[default]` (unchanged default-group behaviour)
+/// - contains `all` → `default` + every distinct named group present in the
+///   lock, sorted
+/// - otherwise → the raw values verbatim
+///
+/// Used only for a membership test against `tool.group`, so order and
+/// duplicates past the `all` case are irrelevant. Unknown names simply match
+/// no tool — the global tier is lenient (no error).
+///
+// ponytail: enumerate the `all` set from the lock, not `ocx.toml` — the global
+// exporter never reads config, and a declared-but-empty group contributes
+// nothing to the env anyway, so lock-derived groups are the complete set.
+fn selected_groups_global(raw: &[String], lock: &ProjectLock) -> Vec<String> {
+    if raw.is_empty() {
+        return vec![DEFAULT_GROUP.to_owned()];
+    }
+    if !raw.iter().any(|g| g == ALL_GROUP) {
+        return raw.to_vec();
+    }
+    let mut named: Vec<String> = lock
+        .tools
+        .iter()
+        .map(|tool| tool.group.clone())
+        .filter(|group| group != DEFAULT_GROUP)
+        .collect();
+    named.sort();
+    named.dedup();
+    let mut groups = vec![DEFAULT_GROUP.to_owned()];
+    groups.extend(named);
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +489,78 @@ mod tests {
     fn parses_platform_flag() {
         let env = ToolchainEnv::try_parse_from(["env", "--platform", "linux/arm64"]).unwrap();
         assert_eq!(env.platforms.as_slice().len(), 1);
+    }
+
+    /// `-g` is repeatable and comma-delimited: `-g ci,lint -g release` → 3.
+    #[test]
+    fn parses_repeatable_comma_group_flag() {
+        let env = ToolchainEnv::try_parse_from(["env", "-g", "ci,lint", "-g", "release"]).unwrap();
+        assert_eq!(
+            env.groups,
+            vec!["ci".to_owned(), "lint".to_owned(), "release".to_owned()]
+        );
+    }
+
+    // ── selected_groups_global ────────────────────────────────────────────────
+
+    fn lock_with_groups(groups: &[&str]) -> ProjectLock {
+        use ocx_lib::oci::{Digest, Identifier};
+        use ocx_lib::project::{LockMetadata, LockVersion, LockedResolution, LockedTool};
+        let tools = groups
+            .iter()
+            .enumerate()
+            .map(|(i, group)| {
+                let mut leaves = std::collections::BTreeMap::new();
+                leaves.insert(
+                    "linux/amd64".to_owned(),
+                    Digest::Sha256(std::iter::repeat_n('a', 64).collect()),
+                );
+                LockedTool {
+                    name: format!("tool{i}"),
+                    group: (*group).to_owned(),
+                    resolution: LockedResolution::PerPlatform {
+                        repository: Identifier::new_registry(format!("tool{i}"), "ocx.sh"),
+                        platforms: leaves,
+                    },
+                }
+            })
+            .collect();
+        ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V2,
+                declaration_hash_version: 1,
+                declaration_hash: format!("sha256:{}", std::iter::repeat_n('0', 64).collect::<String>()),
+                generated_by: "ocx test".into(),
+                generated_at: "2026-04-24T00:00:00Z".into(),
+            },
+            tools,
+        }
+    }
+
+    /// Empty `-g` → the default group only.
+    #[test]
+    fn selected_groups_global_empty_is_default() {
+        let lock = lock_with_groups(&["default", "lint"]);
+        assert_eq!(selected_groups_global(&[], &lock), vec!["default".to_owned()]);
+    }
+
+    /// `-g all` → default + every distinct named lock group, sorted.
+    #[test]
+    fn selected_groups_global_all_expands_from_lock() {
+        let lock = lock_with_groups(&["default", "lint", "ci", "lint"]);
+        assert_eq!(
+            selected_groups_global(&["all".to_owned()], &lock),
+            vec!["default".to_owned(), "ci".to_owned(), "lint".to_owned()]
+        );
+    }
+
+    /// Named groups pass through verbatim (unknown names allowed — lenient tier).
+    #[test]
+    fn selected_groups_global_passthrough() {
+        let lock = lock_with_groups(&["default", "lint"]);
+        assert_eq!(
+            selected_groups_global(&["lint".to_owned(), "missing".to_owned()], &lock),
+            vec!["lint".to_owned(), "missing".to_owned()]
+        );
     }
 }

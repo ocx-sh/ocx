@@ -1113,3 +1113,135 @@ pinned = "{bare_repo}@sha256:{leaf_hex}"
         "V1 global lock: --global env --shell=sh must emit export lines; "
         f"got:\n{env_result.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #176 — `-g/--group` group-scoped env composition (mirror `run`/`pull`)
+# ---------------------------------------------------------------------------
+
+
+def _make_multigroup_project(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    label: str,
+) -> tuple[Path, dict[str, str]]:
+    """Publish a default/lint/ci tool trio, lock + pull, return (project, home_keys).
+
+    Each group owns one distinct package whose default env exposes
+    ``{REPO}_HOME`` (public). The returned ``home_keys`` maps group name →
+    that env key so tests can assert membership in the composed env.
+    """
+    repos: dict[str, str] = {}
+    for group in ("default", "lint", "ci"):
+        short = uuid4().hex[:8]
+        repo = f"t_{short}_{label}_{group}"
+        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+        repos[group] = repo
+
+    project = tmp_path / f"proj_{label}"
+    project.mkdir()
+    reg = ocx.registry
+    _write_ocx_toml(
+        project,
+        f'[tools]\n{repos["default"]} = "{reg}/{repos["default"]}:1.0.0"\n\n'
+        f'[group.lint]\n{repos["lint"]} = "{reg}/{repos["lint"]}:1.0.0"\n\n'
+        f'[group.ci]\n{repos["ci"]} = "{reg}/{repos["ci"]}:1.0.0"\n',
+    )
+    assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+
+    home_keys = {g: r.upper().replace("-", "_") + "_HOME" for g, r in repos.items()}
+    return project, home_keys
+
+
+def _env_json_keys(ocx: OcxRunner, project: Path, *group_args: str) -> list[str]:
+    """Run ``ocx --format json env [group_args]`` and return the entry keys, in order."""
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "env", *group_args],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --format json env {' '.join(group_args)} must succeed; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    data = json.loads(result.stdout)
+    assert "entries" in data and isinstance(data["entries"], list), (
+        f"JSON must carry an 'entries' list; got:\n{result.stdout!r}"
+    )
+    for entry in data["entries"]:
+        assert set(entry) == {"key", "value", "type"}, (
+            f"each entry must be {{key,value,type}}; got: {entry!r}"
+        )
+    return [entry["key"] for entry in data["entries"]]
+
+
+def test_env_single_group_scopes_to_that_group(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env -g lint`` composes lint only — the default group is NOT auto-included.
+
+    #176 option-B contract (identical to ``ocx run -g lint``): a single named
+    group means only that group. The default group is opt-in via ``-g default``.
+    """
+    project, home = _make_multigroup_project(ocx, tmp_path, "single")
+    keys = _env_json_keys(ocx, project, "-g", "lint")
+
+    assert home["lint"] in keys, f"lint group's env var must be present; keys={keys}"
+    assert home["default"] not in keys, (
+        f"default group must NOT be auto-included with -g lint; keys={keys}"
+    )
+    assert home["ci"] not in keys, f"unrelated ci group must be absent; keys={keys}"
+
+
+def test_env_default_plus_named_group_composes_both(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env -g default -g lint`` composes the default group AND lint.
+
+    #176: the issue's "default + requested" case is served by naming both.
+    """
+    project, home = _make_multigroup_project(ocx, tmp_path, "twoflag")
+    keys = _env_json_keys(ocx, project, "-g", "default", "-g", "lint")
+
+    assert home["default"] in keys, f"default group must be present; keys={keys}"
+    assert home["lint"] in keys, f"lint group must be present; keys={keys}"
+    assert home["ci"] not in keys, f"unrequested ci group must be absent; keys={keys}"
+
+
+def test_env_all_keyword_composes_every_group(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env -g all`` composes default + every declared ``[group.*]``."""
+    project, home = _make_multigroup_project(ocx, tmp_path, "allkw")
+    keys = _env_json_keys(ocx, project, "-g", "all")
+
+    for group, key in home.items():
+        assert key in keys, f"-g all must include {group} group's {key!r}; keys={keys}"
+
+
+def test_env_no_group_is_default_only(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env`` (no ``-g``) composes the default ``[tools]`` group only."""
+    project, home = _make_multigroup_project(ocx, tmp_path, "noflag")
+    keys = _env_json_keys(ocx, project)
+
+    assert home["default"] in keys, f"default group must be present; keys={keys}"
+    assert home["lint"] not in keys, f"lint group must be absent without -g; keys={keys}"
+    assert home["ci"] not in keys, f"ci group must be absent without -g; keys={keys}"
+
+
+def test_env_unknown_group_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env -g nope`` on a project → exit 64 (unknown group, project tier)."""
+    project, _ = _make_multigroup_project(ocx, tmp_path, "unknowng")
+    result = _run(ocx, project, "env", "-g", "nope")
+    assert result.returncode == EXIT_USAGE, (
+        f"unknown --group must exit 64 (project tier); got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert "nope" in result.stderr, f"stderr must name the unknown group; got:\n{result.stderr}"
+
+
+def test_env_empty_group_segment_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env -g lint,,ci`` (empty comma segment) → exit 64 before any config load."""
+    project, _ = _make_multigroup_project(ocx, tmp_path, "emptyseg")
+    result = _run(ocx, project, "env", "-g", "lint,,ci")
+    assert result.returncode == EXIT_USAGE, (
+        f"empty --group comma segment must exit 64; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
