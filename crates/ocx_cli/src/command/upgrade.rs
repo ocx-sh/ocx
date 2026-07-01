@@ -10,6 +10,7 @@ use ocx_lib::project::{LockedTool, ProjectLock, ResolveLockOptions, resolutions_
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock};
+use crate::options;
 
 /// Re-resolve every advisory tag in `ocx.toml` and rewrite `ocx.lock`.
 ///
@@ -55,6 +56,9 @@ pub struct Upgrade {
     /// batch lock changes and materialize separately.
     #[arg(long = "no-pull", overrides_with = "pull")]
     pub no_pull: bool,
+
+    #[clap(flatten)]
+    pub platforms: options::Platforms,
 }
 
 impl Upgrade {
@@ -124,10 +128,14 @@ impl Upgrade {
         // The `--check` early-return above ensures this line is never reached
         // on the verify-only path. `--no-pull` opts out.
         let eager = !self.no_pull;
-        materialize_lock(&context, &new_lock, eager).await?;
+        materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
 
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
-        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
+        let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
+        let entries: Vec<LockEntry> = new_lock
+            .tools
+            .iter()
+            .map(|t| LockEntry::from_tool(t, &report_platform))
+            .collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 
@@ -249,6 +257,17 @@ mod tests {
         assert!(
             Upgrade::try_parse_from(["upgrade", "cmake"]).is_err(),
             "`ocx upgrade cmake` must be rejected: positional scoping is gone"
+        );
+    }
+
+    /// `--platform` is repeatable and parses into the flattened `Platforms`.
+    #[test]
+    fn parses_repeatable_platform_flag() {
+        let upgrade = parse(&["upgrade", "--platform", "linux/arm64", "-p", "linux/amd64"]);
+        assert_eq!(
+            upgrade.platforms.as_slice().len(),
+            2,
+            "two --platform values must parse into two entries"
         );
     }
 }

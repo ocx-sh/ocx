@@ -9,6 +9,7 @@ use ocx_lib::project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{load_project_for_mutate, load_project_with_lock, materialize_lock};
+use crate::options;
 
 /// Resolve tool tags to digests and write `ocx.lock`.
 ///
@@ -60,6 +61,9 @@ pub struct Lock {
     /// batch lock changes and materialize separately.
     #[arg(long = "no-pull", overrides_with = "pull")]
     pub no_pull: bool,
+
+    #[clap(flatten)]
+    pub platforms: options::Platforms,
 }
 
 impl Lock {
@@ -138,7 +142,7 @@ impl Lock {
         // the object-store population is deferred. Matches `add` semantics.
         // `--no-pull` opts out: defers to `ocx pull` or the first direnv hit.
         let eager = !self.no_pull;
-        materialize_lock(&context, &new_lock, eager).await?;
+        materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
 
         // Non-fatal advisory note when `.gitattributes` lacks
         // `ocx.lock merge=union`.
@@ -149,8 +153,12 @@ impl Lock {
                 .warn("add `ocx.lock merge=union` to .gitattributes to avoid merge conflicts");
         }
 
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
-        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
+        let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
+        let entries: Vec<LockEntry> = new_lock
+            .tools
+            .iter()
+            .map(|t| LockEntry::from_tool(t, &report_platform))
+            .collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 
@@ -256,5 +264,16 @@ mod tests {
         assert!(lock.pull, "pull must be true when --pull follows --no-pull");
         assert!(!lock.no_pull, "no_pull must be false when --pull overrides it");
         assert!(eager(&lock), "eager must be true when --pull wins");
+    }
+
+    /// `--platform` is repeatable (comma-delimited too) and parses into `Platforms`.
+    #[test]
+    fn parses_repeatable_platform_flag() {
+        let lock = Lock::try_parse_from(["lock", "-p", "linux/arm64,linux/amd64"]).unwrap();
+        assert_eq!(
+            lock.platforms.as_slice().len(),
+            2,
+            "comma-delimited -p must split into two entries"
+        );
     }
 }

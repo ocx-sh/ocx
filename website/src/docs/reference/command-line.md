@@ -369,6 +369,7 @@ ocx add [OPTIONS] <IDENTIFIER>...
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated (e.g. `-p linux/amd64,linux/arm64`). The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
 | `--help` | `-h` | Print help information. |
 
 ::: tip Target the global toolchain
@@ -381,12 +382,12 @@ See [`--global`][global-flag] for the full root-flag reference.
 | Code | Meaning |
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
-| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, or `--global` combined with `--project`. |
+| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error. |
+| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
 
@@ -559,6 +560,7 @@ ocx env [OPTIONS]
 | `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. Mutually exclusive with `--ci`. | *(unset — uses `--format`)* |
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
+| `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
 | `-h`, `--help` | | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -607,7 +609,7 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 | Code | Meaning |
 |------|---------|
 | 0 | Success. Under `--global`, any unusable global toolchain — not configured, or a corrupt/stale `$OCX_HOME/ocx.lock` — is a valid empty environment, not an error (report path and `--shell` path alike). The global tier is lenient. |
-| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); `--ci` and `--shell` used together; `--export-file` given without `--ci` or combined with `--ci=github`; bare `--ci` (auto-detect) used outside a recognized CI environment; `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
+| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); `--ci` and `--shell` used together; `--export-file` given without `--ci` or combined with `--ci=github`; bare `--ci` (auto-detect) used outside a recognized CI environment; more than one `--platform` (env composes a single environment); `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
 | 65 | `ocx.lock` is stale — run `ocx lock` (project tier). |
 | 78 | `ocx.toml` or `ocx.lock` parse error (project tier); or `--ci=github` used outside [GitHub Actions][github-actions-workflow-commands] where [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path] are unset. |
 
@@ -1128,6 +1130,7 @@ ocx lock [OPTIONS]
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Use `-p linux/amd64 -p linux/arm64` to validate that a lock satisfies multiple targets. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1139,11 +1142,11 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written (or preserved if content was unchanged). |
-| 64 | Missing `ocx.toml` or `--global` combined with `--project`. |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
 | 65 | `--check` reported drift. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
-| 78 | Existing `ocx.lock` is malformed (parse error), `ocx.toml` schema-invalid, or `--check` reported the lock is absent. |
+| 78 | Existing `ocx.lock` is malformed (parse error), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
@@ -1182,6 +1185,7 @@ ocx upgrade [OPTIONS]
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Re-resolves every declared tag, compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--remote` | | Route tag resolution to the remote registry instead of the local index. | false |
 | `-h`, `--help` | | Print help information. | |
 
@@ -1194,12 +1198,12 @@ Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--globa
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml` or `--global` combined with `--project`. |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
 | 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream). |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
-| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), or `--check` invoked when the lock is absent. |
+| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, or a requested `--platform` is not shipped by a tool. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1238,6 +1242,7 @@ ocx pull [OPTIONS]
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
+| `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for each named platform instead of the host. Repeatable and comma-separated (e.g. `-p linux/arm64`). Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1249,10 +1254,10 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 | Code | Meaning |
 |------|---------|
 | 0 | Success (or empty group filter — nothing to pull). |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
-| 78 | No leaf digest for the host platform at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. |
+| 78 | No leaf digest for the host (or requested `--platform`) at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — the publisher does not ship that platform. |
 
 **Lock mtime touch**
 

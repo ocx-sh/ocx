@@ -305,6 +305,13 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 /// When `eager` is `false`, returns immediately without contacting the
 /// manager. This is the no-op path used by `--no-pull` callers.
 ///
+/// `platforms` selects which platform leaves to materialize: empty → the host
+/// native platform (default); otherwise each requested platform's leaf is
+/// pulled, so an amd64 host can pre-warm an arm64 leaf. The V2 lock already
+/// pins every shipped platform's leaf, so this only chooses which locked leaf
+/// to fetch — the lock stays host-agnostic. A platform the publisher does not
+/// ship surfaces `NoHostLeaf` (exit 78).
+///
 /// Failures here do NOT roll back the manifest/lock — the binding is
 /// declaratively present even if the pull needs a retry. Matches the
 /// established `add.rs` semantics.
@@ -322,25 +329,44 @@ pub async fn materialize_lock(
     context: &crate::app::Context,
     lock: &ocx_lib::project::ProjectLock,
     eager: bool,
+    platforms: &[ocx_lib::oci::Platform],
 ) -> anyhow::Result<()> {
     if !eager {
         return Ok(());
     }
-    // Resolve each locked tool to its host-platform pull identifier. V2
-    // ([`LockedResolution::PerPlatform`]): host→`"any"` leaf via
-    // `repository.clone_with_digest(leaf)`. V1
-    // ([`LockedResolution::LegacyIndex`]): the legacy pinned index id.
-    let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
-    let identifiers: Vec<ocx_lib::oci::Identifier> = lock
-        .tools
-        .iter()
-        .map(|t| host_materialize_identifier(t, &host))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    reject_multi_platform_on_legacy(has_legacy_entry(&lock.tools), platforms)?;
+    // Which platforms' leaves to materialize. `--platform` omitted → the host
+    // native platform (unchanged default). One or more `--platform` values →
+    // materialize each requested platform's leaf, so an amd64 host can warm an
+    // arm64 (or any other) leaf that the V2 lock already pins.
+    let selection: Vec<ocx_lib::oci::Platform> = if platforms.is_empty() {
+        vec![ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any)]
+    } else {
+        platforms.to_vec()
+    };
+    // Resolve each (tool, platform) to its pull identifier. V2
+    // ([`LockedResolution::PerPlatform`]): the requested platform's leaf via
+    // `repository.clone_with_digest(leaf)` (host key → `"any"` fallback); a
+    // genuinely unshipped platform surfaces `NoHostLeaf` (exit 78). V1
+    // ([`LockedResolution::LegacyIndex`]): the legacy pinned index id (identical
+    // for every platform, so a multi-platform request is rejected above; a single
+    // platform drives `Index::select` inside `pull_all`).
+    let mut identifiers: Vec<ocx_lib::oci::Identifier> = Vec::new();
+    for tool in &lock.tools {
+        for platform in &selection {
+            let identifier = host_materialize_identifier(tool, platform)?;
+            // ponytail: O(n²) dedup over tools×platforms — both are tiny (a
+            // handful each). A HashSet buys nothing at this scale.
+            if !identifiers.contains(&identifier) {
+                identifiers.push(identifier);
+            }
+        }
+    }
     context
         .manager()
         .pull_all(
             &identifiers,
-            crate::conventions::platforms_or_default(&[]),
+            crate::conventions::platforms_or_default(platforms),
             context.concurrency(),
         )
         .await?;
@@ -363,6 +389,51 @@ fn host_materialize_identifier(
     host: &ocx_lib::oci::Platform,
 ) -> anyhow::Result<ocx_lib::oci::Identifier> {
     ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
+}
+
+/// The platform a lock report presents its primary per-tool digest against.
+///
+/// The first requested `--platform` when given (so a cross-build materialization
+/// prints the leaf it actually fetched, not the host's), otherwise the host
+/// native platform. The full per-platform map is always available in the JSON
+/// output regardless.
+pub(crate) fn primary_platform(platforms: &[ocx_lib::oci::Platform]) -> ocx_lib::oci::Platform {
+    platforms
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any))
+}
+
+/// `true` when any tool carries a legacy V1
+/// ([`ocx_lib::project::LockedResolution::LegacyIndex`]) resolution.
+pub(crate) fn has_legacy_entry(tools: &[ocx_lib::project::LockedTool]) -> bool {
+    tools
+        .iter()
+        .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)))
+}
+
+/// Reject a multi-platform `--platform` request against a legacy (V1) lock.
+///
+/// A V1 [`LockedResolution::LegacyIndex`] tool resolves the *same* image-index
+/// identifier for every platform, so `Index::select` inside `pull_all` picks
+/// only the first requested platform that has a matching child — a
+/// multi-`--platform` request would silently materialize just one. Fail loud
+/// instead. `ocx lock` migrates the lock to V2 (which pins every shipped
+/// platform's leaf), lifting the restriction. A single `--platform` (or none)
+/// is always fine.
+///
+/// [`LockedResolution::LegacyIndex`]: ocx_lib::project::LockedResolution::LegacyIndex
+pub(crate) fn reject_multi_platform_on_legacy(
+    has_legacy: bool,
+    platforms: &[ocx_lib::oci::Platform],
+) -> anyhow::Result<()> {
+    if platforms.len() > 1 && has_legacy {
+        return Err(ocx_lib::cli::UsageError::new(
+            "multiple --platform values require a v2 lock; run `ocx lock` to migrate the legacy lock",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Mutation-side counterpart to [`load_project_with_lock`].
@@ -472,4 +543,52 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         previous_lock,
         previous_lock_bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ocx_lib::oci::Platform;
+
+    fn platform(s: &str) -> Platform {
+        s.parse().expect("valid platform")
+    }
+
+    /// A multi-platform `--platform` request against a legacy (V1) lock is
+    /// rejected — `Index::select` would silently materialize only the first.
+    #[test]
+    fn reject_multi_platform_on_legacy_rejects_legacy_multi() {
+        let result = reject_multi_platform_on_legacy(true, &[platform("linux/amd64"), platform("linux/arm64")]);
+        assert!(result.is_err(), "legacy lock + >1 --platform must fail loud");
+    }
+
+    /// A single `--platform` against a legacy lock is fine (one `Index::select`).
+    #[test]
+    fn reject_multi_platform_on_legacy_allows_legacy_single() {
+        assert!(reject_multi_platform_on_legacy(true, &[platform("linux/arm64")]).is_ok());
+    }
+
+    /// A V2 lock (no legacy entry) accepts any number of `--platform` values.
+    #[test]
+    fn reject_multi_platform_on_legacy_allows_v2_multi() {
+        assert!(reject_multi_platform_on_legacy(false, &[platform("linux/amd64"), platform("linux/arm64")]).is_ok());
+    }
+
+    /// No `--platform` is always fine, legacy or not.
+    #[test]
+    fn reject_multi_platform_on_legacy_allows_empty() {
+        assert!(reject_multi_platform_on_legacy(true, &[]).is_ok());
+    }
+
+    /// The report is keyed on the first requested platform when given.
+    #[test]
+    fn primary_platform_prefers_first_requested() {
+        assert_eq!(primary_platform(&[platform("linux/arm64")]).to_string(), "linux/arm64");
+    }
+
+    /// With no `--platform`, the report falls back to the host (never panics).
+    #[test]
+    fn primary_platform_defaults_to_host_when_empty() {
+        let _ = primary_platform(&[]);
+    }
 }

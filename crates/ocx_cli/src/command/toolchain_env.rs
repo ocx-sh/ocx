@@ -51,6 +51,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
+    cli,
+    oci::Platform,
     package::metadata::env::entry::Entry,
     project::{DEFAULT_GROUP, ProjectLock, compose_tool_set, lock::lock_path_for},
 };
@@ -59,6 +61,7 @@ use crate::{
     api,
     app::project_context::load_project_with_lock,
     conventions::{emit_lines, export_ci, platforms_or_default, resolve_ci_arg, resolve_shell_arg},
+    options,
 };
 
 /// Emit the composed environment for the in-scope toolchain.
@@ -129,6 +132,9 @@ pub struct ToolchainEnv {
     /// `$GITHUB_PATH` / `$GITHUB_ENV`. Point this at GitLab's export file.
     #[arg(long, value_name = "PATH", requires = "ci")]
     export_file: Option<std::path::PathBuf>,
+
+    #[clap(flatten)]
+    platforms: options::Platforms,
 }
 
 impl ToolchainEnv {
@@ -140,6 +146,12 @@ impl ToolchainEnv {
         // mutually exclusive with `--shell` (clap `conflicts_with`), so at most
         // one of these is set.
         let ci = resolve_ci_arg(self.ci)?;
+
+        // The single target platform to compose for. `env` produces ONE
+        // environment (a single PATH cannot hold two platforms' tool dirs), so
+        // `--platform` is single-valued here: omitted → host native; one value
+        // → cross-build target; more than one → usage error.
+        let target = single_target(self.platforms.as_slice())?;
 
         // ── Resolve entries: one global path, one project path ───────────────
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
@@ -168,7 +180,7 @@ impl ToolchainEnv {
             // `upgrade`), so this read-only exporter need not. The PROJECT tier
             // (the `else` arm) stays strict: an explicit project's
             // missing/stale/corrupt `ocx.lock` IS an error.
-            match resolve_global_pinned_env(&context).await {
+            match resolve_global_pinned_env(&context, &target).await {
                 Ok(Some(entries)) => entries,
                 Ok(None) => Vec::new(),
                 Err(error) => {
@@ -179,11 +191,12 @@ impl ToolchainEnv {
         } else {
             // Project tier: resolve + a SINGLE batched install (mirror run.rs).
             let ctx = load_project_with_lock(&context).await?;
-            let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
-            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[], &host)?;
+            // Project tier is strict: a tool that ships no leaf for `target`
+            // surfaces `NoHostLeaf` (exit 78) from `compose_tool_set`.
+            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[], &target)?;
 
             let identifiers: Vec<ocx_lib::oci::Identifier> = composed.into_iter().map(|tool| tool.identifier).collect();
-            let platforms = platforms_or_default(&[]);
+            let platforms = platforms_or_default(self.platforms.as_slice());
             let manager = context.manager();
             let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = manager
                 .find_or_install_all(identifiers, platforms, context.concurrency())
@@ -235,6 +248,21 @@ impl ToolchainEnv {
     }
 }
 
+/// Resolve `env`'s repeatable `--platform` flag down to a single target.
+///
+/// `env` produces ONE environment (a single PATH cannot carry two platforms'
+/// tool dirs), so the flag is single-valued here: omitted → the host native
+/// platform (unchanged default); exactly one → that platform (cross-build
+/// target); more than one → a usage error (exit 64). Naming the flag in the
+/// message keeps stderr greppable.
+fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
+    match platforms {
+        [] => Ok(Platform::current().unwrap_or_else(Platform::any)),
+        [one] => Ok(one.clone()),
+        _ => Err(cli::UsageError::new("--platform accepts a single target platform for env").into()),
+    }
+}
+
 /// Resolve the global toolchain's **lock-pinned** set into env entries.
 ///
 /// Source = `$OCX_HOME/ocx.lock` default group. Each global-lock tool is
@@ -271,7 +299,10 @@ impl ToolchainEnv {
 /// # Errors
 ///
 /// Propagates `resolve_env` / index errors.  Never contacts the network.
-pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> anyhow::Result<Option<Vec<Entry>>> {
+pub(crate) async fn resolve_global_pinned_env(
+    context: &crate::app::Context,
+    target: &Platform,
+) -> anyhow::Result<Option<Vec<Entry>>> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
@@ -283,31 +314,31 @@ pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> 
     // Offline-only manager clone: MUST NOT contact the registry regardless
     // of `--remote` (architect boundary; §4 login-path guarantee).
     let manager = context.manager().offline_view(context.local_index().clone());
-    let platforms = platforms_or_default(&[]);
+    // `find`'s platform filter: the target first, then `"any"` as a fallback.
+    // Inert for V2 leaf identifiers (already digest-pinned); for a legacy V1
+    // index digest it drives `Index::select` the same way the host default did.
+    let platforms = vec![target.clone(), Platform::any()];
 
     let mut infos = Vec::new();
     for tool in &lock.tools {
         if tool.group != DEFAULT_GROUP {
             continue;
         }
-        // Resolve the lock entry to its host-platform identifier offline
+        // Resolve the lock entry to its `target`-platform identifier offline
         // against the local object store. V1 ([`LockedResolution::LegacyIndex`]):
         // the lock pins the ImageIndex manifest digest, so `find` walks the
         // (already-local) OCI chain from it. V2 ([`LockedResolution::PerPlatform`]):
-        // reconstruct `repository`+host leaf and find that directly.
+        // reconstruct `repository`+target leaf and find that directly.
         let identifier: ocx_lib::oci::Identifier = match &tool.resolution {
             ocx_lib::project::LockedResolution::LegacyIndex(pinned) => pinned.clone().into(),
             ocx_lib::project::LockedResolution::PerPlatform {
                 repository,
                 platforms: leaves,
             } => {
-                // V2: reconstruct the host-platform leaf directly (host key →
-                // `"any"` fallback across the supported set). Absent leaf →
-                // skip silently (the login exporter must never block a shell).
-                let Some(leaf) = platforms
-                    .iter()
-                    .find_map(|platform| ocx_lib::project::lookup_host_leaf(leaves, platform))
-                else {
+                // V2: reconstruct the target leaf directly (target key → `"any"`
+                // fallback). Absent leaf → skip silently (global tier is
+                // lenient; the login exporter must never block a shell).
+                let Some(leaf) = ocx_lib::project::lookup_host_leaf(leaves, target) else {
                     continue;
                 };
                 repository.clone_with_digest(leaf.clone())
@@ -327,4 +358,42 @@ pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> 
 
     let entries = manager.resolve_env(&infos, false).await?;
     Ok(Some(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn platform(s: &str) -> Platform {
+        s.parse().expect("valid platform")
+    }
+
+    /// No `--platform` → the host native platform (or `any` when unsupported).
+    #[test]
+    fn single_target_defaults_to_host() {
+        // Never errors; the concrete value depends on the build target.
+        single_target(&[]).expect("empty platform list resolves to host default");
+    }
+
+    /// Exactly one `--platform` → that platform, verbatim.
+    #[test]
+    fn single_target_accepts_one() {
+        let target = single_target(&[platform("linux/arm64")]).expect("one platform is accepted");
+        assert_eq!(target.to_string(), "linux/arm64");
+    }
+
+    /// More than one `--platform` → usage error (env composes a single env).
+    #[test]
+    fn single_target_rejects_multiple() {
+        let result = single_target(&[platform("linux/arm64"), platform("linux/amd64")]);
+        assert!(result.is_err(), "env must reject more than one --platform target");
+    }
+
+    /// `--platform` parses at the clap layer (the >1 rejection is at execute time).
+    #[test]
+    fn parses_platform_flag() {
+        let env = ToolchainEnv::try_parse_from(["env", "--platform", "linux/arm64"]).unwrap();
+        assert_eq!(env.platforms.as_slice().len(), 1);
+    }
 }

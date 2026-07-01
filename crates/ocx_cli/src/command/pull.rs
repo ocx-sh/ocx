@@ -11,6 +11,7 @@ use ocx_lib::project::DEFAULT_GROUP;
 use crate::api;
 use crate::app::project_context::load_project_with_lock;
 use crate::conventions::platforms_or_default;
+use crate::options;
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
 ///
@@ -46,6 +47,9 @@ pub struct Pull {
     /// is pulled.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
+
+    #[clap(flatten)]
+    pub platforms: options::Platforms,
 }
 
 impl Pull {
@@ -87,11 +91,21 @@ impl Pull {
         // authoritative. Walk it directly, preserving lock order (sorted
         // by `(group, name)` at write time, so the result is deterministic).
         //
-        // V2 ([`LockedResolution::PerPlatform`]): the pull id is the
-        // host→`"any"` leaf (`repository.clone_with_digest(leaf)`); absent
-        // host leaf → clean pre-network error. V1
-        // ([`LockedResolution::LegacyIndex`]): the legacy index-digest path.
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        // V2 ([`LockedResolution::PerPlatform`]): the pull id is the requested
+        // platform's leaf (`repository.clone_with_digest(leaf)`, host key →
+        // `"any"` fallback); an unshipped platform → clean pre-network
+        // `NoHostLeaf` (exit 78). V1 ([`LockedResolution::LegacyIndex`]): the
+        // legacy index-digest path (identical for every platform, deduped
+        // below; the requested platforms drive `Index::select` in `pull_all`).
+        //
+        // `--platform` omitted → the host native platform (unchanged). One or
+        // more `--platform` values → warm each requested platform's leaf, so an
+        // amd64 host can pre-warm an arm64 leaf.
+        let selection: Vec<oci::Platform> = if self.platforms.as_slice().is_empty() {
+            vec![oci::Platform::current().unwrap_or_else(oci::Platform::any)]
+        } else {
+            self.platforms.as_slice().to_vec()
+        };
         let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
@@ -101,17 +115,30 @@ impl Pull {
                 .filter(|t| self.groups.iter().any(|g| g == &t.group))
                 .collect()
         };
-        let pinned: Vec<oci::PinnedIdentifier> = selected
+        // A V1 legacy tool resolves the same index id for every platform, so a
+        // multi-platform request would silently materialize only the first (see
+        // `reject_multi_platform_on_legacy`). Fail loud before any store write.
+        let has_legacy = selected
             .iter()
-            .map(|t| host_pull_pinned(t, &host))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)));
+        crate::app::project_context::reject_multi_platform_on_legacy(has_legacy, self.platforms.as_slice())?;
+        let mut pinned: Vec<oci::PinnedIdentifier> = Vec::new();
+        for tool in &selected {
+            for platform in &selection {
+                let id = host_pull_pinned(tool, platform)?;
+                // ponytail: O(n²) dedup over tools×platforms — both tiny.
+                if !pinned.contains(&id) {
+                    pinned.push(id);
+                }
+            }
+        }
 
         // ── Phase 4b: dry-run preview ────────────────────────────────────
 
         // Dry-run runs after the staleness gate so a stale lock still
         // exits 65 before any preview prints. No network, no store writes.
         if self.dry_run {
-            return run_dry_run(&context, &pinned).await;
+            return run_dry_run(&context, &pinned, self.platforms.as_slice()).await;
         }
 
         let identifiers: Vec<oci::Identifier> = pinned.iter().cloned().map(Into::into).collect();
@@ -124,7 +151,11 @@ impl Pull {
         // failure.
         let info = context
             .manager()
-            .pull_all(&identifiers, platforms_or_default(&[]), context.concurrency())
+            .pull_all(
+                &identifiers,
+                platforms_or_default(self.platforms.as_slice()),
+                context.concurrency(),
+            )
             .await?;
 
         // Re-save the lock with same bytes to advance its mtime, so direnv
@@ -209,9 +240,13 @@ fn host_pull_pinned(
 /// Resolution failures (network errors when the local index is cold)
 /// surface as `would-fetch` rather than aborting the preview, so a stale
 /// or partial cache still produces a useful report.
-async fn run_dry_run(context: &crate::app::Context, pinned: &[oci::PinnedIdentifier]) -> anyhow::Result<ExitCode> {
+async fn run_dry_run(
+    context: &crate::app::Context,
+    pinned: &[oci::PinnedIdentifier],
+    platforms: &[oci::Platform],
+) -> anyhow::Result<ExitCode> {
     let manager = context.manager();
-    let platforms = platforms_or_default(&[]);
+    let platforms = platforms_or_default(platforms);
     let mut entries = Vec::with_capacity(pinned.len());
     for id in pinned {
         let display = id.to_string();
@@ -235,4 +270,27 @@ async fn run_dry_run(context: &crate::app::Context, pinned: &[oci::PinnedIdentif
     let report = api::data::pull_dry_run::PullDryRun::new(entries);
     context.api().report(&report)?;
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `--platform` is repeatable (and comma-delimited) and coexists with `-g`.
+    #[test]
+    fn parses_repeatable_platform_flag() {
+        let pull =
+            Pull::try_parse_from(["pull", "-g", "ci", "--platform", "linux/arm64", "-p", "linux/amd64"]).unwrap();
+        assert_eq!(
+            pull.platforms.as_slice().len(),
+            2,
+            "two --platform values must parse into two entries"
+        );
+        assert_eq!(
+            pull.groups,
+            vec!["ci".to_owned()],
+            "-g must still parse alongside --platform"
+        );
+    }
 }
