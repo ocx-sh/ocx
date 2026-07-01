@@ -236,21 +236,24 @@ def _curate_local_index_to_v1(custom_index: Path) -> None:
 
 
 @_skip_on_windows
-def test_self_update_default_mode_respects_local_index(
+def test_self_update_default_mode_queries_registry(
     ocx: OcxRunner,
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """Default-mode ``ocx self update`` discovers the latest version through the
-    local index (``OCX_INDEX``), not a live registry probe.
+    """Default-mode ``ocx self update`` discovers the latest version live from
+    the registry, not the (possibly stale) local index.
 
-    Regression for the OCX_INDEX-ignored bug: version discovery used to build a
-    throwaway remote-only index (`check_update` → `Index::from_remote`), so it
-    saw registry tags the curated local index deliberately omitted — every other
-    tag-resolving command honours the local index in default mode, but self
-    update did not. With the local index blessing only ``0.0.1`` while the
-    registry also holds ``0.0.2``, default-mode self update must report
-    ``up_to_date`` (honouring OCX_INDEX), never jump to ``0.0.2``.
+    Regression for the "self update reads the local index" bug: self update
+    exists to reach the freshest upstream release, so its version discovery uses
+    ``TagProbe::Remote`` (matching the sibling ``ocx self setup`` bootstrap and
+    the background auto-check that recommends running it), *not* the local index
+    that a stale ``ocx index update`` snapshot would echo. With the local index
+    blessing only ``0.0.1`` while the registry also holds ``0.0.2``, plain
+    ``ocx self update`` (no ``--remote``) must find and install ``0.0.2``.
+
+    Before the fix this reported ``up_to_date`` and forced the user onto the
+    awkward ``ocx --remote self update``.
     """
     repo = unique_repo
     custom_index = tmp_path / "custom_index"
@@ -266,25 +269,25 @@ def test_self_update_default_mode_respects_local_index(
         f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     payload = json.loads(result.stdout)
-    assert payload.get("status") == "up_to_date", (
-        f"default-mode self update must honour the curated local index (only 0.0.1 blessed) and report "
-        f"up_to_date, not install the registry-only 0.0.2; got: {payload!r}"
+    assert payload.get("status") == "installed" and payload.get("to") == "0.0.2", (
+        f"default-mode self update must query the registry and install the registry-only 0.0.2, "
+        f"not echo the curated local index (only 0.0.1 blessed); got: {payload!r}"
     )
 
 
 @_skip_on_windows
-def test_self_update_remote_mode_queries_registry(
+def test_self_update_remote_flag_is_redundant(
     ocx: OcxRunner,
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """``ocx --remote self update`` forces a live registry probe, finding versions
-    the local index omits.
+    """``ocx --remote self update`` behaves identically to the default: both
+    query the registry live.
 
-    The escape hatch for the default-mode local-index behaviour: a user who wants
-    the freshest upstream release passes ``--remote`` (consistent with every other
-    tag-resolving command). With the local index blessing only ``0.0.1`` but the
-    registry holding ``0.0.2``, ``--remote`` must install ``0.0.2``.
+    Self update queries the registry by default now, so ``--remote`` is a no-op
+    for it (still accepted for consistency with every other command). With the
+    local index blessing only ``0.0.1`` but the registry holding ``0.0.2``,
+    ``--remote`` must install ``0.0.2`` — same outcome as the default-mode test.
     """
     repo = unique_repo
     custom_index = tmp_path / "custom_index"

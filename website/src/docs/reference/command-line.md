@@ -1756,7 +1756,7 @@ Check for a newer version of OCX and, if found, install it.
 
 Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always runs the lookup regardless of when the last automatic check ran.
 
-Version discovery is resolved through the [local index][fs-index] like every other command, so the latest version honours `--offline`, `--frozen`, and [`OCX_INDEX`][env-ocx-index]. To force a live lookup of the newest published release from the registry, pass [`--remote`][arg-remote]. (The background update notice that ocx prints on other commands always queries the registry, independent of this command.)
+Version discovery queries the registry directly for the newest published release — self update exists to reach the freshest upstream ocx, so it does not read the (possibly stale) [local index][fs-index]. This matches [`ocx self setup`](#self-setup) and the background update notice ocx prints on other commands. Under [`--offline`][arg-offline] the check is skipped and the running binary is left unchanged; [`--remote`][arg-remote] is redundant (already the default) but still accepted.
 
 **Usage**
 
@@ -1773,7 +1773,7 @@ ocx self update [--check]
 
 **Behavior without `--check`**
 
-Resolves the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out) through the [local index][fs-index] — add [`--remote`][arg-remote] to query the registry directly. If the resolved version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
+Queries the registry for the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out). If the resolved version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
 
 - **Already up to date** — the running version is the latest.
 - **Installed** — a newer version was downloaded and selected.

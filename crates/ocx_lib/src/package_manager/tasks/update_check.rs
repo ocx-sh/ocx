@@ -132,16 +132,17 @@ pub enum SelfUpdateResult {
 
 /// Where the update-check probe lists candidate tags from.
 ///
-/// Tag discovery has two callers with genuinely different needs, so the source
-/// is explicit rather than always-remote:
+/// The self-flavored commands (`ocx self update`, `ocx self setup`) and the
+/// background auto-check all exist to surface the freshest *upstream* release,
+/// so they force a live remote listing ([`TagProbe::Remote`]) regardless of the
+/// ambient ChainMode — a default-mode local read would only ever echo a stale
+/// local index. `--offline` (no client) still short-circuits to
+/// [`SkippedReason::Offline`].
 ///
-/// - Explicit `ocx self update` / `ocx self setup` resolve "the latest version"
-///   through the manager's configured index, exactly like every other
-///   tag-resolving command. The user's `--offline` / `--frozen` / `--remote`
-///   policy and the `OCX_INDEX` local index all apply.
-/// - The background auto-check exists to surface fresh *upstream* releases, so
-///   it forces a live remote listing regardless of the ambient ChainMode (a
-///   default-mode local read would only ever echo a stale local index).
+/// [`TagProbe::Index`] remains for generic callers of [`check_update`] that want
+/// version discovery routed through the configured index + ChainMode (honouring
+/// `--offline` / `--frozen` / `--remote` and `OCX_INDEX`) like every other
+/// tag-resolving command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagProbe {
     /// Resolve through the manager's configured index + ChainMode. Honours
@@ -258,9 +259,9 @@ impl PackageManager {
     /// (24-hour default); `ocx self update --check` passes
     /// `Some(Duration::ZERO)` (always query).
     ///
-    /// `probe` selects the tag source: explicit `ocx self update[ --check]`
-    /// passes [`TagProbe::Index`] (ChainMode-aware, honours `OCX_INDEX`); the
-    /// background auto-check passes [`TagProbe::Remote`] (live registry).
+    /// `probe` selects the tag source: `ocx self update[ --check]` and the
+    /// background auto-check both pass [`TagProbe::Remote`] (live registry) so
+    /// the freshest upstream release is found regardless of the local index.
     ///
     /// # Errors
     ///
@@ -335,9 +336,10 @@ impl PackageManager {
     /// Self-flavored install: check for update (always bypasses throttle,
     /// explicit user intent) and install the new version if one is available.
     ///
-    /// Version discovery uses [`TagProbe::Index`] — the latest tag is resolved
-    /// through the configured index + ChainMode, so `--offline` / `--frozen` /
-    /// `--remote` and `OCX_INDEX` apply, like every other tag-resolving command.
+    /// Version discovery uses [`TagProbe::Remote`] — the latest tag is resolved
+    /// live from the registry so the freshest published release is always found,
+    /// matching the sibling `ocx self setup` bootstrap and the background
+    /// auto-check. `--offline` (no client) short-circuits to `Skipped(Offline)`.
     ///
     /// The current version is queried via subprocess (`ocx --format json version`)
     /// on the binary resolved through the composed env's PATH
@@ -369,7 +371,7 @@ impl PackageManager {
         let current_version = query_installed_version(self, &ocx_id).await;
 
         let check_result = self
-            .self_check_update(Some(Duration::ZERO), TagProbe::Index)
+            .self_check_update(Some(Duration::ZERO), TagProbe::Remote)
             .await
             .map_err(|kind| {
                 package_manager::error::Error::SelfCheckFailed(Box::new(package_manager::error::PackageError {

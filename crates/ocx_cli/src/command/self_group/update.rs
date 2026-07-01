@@ -17,11 +17,13 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// version exists. With `--check`, only reports whether an update is
 /// available — no installation.
 ///
-/// Version discovery is ChainMode-aware (`TagProbe::Index`): the latest tag is
-/// resolved through the configured local index, so `--offline` / `--frozen` /
-/// `--remote` and `OCX_INDEX` all apply, like every other tag-resolving
-/// command. (User-facing copy of this lives on the `SelfGroup::Update` variant,
-/// which is the surface clap renders; this struct doc is rustdoc-only.)
+/// Version discovery queries the registry directly (`TagProbe::Remote`): the
+/// newest published tag is resolved live, the same source the background
+/// auto-check uses — self-update exists to reach the freshest upstream release,
+/// so it does not read the (possibly stale) local index. `--offline` still
+/// refuses (no client → skipped). (User-facing copy of this lives on the
+/// `SelfGroup::Update` variant, which is the surface clap renders; this struct
+/// doc is rustdoc-only.)
 ///
 /// Both forms always bypass the throttle (explicit user intent).
 ///
@@ -41,8 +43,8 @@ pub struct SelfUpdate {
     ///
     /// Behaviour:
     ///
-    /// * Resolves the latest version through the local index (add `--remote`
-    ///   to query the registry directly).
+    /// * Queries the registry directly for the latest published version. Under
+    ///   `--offline` the check is skipped (exit 75).
     /// * Always bypasses the 24h auto-check throttle (explicit user intent).
     /// * Exit status: 0 if the lookup succeeded (whether or not a newer
     ///   version was found); 75 (`EX_TEMPFAIL`) if the check was skipped.
@@ -59,13 +61,14 @@ pub struct SelfUpdate {
 impl SelfUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         if self.check {
-            // Explicit user intent → resolve the latest through the configured
-            // index + ChainMode (honours --offline/--frozen/--remote + OCX_INDEX),
-            // like every other tag-resolving command. `--remote` forces a live
-            // registry probe.
+            // Self-update discovers the newest published ocx, so it queries the
+            // registry directly (`TagProbe::Remote`) — the same source the
+            // background auto-check uses, not the local index a stale
+            // `ocx index update` snapshot would echo. `--offline` still refuses
+            // (no client → skipped).
             let result = context
                 .manager()
-                .self_check_update(Some(Duration::ZERO), TagProbe::Index)
+                .self_check_update(Some(Duration::ZERO), TagProbe::Remote)
                 .await?;
             let exit = exit_code_for_check(&result);
             context.api().report(&UpdateCheckData::from_result(&result))?;
