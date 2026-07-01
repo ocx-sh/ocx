@@ -4,9 +4,8 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
 use ocx_lib::oci;
-use ocx_lib::project::{ALL_GROUP, DEFAULT_GROUP, expand_all_keyword};
+use ocx_lib::project::expand_all_keyword;
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock;
@@ -56,17 +55,9 @@ pub struct Pull {
 impl Pull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // ── Phase 1: parse-time validation ───────────────────────────────
-
-        // Reject empty comma segments (`-g ci,,lint`) BEFORE any filesystem
-        // or network work. `clap`'s `value_delimiter = ','` splits the value
-        // into `["ci", "", "lint"]`; an empty string is a user-typing error.
-        for raw in &self.groups {
-            if raw.is_empty() {
-                return Err(
-                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
-                );
-            }
-        }
+        // Reject empty comma segments (`-g ci,,lint`) before any filesystem
+        // or network work.
+        crate::app::project_context::ensure_group_segments_nonempty(&self.groups)?;
 
         // ── Phase 2–3: project resolution, lock load, staleness gate ─────
         // Errors propagate to the `main.rs` boundary: logged once via
@@ -74,17 +65,8 @@ impl Pull {
         // `ProjectContextError`'s `ClassifyExitCode` impl.
         let ctx = load_project_with_lock(&context).await?;
 
-        // Validate requested groups against the loaded config. Unknown
-        // groups produce exit 64. `default` is always valid since it
-        // names the top-level `[tools]` table.
-        for raw in &self.groups {
-            if raw == DEFAULT_GROUP || raw == ALL_GROUP {
-                continue;
-            }
-            if !ctx.config.groups.contains_key(raw) {
-                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
-            }
-        }
+        // Validate requested groups against the loaded config (unknown → 64).
+        crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;
 
         // ── Phase 4: select tool set from the lock ───────────────────────
 
@@ -102,11 +84,7 @@ impl Pull {
         // `--platform` omitted → the host native platform (unchanged). One or
         // more `--platform` values → warm each requested platform's leaf, so an
         // amd64 host can pre-warm an arm64 leaf.
-        let selection: Vec<oci::Platform> = if self.platforms.as_slice().is_empty() {
-            vec![oci::Platform::current().unwrap_or_else(oci::Platform::any)]
-        } else {
-            self.platforms.as_slice().to_vec()
-        };
+        let selection = crate::app::project_context::platform_selection(self.platforms.as_slice());
         let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
@@ -122,9 +100,7 @@ impl Pull {
         // A V1 legacy tool resolves the same index id for every platform, so a
         // multi-platform request would silently materialize only the first (see
         // `reject_multi_platform_on_legacy`). Fail loud before any store write.
-        let has_legacy = selected
-            .iter()
-            .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)));
+        let has_legacy = selected.iter().any(|t| t.resolution.is_legacy());
         crate::app::project_context::reject_multi_platform_on_legacy(has_legacy, self.platforms.as_slice())?;
         let mut pinned: Vec<oci::PinnedIdentifier> = Vec::new();
         for tool in &selected {
@@ -173,7 +149,7 @@ impl Pull {
         // (the migration is an explicit `ocx lock --upgrade` / write command).
         // The mtime bump is purely a direnv-refresh nicety, so skipping it for
         // a V1 lock is harmless — direnv still re-fires on the next write.
-        if !lock_has_legacy_entry(&ctx.lock) {
+        if !crate::app::project_context::has_legacy_entry(&ctx.lock.tools) {
             ctx.lock
                 .save(
                     &ctx.lock_path,
@@ -197,16 +173,6 @@ impl Pull {
 
         Ok(ExitCode::SUCCESS)
     }
-}
-
-/// Return `true` when any tool in `lock` is a V1 legacy
-/// ([`ocx_lib::project::LockedResolution::LegacyIndex`]) entry. Such a lock
-/// must never be rewritten on a read path — the writer only emits V2 and the
-/// migration to V2 is an explicit `ocx lock --upgrade` / write command.
-fn lock_has_legacy_entry(lock: &ocx_lib::project::ProjectLock) -> bool {
-    lock.tools
-        .iter()
-        .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)))
 }
 
 /// Resolve a locked tool to its host-platform pull [`oci::PinnedIdentifier`].

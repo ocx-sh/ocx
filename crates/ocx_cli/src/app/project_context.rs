@@ -335,15 +335,7 @@ pub async fn materialize_lock(
         return Ok(());
     }
     reject_multi_platform_on_legacy(has_legacy_entry(&lock.tools), platforms)?;
-    // Which platforms' leaves to materialize. `--platform` omitted → the host
-    // native platform (unchanged default). One or more `--platform` values →
-    // materialize each requested platform's leaf, so an amd64 host can warm an
-    // arm64 (or any other) leaf that the V2 lock already pins.
-    let selection: Vec<ocx_lib::oci::Platform> = if platforms.is_empty() {
-        vec![ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any)]
-    } else {
-        platforms.to_vec()
-    };
+    let selection = platform_selection(platforms);
     // Resolve each (tool, platform) to its pull identifier. V2
     // ([`LockedResolution::PerPlatform`]): the requested platform's leaf via
     // `repository.clone_with_digest(leaf)` (host key → `"any"` fallback); a
@@ -407,9 +399,53 @@ pub(crate) fn primary_platform(platforms: &[ocx_lib::oci::Platform]) -> ocx_lib:
 /// `true` when any tool carries a legacy V1
 /// ([`ocx_lib::project::LockedResolution::LegacyIndex`]) resolution.
 pub(crate) fn has_legacy_entry(tools: &[ocx_lib::project::LockedTool]) -> bool {
-    tools
-        .iter()
-        .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)))
+    tools.iter().any(|t| t.resolution.is_legacy())
+}
+
+/// Which platform leaves a toolchain-tier operation warms.
+///
+/// `--platform` omitted → the host native platform (default). One or more
+/// `--platform` values → each requested platform verbatim, so an amd64 host
+/// can pre-warm an arm64 (or any other) leaf the V2 lock already pins. Shared
+/// by `materialize_lock` (`add`/`lock`/`upgrade`) and `ocx pull`.
+pub(crate) fn platform_selection(platforms: &[ocx_lib::oci::Platform]) -> Vec<ocx_lib::oci::Platform> {
+    if platforms.is_empty() {
+        vec![ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any)]
+    } else {
+        platforms.to_vec()
+    }
+}
+
+/// Reject empty comma segments in a repeatable `--group` value.
+///
+/// clap's `value_delimiter = ','` splits `-g ci,,lint` into
+/// `["ci", "", "lint"]`; an empty element is a stray-comma typo → exit 64.
+/// Runs before any config load (both tiers), so it is config-free. Shared by
+/// `ocx pull` and `ocx env`.
+pub(crate) fn ensure_group_segments_nonempty(groups: &[String]) -> anyhow::Result<()> {
+    if groups.iter().any(String::is_empty) {
+        return Err(
+            ocx_lib::cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate requested `--group` names against the loaded config.
+///
+/// `default` and `all` are always valid reserved keywords (`all` is expanded
+/// downstream); any other name absent from `[group.*]` → exit 64. Shared by
+/// the project-tier paths of `ocx pull` and `ocx env`.
+pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> anyhow::Result<()> {
+    for raw in groups {
+        if raw == ocx_lib::project::DEFAULT_GROUP || raw == ocx_lib::project::ALL_GROUP {
+            continue;
+        }
+        if !config.groups.contains_key(raw) {
+            return Err(ocx_lib::cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
+        }
+    }
+    Ok(())
 }
 
 /// Reject a multi-platform `--platform` request against a legacy (V1) lock.

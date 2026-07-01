@@ -161,16 +161,8 @@ pub struct ToolchainEnv {
 impl ToolchainEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Reject empty comma segments (`-g ci,,lint`) BEFORE any tier split or
-        // config load (parse-level, mirrors `run`/`pull` Phase A). `clap`'s
-        // `value_delimiter = ','` splits into `["ci", "", "lint"]`; an empty
-        // string is a user-typing error.
-        for raw in &self.groups {
-            if raw.is_empty() {
-                return Err(
-                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
-                );
-            }
-        }
+        // config load (parse-level, mirrors `run`/`pull` Phase A).
+        crate::app::project_context::ensure_group_segments_nonempty(&self.groups)?;
 
         // `None` → default-format path; `Some(s)` → eval-safe emit.
         let shell = resolve_shell_arg(self.shell)?;
@@ -225,17 +217,9 @@ impl ToolchainEnv {
             // Project tier: resolve + a SINGLE batched install (mirror run.rs).
             let ctx = load_project_with_lock(&context).await?;
 
-            // Validate requested groups against the loaded config. `default`
-            // and `all` are always valid (`all` is expanded below); anything
-            // else must be a declared `[group.*]`. Unknown → exit 64.
-            for raw in &self.groups {
-                if raw == DEFAULT_GROUP || raw == ALL_GROUP {
-                    continue;
-                }
-                if !ctx.config.groups.contains_key(raw) {
-                    return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
-                }
-            }
+            // Validate requested groups against the loaded config (`all` is
+            // expanded below; unknown → exit 64).
+            crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;
 
             // Expand `all` in place, then promote an empty scope to the default
             // group — identical to `ocx run` Phase C.

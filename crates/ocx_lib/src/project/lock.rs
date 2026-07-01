@@ -218,6 +218,17 @@ pub enum LockedResolution {
     },
 }
 
+impl LockedResolution {
+    /// `true` for a V1 [`LegacyIndex`](Self::LegacyIndex) resolution.
+    ///
+    /// Read paths that special-case legacy locks (multi-platform rejection,
+    /// read-path mtime bump) call this instead of open-coding a `matches!`.
+    #[must_use]
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, Self::LegacyIndex(_))
+    }
+}
+
 /// V2 on-disk shape (read + write). The only format the writer emits.
 ///
 /// `repository` is a bare [`Identifier`] (no tag, no digest); the outer
