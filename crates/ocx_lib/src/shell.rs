@@ -1276,15 +1276,27 @@ mod tests {
     /// re-expansion, which only a sequentially-parsed `.bat` provides. CRLF line
     /// endings keep legacy cmd parsers happy.
     fn run_batch(body: &str) -> Option<String> {
-        let path = std::env::temp_dir().join("ocx_batch_live_mtf.bat");
+        // Unique per invocation: nextest runs the batch live-tests concurrently and
+        // they share `temp_dir()`. A fixed name raced (one test's `SET "PATH="` body
+        // executed under another's cmd → empty PATH). pid disambiguates process-per-test;
+        // the counter covers any same-process reuse.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let name = format!(
+            "ocx_batch_live_{}_{}.bat",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        // RAII cleanup: guard covers the early `?` (write failure leaves a partial
+        // file) and the spawn-error panic path, not just the happy return.
+        let _guard = crate::utility::fs::DropFile::new(&path);
         std::fs::write(&path, format!("@echo off\r\n{body}\r\n")).ok()?;
-        let result = match Command::new("cmd").args(["/c", &path.to_string_lossy()]).output() {
+        match Command::new("cmd").args(["/c", &path.to_string_lossy()]).output() {
             Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => panic!("failed to spawn cmd: {error}"),
-        };
-        let _ = std::fs::remove_file(&path);
-        result
+        }
     }
 
     #[test]
