@@ -19,7 +19,7 @@ Install pre-built tools with a single command, switch versions instantly, and ru
 
 ```sh
 # Install ocx
-curl -fsSL https://ocx.sh/install.sh | sh
+curl -fsSL https://setup.ocx.sh/sh | sh
 
 # Install a package
 ocx package install cmake:4
@@ -38,10 +38,10 @@ See the [Getting Started guide][getting-started] for more.
 
 ```sh
 # macOS / Linux
-curl -fsSL https://ocx.sh/install.sh | sh
+curl -fsSL https://setup.ocx.sh/sh | sh
 
 # Windows (PowerShell)
-irm https://ocx.sh/install.ps1 | iex
+Invoke-RestMethod 'https://setup.ocx.sh/pwsh' | Invoke-Expression
 ```
 
 See the [installation guide][installation] for all options including manual downloads and updating.

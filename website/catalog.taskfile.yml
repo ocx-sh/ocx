@@ -9,7 +9,7 @@ tasks:
       - uv run {{.ROOT_DIR}}/scripts/catalog-generate.py
           --ocx-binary {{.ROOT_DIR}}/target/release/ocx
           --output-dir {{.ROOT_DIR}}/website/src/public/data/catalog
-          --pages-dir {{.ROOT_DIR}}/website/src/docs/catalog
+          --pages-dir {{.ROOT_DIR}}/website/src/catalog
           --registry {{.REGISTRY | default "ocx.sh"}}
           --remote
 

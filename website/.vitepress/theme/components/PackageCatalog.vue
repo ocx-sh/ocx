@@ -47,7 +47,7 @@ const filteredPackages = computed(() => {
 const router = useRouter()
 
 function navigateToPackage(name: string) {
-  router.go(`/docs/catalog/${name}`)
+  router.go(`/catalog/${name}`)
 }
 
 onMounted(async () => {

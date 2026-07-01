@@ -1,18 +1,19 @@
 # Manual cross-shell completion + activation testing
 
 Maintainer QA for `ocx self activate` (inline shell completions) and the
-`install.sh` / `install.ps1` activation shims. Not part of CI — run locally when
+`ocx self setup` activation shims. Not part of CI — run locally when
 touching completion generation, the activation stream, or the env shims.
 
 Completions are emitted **inline** in the `ocx self activate` output (no file on
 disk). The shim (`$OCX_HOME/env.sh` / `env.ps1` / `env.elv` / ...) evals that
 output at interactive shell startup.
 
-## 1. Build + test-install a local binary
+## 1. Build + self-setup a local binary
 
-`__OCX_TESTING_INSTALL_BINARY` (double-underscore = test-only) makes the installer
-skip the download + registry bootstrap and place your freshly built binary as the
-candidate, then wire all env files. No network, no published release needed.
+`ocx self setup` self-installs the running binary into the content store and
+wires all env files — no download, no published release needed. Run it with
+`--offline` so it never touches a registry, and `--no-modify-path` so QA never
+edits your real login profile.
 
 ```sh
 cargo build -p ocx                      # debug binary at target/debug/ocx
@@ -21,16 +22,14 @@ export OCX_HOME=/tmp/ocx-qa
 rm -rf "$OCX_HOME"
 
 # POSIX / Linux / macOS (writes env.sh, env.fish, env.ps1, env.nu, env.elv):
-__OCX_TESTING_INSTALL_BINARY="$BIN" OCX_HOME="$OCX_HOME" \
-  sh website/src/public/install.sh --no-modify-path
+OCX_HOME="$OCX_HOME" "$BIN" --offline self setup --no-modify-path
 ```
 
 On Windows (PowerShell), with a Windows `ocx.exe`:
 
 ```powershell
-$env:__OCX_TESTING_INSTALL_BINARY = "C:\path\to\ocx.exe"
 $env:OCX_HOME = "$env:TEMP\ocx-qa"
-& { iex (Get-Content -Raw website\src\public\install.ps1) }   # or run the script directly
+& "C:\path\to\ocx.exe" --offline self setup --no-modify-path
 ```
 
 ## 2. Per-shell checks
@@ -116,11 +115,10 @@ completes with no startup errors.
 - `cargo test -p ocx` — `app::tests::cli_definition_is_valid` (clap structure),
   `command::self_group::activate::tests::*` (inline generators, zsh compinit guard,
   PowerShell leads with `using namespace`, **completion output is ASCII-only**).
-- `cd test && uv run pytest tests/test_self_activate.py tests/test_install_sh.py`
+- `cd test && uv run pytest tests/test_self_activate.py tests/test_self_setup.py`
   — inline-emission acceptance + env.ps1 cross-platform (`$env:OS` binary-name
-  probe, no `$IsWindows`) + `__OCX_TESTING_INSTALL_BINARY` +
-  `test_windows_read_surface_is_ascii` (install.ps1 / install.sh / the gate
-  harness must be ASCII-only so WinPS 5.1 cannot misread them).
+  probe, no `$IsWindows`) + the env shims, versioned fence, and idempotency that
+  `ocx self setup` writes.
 
 ## 5. Cleanup
 

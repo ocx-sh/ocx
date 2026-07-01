@@ -57,6 +57,8 @@ Once installed, [`ocx package which --candidate`][cmd-which] returns the stable 
 
 ::: tip CI workflows: `ocx package pull`
 In CI pipelines, symlink management is unnecessary — you just need the binary at a known path. [`ocx package pull`][cmd-package-pull] downloads directly into the [object store][fs-objects] without creating candidate or current symlinks. To inject resolved environment variables into the runner, use `ocx --format json package env` for machine-readable output, or `ocx package env --shell=sh` to emit `export` statements directly into the runner's environment.
+
+In [GitHub Actions][github-actions], the [`ocx-sh/setup-ocx`][setup-ocx] action is the turnkey path — it installs ocx, pulls the project toolchain, and replays `ocx env` in a single step. See [CI Integration][ci-integration] for the full setup.
 :::
 
 See the [object store][fs-objects] and [install symlinks][fs-symlinks] sections of the user guide for the full three-store architecture behind this.
@@ -115,6 +117,8 @@ ocx packages declare their environment variables in `metadata.json`. [`ocx packa
 
 ::: tip Persistent shell environment
 OCX activation is handled by `$OCX_HOME/env.sh`, which is written by the installer and sourced from your login profile. At shell startup it invokes `ocx self activate --shell=sh` via the installer-written absolute path, so activation works even before `ocx` is on `PATH`. The command emits three blocks: a PATH prepend to the OCX binary directory, shell completions, and an `eval "$(ocx --global env --shell=sh)"` call that exports your global toolchain's environment. Because the PATH entry points at the `current` symlink, your profile stays valid across upgrades — no manual edit required.
+
+Populate that global toolchain with [`ocx --global add`][user-guide-global-add] — `ocx --global add uv:0.10` installs a tool and puts it on `PATH` in every new shell. See [global toolchain][project-global] for the tier model.
 :::
 
 ::: details Composing environments from multiple packages
@@ -138,6 +142,14 @@ Three commands set up the toolchain:
 <<< @/_scripts/getting-started/project-toolchain.sh{sh}
 
 [`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx run`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
+
+To put the toolchain on `PATH` automatically when you `cd` into the project, hand activation to [direnv][direnv]. [`ocx direnv init`][cmd-direnv-init] drops a ready-made `.envrc` — run `direnv allow` once to enable it.
+
+The generated `.envrc` runs `eval "$(ocx direnv export)"` and re-evaluates whenever the lock changes (`watch_file ocx.toml ocx.lock`), so the toolchain is on `PATH` inside the project and gone when you leave. See [project activation][project-activation] for the full hook and [`ocx direnv export`][cmd-direnv-export] for the export it emits.
+
+::: tip Editor integration
+The [OCX VSCode extension][vscode-ext] (also on [Open VSX][openvsx-ext]) brings the project toolchain into your editor, so its terminal and tasks resolve the same locked binaries as [`ocx run`][cmd-run].
+:::
 
 See [Pin a project's tools][user-guide-project] in the User Guide for groups, lifecycle commands, and CI setup.
 
@@ -169,6 +181,11 @@ Environment variables and CLI flags always override config values. For full deta
 [nvm]: https://github.com/nvm-sh/nvm
 [bun]: https://bun.sh/
 [nodejs]: https://nodejs.org/
+[direnv]: https://direnv.net/
+[github-actions]: https://docs.github.com/en/actions
+[setup-ocx]: https://github.com/ocx-sh/setup-ocx
+[vscode-ext]: https://marketplace.visualstudio.com/items?itemName=ocx-sh.ocx
+[openvsx-ext]: https://open-vsx.org/extension/ocx-sh/ocx
 
 <!-- pages -->
 [installation]: ./installation.md
@@ -176,14 +193,20 @@ Environment variables and CLI flags always override config values. For full deta
 [cmd-ref]: ./reference/command-line.md
 [env-ref]: ./reference/environment.md
 [config-ref]: ./reference/configuration.md
+[ci-integration]: ./in-depth/ci.md
 
 <!-- user guide sections -->
 [user-guide-project]: ./user-guide.md#project
+[user-guide-global-add]: ./user-guide.md#global-toolchain-add
+[project-activation]: ./in-depth/project.md#activation
+[project-global]: ./in-depth/project.md#global-toolchain
 
 <!-- commands -->
 [cmd-init]: ./reference/command-line.md#init
 [cmd-add]: ./reference/command-line.md#add
 [cmd-run]: ./reference/command-line.md#run
+[cmd-direnv-init]: ./reference/command-line.md#direnv-init
+[cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-install]: ./reference/command-line.md#package-install
 [cmd-which]: ./reference/command-line.md#package-which
 [cmd-exec]: ./reference/command-line.md#package-exec

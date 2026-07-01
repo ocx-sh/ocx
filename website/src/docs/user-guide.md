@@ -791,7 +791,7 @@ This section covers the changes introduced in the `feat/project-toolchain` relea
 
 ```sh
 # Idempotent — safe to re-run; existing block marker is overwritten in-place.
-curl -fsSL https://ocx.sh/install.sh | sh
+curl -fsSL https://setup.ocx.sh/sh | sh
 ```
 
 After installation, every new login shell sources `$OCX_HOME/env.sh`, which runs `eval "$(ocx --global env --shell=sh)"`. No `ocx shell init` call is needed — the installer owns profile wiring.

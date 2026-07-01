@@ -147,7 +147,7 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 [cmd-package-info]: ../reference/command-line.md#package-info
 
 <!-- internal -->
-[catalog]: ../catalog.md
+[catalog]: ../../catalog.md
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md

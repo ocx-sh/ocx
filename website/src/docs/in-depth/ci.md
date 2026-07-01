@@ -28,7 +28,25 @@ Running `--ci=github` outside a [GitHub Actions][github-actions-docs] runner —
 
 ### Toolchain-tier example {#ci-github-actions-toolchain}
 
-This workflow installs the project toolchain in one step and uses the tools in a later step:
+The turnkey path is the [`ocx-sh/setup-ocx`][setup-ocx] action. In project mode it installs OCX, pulls the project toolchain from `ocx.lock`, and replays `ocx env --ci=github` into `$GITHUB_PATH` / `$GITHUB_ENV` — all in one step, with a build cache keyed on `sha256(ocx.lock)`. Pin it by commit SHA (with a human-readable version comment), the same way [GitHub recommends pinning third-party actions][github-actions-pin]:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocx-sh/setup-ocx@<sha> # v1.2.2
+
+      - name: Build
+        run: cmake --version && ninja --version
+```
+
+After the [`setup-ocx`][setup-ocx] step, every subsequent step sees the project's resolved tool directories in `PATH` and any declared environment variables.
+
+::: details Without the action — install OCX manually
+If you prefer not to depend on the [`setup-ocx`][setup-ocx] action, install OCX with the [POSIX installer][setup-ocx-sh] and replay the toolchain yourself. The installer puts the `ocx` binary under `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin` — add that to `$GITHUB_PATH` so `ocx` resolves in later steps:
 
 ```yaml
 jobs:
@@ -39,8 +57,8 @@ jobs:
 
       - name: Install OCX
         run: |
-          curl -fsSL https://ocx.sh/install.sh | sh
-          echo "$HOME/.ocx/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://setup.ocx.sh/sh | sh
+          echo "$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin" >> "$GITHUB_PATH"
 
       - name: Set up toolchain
         run: ocx env --ci=github
@@ -48,12 +66,11 @@ jobs:
       - name: Build
         run: cmake --version && ninja --version
 ```
-
-After the "Set up toolchain" step, every subsequent step sees the project's resolved tool directories in `PATH` and any declared environment variables.
+:::
 
 ### OCI-tier example {#ci-github-actions-oci}
 
-For individual OCI packages rather than a full project toolchain:
+For individual OCI packages rather than a full project toolchain, there is no `ocx.lock` to pull, so install OCX directly — either with the [`ocx-sh/setup-ocx`][setup-ocx] action (install only) or the [POSIX installer][setup-ocx-sh] — and resolve each package with `ocx package env`:
 
 ```yaml
 jobs:
@@ -64,8 +81,8 @@ jobs:
 
       - name: Install OCX
         run: |
-          curl -fsSL https://ocx.sh/install.sh | sh
-          echo "$HOME/.ocx/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://setup.ocx.sh/sh | sh
+          echo "$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin" >> "$GITHUB_PATH"
 
       - name: Resolve tool environment
         run: ocx package env --ci=github node:20 python:3.12
@@ -109,8 +126,8 @@ build:
   run:
     - name: Install OCX
       script: |
-        curl -fsSL https://ocx.sh/install.sh | sh
-        export PATH="$HOME/.ocx/bin:$PATH"
+        curl -fsSL https://setup.ocx.sh/sh | sh
+        export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin:$PATH"
     - name: Set up toolchain
       script: ocx env --ci=gitlab --export-file="${{ export_file }}"
     - name: Build
@@ -141,8 +158,8 @@ test:
   run:
     - name: Install OCX
       script: |
-        curl -fsSL https://ocx.sh/install.sh | sh
-        export PATH="$HOME/.ocx/bin:$PATH"
+        curl -fsSL https://setup.ocx.sh/sh | sh
+        export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin:$PATH"
     - name: Resolve tool environment
       script: ocx package env --ci=gitlab --export-file="${{ export_file }}" node:20 python:3.12
     - name: Run tests
@@ -156,6 +173,9 @@ Bare `--ci` without `=gitlab` also works inside [GitLab CI/CD][gitlab-ci-docs] b
 :::
 
 <!-- external -->
+[setup-ocx]: https://github.com/ocx-sh/setup-ocx
+[setup-ocx-sh]: https://setup.ocx.sh/sh
+[github-actions-pin]: https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [github-actions-set-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-an-environment-variable
 [github-actions-set-path]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#adding-a-system-path

@@ -24,8 +24,6 @@ on:
       - test/tests/test_self_activate.py
       - test/docker/**
       - test/taskfile.yml
-      - website/src/public/install.sh
-      - website/src/public/install.ps1
       - .github/workflows/shell-activation.yml
   push:
     branches: [main]

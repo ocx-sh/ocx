@@ -49,14 +49,38 @@ features:
 
 ::: code-group
 ```sh [Shell]
-curl -fsSL https://ocx.sh/install.sh | sh
+curl -fsSL https://setup.ocx.sh/sh | sh
 ```
-```ps1 [PowerShell]
-irm https://ocx.sh/install.ps1 | iex
+```powershell [PowerShell]
+Invoke-RestMethod 'https://setup.ocx.sh/pwsh' | Invoke-Expression
+```
+```nushell [Nushell]
+curl -fsSL https://setup.ocx.sh/nu | nu
+```
+```fish [fish]
+curl -fsSL https://setup.ocx.sh/fish | fish
+```
+```sh [Elvish]
+curl -fsSL https://setup.ocx.sh/elvish | elvish
 ```
 :::
 
+See [Installation](/docs/installation) for pinned versions, manual downloads, and CI setup.
+
 Open a new terminal and run `ocx --remote --global add uv:0.10` to install your first package.
+
+</div>
+
+<div class="quick-start-header">
+  <h2>Integrations</h2>
+  <p>Wire ocx into your editor, your CI, and your shell.</p>
+</div>
+
+<div class="quick-start-body">
+
+- **VSCode extension** — install from the [VS Marketplace](https://marketplace.visualstudio.com/items?itemName=ocx-sh.ocx) or [Open VSX](https://open-vsx.org/extension/ocx-sh/ocx).
+- **GitHub Action** — [`ocx-sh/setup-ocx`](https://github.com/ocx-sh/setup-ocx) installs ocx, pulls the project toolchain, and exports its environment in one step.
+- **direnv** — `ocx direnv init` drops an `.envrc` so [direnv](https://direnv.net/) activates the project toolchain on `cd`.
 
 </div>
 
@@ -94,7 +118,7 @@ Write `ocx add uv:0.10` once. It works on your Mac, your CI runner's Linux, and 
 <FeatureSection title="Composable Environments">
   <template #text>
 
-Every package declares its own environment variables. `ocx exec` layers them on top of your current shell, and with `--clean` it strips everything back to only what the packages provide — no host pollution, no PATH conflicts, no stale state.
+Every package declares its own environment variables. `ocx package exec` layers them on top of your current shell, and with `--clean` it strips everything back to only what the packages provide — no host pollution, no PATH conflicts, no stale state.
 
 Compose multiple packages in a single invocation. Each one contributes its variables. Pass `--clean` when you need a hermetic, reproducible scope — ideal for CI pipelines and build systems.
 
@@ -120,7 +144,7 @@ This also means verification is built in. A path under `sha256:…/` never chang
 
 Every command returns structured JSON with `--format json`. Exit codes are meaningful. Environment variables compose cleanly. There is no interactive prompt, no "press Y to continue", no color code that breaks your parser.
 
-`ocx exec` runs commands with package-declared variables. `ocx env` prints them for your build system. `ocx ci export` writes them directly into GitHub Actions or GitLab CI runtime files. The entire CLI is designed to be called by other tools, not typed by humans.
+`ocx package exec` runs commands with package-declared variables. `ocx package env` prints them for your build system. `ocx env --ci` writes them directly into GitHub Actions or GitLab CI runtime files. The entire CLI is designed to be called by other tools, not typed by humans.
 
   </template>
 
@@ -154,7 +178,7 @@ The local index snapshot plus the content-addressed object store is everything `
       <span>See what we're building and what's coming next.</span>
     </div>
   </a>
-  <a href="/docs/catalog/" class="cta-card">
+  <a href="/catalog/" class="cta-card">
     <img src="/licensed/icons/cta-catalog.svg" alt="" class="cta-card-icon cta-icon-catalog" />
     <div class="cta-card-text">
       <strong>Package Catalog</strong>

@@ -833,7 +833,6 @@ def test_pt8_no_website_path_literal_in_test_files() -> None:
     # Allowed patterns that reference website/ as a READ-ONLY source:
     #   - website/src/docs/…        (NC1–NC3, command-line ref, project tests)
     #   - website/src/public/schemas/… (schema generation tests)
-    #   - website/src/public/install… (install-script test)
     #   - website/src/_scripts/…   (manifest read for NC2)
     #
     # Not allowed:
@@ -854,7 +853,6 @@ def test_pt8_no_website_path_literal_in_test_files() -> None:
         r"""(
             website/src/docs/
           | website/src/public/schemas/
-          | website/src/public/install
           | website/src/_scripts
           | website/taskfile\.yml          # taskfile reference by name
           | ["']website[/"']              # bare segment (no sub-path) — checked by casts_re instead

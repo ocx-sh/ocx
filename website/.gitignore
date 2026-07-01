@@ -14,4 +14,4 @@ src/public/data
 # Schema artifacts are regenerated on every build (see website/schema.taskfile.yml).
 src/public/schemas/
 src/docs/reference/dependencies.md
-src/docs/catalog/
+src/catalog/

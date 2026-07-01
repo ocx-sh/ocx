@@ -21,7 +21,7 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 | `src/index.md` | Homepage (`layout: home` with hero + features) |
 | `src/docs/*.md` | Documentation pages |
 | `src/docs/reference/*.md` | Reference pages (command-line, environment, metadata) |
-| `src/docs/catalog/*.md` | **Generated** — per-package pages |
+| `src/catalog/*.md` | **Generated** — per-package pages |
 | `src/docs/reference/dependencies.md` | **Generated** — SBOM dependency list |
 | `src/public/casts/*.cast` | **Generated** — asciinema recordings |
 | `src/public/schemas/metadata/v1.json` | **Generated** — JSON schema from `ocx_schema` crate |

@@ -22,11 +22,11 @@ interface PackageInfo {
 }
 
 const route = useRoute()
-// URL is `/docs/catalog/<name>` where `<name>` may contain slashes
+// URL is `/catalog/<name>` where `<name>` may contain slashes
 // (nested OCI repos, e.g. `ocx/cli`). Strip the catalog prefix and
 // `.html` suffix, then trim any trailing slash.
 const pkgName = computed(() => {
-  const prefix = '/docs/catalog/'
+  const prefix = '/catalog/'
   const path = route.path.replace(/\.html$/, '').replace(/\/$/, '')
   return path.startsWith(prefix) ? path.slice(prefix.length) : ''
 })
@@ -85,7 +85,7 @@ onMounted(async () => {
     <!-- Content -->
     <template v-else-if="info">
       <!-- Back link -->
-      <a href="/docs/catalog" class="back-link">
+      <a href="/catalog" class="back-link">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M19 12H5" />
           <polyline points="12 19 5 12 12 5" />

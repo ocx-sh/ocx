@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitepress'
-import { groupIconMdPlugin, groupIconVitePlugin } from 'vitepress-plugin-group-icons'
+import { groupIconMdPlugin, groupIconVitePlugin, localIconLoader } from 'vitepress-plugin-group-icons'
 import licensedAssetFallback from './plugins/licensed-asset-fallback.mts'
 
 const deployTarget = process.env.OCX_DEPLOY_TARGET === 'prod' ? 'prod' : 'dev'
@@ -37,14 +37,14 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Roadmap', link: '/docs/roadmap' },
-      { text: 'Catalog', link: '/docs/catalog' },
+      { text: 'Catalog', link: '/catalog' },
       { text: 'Docs', link: '/docs/user-guide' },
       { text: 'Team', link: '/team' },
     ],
 
     sidebar: {
       "/docs/roadmap": [],
-      "/docs/catalog": [],
+      "/catalog": [],
       "/team": [],
       "/": [
         {
@@ -140,9 +140,16 @@ export default defineConfig({
   vite: {
     plugins: [
       groupIconVitePlugin({
+        // Icons are matched against the code-group tab LABEL (case-insensitive
+        // substring), longest key first — so `powershell`/`nushell` win over the
+        // shorter `shell` key. fish and elvish have no bundled iconify glyph, so
+        // they load local brand SVGs from `.vitepress/icons/`.
         customIcon: {
           shell: 'vscode-icons:file-type-shell',
           powershell: 'vscode-icons:file-type-powershell',
+          nushell: 'vscode-icons:file-type-nushell',
+          fish: localIconLoader(import.meta.url, './icons/fish.svg'),
+          elvish: localIconLoader(import.meta.url, './icons/elvish.svg'),
         },
       }),
       licensedAssetFallback(),

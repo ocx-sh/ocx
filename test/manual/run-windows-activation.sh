@@ -20,7 +20,6 @@ IFS=$'\n\t'
 REPO_ROOT=$(git rev-parse --show-toplevel)
 EXE_UNIX="${OCX_WIN_EXE:-$REPO_ROOT/target/xwin/x86_64-pc-windows-msvc/release/ocx.exe}"
 GATE_UNIX="$REPO_ROOT/test/manual/test-windows-activation.ps1"
-INSTALL_UNIX="$REPO_ROOT/website/src/public/install.ps1"
 
 log() { printf 'run-windows-activation: %s\n' "$1" >&2; }
 
@@ -38,13 +37,12 @@ first_existing() {
 
 # Run the gate harness under one interpreter. $1 = interpreter, $2 = label.
 run_gate() {
-    local _interp="$1" _label="$2" _exe_win _gate_win _install_win
+    local _interp="$1" _label="$2" _exe_win _gate_win
     _exe_win=$(wslpath -w "$EXE_UNIX")
     _gate_win=$(wslpath -w "$GATE_UNIX")
-    _install_win=$(wslpath -w "$INSTALL_UNIX")
     log "== $_label =="
     "$_interp" -NoProfile -ExecutionPolicy Bypass -File "$_gate_win" \
-        -OcxBin "$_exe_win" -InstallPs1 "$_install_win"
+        -OcxBin "$_exe_win"
 }
 
 main() {

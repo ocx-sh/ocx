@@ -6,7 +6,6 @@ paths:
   - .github/workflows/release.yml
   - .github/workflows/verify-version.yml
   - .github/workflows/post-release-oci-publish.yml
-  - .github/workflows/test-install-scripts.yml
 ---
 
 # Release Implementation Notes
@@ -52,7 +51,7 @@ When publishing OCX to own registry (`ocx.sh/ocx/cli`), archive must contain `bi
 
 ### Shell Startup: Live env eval
 
-The in-repo installer (`website/src/public/install.sh` / `install.ps1`) writes thin shims `$OCX_HOME/env.{sh,fish,ps1}` and appends a `# BEGIN ocx`/`# END ocx` block to the login profile that sources the shim. Each shim runs `eval "$(ocx --global env --shell=<sh|fish|pwsh>)"` live on every shell start — the `ocx` binary is resolved via the literal install root embedded at install time, `[ -x ]`-guarded, with `|| true` so a broken/absent binary never breaks the shell. There is no static `~/.ocx/env` PATH export and no `ocx shell env` command (deleted — see `handshake_toolchain_cli.md` §4/§7).
+`ocx self setup` — invoked by the per-shell installers at [setup.ocx.sh](https://setup.ocx.sh) (repo `ocx-sh/www-setup`), or run directly after a bare-binary download — writes the thin shims `$OCX_HOME/env.{sh,fish,ps1,nu,elv}` and adds a managed `# >>> ocx v1 <hash> >>>` … `# <<< ocx <<<` block to the login profile that sources the shim. Each shim runs `eval "$(ocx self activate --shell=<sh|fish|pwsh|nushell|elvish>)"` live on every shell start — the `ocx` binary is resolved via the literal install root embedded at setup time, `[ -x ]`-guarded, with `|| true` so a broken/absent binary never breaks the shell. There is no static `~/.ocx/env` PATH export and no `ocx shell env` command (deleted — see `handshake_toolchain_cli.md` §4/§7).
 
 ### Dependency Update Config
 
@@ -69,28 +68,9 @@ Both must add to:
 - `website/src/docs/reference/environment.md`
 - Env var parsing use same truthy-value logic as `OCX_OFFLINE` and `OCX_REMOTE`
 
-### Install Script Requirements (install.sh)
+### Installers live in ocx-sh/www-setup
 
-- Must handle both POSIX and Fish shells
-- Fish: create `~/.config/fish/conf.d/ocx.fish` (not modify profile)
-- bash/zsh: append `. "$HOME/.ocx/env"` to profile (idempotent existence check)
-- Must honor `--no-modify-path` flag + `OCX_NO_MODIFY_PATH=1` env var
-- Must verify SHA256 checksums from `sha256.sum`
-- Must print clear success message with next steps
-
-### Install Script Requirements (install.ps1)
-
-- Use `$PROFILE.CurrentUserCurrentHost` for profile modification
-- Create profile file if missing
-- Write PowerShell equivalent of `~/.ocx/env` for indirection
-- Same `OCX_NO_MODIFY_PATH` opt-out
-
-### Testing Install Scripts
-
-Install scripts must test in CI:
-- `install.sh`: test in clean Docker container (ubuntu, alpine, macos runner)
-- `install.ps1`: test on Windows runner
-- Verify: binary works, profile modified, `ocx version` outputs correct version
+The `curl … | sh` / PowerShell installers are no longer in this repo. They are the five per-shell bootstraps served at [setup.ocx.sh](https://setup.ocx.sh) (repo `ocx-sh/www-setup`): each detects the platform, resolves + verifies a release from `dist.json`, and hands off to `ocx self setup`. This repo owns only the machine-state logic those installers call — `crates/ocx_lib/src/setup/` (shims, profile blocks, completions) behind `ocx self setup`. Installer maintenance and its CI (clean-container / Windows-runner tests) live in the www-setup repo.
 
 ### Shared Version Utility
 

@@ -170,7 +170,7 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 [in-depth-environments]: ../in-depth/environments.md
 
 <!-- internal -->
-[catalog]: ../catalog.md
+[catalog]: ../../catalog.md
 
 <!-- authoring -->
 [authoring-env-surface]: ./env-surface.md
