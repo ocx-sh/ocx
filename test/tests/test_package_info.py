@@ -68,21 +68,22 @@ def test_info_with_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path)
 
 
 def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """package info --format json returns structured object."""
+    """package info --format json returns an object keyed by the raw identifier."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
     _push_description(ocx, unique_repo, tmp_path, title="CMake", description="Build system", keywords="cmake,build")
 
-    data = ocx.json("package", "info", pkg.fq)
+    data = ocx.json("package", "info", pkg.fq)[pkg.fq]
     assert data["title"] == "CMake"
     assert data["description"] == "Build system"
     assert data["keywords"] == "cmake,build"
 
 
 def test_info_json_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """package info --format json returns null when no description exists."""
+    """package info --format json keys the package with a null value when absent."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
     data = ocx.json("package", "info", pkg.fq)
-    assert data is None
+    assert list(data.keys()) == [pkg.fq]
+    assert data[pkg.fq] is None
 
 
 def test_info_save_readme(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -121,3 +122,83 @@ def test_info_save_logo(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     # Should start with PNG magic bytes
     data = save_path.read_bytes()
     assert data[:4] == b"\x89PNG"
+
+
+# ---------------------------------------------------------------------------
+# Multi-package `info PKGS...` — pluralization.
+# ---------------------------------------------------------------------------
+
+
+def test_info_multiple_packages_json_keyed_object(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Multi-package ``package info A B`` returns an object keyed by each identifier."""
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_a", "1.0.0", tmp_path, new=True)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_b", "1.0.0", tmp_path, new=True)
+    _push_description(ocx, a.repo, tmp_path, title="Alpha")
+
+    data = ocx.json("package", "info", a.fq, b.fq)
+
+    assert set(data.keys()) == {a.fq, b.fq}
+    assert data[a.fq]["title"] == "Alpha"
+    assert data[b.fq] is None
+
+
+def test_info_rejects_duplicate_references(ocx: OcxRunner) -> None:
+    """Naming the same package twice is a usage error (exit 64).
+
+    The keyed JSON object would otherwise emit a duplicate key for the
+    repeated reference, so the duplicate is rejected before any fetch.
+    """
+    result = ocx.run(
+        "package", "info", "dup-tool:1.0.0", "dup-tool:1.0.0", format=None, check=False
+    )
+
+    assert result.returncode == 64, f"expected usage error, got {result.returncode}: {result.stderr}"
+    assert "duplicate" in result.stderr.lower()
+
+
+def test_info_multiple_packages_plain_shows_header_per_package(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Plain multi-package ``package info A B`` prints a ``== <id> ==`` header per package, in input order."""
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_a", "1.0.0", tmp_path, new=True)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_b", "1.0.0", tmp_path, new=True)
+
+    result = ocx.plain("package", "info", a.fq, b.fq)
+
+    assert f"== {a.fq} ==" in result.stdout
+    assert f"== {b.fq} ==" in result.stdout
+    assert result.stdout.index(a.fq) < result.stdout.index(b.fq)
+
+
+def test_info_save_readme_rejected_with_multiple_packages(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """--save-readme is rejected when more than one package is given (nonzero exit)."""
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_a", "1.0.0", tmp_path, new=True)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_b", "1.0.0", tmp_path, new=True)
+
+    result = ocx.run(
+        "package", "info", "--save-readme", str(tmp_path / "out.md"), a.fq, b.fq,
+        format=None, check=False,
+    )
+
+    assert result.returncode == 64, "must reject --save-readme with more than one package (usage error)"
+    assert "--save-readme" in result.stderr
+
+
+def test_info_save_logo_rejected_with_multiple_packages(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """--save-logo is rejected when more than one package is given (nonzero exit)."""
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_a", "1.0.0", tmp_path, new=True)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_b", "1.0.0", tmp_path, new=True)
+
+    result = ocx.run(
+        "package", "info", "--save-logo", str(tmp_path / "out.png"), a.fq, b.fq,
+        format=None, check=False,
+    )
+
+    assert result.returncode == 64, "must reject --save-logo with more than one package (usage error)"
+    assert "--save-logo" in result.stderr

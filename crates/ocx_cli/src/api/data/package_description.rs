@@ -57,3 +57,41 @@ impl Printable for PackageDescription {
         }
     }
 }
+
+/// One or more [`PackageDescription`] views keyed by the requested identifier.
+///
+/// Plain format: a `== <id> ==` header line per package followed by its
+/// description fields, in input order.
+///
+/// JSON format: object keyed by the raw request identifier
+/// (`{"<id>": {…}|null}`), preserving input order — the same keyed-object shape
+/// `which` uses, applied even for a single package.
+pub struct PackageDescriptions {
+    entries: Vec<(String, PackageDescription)>,
+}
+
+impl PackageDescriptions {
+    pub fn new(entries: Vec<(String, PackageDescription)>) -> Self {
+        Self { entries }
+    }
+}
+
+impl Serialize for PackageDescriptions {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
+        for (key, description) in &self.entries {
+            map.serialize_entry(key, description)?;
+        }
+        map.end()
+    }
+}
+
+impl Printable for PackageDescriptions {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+        for (key, description) in &self.entries {
+            println!("== {key} ==");
+            description.print_plain(printer);
+        }
+    }
+}

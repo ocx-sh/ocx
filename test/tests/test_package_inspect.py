@@ -23,6 +23,7 @@ import json
 import shutil
 import urllib.request
 from pathlib import Path
+from uuid import uuid4
 
 from src import OcxRunner
 from src.helpers import make_package
@@ -35,7 +36,7 @@ def test_inspect_default_lists_index_candidates(
     """Default inspect of an image-index tag lists platform candidates only."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
-    data = ocx.json("package", "inspect", pkg.short)
+    data = ocx.json("package", "inspect", pkg.short)[pkg.short]
 
     assert "metadata" not in data, "candidate listing must not load metadata"
     assert "resolution" not in data
@@ -49,14 +50,30 @@ def test_inspect_default_lists_index_candidates(
     assert isinstance(c["size"], int)
 
 
+def test_inspect_rejects_duplicate_references(ocx: OcxRunner) -> None:
+    """Naming the same package twice is a usage error (exit 64).
+
+    The identifier-keyed report collapses duplicates through
+    ``drain_package_tasks`` and would silently drop a result row, so the
+    duplicate is rejected before any fetch.
+    """
+    result = ocx.run(
+        "package", "inspect", "dup-tool:1.0.0", "dup-tool:1.0.0", format=None, check=False
+    )
+
+    assert result.returncode == 64, f"expected usage error, got {result.returncode}: {result.stderr}"
+    assert "duplicate" in result.stderr.lower()
+
+
 def test_inspect_digest_manifest_shows_metadata(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """A ``<repo>@<digest>`` ref pointing at a child manifest shows metadata."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
-    child = ocx.json("package", "inspect", pkg.short)["candidates"][0]["digest"]
+    child = ocx.json("package", "inspect", pkg.short)[pkg.short]["candidates"][0]["digest"]
 
-    data = ocx.json("package", "inspect", f"{unique_repo}@{child}")
+    digest_ref = f"{unique_repo}@{child}"
+    data = ocx.json("package", "inspect", digest_ref)[digest_ref]
 
     assert "candidates" not in data
     assert "resolution" not in data
@@ -79,7 +96,7 @@ def test_inspect_resolve_adds_metadata_and_chain(
     """``--resolve`` platform-selects and adds the resolution chain."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
-    data = ocx.json("package", "inspect", "--resolve", pkg.short)
+    data = ocx.json("package", "inspect", "--resolve", pkg.short)[pkg.short]
 
     assert data["metadata"]["version"] == 1
     resolution = data["resolution"]
@@ -121,11 +138,11 @@ def test_inspect_resolve_platform_selects_child(
     )
     short = f"{unique_repo}:1.0.0"
 
-    listed = {c["platform"] for c in ocx.json("package", "inspect", short)["candidates"]}
+    listed = {c["platform"] for c in ocx.json("package", "inspect", short)[short]["candidates"]}
     assert {"linux/amd64", "linux/arm64"} <= listed, listed
 
-    amd = ocx.json("package", "inspect", "--resolve", "-p", "linux/amd64", short)
-    arm = ocx.json("package", "inspect", "--resolve", "-p", "linux/arm64", short)
+    amd = ocx.json("package", "inspect", "--resolve", "-p", "linux/amd64", short)[short]
+    arm = ocx.json("package", "inspect", "--resolve", "-p", "linux/arm64", short)[short]
     assert amd["pinned_digest"] != arm["pinned_digest"]
 
 
@@ -221,7 +238,7 @@ def test_inspect_default_platform_flag_ignored_without_resolve(
         "-p must be ignored in default mode (byte-identical output expected)\n"
         f"without -p: {without_flag!r}\nwith -p: {with_flag!r}"
     )
-    listed = {c["platform"] for c in json.loads(with_flag)["candidates"]}
+    listed = {c["platform"] for c in json.loads(with_flag)[short]["candidates"]}
     assert {"linux/amd64", "linux/arm64"} <= listed, (
         f"default mode must list ALL platforms even with -p, got {listed}"
     )
@@ -242,9 +259,10 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     on the registry, then re-indexing that tag.
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    tag_ref = f"{unique_repo}:1.0.0"
     child = ocx.json(
-        "package", "inspect", f"{unique_repo}:1.0.0"
-    )["candidates"][0]["digest"]
+        "package", "inspect", tag_ref
+    )[tag_ref]["candidates"][0]["digest"]
 
     # Retag the child image manifest under a new tag so the tag points
     # directly at a bare image manifest (not an image index).
@@ -252,9 +270,10 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     base = f"http://{ocx.registry}/v2/{unique_repo}/manifests"
     body, _ = _registry_get(f"{base}/{child}", img_mt)
     _registry_put(f"{base}/flat", body, img_mt)
-    ocx.plain("index", "update", f"{unique_repo}:flat")
+    flat_ref = f"{unique_repo}:flat"
+    ocx.plain("index", "update", flat_ref)
 
-    data = ocx.json("package", "inspect", f"{unique_repo}:flat")
+    data = ocx.json("package", "inspect", flat_ref)[flat_ref]
 
     assert "candidates" not in data, "flat-tag manifest must not list candidates"
     assert "resolution" not in data, "default mode must not add a resolution chain"
@@ -336,4 +355,88 @@ def test_inspect_default_has_no_install_side_effects(
             assert unique_repo not in entry.read_text(), (
                 f"inspect must not assemble a package for {unique_repo}: {entry}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Multi-package `inspect PKGS...` — pluralization + deterministic batch order.
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_multiple_packages_plain_renders_in_input_order(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Plain ``package inspect A B C`` renders each package's tree in input order."""
+    short_id = uuid4().hex[:8]
+    repo_a = f"t_{short_id}_inspect_multi_a"
+    repo_b = f"t_{short_id}_inspect_multi_b"
+    repo_c = f"t_{short_id}_inspect_multi_c"
+    a = make_package(ocx, repo_a, "1.0.0", tmp_path)
+    b = make_package(ocx, repo_b, "1.0.0", tmp_path)
+    c = make_package(ocx, repo_c, "1.0.0", tmp_path)
+
+    result = ocx.plain("package", "inspect", a.short, b.short, c.short)
+
+    offset_a = result.stdout.index(repo_a)
+    offset_b = result.stdout.index(repo_b)
+    offset_c = result.stdout.index(repo_c)
+    assert offset_a < offset_b < offset_c, (
+        f"expected trees in input order (a, b, c), got offsets {offset_a}, {offset_b}, {offset_c}\n"
+        f"stdout: {result.stdout}"
+    )
+
+
+def test_inspect_multiple_packages_json_keyed_by_raw_identifier(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """JSON ``package inspect A B`` is an object keyed by each raw request identifier."""
+    short_id = uuid4().hex[:8]
+    repo_a = f"t_{short_id}_inspect_json_multi_a"
+    repo_b = f"t_{short_id}_inspect_json_multi_b"
+    a = make_package(ocx, repo_a, "1.0.0", tmp_path)
+    b = make_package(ocx, repo_b, "1.0.0", tmp_path)
+
+    data = ocx.json("package", "inspect", a.short, b.short)
+
+    assert set(data.keys()) == {a.short, b.short}
+    assert "candidates" in data[a.short]
+    assert "candidates" in data[b.short]
+
+
+def test_inspect_single_package_json_still_keyed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A single-package inspect is still keyed by the raw identifier (parity with ``which``)."""
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
+
+    data = ocx.json("package", "inspect", pkg.short)
+
+    assert list(data.keys()) == [pkg.short]
+
+
+def test_inspect_partial_failure_exits_nonzero_and_stable(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Partial failure exits nonzero; the exit code is stable across repeated runs.
+
+    ``inspect A_good B_missing C_good`` — the missing package's failure
+    determines the batch exit code (input-order-first, per
+    ``drain_package_tasks``'s index sort). Running the same invocation twice
+    proves the code is not completion-order dependent — the race the index
+    sort fixed.
+    """
+    short_id = uuid4().hex[:8]
+    repo_a = f"t_{short_id}_inspect_partial_a"
+    repo_c = f"t_{short_id}_inspect_partial_c"
+    a = make_package(ocx, repo_a, "1.0.0", tmp_path)
+    c = make_package(ocx, repo_c, "1.0.0", tmp_path)
+    missing = f"t_{short_id}_inspect_partial_b:9.9.9"
+
+    first = ocx.run("package", "inspect", a.short, missing, c.short, format=None, check=False)
+    second = ocx.run("package", "inspect", a.short, missing, c.short, format=None, check=False)
+
+    assert first.returncode != 0, f"expected nonzero exit, stderr: {first.stderr}"
+    assert first.returncode == second.returncode, (
+        "exit code must be stable across repeated runs, "
+        f"got {first.returncode} then {second.returncode}"
+    )
 

@@ -65,7 +65,7 @@ pub enum Command {
     /// under `--global`. Defaults to a plain table; `ocx --format json env`
     /// emits JSON. `--shell[=NAME]` is the only eval-safe form.
     Env(toolchain_env::ToolchainEnv),
-    /// Add a tool binding to ocx.toml.
+    /// Add one or more tool bindings to ocx.toml.
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
@@ -94,7 +94,7 @@ pub enum Command {
     Package(package::Package),
     /// Pre-warm the object store from the project ocx.lock without creating symlinks.
     Pull(pull::Pull),
-    /// Remove a tool binding from ocx.toml.
+    /// Remove one or more tool bindings from ocx.toml.
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.
     Run(run::Run),

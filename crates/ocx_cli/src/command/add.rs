@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx add [--group <name>] <identifier>` — append a binding to
-//! `ocx.toml`, atomically rewrite `ocx.lock` for impacted tools, and
-//! install.
+//! `ocx add [--group <name>] <identifier>...` — append one or more
+//! bindings to `ocx.toml`, atomically rewrite `ocx.lock` for impacted
+//! tools, and install.
 
 use std::process::ExitCode;
 
@@ -13,12 +13,16 @@ use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{ensure_global_project_initialized, load_project_for_mutate, materialize_lock};
 
-/// Add a tool binding to `ocx.toml`.
+/// Add one or more tool bindings to `ocx.toml`.
 ///
-/// Appends the given identifier to the implicit default `[tools]` table,
+/// Appends the given identifiers to the implicit default `[tools]` table,
 /// or to a named `[group.<name>]` table when `--group` is supplied.
-/// Resolves only the new binding, carries every existing lock entry
-/// forward unchanged, and installs the tool (default eager behavior).
+/// Resolves only the new bindings, carries every existing lock entry
+/// forward unchanged, and installs the tools (default eager behavior).
+///
+/// All identifiers are validated and staged before anything is written:
+/// a duplicate identifier (already bound, or repeated in the same batch)
+/// aborts the whole command with `ocx.toml` left untouched.
 ///
 /// Fails with exit 65 when `ocx.toml` drifted from `ocx.lock` before
 /// this add (run `ocx lock` to reconcile), or exit 78 when a carried
@@ -36,7 +40,7 @@ use crate::app::project_context::{ensure_global_project_initialized, load_projec
 /// Fails if the binding name already exists in any group.
 #[derive(Parser, Clone)]
 pub struct Add {
-    /// Named group to add the binding to. Defaults to the implicit
+    /// Named group to add the bindings to. Defaults to the implicit
     /// `[tools]` table when omitted.
     #[arg(long = "group", short = 'g', value_name = "GROUP")]
     pub group: Option<String>,
@@ -57,9 +61,9 @@ pub struct Add {
     #[arg(long = "no-pull", overrides_with = "pull")]
     pub no_pull: bool,
 
-    /// Fully-qualified tool identifier to add (e.g. `ocx.sh/cmake:3.28`).
-    #[arg(value_name = "IDENTIFIER")]
-    pub identifier: String,
+    /// Fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28`).
+    #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
+    pub identifiers: Vec<String>,
 }
 
 impl Add {
@@ -70,19 +74,25 @@ impl Add {
         // or the file already exists.
         ensure_global_project_initialized(&context).await?;
 
-        // Parse the identifier, applying the default registry if unqualified.
-        let identifier =
-            ocx_lib::oci::Identifier::parse_with_default_registry(&self.identifier, context.default_registry())?;
-
-        // Apply :latest default for bare identifiers (no tag, no digest).
-        // See history of this file for the design rationale (intentional NOT a
-        // duplicate of the config-parse-layer default in
-        // `ProjectConfig::from_toml_str`).
-        let identifier = if identifier.tag().is_none() && identifier.digest().is_none() {
-            identifier.clone_with_tag("latest")
-        } else {
-            identifier
-        };
+        // Parse every identifier up front — before the flock — applying the
+        // default registry if unqualified and the `:latest` default for bare
+        // identifiers (no tag, no digest). Parsing all of them first means a
+        // malformed identifier fails fast without touching the flock or
+        // `ocx.toml`. The `:latest` default is intentionally NOT a duplicate
+        // of the config-parse-layer default in `ProjectConfig::from_toml_str`.
+        let identifiers: Vec<ocx_lib::oci::Identifier> = self
+            .identifiers
+            .iter()
+            .map(|raw| {
+                let id = ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry())?;
+                let id = if id.tag().is_none() && id.digest().is_none() {
+                    id.clone_with_tag("latest")
+                } else {
+                    id
+                };
+                Ok::<_, anyhow::Error>(id)
+            })
+            .collect::<Result<_, _>>()?;
 
         // Resolve project, acquire flock, load snapshot + predecessor lock.
         // Errors propagate to the `main.rs` boundary: `log::error!` logs the
@@ -90,32 +100,41 @@ impl Add {
         // `ProjectContextError`'s `ClassifyExitCode` impl.
         let guard = load_project_for_mutate(&context).await?;
 
-        // Stage: in-memory add against a clone of the snapshot.
+        // Stage: in-memory add of every identifier against a clone of the
+        // snapshot. A duplicate identifier — already bound, or repeated within
+        // this batch — surfaces as `BindingAlreadyExists` inside the closure,
+        // which aborts before any disk write. Atomic: all bindings land or
+        // none do; `ocx.toml` is never left half-edited.
         let config_path = guard.config_path().to_path_buf();
-        let identifier_for_stage = identifier.clone();
+        let identifiers_for_stage = identifiers.clone();
         let group = self.group.clone();
         let staged = guard.stage(move |cfg| {
-            add_binding_in_memory(cfg, &config_path, &identifier_for_stage, group.as_deref())?;
+            for identifier in &identifiers_for_stage {
+                add_binding_in_memory(cfg, &config_path, identifier, group.as_deref())?;
+            }
             Ok(())
         })?;
 
-        // Whole-file model (spec §4.3): re-resolve ONLY the new binding and
+        // Whole-file model (spec §4.3): re-resolve ONLY the new bindings and
         // carry every pre-existing lock entry forward verbatim (V2
         // byte-identical; V1 via exact-only pinned-index transcribe). The
         // freshness gate inside `resolve_lock_touched` anchors on the
-        // pre-mutation snapshot (`guard.config()`) — the inserted binding makes
+        // pre-mutation snapshot (`guard.config()`) — the inserted bindings make
         // the candidate hash differ, so anchoring on the candidate would fail
         // every clean add — and stamps the candidate hash into the produced
         // lock. Drift on the pre-mutation snapshot surfaces as
         // `StaleLockOnPartial` (65, run `ocx lock`); a carried V1 entry whose
         // index is gone surfaces as `LockUpgradeRequired` (78, run
         // `ocx upgrade`). Both propagate to the `main.rs` boundary.
-        let binding_name = ocx_lib::project::binding_key(&identifier);
+        // `resolve_lock_touched` dedups the touched set internally.
         let group = self
             .group
             .clone()
             .unwrap_or_else(|| ocx_lib::project::DEFAULT_GROUP.to_string());
-        let touched = [(group, binding_name)];
+        let touched: Vec<(String, String)> = identifiers
+            .iter()
+            .map(|identifier| (group.clone(), ocx_lib::project::binding_key(identifier)))
+            .collect();
         let new_lock = match guard.previous_lock().cloned() {
             Some(prev) => {
                 resolve_lock_touched(
@@ -236,5 +255,31 @@ mod tests {
         assert!(add.pull, "pull must be true when --pull follows --no-pull");
         assert!(!add.no_pull, "no_pull must be false when --pull overrides it");
         assert!(eager(&add), "eager must be true when --pull wins");
+    }
+
+    /// A single positional still parses (back-compat with the pre-plural form).
+    #[test]
+    fn parse_single_identifier() {
+        let add = parse(&["add", "tool:1"]);
+        assert_eq!(add.identifiers, vec!["tool:1".to_string()]);
+    }
+
+    /// Multiple positionals are all captured, in order.
+    #[test]
+    fn parse_multiple_identifiers() {
+        let add = parse(&["add", "a:1", "b:2", "c:3"]);
+        assert_eq!(
+            add.identifiers,
+            vec!["a:1".to_string(), "b:2".to_string(), "c:3".to_string()]
+        );
+    }
+
+    /// `num_args=1..` rejects zero positionals.
+    #[test]
+    fn parse_zero_identifiers_is_error() {
+        assert!(
+            Add::try_parse_from(["add"]).is_err(),
+            "add with no identifier must fail"
+        );
     }
 }

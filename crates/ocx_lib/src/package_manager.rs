@@ -333,32 +333,6 @@ impl PackageManager {
         self.client.is_none()
     }
 
-    /// Wires the per-repo `current` selection symlink for `package`.
-    ///
-    /// Thin facade over [`tasks::common::wire_selection`]. Used by both
-    /// `install --select` (via `tasks::install`) and the `select` CLI command
-    /// so collision detection, lock acquisition, and the per-registry
-    /// entry-points index update share a single implementation. The symlink
-    /// targets the package root; consumers traverse `<current>/content/`,
-    /// `<current>/entrypoints/`, or `<current>/metadata.json`.
-    ///
-    /// # Errors
-    ///
-    /// Returns I/O errors from the symlink wire-up. Closure-scoped entrypoint
-    /// name collisions are detected at install Stage 1 via
-    /// [`composer::check_entrypoints`](crate::package_manager::composer::check_entrypoints),
-    /// not here.
-    #[allow(clippy::result_large_err)]
-    pub async fn wire_selection(
-        &self,
-        package: &oci::Identifier,
-        info: &crate::package::install_info::InstallInfo,
-        candidate: bool,
-        select: bool,
-    ) -> Result<WireSelectionOutcome, error::PackageErrorKind> {
-        tasks::common::wire_selection(self.file_structure(), package, info, candidate, select).await
-    }
-
     /// Builds an [`InstallInfo`] for an already-installed package whose
     /// on-disk **package root** is known. Used by `ocx launcher exec <pkg-root>`
     /// to bypass identifier resolution and read the installed metadata

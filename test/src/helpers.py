@@ -96,6 +96,7 @@ def make_package(
     *,
     new: bool = True,
     cascade: bool = True,
+    index: bool = True,
     size_mb: int = 0,
     layers: int = 1,
     platform: str | None = None,
@@ -278,9 +279,16 @@ def make_package(
     # Update local index so install/find can discover the package.
     # When cascade is enabled, use bare repo name to index all cascaded tags;
     # when disabled, use tagged identifier for minimal indexing.
+    #
+    # `index=False` skips this step — needed when a replace-mirror is configured
+    # that does not carry this repo, so the tag-refresh read would 404. `ocx
+    # index update` now propagates that failure (a package-manager batch surfaces
+    # its errors), so callers that only assert against the registry over HTTP and
+    # never consult the local index must opt out.
     short = f"{repo}:{tag}"
-    index_target = repo if cascade else short
-    ocx.plain("index", "update", index_target)
+    if index:
+        index_target = repo if cascade else short
+        ocx.plain("index", "update", index_target)
 
     return PackageInfo(
         repo=repo,

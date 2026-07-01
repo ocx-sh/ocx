@@ -341,7 +341,9 @@ Appends a tool binding to the nearest `ocx.toml`, resolves its digest into `ocx.
 
 The command locates the project `ocx.toml` by walking the directory tree from the current working directory upward (same discovery as [`ocx lock`](#lock) and [`ocx pull`](#pull)). It fails with exit code 64 if no `ocx.toml` is found — it does **not** scaffold one implicitly. To create a project file first, run [`ocx init`](#init).
 
-After mutating `ocx.toml`, `ocx add` resolves only the new binding and carries every existing lock entry forward unchanged, then installs the newly added tool.
+After mutating `ocx.toml`, `ocx add` resolves only the new bindings and carries every existing lock entry forward unchanged, then installs the newly added tools.
+
+Multiple identifiers may be given in one invocation. They are staged together and committed atomically — if any identifier is invalid or its binding name already exists, nothing is written. `--group` applies to every identifier in the batch.
 
 The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same tool in different contexts:
 
@@ -353,12 +355,12 @@ ocx add --group ci shfmt:3.13   # also legal — coexists in [group.ci]
 **Usage**
 
 ```shell
-ocx add [OPTIONS] <IDENTIFIER>
+ocx add [OPTIONS] <IDENTIFIER>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>`: Fully-qualified tool identifier to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale.
+- `<IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale.
 
 **Options**
 
@@ -864,6 +866,11 @@ the local tag store should contain only explicitly requested tags. When a bare i
 After running `ocx index update <pkg>`, an `ocx --offline install <pkg>` will fail with
 `OfflineManifestMissing` until the blob cache is populated by a prior online `ocx install <pkg>`.
 
+A tag-refresh failure for any requested package fails the whole invocation; the
+[exit code][exit-codes] corresponds to the first failure in request order
+(deterministic across repeated runs). Packages refreshed earlier in the batch
+keep their updated tags.
+
 **Arguments**
 
 - `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags.
@@ -1358,9 +1365,9 @@ See [Project Toolchain In Depth → Running tools][in-depth-project-running] for
 
 ### `remove` {#remove}
 
-Removes a tool binding from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tool.
+Removes one or more tool bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tools.
 
-The command accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). The binding key is always the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. Fails with exit code 79 if no matching binding is found.
+Each argument accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). The binding key is always the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
 
 When the same binding name appears in more than one group (e.g. in both `[tools]` and `[group.ci]`), `ocx remove` cannot determine which entry to drop and exits with code 64. Pass `--group` to make the target group explicit:
 
@@ -1373,12 +1380,12 @@ ocx remove shellcheck             # error 64 — ambiguous; use --group
 **Usage**
 
 ```shell
-ocx remove [OPTIONS] <IDENTIFIER>
+ocx remove [OPTIONS] <IDENTIFIER>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>`: Binding name or fully-qualified identifier to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`).
+- `<IDENTIFIER>...`: One or more binding names or fully-qualified identifiers to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`).
 
 **Options**
 
@@ -2143,12 +2150,14 @@ Unlike [`package test`][cmd-package-test], the identifier accepts an explicit `@
 **Usage**
 
 ```shell
-ocx package inspect [OPTIONS] <IDENTIFIER>
+ocx package inspect [OPTIONS] <IDENTIFIER>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>`: Package identifier to inspect. Tag (`repo:tag`) or `@digest`.
+- `<IDENTIFIER>...`: One or more package identifiers to inspect. Each is a tag (`repo:tag`) or `@digest`.
+
+With more than one identifier, JSON output is an object keyed by the requested identifier (`{"<id>": {...}}`, keyed even for a single package); plain output renders each package's tree in request order.
 
 **Options**
 
@@ -2159,6 +2168,8 @@ ocx package inspect [OPTIONS] <IDENTIFIER>
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
 
 **JSON shape**
+
+The top-level JSON is an object keyed by the requested identifier — `{"<id>": <per-package>}`, keyed even for a single package. Each value has one of the shapes below.
 
 Default, image index — candidate listing:
 
@@ -2206,14 +2217,17 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 **Examples**
 
 ```shell
-# List the platforms a multi-platform tag offers.
-ocx --format json package inspect mytool:1.0.0 | jq .candidates
+# List the platforms a multi-platform tag offers (output keyed by identifier).
+ocx --format json package inspect mytool:1.0.0 | jq '.["mytool:1.0.0"].candidates'
+
+# Inspect several packages at once — one keyed entry each.
+ocx --format json package inspect mytool:1.0.0 othertool:2.0.0
 
 # Inspect one platform child by digest (same repo, online or cached).
 ocx package inspect mytool@sha256:abc…
 
 # Platform-select and include the OCI resolution chain.
-ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq .resolution
+ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.["mytool:1.0.0"].resolution'
 ```
 
 **Plain output**
@@ -2281,22 +2295,24 @@ At least one of the above metadata options must be provided.
 
 #### `info` {#package-info}
 
-Displays description metadata for a package from the registry.
+Displays description metadata for one or more packages from the registry.
+
+JSON output is an object keyed by the requested identifier (`{"<id>": {...}|null}`, keyed even for a single package); plain output always prints a `== <id> ==` header line per package, even for a single package, followed by its description fields.
 
 **Usage**
 
 ```shell
-ocx package info [OPTIONS] <IDENTIFIER>
+ocx package info [OPTIONS] <IDENTIFIER>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>`: Package identifier (repository only).
+- `<IDENTIFIER>...`: One or more package identifiers (repository only).
 
 **Options**
 
-- `--save-readme <PATH>`: Save the README to a file or directory.
-- `--save-logo <PATH>`: Save the logo to a file or directory.
+- `--save-readme <PATH>`: Save the README to a file or directory. Requires exactly one identifier.
+- `--save-logo <PATH>`: Save the logo to a file or directory. Requires exactly one identifier.
 - `-h`, `--help`: Print help information.
 
 #### `install` {#package-install}

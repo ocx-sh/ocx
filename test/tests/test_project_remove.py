@@ -333,3 +333,80 @@ def test_remove_fails_when_toml_handedited_since_lock(
         "error must direct the user to run `ocx lock` to reconcile; "
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-identifier `ocx remove a b` (fail-fast, all-or-nothing)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_multiple_bindings_in_one_call(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx remove A B`` drops both bindings from ``ocx.toml`` + ``ocx.lock``
+    and uninstalls both (candidate symlinks absent)."""
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_multi_a"
+    repo_b = f"t_{short}_multi_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(
+        project_dir,
+        f'[tools]\n'
+        f'{repo_a} = "{ocx.registry}/{repo_a}:1.0.0"\n'
+        f'{repo_b} = "{ocx.registry}/{repo_b}:1.0.0"\n',
+    )
+    lock_r = subprocess.run(
+        [str(ocx.binary), "lock"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
+    for repo in (repo_a, repo_b):
+        subprocess.run(
+            [str(ocx.binary), "package", "install", f"{ocx.registry}/{repo}:1.0.0"],
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+            check=True,
+        )
+        assert_symlink_exists(_candidate_path(ocx, repo, "1.0.0"))
+
+    result = _run_cmd(ocx, project_dir, "remove", repo_a, repo_b)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx remove A B failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    toml_content = (project_dir / "ocx.toml").read_text()
+    lock_text = (project_dir / "ocx.lock").read_text()
+    for repo in (repo_a, repo_b):
+        assert repo not in toml_content, f"{repo!r} must be gone from ocx.toml; got:\n{toml_content}"
+        assert repo not in lock_text, f"{repo!r} must be gone from ocx.lock; got:\n{lock_text}"
+        assert_not_exists(_candidate_path(ocx, repo, "1.0.0"))
+
+
+def test_remove_fails_fast_when_one_absent(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx remove present absent`` fails fast with NotFound (79) and removes
+    NOTHING — the present binding stays in ``ocx.toml`` and installed."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_ff_present"
+    project_dir, candidate = _setup_project_with_tool(ocx, tmp_path, repo, "1.0.0")
+    assert_symlink_exists(candidate)
+
+    original_toml = (project_dir / "ocx.toml").read_text()
+    result = _run_cmd(ocx, project_dir, "remove", repo, "nonexistent")
+    assert result.returncode == EXIT_NOT_FOUND, (
+        f"remove with one absent binding should exit {EXIT_NOT_FOUND}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").read_text() == original_toml, (
+        "ocx.toml must be unchanged when a batch remove hits a missing binding"
+    )
+    assert_symlink_exists(candidate)

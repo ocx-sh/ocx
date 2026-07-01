@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use tokio::task::JoinSet;
+
 use crate::{
     oci,
     oci::index::IndexOperation,
     package::metadata::ValidMetadata,
-    package_manager::{error::PackageErrorKind, tasks::resolve::ResolvedChain},
+    package_manager::{self, error::PackageError, error::PackageErrorKind, tasks::resolve::ResolvedChain},
 };
 
 use super::super::PackageManager;
@@ -148,6 +150,46 @@ impl PackageManager {
                 })
             }
         }
+    }
+
+    /// Inspects multiple packages in parallel, preserving input order.
+    ///
+    /// Empty input short-circuits to `Ok(vec![])`; a single package takes the
+    /// direct path; otherwise each package is inspected on its own task and the
+    /// results are drained via
+    /// [`drain_package_tasks`](super::common::drain_package_tasks), which
+    /// returns successes in input order and batch errors sorted by input index
+    /// (deterministic exit code). Mirrors [`find_all`](PackageManager::find_all).
+    pub async fn inspect_all(
+        &self,
+        packages: Vec<oci::Identifier>,
+        platforms: Vec<oci::Platform>,
+        resolve: bool,
+    ) -> Result<Vec<InspectResult>, package_manager::error::Error> {
+        if packages.is_empty() {
+            return Ok(Vec::new());
+        }
+        if packages.len() == 1 {
+            let _spin = self.progress().spinner(format!("Inspecting '{}'", packages[0]));
+            let result = self.inspect(&packages[0], platforms, resolve).await.map_err(|kind| {
+                package_manager::error::Error::InspectFailed(vec![PackageError::new(packages[0].clone(), kind)])
+            })?;
+            return Ok(vec![result]);
+        }
+
+        let mut tasks = JoinSet::new();
+        for package in &packages {
+            let mgr = self.clone();
+            let package = package.clone();
+            let platforms = platforms.clone();
+            tasks.spawn(async move {
+                let _spin = mgr.progress().spinner(format!("Inspecting '{package}'"));
+                let result = mgr.inspect(&package, platforms, resolve).await;
+                (package, result)
+            });
+        }
+
+        super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::InspectFailed).await
     }
 }
 

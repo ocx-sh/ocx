@@ -43,6 +43,12 @@ pub enum Error {
     /// A resolve operation failed for one or more packages.
     #[error("{}", format_batch("resolve", _0))]
     ResolveFailed(Vec<PackageError>),
+    /// An inspect operation failed for one or more packages.
+    #[error("{}", format_batch("inspect", _0))]
+    InspectFailed(Vec<PackageError>),
+    /// A select operation failed for one or more packages.
+    #[error("{}", format_batch("select", _0))]
+    SelectFailed(Vec<PackageError>),
     /// The self-update check operation failed.
     ///
     /// Distinct from [`InstallFailed`]: a check failure does not imply an
@@ -205,7 +211,9 @@ impl ClassifyExitCode for Error {
             | Self::InstallFailed(es)
             | Self::UninstallFailed(es)
             | Self::DeselectFailed(es)
-            | Self::ResolveFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
+            | Self::ResolveFailed(es)
+            | Self::InspectFailed(es)
+            | Self::SelectFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
         }
     }
 }
@@ -268,5 +276,29 @@ mod tests {
         let e = ClientError::ManifestNotFound("example.com/pkg".to_string());
         let kind: PackageErrorKind = e.into();
         assert!(matches!(kind, PackageErrorKind::Internal(_)));
+    }
+
+    #[test]
+    fn inspect_failed_classifies_from_first_error() {
+        let errors = vec![
+            PackageError::new(
+                oci::Identifier::new_registry("a", "example.com"),
+                PackageErrorKind::NotFound,
+            ),
+            PackageError::new(
+                oci::Identifier::new_registry("b", "example.com"),
+                PackageErrorKind::SymlinkRequiresTag,
+            ),
+        ];
+        assert_eq!(Error::InspectFailed(errors).classify(), Some(ExitCode::NotFound));
+    }
+
+    #[test]
+    fn select_failed_classifies_from_first_error() {
+        let errors = vec![PackageError::new(
+            oci::Identifier::new_registry("a", "example.com"),
+            PackageErrorKind::SelectionAmbiguous(vec![]),
+        )];
+        assert_eq!(Error::SelectFailed(errors).classify(), Some(ExitCode::DataError));
     }
 }

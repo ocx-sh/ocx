@@ -13,6 +13,30 @@ def test_index_update_succeeds(
     assert result.returncode == 0
 
 
+def test_index_update_partial_failure_exits_nonzero_and_stable(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """One unresolvable package among several fails the whole batch (nonzero, stable).
+
+    Regression test: `ocx index update` used to always return exit 0 even
+    when a tag failed to refresh (the per-package refresh error was logged
+    but never surfaced as a batch failure). The command now propagates the
+    input-order-first failure, and the exit code is stable across repeated
+    runs (not completion-order dependent).
+    """
+    pkg = published_package
+    missing = f"t_{uuid4().hex[:8]}_index_update_missing:9.9.9"
+
+    first = ocx.run("index", "update", pkg.short, missing, format=None, check=False)
+    second = ocx.run("index", "update", pkg.short, missing, format=None, check=False)
+
+    assert first.returncode != 0, f"expected nonzero exit, stderr: {first.stderr}"
+    assert first.returncode == second.returncode, (
+        "exit code must be stable across repeated runs, "
+        f"got {first.returncode} then {second.returncode}"
+    )
+
+
 def test_index_list_shows_tag(
     ocx: OcxRunner, published_package: PackageInfo
 ):

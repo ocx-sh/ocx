@@ -799,3 +799,112 @@ def test_add_with_empty_tools_v2_lock_succeeds(
     )
     lock_text = (project_dir / "ocx.lock").read_text()
     assert _leaves_for_add(lock_text, repo), "the added tool must record leaf digests"
+
+
+# ---------------------------------------------------------------------------
+# Multi-identifier `ocx add a b c` (single flock, single commit, single lock)
+# ---------------------------------------------------------------------------
+
+
+def test_add_multiple_identifiers_in_one_call(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add A B`` adds both bindings to ``ocx.toml`` and both entries to
+    ``ocx.lock`` in a single invocation."""
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_multi_a"
+    repo_b = f"t_{short}_multi_b"
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "2.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg_a.fq, pkg_b.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add A B failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    toml_content = (project_dir / "ocx.toml").read_text()
+    lock_text = (project_dir / "ocx.lock").read_text()
+    for repo in (repo_a, repo_b):
+        assert repo in toml_content, f"{repo!r} must be in ocx.toml; got:\n{toml_content}"
+        assert repo in lock_text, f"{repo!r} must be in ocx.lock; got:\n{lock_text}"
+
+
+def test_add_batch_atomic_on_duplicate_in_batch(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add A:1 A`` (two identifiers deriving the same binding key) fails
+    fast with UsageError (64) and leaves ``ocx.toml`` byte-unchanged — the
+    in-memory stage catches the duplicate before any disk write."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_multi_dup"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    original_toml = "[tools]\n"
+    _write_ocx_toml(project_dir, original_toml)
+
+    # Both identifiers derive binding key = repo basename → duplicate in batch.
+    bare = f"{ocx.registry}/{repo}"
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq, bare)
+    assert result.returncode == EXIT_USAGE_ERROR, (
+        f"duplicate-in-batch add should exit {EXIT_USAGE_ERROR}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").read_text() == original_toml, (
+        "ocx.toml must be byte-unchanged when a batch add rejects a duplicate"
+    )
+    assert_not_exists(project_dir / "ocx.lock")
+
+
+def test_add_multiple_group_applies_to_all(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add --group ci A B`` places both bindings under the ci group."""
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_grp_a"
+    repo_b = f"t_{short}_grp_b"
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--group", "ci", "--no-pull", pkg_a.fq, pkg_b.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --group ci A B failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    toml_content = (project_dir / "ocx.toml").read_text()
+    assert "ci" in toml_content, f"[group.ci] must appear; got:\n{toml_content}"
+    for repo in (repo_a, repo_b):
+        assert repo in toml_content, f"{repo!r} must be under the ci group; got:\n{toml_content}"
+
+
+def test_add_no_pull_batch_stays_cold(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add --no-pull A B`` writes both bindings + lock but leaves the
+    object store cold for the whole batch."""
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_np_a"
+    repo_b = f"t_{short}_np_b"
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg_a.fq, pkg_b.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --no-pull A B failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert _packages_present_count(ocx) == 0, (
+        "batch --no-pull must not materialize any package into the object store"
+    )

@@ -31,6 +31,23 @@ impl Identifier {
         }
     }
 
+    /// Rejects a batch that names the same package twice.
+    ///
+    /// Commands that emit an identifier-keyed report (`package inspect`,
+    /// `package info`) must not receive duplicate references: the keyed shape
+    /// would otherwise drop a result row (inspect collapses duplicates through
+    /// `drain_package_tasks`) or emit a duplicate JSON key (info). Returns a
+    /// usage error (exit 64) naming the first duplicate.
+    pub fn reject_duplicate_references(identifiers: &[oci::Identifier]) -> anyhow::Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for identifier in identifiers {
+            if !seen.insert(identifier.to_string()) {
+                return Err(ocx_lib::cli::UsageError::new(format!("duplicate package reference: {identifier}")).into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn raw(&self) -> &str {
         &self.raw
     }

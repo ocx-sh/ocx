@@ -471,3 +471,40 @@ impl Printable for PackageInspect {
         data.print_tree(&root);
     }
 }
+
+/// One or more [`PackageInspect`] views keyed by the requested identifier.
+///
+/// Plain format: each package's tree rendered in input order (inspect holds the
+/// single-table exemption — its output is inherently a nested tree, not a row).
+///
+/// JSON format: object keyed by the raw request identifier
+/// (`{"<id>": {…inspect…}}`), preserving input order — the same keyed-object
+/// shape `which` uses, applied even for a single package.
+pub struct PackageInspects {
+    entries: Vec<(String, PackageInspect)>,
+}
+
+impl PackageInspects {
+    pub fn new(entries: Vec<(String, PackageInspect)>) -> Self {
+        Self { entries }
+    }
+}
+
+impl Serialize for PackageInspects {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
+        for (key, inspect) in &self.entries {
+            map.serialize_entry(key, inspect)?;
+        }
+        map.end()
+    }
+}
+
+impl Printable for PackageInspects {
+    fn print_plain(&self, data: &DataInterface) {
+        for (_, inspect) in &self.entries {
+            inspect.print_plain(data);
+        }
+    }
+}

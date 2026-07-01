@@ -23,9 +23,9 @@ pub enum Package {
     Deps(super::deps::Deps),
     /// Print the resolved environment variables for one or more installed packages.
     Env(super::env::Env),
-    /// Show description metadata for a package repository.
+    /// Show description metadata for one or more packages.
     Info(super::package_info::PackageInfo),
-    /// Inspect a package's metadata and (with --resolve) its resolution chain.
+    /// Inspect one or more package references (candidates, metadata, or resolution chain).
     Inspect(super::package_inspect::PackageInspect),
     /// Install packages from a local or remote index (no `ocx.toml` touched).
     Install(super::install::Install),

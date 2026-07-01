@@ -7,10 +7,14 @@ use clap::Parser;
 
 use crate::{conventions::platforms_or_default, options};
 
-/// Inspect what sits at a package reference. Read-only — nothing is
-/// installed and no symlinks are created. Accepts a tag or an `@digest`.
+/// Inspect what sits at one or more package references. Read-only — nothing
+/// is installed and no symlinks are created. Accepts a tag or an `@digest`.
 ///
-/// Output adapts to the reference shape:
+/// With multiple packages, JSON output is an object keyed by the requested
+/// identifier (`{"<id>": {...}}`); plain output renders each package's tree in
+/// order.
+///
+/// Output adapts to each reference's shape:
 ///
 /// - Default, reference is an image index: list the platform **candidates**
 ///   (platform, child digest, media type, size). No metadata is loaded and
@@ -39,23 +43,63 @@ pub struct PackageInspect {
     #[clap(long)]
     resolve: bool,
 
-    /// The package identifier to inspect (tag or `@digest`).
-    identifier: options::Identifier,
+    /// Package identifiers to inspect (each a tag or `@digest`).
+    #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
+    packages: Vec<options::Identifier>,
 }
 
 impl PackageInspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifier = self.identifier.with_domain(context.default_registry())?;
+        use crate::api::data::package_inspect::{PackageInspect, PackageInspects};
+
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
+        options::Identifier::reject_duplicate_references(&identifiers)?;
         let platforms = platforms_or_default(self.platforms.as_slice());
 
-        let result = context
+        // `inspect_all` preserves input order, so zipping the results back with
+        // `self.packages` (the raw request strings) is sound.
+        let results = context
             .manager()
-            .inspect(&identifier, platforms.clone(), self.resolve)
+            .inspect_all(identifiers.clone(), platforms.clone(), self.resolve)
             .await?;
 
-        let report = crate::api::data::package_inspect::PackageInspect::new(identifier, platforms, result);
-        context.api().report(&report)?;
+        let entries: Vec<(String, PackageInspect)> = self
+            .packages
+            .iter()
+            .zip(identifiers)
+            .zip(results)
+            .map(|((raw, identifier), result)| {
+                (
+                    raw.raw().to_string(),
+                    PackageInspect::new(identifier, platforms.clone(), result),
+                )
+            })
+            .collect();
+
+        context.api().report(&PackageInspects::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_multiple_positionals() {
+        let cmd = PackageInspect::try_parse_from(["inspect", "a", "b", "c"]).unwrap();
+        assert_eq!(cmd.packages.len(), 3);
+    }
+
+    #[test]
+    fn single_positional_still_parses() {
+        let cmd = PackageInspect::try_parse_from(["inspect", "a"]).unwrap();
+        assert_eq!(cmd.packages.len(), 1);
+    }
+
+    #[test]
+    fn zero_positionals_is_rejected() {
+        assert!(PackageInspect::try_parse_from(["inspect"]).is_err());
     }
 }

@@ -239,8 +239,11 @@ def test_mirror_push_targets_canonical_registry_not_mirror(
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
-    # Push to the canonical (upstream) registry.
-    make_package(ocx, unique_repo, "1.0.0", tmp_path)
+    # Push to the canonical (upstream) registry. Skip the local-index refresh:
+    # the configured replace-mirror does not carry this repo, so `ocx index
+    # update` would 404 (and now propagates that failure). This test only asserts
+    # against the registries over HTTP and never consults the local index.
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     # Canonical registry must have the manifest after the push.
     canonical_status = head_manifest(registry, unique_repo, "1.0.0")

@@ -32,22 +32,21 @@ impl Select {
 
         let platforms = platforms_or_default(self.platforms.as_slice());
 
-        let package_infos = context.manager().find_all(identifiers.clone(), platforms).await?;
+        // `select_all` resolves in parallel (via `find_all`) then wires each
+        // `current` symlink sequentially, aggregating every per-package failure
+        // into one `SelectFailed` instead of aborting on the first. Results are
+        // returned in input order, so zipping with `self.packages` is sound.
+        let results = context.manager().select_all(identifiers, platforms).await?;
 
-        let mut packages = HashMap::with_capacity(package_infos.len());
+        let mut packages = HashMap::with_capacity(results.len());
 
-        for ((raw, identifier), info) in self.packages.iter().zip(identifiers.iter()).zip(package_infos.iter()) {
-            // Drive the same wire-selection pipeline as `install --select`:
-            // collision check + atomic pair update + index publish under a
-            // shared per-registry lock.
-            let outcome = context.manager().wire_selection(identifier, info, false, true).await?;
-
+        for (raw, (info, outcome)) in self.packages.iter().zip(results.iter()) {
             packages.insert(
                 raw.raw().to_string(),
                 api::data::install::InstallEntry {
                     identifier: info.identifier().clone().into(),
                     metadata: info.metadata().clone(),
-                    path: outcome.current,
+                    path: outcome.current.clone(),
                 },
             );
         }

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx remove <identifier>` — drop a binding from `ocx.toml`, rewrite
-//! `ocx.lock` for the affected group, and uninstall the tool.
+//! `ocx remove <identifier>...` — drop one or more bindings from
+//! `ocx.toml`, rewrite `ocx.lock` for the affected groups, and uninstall
+//! the tools.
 
 use std::process::ExitCode;
 
@@ -12,12 +13,13 @@ use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_loc
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::load_project_for_mutate;
 
-/// Remove a tool binding from `ocx.toml`.
+/// Remove one or more tool bindings from `ocx.toml`.
 ///
 /// Searches the implicit default `[tools]` table and all named groups for
-/// a binding whose key or identifier matches the given identifier, removes
-/// it, rewrites `ocx.lock` with every surviving entry carried forward
-/// unchanged, and uninstalls the tool.
+/// each binding whose key or identifier matches the given identifiers,
+/// removes them, rewrites `ocx.lock` with every surviving entry carried
+/// forward unchanged, and uninstalls the tools. If any identifier matches
+/// no binding, the whole command fails and `ocx.toml` is left untouched.
 ///
 /// Removing a binding never re-resolves the surviving tools: their pins
 /// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
@@ -33,10 +35,10 @@ use crate::app::project_context::load_project_for_mutate;
 /// group when `--group` is absent).
 #[derive(Parser, Clone)]
 pub struct Remove {
-    /// Identifier of the tool to remove (binding name or fully-qualified
+    /// Identifiers of the tools to remove (binding name or fully-qualified
     /// identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`).
-    #[arg(value_name = "IDENTIFIER")]
-    pub identifier: String,
+    #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
+    pub identifiers: Vec<String>,
 
     /// Target a specific group. Use `default` to target the implicit
     /// `[tools]` table, or a named group (e.g. `ci`) to target
@@ -66,11 +68,17 @@ impl Remove {
         // the `main.rs` boundary (logged + classified there).
         let guard = load_project_for_mutate(&context).await?;
 
-        // Derive the binding key + look up the live identifier from the
-        // pre-mutation snapshot so we can uninstall it after the commit.
-        let binding_key = {
-            let raw = &self.identifier;
-            if raw.contains('/') {
+        // For each identifier, derive the binding key + look up the live
+        // identifier from the pre-mutation snapshot so we can uninstall it
+        // after the commit. `remove_ids` carries one synthetic identifier per
+        // input (the in-memory remover only consults the repo basename);
+        // `install_identifiers` collects only the bindings that were live so
+        // the post-commit uninstall targets exactly those.
+        let mut remove_ids: Vec<ocx_lib::oci::Identifier> = Vec::with_capacity(self.identifiers.len());
+        let mut install_identifiers: Vec<ocx_lib::oci::Identifier> = Vec::new();
+
+        for raw in &self.identifiers {
+            let binding_key = if raw.contains('/') {
                 match ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry()) {
                     Ok(id) => ocx_lib::project::binding_key(&id),
                     Err(_) => raw.rsplit('/').next().unwrap_or(raw).to_owned(),
@@ -79,44 +87,53 @@ impl Remove {
                 raw.split_once(':')
                     .map(|(k, _)| k.to_owned())
                     .unwrap_or_else(|| raw.clone())
+            };
+
+            let install_identifier = match self.group.as_deref() {
+                Some("default") => guard.config().tools.get(&binding_key).cloned(),
+                Some(g) => guard
+                    .config()
+                    .groups
+                    .get(g)
+                    .and_then(|grp| grp.get(&binding_key))
+                    .cloned(),
+                None => guard
+                    .config()
+                    .tools
+                    .get(&binding_key)
+                    .or_else(|| guard.config().groups.values().find_map(|g| g.get(&binding_key)))
+                    .cloned(),
+            };
+
+            // Build the synthetic identifier the in-memory remover requires.
+            // remove_binding_in_memory only consults the binding key (repo
+            // basename), so either the live identifier or a parse of the
+            // user-supplied string suffices.
+            let dummy_id = ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry());
+            let remove_id = match &install_identifier {
+                Some(id) => id.clone(),
+                None => match dummy_id {
+                    Ok(id) => id,
+                    Err(_) => ocx_lib::oci::Identifier::new_registry(&binding_key, context.default_registry()),
+                },
+            };
+
+            if let Some(id) = install_identifier {
+                install_identifiers.push(id);
             }
-        };
+            remove_ids.push(remove_id);
+        }
 
-        let install_identifier = match self.group.as_deref() {
-            Some("default") => guard.config().tools.get(&binding_key).cloned(),
-            Some(g) => guard
-                .config()
-                .groups
-                .get(g)
-                .and_then(|grp| grp.get(&binding_key))
-                .cloned(),
-            None => guard
-                .config()
-                .tools
-                .get(&binding_key)
-                .or_else(|| guard.config().groups.values().find_map(|g| g.get(&binding_key)))
-                .cloned(),
-        };
-
-        // Build the synthetic identifier the in-memory remover requires.
-        // remove_binding_in_memory only consults the binding key (repo
-        // basename), so either the live identifier or a parse of the
-        // user-supplied string suffices.
-        let dummy_id =
-            ocx_lib::oci::Identifier::parse_with_default_registry(&self.identifier, context.default_registry());
-        let remove_id = match &install_identifier {
-            Some(id) => id.clone(),
-            None => match dummy_id {
-                Ok(id) => id,
-                Err(_) => ocx_lib::oci::Identifier::new_registry(&binding_key, context.default_registry()),
-            },
-        };
-
-        // Stage: in-memory remove on a clone of the snapshot.
+        // Stage: in-memory remove of every identifier on a clone of the
+        // snapshot. A missing binding surfaces as `BindingNotFound` inside the
+        // closure, aborting before any disk write — nothing is removed unless
+        // every identifier matches.
         let config_path = guard.config_path().to_path_buf();
         let group = self.group.clone();
         let staged = guard.stage(move |cfg| {
-            remove_binding_in_memory(cfg, &config_path, &remove_id, group.as_deref())?;
+            for remove_id in &remove_ids {
+                remove_binding_in_memory(cfg, &config_path, remove_id, group.as_deref())?;
+            }
             Ok(())
         })?;
 
@@ -157,12 +174,13 @@ impl Remove {
         let commit = guard.commit(staged, new_lock.clone()).await?;
         let _ = commit;
 
-        // Best-effort uninstall after commit. The tool may not be
-        // installed (lock-only workflow); errors here do not roll back.
-        if let Some(ref ident) = install_identifier {
+        // Best-effort uninstall after commit. Tools may not be installed
+        // (lock-only workflow); errors here do not roll back. One batched
+        // `uninstall_all` call over every live binding.
+        if !install_identifiers.is_empty() {
             let _ = context
                 .manager()
-                .uninstall_all(std::slice::from_ref(ident), false, false)
+                .uninstall_all(&install_identifiers, false, false)
                 .await;
 
             // Global-tier symmetry: `ocx --global add` sets the `current`
@@ -174,8 +192,11 @@ impl Remove {
             // `deselect`'s tag-less requirement). Project tier never touches
             // `current` (resolves via the lock), so this is `--global`-only.
             if context.global() {
-                let current_key = ident.without_specifiers();
-                let _ = context.manager().deselect_all(std::slice::from_ref(&current_key)).await;
+                let current_keys: Vec<_> = install_identifiers
+                    .iter()
+                    .map(|ident| ident.without_specifiers())
+                    .collect();
+                let _ = context.manager().deselect_all(&current_keys).await;
             }
         }
 
@@ -185,5 +206,36 @@ impl Remove {
         context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A single positional still parses (back-compat with the pre-plural form).
+    #[test]
+    fn parse_single_identifier() {
+        let remove = Remove::try_parse_from(["remove", "tool"]).unwrap();
+        assert_eq!(remove.identifiers, vec!["tool".to_string()]);
+    }
+
+    /// Multiple positionals are all captured, in order.
+    #[test]
+    fn parse_multiple_identifiers() {
+        let remove = Remove::try_parse_from(["remove", "a", "b", "c"]).unwrap();
+        assert_eq!(
+            remove.identifiers,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    /// `num_args=1..` rejects zero positionals.
+    #[test]
+    fn parse_zero_identifiers_is_error() {
+        assert!(
+            Remove::try_parse_from(["remove"]).is_err(),
+            "remove with no identifier must fail"
+        );
     }
 }

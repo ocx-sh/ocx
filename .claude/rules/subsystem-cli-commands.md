@@ -62,11 +62,11 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | `-g/--group`, `--pull/--no-pull` |
+| `add IDENTIFIER...` | Append one or more bindings to `ocx.toml`, update lock, install (staged atomically) | `-g/--group`, `--pull/--no-pull` |
 | `init` | Create minimal `ocx.toml` in current directory | — |
-| `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock | — |
+| `remove IDENTIFIER...` | Drop one or more bindings from `ocx.toml`, rewrite lock (fail-fast, all-or-nothing) | — |
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
-| `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group`, `--pull/--no-pull` |
+| `upgrade` | Re-resolve advisory tags in lock (no positional) | `--check`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
 | `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
@@ -85,7 +85,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package create PATH` | Bundle directory into archive | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp` |
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
-| `package info ID` | Display description metadata | `--save-readme`, `--save-logo` |
+| `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
+| `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
@@ -137,7 +138,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `direnv export` | Stateless bash export generator for direnv `.envrc` | — |
 | `index catalog` | List known repositories | `--tags` |
 | `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
-| `index update PKGS...` | Sync local index from remote | — |
+| `index update PKGS...` | Sync local index from remote; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
 | `version` | Print version | — |
 | `about` | Print version + registry + platform + shell + home | — |
 
@@ -194,6 +195,8 @@ Rules:
 | `install_all(candidate=false)` | N/A | No | `package pull` |
 | `deselect_all()` | No | Removes current | `package deselect` |
 | `uninstall_all()` | No | Removes candidate | `package uninstall` |
+| `inspect_all()` | No | No | `package inspect` |
+| `select_all()` | No | Sets current | `package select` |
 | `clean()` | No | — | `clean` |
 
 ---
@@ -208,6 +211,7 @@ Rules:
 - **`logout` is always exit 0** — matches `docker`/`oras`/`helm`; CI cleanup must not fail.
 - **`--password VALUE` does not exist** — argv-visible secrets leak via `ps`. Use `--password-stdin`.
 - **`index list <pkg>@<digest>` rejected** — tag-only identifiers still work.
+- **`index update` fail-fast aggregation** — per-package tag refreshes run concurrently (`JoinSet`); on any failure the command returns the failure with the lowest input index (sorted, not completion order) as the process error, so the exit code is deterministic across repeated runs. Packages that succeeded earlier in input order keep their refreshed tags — the failure does not roll them back.
 - **`shell hook` vs `direnv export`** — `shell hook` is deleted; `direnv export` is stateless bash export generator for direnv `.envrc` (still alive, untouched).
 - **`package test` tempdir lifecycle** — without `--keep` or `--output`, temp dir deleted on any exit. `--keep` + `--output` are mutually exclusive.
 - **`launcher exec` internal subcommand** — hidden from `--help`. Wire ABI: `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true`. Resolves `${installPath}` in baked entrypoint `args` and prepends them before user args (wire ABI unchanged).
