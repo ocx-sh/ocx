@@ -41,6 +41,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src import registry_dir
 from src.helpers import make_package
 from src.runner import OcxRunner
@@ -612,14 +614,22 @@ hello = "{ocx.registry}/{repo}:{tag}"
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "group_value",
+    ["ci,,lint", ",ci", "lint,", ",,"],
+    ids=["middle", "leading", "trailing", "degenerate"],
+)
 def test_pull_empty_group_segment_exits_64(
-    ocx: OcxRunner, tmp_path: Path
+    ocx: OcxRunner, tmp_path: Path, group_value: str
 ) -> None:
-    """``ocx pull -g ci,,lint`` → exit 64 (empty segment).
+    """``ocx pull -g <value>`` with any empty comma segment → exit 64.
 
     Mirrors ``test_lock_empty_group_segment_exits_64`` and
     ``test_exec_empty_group_segment_errors_64``: clap parses the empty
     string at the comma boundary; the runtime validator must reject it.
+    Hardened beyond the single middle-segment case (``ci,,lint``) to also
+    cover a leading comma (``,ci``), a trailing comma (``lint,``), and a
+    comma-only value (``,,``).
     """
     repo_ci, tag_ci = _published_tool(ocx, tmp_path, "empty_seg_ci")
     repo_lint, tag_lint = _published_tool(ocx, tmp_path, "empty_seg_lint")
@@ -640,10 +650,10 @@ b = "{ocx.registry}/{repo_lint}:{tag_lint}"
     lock = _run_lock(ocx, project)
     assert lock.returncode == EXIT_SUCCESS, lock.stderr
 
-    result = _run_pull(ocx, project, "-g", "ci,,lint")
+    result = _run_pull(ocx, project, "-g", group_value)
 
     assert result.returncode == EXIT_USAGE, (
-        f"expected exit {EXIT_USAGE} for empty group segment; "
+        f"expected exit {EXIT_USAGE} for empty group segment ({group_value!r}); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
     assert "empty" in result.stderr.lower() or "segment" in result.stderr.lower(), (
@@ -1610,6 +1620,78 @@ pinned = "{bare_repo}@sha256:{leaf_hex}"
     count_after = _packages_present_count(ocx_home, ocx.registry)
     assert count_after >= 1, (
         f"at least one package must appear after pull on V1 lock; got {count_after}"
+    )
+
+
+def test_pull_multi_platform_on_legacy_exits_64(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx pull --platform=A --platform=B`` against a V1 lock exits 64
+    before any network I/O — a legacy index pin resolves the *same*
+    identifier for every platform, so a multi-platform request cannot be
+    honoured (``reject_multi_platform_on_legacy`` in ``project_context.rs``).
+
+    Unlike ``ocx lock``/``ocx add``/``ocx upgrade`` — which always migrate a
+    carried V1 entry to V2 before writing, so their own ``materialize_lock``
+    call never observes a legacy entry — ``ocx pull`` reads ``ocx.lock``
+    verbatim from disk without ever rewriting or migrating it. A committed
+    V1-format lock is therefore the only route that reaches this reject
+    path end-to-end; this test is the ``pull`` variant flagged by #138 (the
+    ``lock`` command's own migration makes the check unreachable there).
+    """
+    repo, tag = _published_tool(ocx, tmp_path, "v1multi")
+
+    project = tmp_path / "proj_v1multi"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+the_tool = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, lock.stderr
+    v2_text = (project / "ocx.lock").read_text()
+
+    repo_match = _re_pull.search(r'repository\s*=\s*"([^"]+)"', v2_text)
+    leaf_match = _LEAF_RE_PULL.search(v2_text)
+    decl_match = _re_pull.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
+    assert repo_match and leaf_match and decl_match, (
+        "V2 lock must carry repository + leaf + declaration_hash; got:\n" + v2_text[:400]
+    )
+    bare_repo = repo_match.group(1)
+    leaf_hex = leaf_match.group(1)
+    decl_hash = decl_match.group(1)
+
+    (project / "ocx.lock").write_text(
+        f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "{decl_hash}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "the_tool"
+group = "default"
+pinned = "{bare_repo}@sha256:{leaf_hex}"
+"""
+    )
+
+    result = _run_pull(ocx, project, "--platform=linux/amd64", "--platform=linux/arm64")
+
+    assert result.returncode == EXIT_USAGE, (
+        f"multi-platform pull against a V1 lock must exit {EXIT_USAGE}; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "v2 lock" in result.stderr, (
+        f"stderr must name the v2-lock remedy; got:\n{result.stderr}"
+    )
+    assert "ocx lock" in result.stderr, (
+        f"stderr must name the `ocx lock` remedy command; got:\n{result.stderr}"
     )
 
 

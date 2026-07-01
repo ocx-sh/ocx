@@ -1178,6 +1178,30 @@ def _env_json_keys(ocx: OcxRunner, project: Path, *group_args: str) -> list[str]
     return [entry["key"] for entry in data["entries"]]
 
 
+def _global_env_json_keys(ocx: OcxRunner, cwd: Path, *group_args: str) -> list[str]:
+    """Run ``ocx --global --format json env [group_args]`` and return entry keys, in order.
+
+    ``--global`` mirrors ``_env_json_keys`` but must precede the subcommand
+    (root flag), so it cannot reuse that helper's fixed argv shape.
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "--global", "--format", "json", "env", *group_args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --global --format json env {' '.join(group_args)} must succeed; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    data = json.loads(result.stdout)
+    assert "entries" in data and isinstance(data["entries"], list), (
+        f"JSON must carry an 'entries' list; got:\n{result.stdout!r}"
+    )
+    return [entry["key"] for entry in data["entries"]]
+
+
 def test_env_single_group_scopes_to_that_group(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx env -g lint`` composes lint only — the default group is NOT auto-included.
 
@@ -1205,6 +1229,15 @@ def test_env_default_plus_named_group_composes_both(ocx: OcxRunner, tmp_path: Pa
     assert home["default"] in keys, f"default group must be present; keys={keys}"
     assert home["lint"] in keys, f"lint group must be present; keys={keys}"
     assert home["ci"] not in keys, f"unrequested ci group must be absent; keys={keys}"
+    # Exact-order pin (#176): groups compose in the order requested on the
+    # command line (`compose_tool_set` preserves user-specified group order),
+    # and within each single-tool group the fixture's own metadata order is
+    # PATH then `{REPO}_HOME` (`make_package`'s default env list, no
+    # entrypoints synth-PATH since these fixtures declare none).
+    assert keys == ["PATH", home["default"], "PATH", home["lint"]], (
+        f"default+lint composition order must be [PATH, default HOME, PATH, "
+        f"lint HOME]; got {keys}"
+    )
 
 
 def test_env_all_keyword_composes_every_group(ocx: OcxRunner, tmp_path: Path) -> None:
@@ -1214,6 +1247,21 @@ def test_env_all_keyword_composes_every_group(ocx: OcxRunner, tmp_path: Path) ->
 
     for group, key in home.items():
         assert key in keys, f"-g all must include {group} group's {key!r}; keys={keys}"
+    # Exact-order pin (#176): `expand_all_keyword` expands `all` to `default`
+    # followed by every named `[group.*]` in alphabetical order (`ci` before
+    # `lint`), and `compose_tool_set` preserves that group order. Within each
+    # single-tool group, the fixture contributes PATH then `{REPO}_HOME`.
+    assert keys == [
+        "PATH",
+        home["default"],
+        "PATH",
+        home["ci"],
+        "PATH",
+        home["lint"],
+    ], (
+        f"-g all composition order must be default, then alphabetical named "
+        f"groups (ci, lint); got {keys}"
+    )
 
 
 def test_env_no_group_is_default_only(ocx: OcxRunner, tmp_path: Path) -> None:
@@ -1237,11 +1285,138 @@ def test_env_unknown_group_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
     assert "nope" in result.stderr, f"stderr must name the unknown group; got:\n{result.stderr}"
 
 
-def test_env_empty_group_segment_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx env -g lint,,ci`` (empty comma segment) → exit 64 before any config load."""
+@pytest.mark.parametrize(
+    "group_value",
+    ["lint,,ci", ",lint", "lint,", ",,"],
+    ids=["middle", "leading", "trailing", "degenerate"],
+)
+def test_env_empty_group_segment_exits_64(ocx: OcxRunner, tmp_path: Path, group_value: str) -> None:
+    """``ocx env -g <value>`` with any empty comma segment → exit 64 before any config load.
+
+    Hardens beyond the single middle-segment case (``lint,,ci``): a leading
+    comma (``,lint``), a trailing comma (``lint,``), and a comma-only value
+    (``,,``) all parse to at least one empty string via clap's
+    ``value_delimiter``, and each must be rejected identically.
+    """
     project, _ = _make_multigroup_project(ocx, tmp_path, "emptyseg")
-    result = _run(ocx, project, "env", "-g", "lint,,ci")
+    result = _run(ocx, project, "env", "-g", group_value)
     assert result.returncode == EXIT_USAGE, (
-        f"empty --group comma segment must exit 64; got {result.returncode}\n"
-        f"stderr:\n{result.stderr}"
+        f"empty --group comma segment ({group_value!r}) must exit 64; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #176 global-tier gap — unknown `-g` group on the LENIENT global toolchain
+# must degrade to an empty env (exit 0), not the project tier's exit 64.
+# ---------------------------------------------------------------------------
+
+
+def test_env_global_unknown_group_is_empty_env(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --global env -g nonexistent-group`` → exit 0, empty env on both paths.
+
+    Mirrors ``test_env_global_no_toolchain_shell_is_silent_noop``: the global
+    tier is lenient (``selected_groups_global`` passes an unrecognised name
+    through verbatim; a lock entry whose group never matches it is simply
+    skipped — no ``UnknownGroup`` error the project tier would raise).
+
+    Two observable channels are asserted:
+
+    - ``--shell=sh`` (the eval-safe login-exporter channel): stdout must be
+      exactly empty (the released-bug regression contract — see the
+      no-toolchain sibling test).
+    - ``--format json`` (the report path): stdout must decode to
+      ``{"entries": []}`` — the composed env is empty. The context-format
+      *plain* report path is deliberately NOT asserted byte-empty here: the
+      ``Printable`` single-table convention prints its column header row
+      unconditionally, even with zero data rows (see
+      ``api/data/env.rs::EnvVars::print_plain`` and the sibling
+      ``test_env_global_no_toml_is_empty_env``, which likewise only checks
+      the exit code on that path). "Empty env" means zero composed entries,
+      not zero stdout bytes, on the plain-table report path.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_gunknown"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+
+    add_result = _run(ocx, empty, "--global", "add", fq)
+    assert add_result.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed to build the global toolchain fixture; "
+        f"rc={add_result.returncode}\nstderr:\n{add_result.stderr}"
+    )
+
+    shell_result = _run(ocx, empty, "--global", "env", "-g", "nonexistent-group", "--shell=sh")
+    assert shell_result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env -g nonexistent-group --shell=sh must exit 0 (lenient "
+        f"global tier); got {shell_result.returncode}\nstderr:\n{shell_result.stderr}"
+    )
+    assert shell_result.stdout == "", (
+        f"unknown --group on the global --shell path must emit nothing on "
+        f"stdout; got:\n{shell_result.stdout!r}"
+    )
+
+    report_result = _run(
+        ocx, empty, "--format", "json", "--global", "env", "-g", "nonexistent-group"
+    )
+    assert report_result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env -g nonexistent-group (report path) must exit 0; "
+        f"got {report_result.returncode}\nstderr:\n{report_result.stderr}"
+    )
+    data = json.loads(report_result.stdout)
+    assert data.get("entries") == [], (
+        f"unknown --group on the global report path must compose an empty "
+        f"env; got:\n{report_result.stdout!r}"
+    )
+
+
+def test_env_global_group_scoped_composition(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --global env -g <group>`` scopes composition on a multi-group
+    GLOBAL lock, mirroring the project-tier ``-g`` membership contract.
+
+    #176: the group-scoped composition guarantee extends to the global
+    toolchain tier via ``selected_groups_global`` (default/all/named
+    passthrough), not just the project tier's ``compose_tool_set``. Each
+    group is built with a separate ``ocx --global add [--group <name>]``
+    call (global ``add`` accepts one group per invocation).
+    """
+    repos: dict[str, str] = {}
+    for group in ("default", "lint", "ci"):
+        short = uuid4().hex[:8]
+        repo = f"t_{short}_gscoped_{group}"
+        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+        repos[group] = repo
+    home = {g: r.upper().replace("-", "_") + "_HOME" for g, r in repos.items()}
+
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+
+    add_default = _run(ocx, empty, "--global", "add", f"{ocx.registry}/{repos['default']}:1.0.0")
+    assert add_default.returncode == EXIT_SUCCESS, add_default.stderr
+    add_lint = _run(
+        ocx, empty, "--global", "add", "--group", "lint", f"{ocx.registry}/{repos['lint']}:1.0.0"
+    )
+    assert add_lint.returncode == EXIT_SUCCESS, add_lint.stderr
+    add_ci = _run(
+        ocx, empty, "--global", "add", "--group", "ci", f"{ocx.registry}/{repos['ci']}:1.0.0"
+    )
+    assert add_ci.returncode == EXIT_SUCCESS, add_ci.stderr
+
+    lint_keys = _global_env_json_keys(ocx, empty, "-g", "lint")
+    assert home["lint"] in lint_keys, f"lint group must be present; keys={lint_keys}"
+    assert home["default"] not in lint_keys, (
+        f"default group must NOT be auto-included with -g lint; keys={lint_keys}"
+    )
+    assert home["ci"] not in lint_keys, f"unrelated ci group must be absent; keys={lint_keys}"
+
+    all_keys = _global_env_json_keys(ocx, empty, "-g", "all")
+    for group, key in home.items():
+        assert key in all_keys, f"-g all must include {group} group's {key!r}; keys={all_keys}"
+
+    both_keys = _global_env_json_keys(ocx, empty, "-g", "default", "-g", "lint")
+    assert home["default"] in both_keys, f"default group must be present; keys={both_keys}"
+    assert home["lint"] in both_keys, f"lint group must be present; keys={both_keys}"
+    assert home["ci"] not in both_keys, f"unrequested ci group must be absent; keys={both_keys}"

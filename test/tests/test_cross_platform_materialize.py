@@ -122,6 +122,37 @@ def test_add_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str
     assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 leaf must be warmed by add --platform"
 
 
+def test_upgrade_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx upgrade --platform=linux/arm64` re-resolves a moved tag and warms
+    ONLY the requested arm64 leaf of the freshly-resolved digest.
+
+    #138 lists `upgrade` in its `--platform` scope; unlike `add`/`lock` this
+    is the whole-file bump verb that re-resolves every declared tag even when
+    unchanged — publishing a second version and bumping the bound minor tag
+    proves `--platform` drives materialization of the NEW lock, not a stale
+    one carried over from setup.
+    """
+    _publish_multiplatform(ocx, unique_repo, tmp_path)
+    project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
+
+    # Bump: publish a second version for both platforms. `cascade` (default
+    # True in `make_package`) re-points the bound minor tag (3.28) at the
+    # new digest, so `ocx upgrade` has a moved tag to re-resolve.
+    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_amd64", platform=AMD64, new=False)
+    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_arm64", platform=ARM64, new=False)
+
+    assert _dry_run_status(ocx, project_dir, ARM64) == "would-fetch", "arm64 must start uncached"
+
+    upgrade = _run(ocx, project_dir, "upgrade", f"--platform={ARM64}")
+    assert upgrade.returncode == EXIT_SUCCESS, f"cross-platform upgrade failed: {upgrade.stderr}"
+
+    assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 must be cached after upgrade"
+    assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
+        "amd64 must stay uncached — only the requested arm64 leaf of the "
+        "newly-resolved digest was materialized"
+    )
+
+
 def test_pull_platform_not_shipped_exits_78(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """Requesting a platform the publisher does not ship fails loud (exit 78)."""
     _publish_multiplatform(ocx, unique_repo, tmp_path)  # linux only
