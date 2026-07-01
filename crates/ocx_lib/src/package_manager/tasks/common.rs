@@ -182,7 +182,13 @@ pub async fn drain_package_tasks<T: 'static>(
 
     let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
     let mut results: Vec<Option<T>> = std::iter::repeat_with(|| None).take(packages.len()).collect();
-    let mut errors: Vec<PackageError> = Vec::new();
+    // Errors carry their input slot index so the batch can be sorted back into
+    // input order before it is surfaced. `join_next` yields in completion
+    // (race) order; without this sort the exit-code classifier — which picks
+    // `errors.first()` — would be nondeterministic (quality-rust.md Async
+    // Patterns; subsystem-cli-api.md "Report Actual Results"). An id absent
+    // from `index_map` (should never happen) sorts last via `usize::MAX`.
+    let mut errors: Vec<(usize, PackageError)> = Vec::new();
 
     while let Some(join_result) = tasks.join_next().await {
         match join_result {
@@ -194,7 +200,8 @@ pub async fn drain_package_tasks<T: 'static>(
             }
             Ok((id, Err(kind))) => {
                 pending.remove(&id);
-                errors.push(PackageError::new(id, kind));
+                let idx = index_map.get(&id).copied().unwrap_or(usize::MAX);
+                errors.push((idx, PackageError::new(id, kind)));
             }
             Err(e) => log::error!("Task panicked: {}", e),
         }
@@ -204,10 +211,13 @@ pub async fn drain_package_tasks<T: 'static>(
     // reporting back (panic without propagation or JoinError without matching
     // Ok/Err from a task that was silently dropped).
     for id in pending {
-        errors.push(PackageError::new(id, PackageErrorKind::TaskPanicked));
+        let idx = index_map.get(&id).copied().unwrap_or(usize::MAX);
+        errors.push((idx, PackageError::new(id, PackageErrorKind::TaskPanicked)));
     }
 
     if !errors.is_empty() {
+        errors.sort_by_key(|(idx, _)| *idx);
+        let errors: Vec<PackageError> = errors.into_iter().map(|(_, error)| error).collect();
         return Err(error_ctor(errors));
     }
 
@@ -430,6 +440,54 @@ mod tests {
     use crate::oci;
     use crate::package::resolved_package::ResolvedPackage;
     use crate::prelude::SerdeExt as _;
+
+    /// Regression: `drain_package_tasks` must return batch errors in **input**
+    /// order, not `JoinSet` completion order. The exit-code classifier picks
+    /// `errors.first()`, so a completion-order leak makes `find_all` /
+    /// `resolve_all` exit codes race-dependent. Feed a later-input task that
+    /// completes first with a distinct error kind and assert the returned
+    /// `Vec<PackageError>` is index-ordered. Async analogue of the
+    /// `install.rs` `install_failures_are_sorted_by_index_for_deterministic_exit_code`
+    /// unit test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drain_package_tasks_sorts_errors_by_input_index() {
+        use crate::package_manager::error::{Error, PackageErrorKind};
+        use std::time::Duration;
+        use tokio::task::JoinSet;
+
+        let pkg0 = oci::Identifier::new_registry("alpha", "example.com");
+        let pkg1 = oci::Identifier::new_registry("bravo", "example.com");
+        let packages = vec![pkg0.clone(), pkg1.clone()];
+
+        let mut tasks: JoinSet<(oci::Identifier, Result<(), PackageErrorKind>)> = JoinSet::new();
+        // Later-input task (index 1) completes first with a distinct kind.
+        let pkg1_task = pkg1.clone();
+        tasks.spawn(async move { (pkg1_task, Err(PackageErrorKind::SymlinkRequiresTag)) });
+        // Earlier-input task (index 0) completes last (delayed).
+        let pkg0_task = pkg0.clone();
+        tasks.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            (pkg0_task, Err(PackageErrorKind::NotFound))
+        });
+
+        let err = super::drain_package_tasks(&packages, tasks, Error::FindFailed)
+            .await
+            .unwrap_err();
+
+        match err {
+            Error::FindFailed(errors) => {
+                assert_eq!(errors.len(), 2, "both failures collected");
+                assert_eq!(
+                    errors[0].identifier, pkg0,
+                    "input index 0 must sort first regardless of completion order"
+                );
+                assert!(matches!(errors[0].kind, PackageErrorKind::NotFound));
+                assert_eq!(errors[1].identifier, pkg1);
+                assert!(matches!(errors[1].kind, PackageErrorKind::SymlinkRequiresTag));
+            }
+            other => panic!("expected FindFailed, got {other:?}"),
+        }
+    }
 
     /// Writes valid + resolve.json under a fake content path, then writes a
     /// metadata.json that references an undeclared dep — `load_object_data`
