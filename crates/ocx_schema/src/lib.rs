@@ -9,6 +9,7 @@
 
 use ocx_lib::Config;
 use ocx_lib::package::metadata::Metadata;
+use ocx_lib::patch::PatchDescriptor;
 use ocx_lib::project::{ProjectConfig, ProjectLockV2};
 use schemars::generate::SchemaSettings;
 
@@ -21,13 +22,18 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// Generate a JSON Schema for the given schema kind.
 ///
 /// Returns `Some(json_string)` for known kinds and `None` for unknown kinds.
-/// Known kinds: `metadata`, `config`, `project`, `project-lock`.
+/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`.
 ///
 /// The output JSON has its `$id` set to the canonical published URL
 /// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
 /// `v1.json` except `project-lock`, which is at `v2.json` (in lock-step with
 /// `LockVersion::V2`). The `project-lock` schema additionally carries a
 /// top-level `$comment` flagging the format as machine-generated.
+///
+/// The `patch` schema describes the JSON document authored for
+/// `ocx patch publish --descriptor-file` (and carried in the `__ocx.patch`
+/// OCI artifact layer); the `[patches]` config tier itself is covered by the
+/// `config` schema.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         "metadata" => Some(generate_schema::<Metadata>(
@@ -42,6 +48,10 @@ pub fn schema_for(kind: &str) -> Option<String> {
         "project-lock" => Some(generate_schema::<ProjectLockV2>(
             "https://ocx.sh/schemas/project-lock/v2.json",
             Some(PROJECT_LOCK_COMMENT),
+        )),
+        "patch" => Some(generate_schema::<PatchDescriptor>(
+            "https://ocx.sh/schemas/patch/v1.json",
+            None,
         )),
         _ => None,
     }

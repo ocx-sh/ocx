@@ -129,6 +129,18 @@ pub struct ToolchainEnv {
     /// `$GITHUB_PATH` / `$GITHUB_ENV`. Point this at GitLab's export file.
     #[arg(long, value_name = "PATH", requires = "ci")]
     export_file: Option<std::path::PathBuf>,
+
+    /// Annotate each entry with its origin package or companion identifier.
+    ///
+    /// When `[patches]` is configured, companion overlay entries are appended
+    /// after the toolchain's own entries.  `--show-patches` adds a Source column
+    /// to the plain table (or a `"source"` field in JSON) so the origin of each
+    /// entry is visible.
+    ///
+    /// Has no effect when `[patches]` is not configured.  Cannot be combined
+    /// with `--shell` or `--ci`; use the plain or JSON structured report instead.
+    #[arg(long, default_value_t = false, conflicts_with = "shell", conflicts_with = "ci")]
+    show_patches: bool,
 }
 
 impl ToolchainEnv {
@@ -145,7 +157,13 @@ impl ToolchainEnv {
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
         // `ContextOptions`) re-targets resolution to `$OCX_HOME/ocx.toml`;
         // `--global` ⟂ `--project` is rejected at `Context::try_init`.
-        let entries = if context.global() {
+        //
+        // `patch_start` is the index at which companion-overlay entries begin
+        // (used by the `--show-patches` annotation below). BOTH tiers apply the
+        // Phase 4 overlay from local state and return the boundary: the global
+        // path's `offline_view` preserves the patch tier (only the network is
+        // disabled), so already-installed companions overlay the global env too.
+        let (entries, patch_start) = if context.global() {
             // OFFLINE current-symlink resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             //
@@ -169,11 +187,11 @@ impl ToolchainEnv {
             // (the `else` arm) stays strict: an explicit project's
             // missing/stale/corrupt `ocx.lock` IS an error.
             match resolve_global_pinned_env(&context).await {
-                Ok(Some(entries)) => entries,
-                Ok(None) => Vec::new(),
+                Ok(Some((entries, patch_start))) => (entries, patch_start),
+                Ok(None) => (Vec::new(), 0),
                 Err(error) => {
                     tracing::debug!("global toolchain env resolution failed; emitting empty env: {error:#}");
-                    Vec::new()
+                    (Vec::new(), 0)
                 }
             }
         } else {
@@ -191,7 +209,11 @@ impl ToolchainEnv {
                 .into_iter()
                 .map(Arc::new)
                 .collect();
-            manager.resolve_env(&infos, false).await?
+            // Per-package opt-out from the in-scope project `ocx.toml`.
+            let no_patches = ctx.config.no_patches_repositories();
+            manager
+                .resolve_env_with_patch_boundary(&infos, false, &no_patches)
+                .await?
         };
 
         // ── Emit ─────────────────────────────────────────────────────────────
@@ -214,10 +236,21 @@ impl ToolchainEnv {
         // `--format`); this command does not override it.
         let env_data: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
-            .map(|e| api::data::env::EnvEntry {
-                key: e.key,
-                value: e.value,
-                kind: e.kind,
+            .enumerate()
+            .map(|(i, e)| {
+                // Annotate origin when `--show-patches` is enabled. Entries at index
+                // `>= patch_start` came from companion overlay projections.
+                let source = if self.show_patches && i >= patch_start {
+                    Some(api::data::env::SOURCE_PATCH.to_owned())
+                } else {
+                    None
+                };
+                api::data::env::EnvEntry {
+                    key: e.key,
+                    value: e.value,
+                    kind: e.kind,
+                    source,
+                }
             })
             .collect();
 
@@ -271,7 +304,9 @@ impl ToolchainEnv {
 /// # Errors
 ///
 /// Propagates `resolve_env` / index errors.  Never contacts the network.
-pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> anyhow::Result<Option<Vec<Entry>>> {
+pub(crate) async fn resolve_global_pinned_env(
+    context: &crate::app::Context,
+) -> anyhow::Result<Option<(Vec<Entry>, usize)>> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
@@ -325,6 +360,21 @@ pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> 
         return Ok(None);
     }
 
-    let entries = manager.resolve_env(&infos, false).await?;
-    Ok(Some(entries))
+    // Per-package opt-out from the global `$OCX_HOME/ocx.toml`. The global lock
+    // can exist without a sibling `ocx.toml`; a missing or unparseable file
+    // yields an empty opt-out set (lenient — the login exporter must never fail
+    // on a malformed global config, matching this path's overall posture).
+    let no_patches = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+        Ok(config) => config.no_patches_repositories(),
+        Err(_) => std::collections::BTreeSet::new(),
+    };
+
+    // Patch overlays apply offline: companions are already installed locally and
+    // `offline_view` preserves the patch tier (the network alone is disabled).
+    // Return the companion-overlay boundary so `--show-patches` can annotate
+    // companion entries on the global path, exactly as on the project path.
+    let (entries, patch_start) = manager
+        .resolve_env_with_patch_boundary(&infos, false, &no_patches)
+        .await?;
+    Ok(Some((entries, patch_start)))
 }

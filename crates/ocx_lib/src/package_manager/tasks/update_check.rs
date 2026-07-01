@@ -397,8 +397,20 @@ impl PackageManager {
                 // select=true:    updates the `current` symlink to the new version.
                 let candidate = false;
                 let select = true;
-                self.install_all(vec![latest_id], platforms, candidate, select, Concurrency::default())
-                    .await?;
+                // skip_discovery=true: self-update installs ocx itself, not a
+                // user-requested tool. Looking up a patch descriptor for ocx.sh/ocx/cli
+                // at the patch registry is nonsensical and could abort the update with
+                // a spurious required-companion error.
+                let skip_discovery = true;
+                self.install_all(
+                    vec![latest_id],
+                    platforms,
+                    candidate,
+                    select,
+                    Concurrency::default(),
+                    skip_discovery,
+                )
+                .await?;
                 Ok(SelfUpdateResult::Installed {
                     from: current_version,
                     to: to_tag,

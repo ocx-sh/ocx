@@ -44,8 +44,9 @@ OCX_BIN="${REPO_ROOT}/test/bin/ocx"
 # shellcheck disable=SC1091  # _lib.sh resolved at runtime via SCRIPT_DIR
 source "${SCRIPT_DIR}/_lib.sh"
 
-# Short, registry-relative identifier for CLI use (`push -i`, `index update`,
-# `install`, `exec`). The CLI resolves these against the consumer's
+# Short, registry-relative identifier for CLI use (`package push -i`,
+# `index update`, `package install`, `package exec`). The CLI resolves these
+# against the consumer's
 # `OCX_DEFAULT_REGISTRY`.
 id() { echo "${NAMESPACE}/${1}:${TAG}"; }
 # Fully-qualified identifier — required only inside `metadata.json` dep
@@ -178,6 +179,6 @@ ocx index update "${NAMESPACE}/baked-args-demo" >/dev/null
 
 echo
 ocx_done "bootstrap done. Try:"
-echo "  ocx exec ${NAMESPACE}/single-layer-hello:${TAG} -- hello"
-echo "  ocx exec ${NAMESPACE}/multi-entry-toolkit:${TAG} -- tool-a"
-echo "  ocx exec ${NAMESPACE}/deps-app:${TAG} -- app"
+echo "  ocx package exec ${NAMESPACE}/single-layer-hello:${TAG} -- hello"
+echo "  ocx package exec ${NAMESPACE}/multi-entry-toolkit:${TAG} -- tool-a"
+echo "  ocx package exec ${NAMESPACE}/deps-app:${TAG} -- app"

@@ -209,7 +209,14 @@ impl Run {
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
-        let entries = manager.resolve_env(&install_infos, self.self_view).await?;
+        // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
+        // opted-out bases get no companion overlay unless the tier is
+        // system-required. `run.rs` does not need the patch boundary index.
+        let no_patches = ctx.config.no_patches_repositories();
+        let entries = manager
+            .resolve_env_with_patch_boundary(&install_infos, self.self_view, &no_patches)
+            .await?
+            .0;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 

@@ -1,0 +1,24 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "SSL_CERT_FILE",
+      "type": "constant",
+      "value": "${installPath}/certs/corp-ca.pem",
+      "visibility": "interface"
+    },
+    {
+      "key": "NODE_EXTRA_CA_CERTS",
+      "type": "constant",
+      "value": "${installPath}/certs/corp-ca.pem",
+      "visibility": "interface"
+    },
+    {
+      "key": "REQUESTS_CA_BUNDLE",
+      "type": "constant",
+      "value": "${installPath}/certs/corp-ca.pem",
+      "visibility": "interface"
+    }
+  ]
+}

@@ -1039,6 +1039,92 @@ impl Client {
         Ok(())
     }
 
+    // ── Patch descriptor operations ───────────────────────────────────────
+
+    /// Pushes a `__ocx.patch` descriptor artifact to the patch registry.
+    ///
+    /// Builds an OCI ImageManifest with `artifactType` set to
+    /// [`crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE`], an empty `{}` config blob,
+    /// and a single layer carrying the descriptor JSON
+    /// ([`crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE`]). The artifact is
+    /// pushed to the `__ocx.patch` internal tag on `patch_repo_id`.
+    ///
+    /// `descriptor_bytes` is validated by parsing it as a
+    /// [`crate::patch::PatchDescriptor`] before any network call — a malformed
+    /// descriptor is rejected up front rather than published.
+    ///
+    /// Returns the manifest digest of the pushed `__ocx.patch` artifact.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::InvalidManifest`] — `descriptor_bytes` is not a valid
+    ///   patch descriptor, or manifest assembly failed.
+    /// - [`ClientError::Authentication`] / [`ClientError::Registry`] — auth or a
+    ///   blob/manifest push failed.
+    pub async fn push_patch_descriptor(
+        &self,
+        patch_repo_id: &Identifier,
+        descriptor_bytes: &[u8],
+    ) -> std::result::Result<oci::Digest, ClientError> {
+        // Validate the descriptor parses before pushing — reject malformed input.
+        crate::patch::PatchDescriptor::from_json_bytes(descriptor_bytes)
+            .map_err(|e| ClientError::InvalidManifest(format!("invalid patch descriptor: {e}")))?;
+
+        let patch_identifier = patch_repo_id.clone_with_tag(InternalTag::PATCH_TAG);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let image = patch_identifier.canonical_reference();
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+
+        let config_data = b"{}".to_vec();
+        let config_digest = Algorithm::Sha256.hash(&config_data);
+        self.transport
+            .push_blob(&image, config_data, &config_digest, transport::no_progress())
+            .await?;
+
+        let layer_len = descriptor_bytes.len();
+        let layer_digest = Algorithm::Sha256.hash(descriptor_bytes);
+        self.transport
+            .push_blob(
+                &image,
+                descriptor_bytes.to_vec(),
+                &layer_digest,
+                transport::no_progress(),
+            )
+            .await?;
+
+        let layer_size = i64::try_from(layer_len)
+            .map_err(|_| ClientError::InvalidManifest(format!("descriptor blob size {layer_len} exceeds i64::MAX")))?;
+        let layers = vec![oci::Descriptor {
+            media_type: crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE.to_string(),
+            digest: layer_digest.to_string(),
+            size: layer_size,
+            urls: None,
+            annotations: Some([(oci::annotations::TITLE.to_string(), InternalTag::PATCH_TAG.to_string())].into()),
+        }];
+
+        let parts = super::manifest_builder::ManifestBuilder::new()
+            .artifact_type(crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE)
+            .config_bytes(MEDIA_TYPE_OCI_EMPTY_CONFIG, b"{}".to_vec())
+            .layers(layers)
+            .build()?;
+        // Sanity: the empty-config blob digest computed by the builder must
+        // match the one we already pushed above.
+        debug_assert_eq!(parts.config_digest.to_string(), config_digest.to_string());
+        let manifest_digest = parts.manifest_digest.clone();
+
+        // Push to the tag reference directly (not by digest) so the tag is created.
+        self.transport
+            .push_manifest_raw(&image, parts.manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .await?;
+
+        log::debug!(
+            "Pushed patch descriptor for {} (manifest: {})",
+            patch_repo_id,
+            manifest_digest
+        );
+        Ok(manifest_digest)
+    }
+
     /// Pulls the description artifact from the `__ocx.desc` tag.
     ///
     /// Returns `Ok(None)` if no description tag exists for the identifier.
@@ -1128,6 +1214,93 @@ impl Client {
             logo,
             annotations,
         }))
+    }
+
+    // ── Patch descriptor fetch ───────────────────────────────────────
+
+    /// Fetches the raw manifest bytes and the parsed [`oci::Manifest`] for
+    /// `patch_identifier`.
+    ///
+    /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
+    /// Unlike [`Self::fetch_manifest`], this method also returns the raw
+    /// manifest bytes so callers can persist them to the CAS blob store
+    /// without re-serialisation — the round-trip bytes must be byte-identical
+    /// to what the registry served to ensure the stored digest is consistent.
+    pub(crate) async fn fetch_patch_manifest_raw(
+        &self,
+        patch_identifier: &Identifier,
+    ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
+        let image = self.transport_reference(patch_identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+
+        let (raw_bytes, digest_str) = match self
+            .transport
+            .pull_manifest_raw(&image, ACCEPTED_MANIFEST_MEDIA_TYPES)
+            .await
+        {
+            Ok(pair) => pair,
+            Err(ClientError::ManifestNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
+        let digest: Digest =
+            Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
+        Ok(Some((raw_bytes, digest, manifest)))
+    }
+
+    /// Fetches the raw bytes of a single blob for the patch descriptor layer.
+    ///
+    /// The blob is identified by `(identifier_for_auth, layer_digest)`. Auth is
+    /// established against the registry of `identifier_for_auth` before the
+    /// pull.
+    ///
+    /// # Size cap (CWE-400)
+    ///
+    /// `max_bytes` is a hard ceiling on the number of bytes that will be
+    /// buffered in memory. The stream is capped at `max_bytes + 1` via
+    /// [`AsyncReadExt::take`]; if the registry delivers more than `max_bytes`
+    /// bytes (ignoring its own declared-size field), the function returns
+    /// [`ClientError::DecompressionCapExceeded`] (repurposed for stream-level
+    /// oversized blobs) and no allocation beyond `max_bytes + 1` occurs.
+    ///
+    /// The caller in `patch::persistence::fetch_patch_descriptor_blobs` already
+    /// rejects manifests whose *declared* layer size exceeds the ceiling; this
+    /// cap closes the gap where a malicious registry ignores its own declaration
+    /// and streams more bytes than it declared.
+    pub(crate) async fn fetch_patch_layer_blob(
+        &self,
+        identifier_for_auth: &Identifier,
+        layer_digest: &Digest,
+        max_bytes: u64,
+    ) -> std::result::Result<Vec<u8>, ClientError> {
+        let image = self.transport_reference(identifier_for_auth);
+        // Auth was already established by the caller in fetch_patch_manifest_raw,
+        // but call ensure_auth again for robustness (it is a no-op on cache hit).
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+
+        // Stream the blob with a hard byte cap so a malicious registry that
+        // sends more bytes than its declared layer size cannot OOM the process.
+        // We read up to (max_bytes + 1) to detect overflow: if we fill the
+        // buffer to that length, the registry sent too many bytes.
+        use tokio::io::AsyncReadExt as _;
+        let stream = self.transport.pull_blob_streaming(&image, layer_digest).await?;
+        // Cap sentinel: read one byte beyond the allowed ceiling to detect overflow.
+        let cap_sentinel = max_bytes.saturating_add(1);
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        stream
+            .take(cap_sentinel)
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| ClientError::Io {
+                path: std::path::PathBuf::from("<patch layer blob>"),
+                source: e,
+            })?;
+        if buf.len() as u64 > max_bytes {
+            // Registry streamed more bytes than the declared + cap ceiling.
+            return Err(ClientError::DecompressionCapExceeded { cap: max_bytes });
+        }
+        Ok(buf)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────
@@ -3570,6 +3743,95 @@ mod tests {
             "T-arch-A1: `canonical_reference` found in file(s) outside the allow-list \
              (read paths must route through Client::transport_reference / transport_registry):\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    // ── push_patch_descriptor ─────────────────────────────────────────
+
+    /// `push_patch_descriptor` pushes a `__ocx.patch` manifest with the
+    /// expected artifactType + a descriptor layer, and returns the manifest
+    /// digest. Verified against the `StubTransport` via `capture_pushes`.
+    #[tokio::test]
+    async fn push_patch_descriptor_pushes_patch_artifact_and_returns_digest() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let client = stub(&data);
+
+        let descriptor_bytes = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": ["internal.company.com/certs/ca:latest"] }]
+        })
+        .to_string()
+        .into_bytes();
+
+        // Global patch repo identifier (reserved `global` repository at the patch registry).
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+
+        let digest = client
+            .push_patch_descriptor(&patch_repo, &descriptor_bytes)
+            .await
+            .expect("push_patch_descriptor must succeed");
+
+        // A manifest was pushed.
+        let inner = data.read();
+        assert!(
+            inner.calls.iter().any(|c| c == "push_manifest_raw"),
+            "push_patch_descriptor must push a manifest; calls = {:?}",
+            inner.calls
+        );
+
+        // The descriptor layer blob was pushed (push_blob:<layer_digest>).
+        let layer_digest = Algorithm::Sha256.hash(&descriptor_bytes).to_string();
+        assert!(
+            inner.calls.iter().any(|c| c == &format!("push_blob:{layer_digest}")),
+            "push_patch_descriptor must push the descriptor layer blob; calls = {:?}",
+            inner.calls
+        );
+
+        // The captured manifest carries the patch artifactType + the descriptor layer media type.
+        let (_image, (manifest_bytes, manifest_digest)) = inner
+            .manifests
+            .iter()
+            .next()
+            .expect("a manifest must have been captured");
+        let manifest: oci::ImageManifest =
+            serde_json::from_slice(manifest_bytes).expect("captured manifest must parse");
+        assert_eq!(
+            manifest.artifact_type.as_deref(),
+            Some(crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE),
+            "manifest artifactType must be the patch artifact type"
+        );
+        assert_eq!(manifest.layers.len(), 1, "patch manifest must have exactly one layer");
+        assert_eq!(
+            manifest.layers[0].media_type,
+            crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE,
+            "layer media type must be the descriptor layer media type"
+        );
+
+        // The returned digest matches the pushed manifest's digest.
+        assert_eq!(
+            digest.to_string(),
+            *manifest_digest,
+            "returned digest must equal the pushed manifest digest"
+        );
+    }
+
+    /// `push_patch_descriptor` rejects malformed descriptor bytes before any push.
+    #[tokio::test]
+    async fn push_patch_descriptor_rejects_malformed_descriptor() {
+        let data = StubTransportData::new();
+        let client = stub(&data);
+        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+
+        let result = client.push_patch_descriptor(&patch_repo, b"not valid json {{{").await;
+        assert!(
+            matches!(result, Err(ClientError::InvalidManifest(_))),
+            "malformed descriptor must be rejected with InvalidManifest, got: {result:?}"
+        );
+        // No manifest was pushed.
+        assert!(
+            data.read().calls.iter().all(|c| c != "push_manifest_raw"),
+            "no manifest must be pushed when the descriptor is malformed"
         );
     }
 }

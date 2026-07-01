@@ -192,6 +192,106 @@ Credentials are resolved against the **mirror** host, not the upstream. Configur
 | `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
 | `ocx index catalog` | Against a proxy-type mirror, the catalog lists only repositories the proxy has cached. This is a registry-side constraint, not an OCX behavior. |
 
+### `[patches]` section {#keys-patches}
+
+The `[patches]` tier points at an operator-controlled OCI registry that hosts
+[patch descriptors][patches-user-guide]. Descriptors map glob patterns over package
+identifiers to **companion packages** — small packages that carry site-specific
+environment overlays (CA bundles, proxy endpoint variables, license-server hints). At
+exec time OCX composes matched companions' `interface` environment entries on top of the
+base package's entries without modifying the base package.
+
+The `[patches]` tier is the execution-environment twin of `[mirrors]`: `[mirrors]`
+adapts where bytes come from; `[patches]` adapts what environment a tool runs in. Both
+are opt-in and configured here.
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+path     = "{registry}/{repository}"
+required = true
+```
+
+#### `registry` {#keys-patches-registry}
+
+**Type**: string  
+**Required**: yes — absent or empty is a hard error at config resolve time.  
+**Overridden by**: [`OCX_PATCHES`][env-ocx-patches] (JSON wire format forwarded to subprocesses)
+
+The OCI registry root that hosts patch descriptors. The global descriptor (`__ocx.patch`
+at the reserved `global` repository, e.g. `<registry>/global:__ocx.patch`) applies to
+all packages; per-package descriptors live at sub-paths computed from the `path` template.
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+```
+
+#### `path` {#keys-patches-path}
+
+**Type**: string  
+**Default**: `{registry}/{repository}`
+
+Template for per-package patch repository paths. Two placeholder tokens are substituted
+at runtime:
+
+| Token | Expands to |
+|-------|-----------|
+| `{registry}` | Slugified registry host of the base package (e.g. `ocx.sh` stays `ocx.sh`; `localhost:5000` becomes `localhost_5000`) |
+| `{repository}` | Repository path of the base package verbatim (e.g. `java` for `ocx.sh/java:21`) |
+
+The default `{registry}/{repository}` is suitable for most setups. Customise only if
+the patch registry lays out sub-paths differently:
+
+```toml
+[patches]
+registry = "registry.corp.example/ocx-patches"
+path     = "bases/{repository}"
+```
+
+The expanded path always produces a non-empty sub-path. The reserved `global` repository
+name is the fixed location of the global descriptor and must not be used as a per-package path.
+
+#### `required` {#keys-patches-required}
+
+**Type**: boolean  
+**Default**: `true`
+
+Fail posture when a matched companion package is unavailable.
+
+| Value | Behavior |
+|-------|----------|
+| `true` (default) | Execution aborts if a matched companion cannot be resolved. Use for security-critical companions (CA bundles, proxy config) where running without the companion is unsafe. |
+| `false` | OCX logs a warning and continues. Use for non-security companions (metrics endpoints, license server hints). |
+
+#### Scopes and merge {#keys-patches-scopes}
+
+The `[patches]` section follows the same multi-tier merge as `[mirrors]`. A
+higher-precedence config tier (user scope > `$OCX_HOME` scope > system scope) overrides
+fields field-by-field.
+
+**System-required posture.** When `[patches]` is declared at the system scope
+(`/etc/ocx/config.toml`) with `required = true` — or with no `required` line, which
+defaults to `true` — the tier is locked as **system-required**. A system-required tier
+cannot be redirected, suppressed, or flipped to fail-open by any lower-precedence tier,
+including `OCX_PATCHES` or per-package `no-patches`. This is the fail-closed enforcement
+point for corporate CA distribution.
+
+An explicit `required = false` in the system config is NOT locked; a lower-precedence
+tier may still override it.
+
+#### Per-package opt-out {#keys-patches-no-patches}
+
+A project can opt a specific base package out of the user-scope or project-scope patch
+tier by adding a `[package."<id>"]` table with `no-patches = true` to `ocx.toml`:
+
+```toml
+[package."ocx.sh/cmake:3.28"]
+no-patches = true
+```
+
+A system-required tier is never skipped by `no-patches`.
+
 ## Environment Variable Override Table {#env-overrides}
 
 This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
@@ -200,6 +300,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 |---------------------|-------------------|-------|
 | [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
 | [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
+| [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
 | [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
@@ -225,7 +326,7 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 
 ## JSON Schemas {#schemas}
 
-OCX publishes JSON Schemas for every config and project file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
+OCX publishes JSON Schemas for every config, project, and patch file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
 
 | File | Schema URL |
 |------|------------|
@@ -233,8 +334,9 @@ OCX publishes JSON Schemas for every config and project file at stable URLs. IDE
 | `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
 | `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v2.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
+| Patch descriptor (`ocx patch publish --descriptor-file`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
 
-`ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
+`ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
 
 ## Future Config Keys {#future}
 
@@ -253,10 +355,6 @@ url = "registry.company.example"
 insecure = false                 # per-registry TLS opt-out
 location = "mirror.company.example"  # URL rewrite / mirror
 ```
-
-### `[patches]` section {#future-patches}
-
-Infrastructure patch entries will live under `[patches]`. This section is reserved for the patches feature and is ignored by the v1 loader.
 
 ### `[clean]` section {#future-clean}
 
@@ -280,6 +378,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [schema-project-lock]: https://ocx.sh/schemas/project-lock/v2.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
+[schema-patch]: https://ocx.sh/schemas/patch/v1.json
 
 <!-- in-depth -->
 [config-indepth]: ../in-depth/configuration.md
@@ -297,6 +396,10 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-remote]: ./environment.md#ocx-remote
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-mirrors]: ./environment.md#ocx-mirrors
+[env-ocx-patches]: ./environment.md#ocx-patches
+
+<!-- patches user guide -->
+[patches-user-guide]: ../user-guide/patches.md
 [env-no-update-check]: ./environment.md#ocx-no-update-check
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
