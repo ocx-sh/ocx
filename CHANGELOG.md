@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12] - 2026-07-02
+
+### Added
+
+- Per-layer strip and output prefix via manifest annotations *(layer)*
+
+### Fixed
+
+- Extract layers verbatim, apply strip at assemble time *(assemble)*
+- Race-free host-only install symlinks (#179) *(package-manager)*
+- Serialize layer prefix as forward-slash wire form *(layer)*
+- Correct absolute-path classification and concurrent link race *(windows)*
+- Retry transient lock errors across concurrent junction ops *(windows)*
+- Tolerate concurrent junction teardown in remove_link *(windows)*
+
 ## [0.3.11] - 2026-07-02
 
 ### Added
@@ -26,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Self update probes registry by default *(self)*
 - Order batch errors by input index *(package-manager)*
 - Unique temp file per batch live-test invocation *(shell)*
+
+### Release
+
+- V0.3.11
 
 ## [0.3.10] - 2026-06-30
 
@@ -550,6 +569,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.12]: https://github.com/ocx-sh/ocx/compare/v0.3.11..v0.3.12
 [0.3.11]: https://github.com/ocx-sh/ocx/compare/v0.3.10..v0.3.11
 [0.3.10]: https://github.com/ocx-sh/ocx/compare/v0.3.9..v0.3.10
 [0.3.9]: https://github.com/ocx-sh/ocx/compare/v0.3.8..v0.3.9
