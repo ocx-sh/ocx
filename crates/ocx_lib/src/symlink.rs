@@ -299,16 +299,25 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         // Converge without touching `to` when it already resolves to the target
         // we staged. A peer that published first left exactly the link we
         // wanted; removing and re-renaming it would only thrash the winner and
-        // widen the reader-visibility window. A genuine re-link (a *different*
-        // target, e.g. `ProjectRegistry` repointing a ledger entry) falls
-        // through to the replace below. A transient read failure here is not
-        // fatal — fall through and let the remove/rename retry.
-        if is_link(to)
-            && let (Ok(existing), Ok(staged)) = (std::fs::read_link(to), std::fs::read_link(from))
-            && existing == staged
-        {
-            let _ = remove_link(from);
-            return Ok(());
+        // widen the reader-visibility window.
+        if is_link(to) {
+            match (std::fs::read_link(to), std::fs::read_link(from)) {
+                // An equivalent link is already published — drop our stage, done.
+                (Ok(existing), Ok(staged)) if existing == staged => {
+                    let _ = remove_link(from);
+                    return Ok(());
+                }
+                // `to` is a link to a *different* target — a genuine re-link
+                // (e.g. `ProjectRegistry` repointing a ledger entry). Fall
+                // through to the remove-then-rename replace below.
+                (Ok(_), Ok(_)) => {}
+                // A read raced a peer mid-republish. Do NOT fall through to
+                // removal: for concurrent *identical* installs (#179) `to` will
+                // settle into the equivalent link, and `remove_link` is a
+                // non-atomic two-step whose concurrent teardown is what surfaced
+                // `ERROR_NOT_A_REPARSE_POINT`. Back off and re-check instead.
+                _ => continue,
+            }
         }
 
         // Clear any existing entry at `to`. Concurrent junction removal is racy:
@@ -408,24 +417,64 @@ fn create_link(target: &std::path::Path, link_path: &std::path::Path) -> std::io
     with_transient_retry(|| junction::create(&abs_target, link_path))
 }
 
+/// Windows `ERROR_NOT_A_REPARSE_POINT` (0x1126): `junction::delete` raced a peer
+/// that already stripped the reparse data off this path. Benign under the
+/// concurrent junction teardown of issue #179 — the point is already gone.
+#[cfg(windows)]
+const ERROR_NOT_A_REPARSE_POINT: i32 = 4390;
+
 #[cfg(windows)]
 fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    // Removing a directory junction is a non-atomic *two-step* (strip reparse
+    // data, then remove the now-empty dir). Under issue #179's 32-thread storm a
+    // peer runs the identical teardown on the same path, so every step must
+    // tolerate a concurrent racer having already completed it — otherwise a lost
+    // interleaving surfaces `ERROR_NOT_A_REPARSE_POINT` (4390) or a spurious
+    // `NotFound` to the caller.
+    let meta = match link_path.symlink_metadata() {
+        Ok(meta) => meta,
+        // A peer already removed the entry — nothing left to do.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
 
     // `Metadata::is_dir()` returns false for junction points because Rust
     // checks `!is_symlink() && is_directory()`. Check raw file attributes
     // instead to correctly identify junctions and directory symlinks.
-    let meta = link_path.symlink_metadata()?;
-    if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        // Junctions are empty directory entries — the contents live in the
-        // target. First strip the reparse data, then remove the empty dir.
-        // Using `remove_dir` (not `_all`) ensures we can never accidentally
-        // recurse into the target, regardless of future Rust behavior.
-        junction::delete(link_path)?;
-        std::fs::remove_dir(link_path)
-    } else {
-        std::fs::remove_file(link_path)
+    if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return match std::fs::remove_file(link_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+
+    // Junctions are empty directory entries — the contents live in the target.
+    // First strip the reparse data, then remove the empty dir. Using
+    // `remove_dir` (not `_all`) ensures we can never accidentally recurse into
+    // the target, regardless of future Rust behavior.
+    match junction::delete(link_path) {
+        Ok(()) => {}
+        // A peer stripped the reparse point first (4390) or removed the entry
+        // outright (NotFound) — exactly the state we want; proceed.
+        Err(error)
+            if error.raw_os_error() == Some(ERROR_NOT_A_REPARSE_POINT) || error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    match std::fs::remove_dir(link_path) {
+        Ok(()) => Ok(()),
+        // A peer removed the directory first.
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        // A peer re-published a junction here between our reparse-strip and this
+        // removal. A freshly re-created link is the desired end state — never
+        // delete a valid link we did not stage; leave it in place.
+        Err(_) if is_link(link_path) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
