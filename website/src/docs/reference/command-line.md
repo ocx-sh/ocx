@@ -2381,6 +2381,10 @@ ocx package install [OPTIONS] <PACKAGE>...
 | `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
 | `-h`, `--help` | | Print help information. |
 
+::: warning Host-only symlinks for foreign-platform installs
+The [candidate and current symlinks][fs-symlinks] are written only when the resolved platform matches the host (or the package is platform-agnostic). Installing a foreign platform — e.g. `-p windows/amd64` on Linux — still populates the object store, but leaves the host's `candidates/{tag}` and `current` slots untouched so a platformless `which` or [`env`][cmd-package-env] never resolves to a package the host cannot run. The install reports a null `path` in that case; reference the foreign platform by its digest instead.
+:::
+
 ::: warning Windows: `PATHEXT` must include `.CMD`
 On Windows, `package install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them.
 :::
@@ -2587,9 +2591,9 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [metadata-strip-components]: ./metadata.md#extraction-strip-components
 [guide-entry-points]: ../in-depth/entry-points.md
 [exit-codes]: #exit-codes
-[fs-objects]: ../user-guide.md#file-structure-packages
-[fs-symlinks]: ../user-guide.md#file-structure-symlinks
-[fs-index]: ../user-guide.md#indices-local
+[fs-objects]: ../in-depth/storage.md#packages
+[fs-symlinks]: ../in-depth/storage.md#symlinks
+[fs-index]: ../in-depth/indices.md#local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment
 

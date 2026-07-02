@@ -172,6 +172,60 @@ impl Platform {
         self == other
     }
 
+    /// Compares only the OS and architecture of two `Specific` platforms,
+    /// ignoring `variant`, `os_version`, `os_features`, and `features`.
+    ///
+    /// [`current`](Self::current) can only ever populate `os`/`arch` (the
+    /// remaining fields are always `None`), so a full-struct [`matches`](Self::matches)
+    /// would wrongly reject a host-runnable image-index entry that merely carries
+    /// an `os_version` or `os_features` refinement. The host-only symlink gate
+    /// (issue #179) therefore compares os+arch only. Two [`Any`](Self::Any)
+    /// values compare equal; `Any` vs `Specific` never do.
+    pub fn same_os_arch(&self, other: &Platform) -> bool {
+        match (self, other) {
+            (Self::Any, Self::Any) => true,
+            (
+                Self::Specific {
+                    os: self_os,
+                    arch: self_arch,
+                    ..
+                },
+                Self::Specific {
+                    os: other_os,
+                    arch: other_arch,
+                    ..
+                },
+            ) => self_os == other_os && self_arch == other_arch,
+            _ => false,
+        }
+    }
+
+    /// Whether a package that resolved to `platform` is runnable on the current
+    /// host — the host-only symlink gate for `candidates/{tag}` and `current`
+    /// (issue #179).
+    ///
+    /// `None` (undeterminable platform) and [`any`](Self::any) (platform-agnostic
+    /// package) are always host-appropriate. A specific platform is
+    /// host-appropriate only when its os+arch equal the host's; when the host
+    /// itself is undeterminable, the write is allowed — never suppress on an
+    /// unknown host.
+    pub fn host_can_run(platform: Option<&Platform>) -> bool {
+        Self::host_can_run_on(platform, Self::current().as_ref())
+    }
+
+    /// Host-injectable core of [`host_can_run`](Self::host_can_run).
+    ///
+    /// Takes the host platform explicitly so the gating contract can be unit
+    /// tested against literal os/arch pairs, independent of the test runner's
+    /// actual OS/arch (issue #179).
+    pub fn host_can_run_on(platform: Option<&Platform>, host: Option<&Platform>) -> bool {
+        match platform {
+            None => true,
+            Some(p) if p.is_any() => true,
+            Some(p) => host.is_none_or(|h| h.same_os_arch(p)),
+        }
+    }
+
     /// Returns [`segments`](Self::segments) lowercased to ASCII.
     pub fn ascii_segments(&self) -> Vec<String> {
         self.segments().into_iter().map(|s| s.to_ascii_lowercase()).collect()
@@ -606,6 +660,65 @@ mod tests {
         let specific: Platform = "linux/amd64".parse().unwrap();
         assert!(!Platform::Any.matches(&specific));
         assert!(!specific.matches(&Platform::Any));
+    }
+
+    /// Returns `linux/amd64` with a non-`None` `os_version` — the shape a
+    /// mirrored image-index entry carries but [`Platform::current`] can never
+    /// produce.
+    fn linux_amd64_with_os_version() -> Platform {
+        let base: Platform = "linux/amd64".parse().unwrap();
+        let Platform::Specific { os, arch, .. } = base else {
+            panic!("linux/amd64 parses to Specific");
+        };
+        Platform::Specific {
+            os,
+            arch,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: None,
+            features: None,
+        }
+    }
+
+    #[test]
+    fn same_os_arch_ignores_refinement_fields() {
+        let plain: Platform = "linux/amd64".parse().unwrap();
+        // os+arch equal, differ only in os_version → same_os_arch, unlike `matches`.
+        assert!(plain.same_os_arch(&linux_amd64_with_os_version()));
+        assert!(!plain.matches(&linux_amd64_with_os_version()));
+        // Different arch / os → not same.
+        assert!(!plain.same_os_arch(&"linux/arm64".parse().unwrap()));
+        assert!(!plain.same_os_arch(&"windows/amd64".parse().unwrap()));
+        // Any algebra.
+        assert!(Platform::Any.same_os_arch(&Platform::Any));
+        assert!(!Platform::Any.same_os_arch(&plain));
+    }
+
+    /// Regression (issue #179): the host-only gate compares os+arch only, so a
+    /// host-runnable platform carrying an `os_version` is NOT suppressed.
+    #[test]
+    fn host_can_run_on_gate() {
+        let host: Platform = "linux/amd64".parse().unwrap();
+        let host = Some(&host);
+
+        // Undeterminable platform and platform-agnostic package always run.
+        assert!(Platform::host_can_run_on(None, host));
+        assert!(Platform::host_can_run_on(Some(&Platform::any()), host));
+
+        // Matching os+arch runs; a differing os or arch does not.
+        assert!(Platform::host_can_run_on(Some(&"linux/amd64".parse().unwrap()), host));
+        assert!(!Platform::host_can_run_on(
+            Some(&"windows/amd64".parse().unwrap()),
+            host
+        ));
+        assert!(!Platform::host_can_run_on(Some(&"linux/arm64".parse().unwrap()), host));
+
+        // Key case: matching os+arch with an os_version refinement still runs.
+        assert!(Platform::host_can_run_on(Some(&linux_amd64_with_os_version()), host));
+
+        // Unknown host never suppresses.
+        let foreign: Platform = "windows/amd64".parse().unwrap();
+        assert!(Platform::host_can_run_on(Some(&foreign), None));
     }
 
     // --- segments() ---

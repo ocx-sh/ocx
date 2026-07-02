@@ -281,6 +281,34 @@ pub async fn setup_owned(
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
 ) -> Result<InstallInfo, PackageErrorKind> {
+    // Stamp the resolved platform exactly once, at the single boundary every
+    // returned `InstallInfo` passes through, so the candidate-symlink gate can
+    // suppress foreign-platform installs (issue #179). Threading it as a wrapper
+    // (rather than at each `return`) makes it structurally impossible for a new
+    // early return in `setup_owned_impl` to forget the stamp.
+    let resolved_platform = resolved.platform.clone();
+    setup_owned_impl(
+        mgr,
+        pinned,
+        resolved,
+        platforms,
+        groups,
+        dest_override,
+        provided_metadata,
+    )
+    .await
+    .map(|info| info.with_platform(resolved_platform))
+}
+
+async fn setup_owned_impl(
+    mgr: &PackageManager,
+    pinned: &oci::PinnedIdentifier,
+    resolved: super::resolve::ResolvedChain,
+    platforms: Vec<oci::Platform>,
+    groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+    provided_metadata: Option<metadata::Metadata>,
+) -> Result<InstallInfo, PackageErrorKind> {
     // Defense layer 2 — skip if already fully installed (cross-process).
     // When dest_override is set the caller wants to materialize to a specific
     // path, not the object-store CAS path — bypass the fast-path so the

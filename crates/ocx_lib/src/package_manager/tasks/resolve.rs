@@ -79,6 +79,11 @@ pub struct ResolvedChain {
     /// The platform-selected image manifest used by the pull pipeline for
     /// layer extraction. Never an image index.
     pub final_manifest: oci::ImageManifest,
+    /// The platform the resolution selected. `Platform::any()` for a flat
+    /// (single-image) manifest; the matched image-index entry's platform for a
+    /// multi-platform tag. Threaded into `InstallInfo` so the candidate-symlink
+    /// gate can suppress foreign-platform installs (issue #179).
+    pub platform: oci::Platform,
 }
 
 impl ResolvedChain {
@@ -147,6 +152,9 @@ impl PackageManager {
                     pinned: top_pinned,
                     chain,
                     final_manifest: img,
+                    // A flat image manifest carries no platform metadata; it is
+                    // treated as platform-agnostic (matches `from_image_manifest`).
+                    platform: oci::Platform::any(),
                 })
             }
             // Image index: defer platform selection to `Index::select`, then
@@ -219,6 +227,19 @@ impl PackageManager {
                         blob_data_size(self.file_structure(), &child_pinned).await,
                     ),
                 };
+                // The selected image-index entry's platform — the authoritative
+                // record of which platform this resolution landed on. A missing
+                // or unconvertible platform falls back to `any` (never suppress
+                // the candidate on an undeterminable platform).
+                let selected_platform = match child_descriptor {
+                    Some(entry) => oci::Platform::try_from(entry.platform.clone()).unwrap_or_else(|error| {
+                        crate::log::warn!(
+                            "Selected image-index entry for '{child_pinned}' has an unconvertible platform, treating as `any`: {error}"
+                        );
+                        oci::Platform::any()
+                    }),
+                    None => oci::Platform::any(),
+                };
                 chain.push(ChainBlob {
                     identifier: child_pinned,
                     role: ChainRole::Manifest,
@@ -241,6 +262,7 @@ impl PackageManager {
                     pinned,
                     chain,
                     final_manifest,
+                    platform: selected_platform,
                 })
             }
         }

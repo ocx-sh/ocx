@@ -316,10 +316,19 @@ pub async fn acquire_select_lock(
 }
 
 /// Outcome of [`wire_selection`] for the caller's reporting.
-#[derive(Debug, Clone)]
+///
+/// Each field is `Some` only when that symlink was actually written this call.
+/// The host-only gate (issue #179) suppresses a foreign-platform write, and a
+/// plain install without `--select` never writes `current`, so callers must
+/// report the real outcome rather than recomputing a path that may not exist.
+#[derive(Debug, Clone, Default)]
 pub struct WireSelectionOutcome {
-    /// Path to the `current` symlink that was written (or refreshed).
-    pub current: std::path::PathBuf,
+    /// The `current` symlink written this call, or `None` when `select` was not
+    /// requested or the resolved platform is not host-runnable.
+    pub current: Option<std::path::PathBuf>,
+    /// The `candidates/{tag}` symlink written this call, or `None` when no
+    /// candidate was requested or the resolved platform is not host-runnable.
+    pub candidate: Option<std::path::PathBuf>,
 }
 
 /// Wires the per-repo `current` selection symlink for `package` and optionally
@@ -355,16 +364,50 @@ pub async fn wire_selection(
     // Both `current` and `candidates/{tag}` target the package root.
     let pkg_root = info.dir().dir.as_path();
 
-    if candidate {
+    // The host-only gate (issue #179): `candidates/{tag}` and `current` are
+    // per-repo, platform-agnostic paths that platformless readers (`ocx package
+    // which`, project env) expect to resolve to host-runnable content. A
+    // foreign-platform install (e.g. `-p windows/amd64` on a Linux host) still
+    // lands in the object store, but must not clobber either host pointer;
+    // cross-platform consumers resolve digest-pinned roots directly instead.
+    let host_runnable = info.is_host_runnable();
+
+    let candidate_written = if candidate && host_runnable {
         let link_path = fs.symlinks.candidate(package);
         log::debug!("Creating candidate symlink at '{}'.", link_path.display());
         rm.link(&link_path, pkg_root).map_err(PackageErrorKind::Internal)?;
+        Some(link_path)
+    } else {
+        if candidate {
+            log::debug!(
+                "Skipping candidate symlink for '{}': resolved platform {:?} is not host-runnable (issue #179).",
+                package,
+                info.platform(),
+            );
+        }
+        None
+    };
+
+    if !select {
+        return Ok(WireSelectionOutcome {
+            current: None,
+            candidate: candidate_written,
+        });
+    }
+
+    if !host_runnable {
+        log::debug!(
+            "Skipping current symlink for '{}': resolved platform {:?} is not host-runnable (issue #179).",
+            package,
+            info.platform(),
+        );
+        return Ok(WireSelectionOutcome {
+            current: None,
+            candidate: candidate_written,
+        });
     }
 
     let current_path = fs.symlinks.current(package);
-    if !select {
-        return Ok(WireSelectionOutcome { current: current_path });
-    }
 
     // Acquire the per-repo .select.lock for the symlink write.
     let _select_guard = acquire_select_lock(fs, package).await?;
@@ -381,7 +424,10 @@ pub async fn wire_selection(
         return Err(PackageErrorKind::Internal(e));
     }
 
-    Ok(WireSelectionOutcome { current: current_path })
+    Ok(WireSelectionOutcome {
+        current: Some(current_path),
+        candidate: candidate_written,
+    })
 }
 
 /// RAII guard for the per-repo `.select.lock`. Releases on drop.
@@ -525,6 +571,90 @@ mod tests {
         assert!(
             chain.contains("missing"),
             "error chain must mention undeclared dep name 'missing': {chain}"
+        );
+    }
+
+    /// Builds a valid, installed `InstallInfo` under `fs` for `foo/bar:1.0` and
+    /// returns it paired with the tagged identifier whose `candidates/{tag}`
+    /// slot `wire_selection` targets.
+    async fn install_info_fixture(fs: &FileStructure) -> (oci::Identifier, crate::package::install_info::InstallInfo) {
+        let digest_hex: String = "cd".repeat(32);
+        let tagged = oci::Identifier::new_registry("foo/bar", "example.com")
+            .clone_with_tag("1.0")
+            .clone_with_digest(oci::Digest::Sha256(digest_hex));
+        let pinned = oci::PinnedIdentifier::try_from(tagged.clone()).unwrap();
+
+        let pkg_dir = fs.packages.path(&pinned);
+        let content_dir = pkg_dir.join("content");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(pkg_dir.join("metadata.json"), r#"{"type":"bundle","version":1}"#).unwrap();
+        ResolvedPackage::new()
+            .write_json(pkg_dir.join("resolve.json"))
+            .await
+            .unwrap();
+
+        let (metadata, resolved) = super::load_object_data(&fs.packages, &content_dir)
+            .await
+            .expect("fixture metadata is valid");
+        let dir = crate::file_structure::PackageDir::with_root(pkg_dir);
+        let info = crate::package::install_info::InstallInfo::new(pinned, metadata, resolved, dir);
+        (tagged, info)
+    }
+
+    /// A supported platform the current host cannot run, or `None` when the host
+    /// platform is undeterminable (unsupported CI arch), in which case the gate
+    /// writes unconditionally and suppression cannot be exercised.
+    fn a_foreign_platform() -> Option<oci::Platform> {
+        ["windows/amd64", "linux/amd64", "darwin/arm64", "linux/arm64"]
+            .into_iter()
+            .map(|spec| spec.parse::<oci::Platform>().expect("valid platform string"))
+            .find(|platform| !oci::Platform::host_can_run(Some(platform)))
+    }
+
+    /// Regression (issue #179, defect 2): a foreign-platform install must NOT
+    /// write `candidates/{tag}`, and must leave a pre-existing host candidate
+    /// untouched — the actual clobber scenario from the bug report. The pure
+    /// gate contract is covered host-independently by `Platform::host_can_run_on`
+    /// in `oci/platform.rs`; this test proves `wire_selection` acts on it.
+    #[tokio::test]
+    async fn wire_selection_suppresses_foreign_platform_candidate() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let (tagged, info) = install_info_fixture(&fs).await;
+
+        let Some(foreign) = a_foreign_platform() else {
+            return; // host undeterminable: gate writes all, nothing to suppress
+        };
+        let foreign_info = info.clone().with_platform(foreign);
+        let candidate_path = fs.symlinks.candidate(&tagged);
+
+        // Fresh foreign install → no candidate written.
+        let outcome = super::wire_selection(&fs, &tagged, &foreign_info, true, false)
+            .await
+            .expect("wire_selection succeeds");
+        assert!(
+            outcome.candidate.is_none(),
+            "foreign platform must not report a candidate"
+        );
+        assert!(
+            !crate::symlink::is_link(&candidate_path),
+            "foreign platform must not create candidates/{{tag}}"
+        );
+
+        // Pre-existing host candidate must survive a subsequent foreign install.
+        let host_info = info; // no platform stamp → host-runnable
+        super::wire_selection(&fs, &tagged, &host_info, true, false)
+            .await
+            .expect("host wire_selection succeeds");
+        let host_target = std::fs::read_link(&candidate_path).expect("host candidate exists");
+
+        super::wire_selection(&fs, &tagged, &foreign_info, true, false)
+            .await
+            .expect("foreign wire_selection succeeds");
+        assert_eq!(
+            std::fs::read_link(&candidate_path).unwrap(),
+            host_target,
+            "foreign install must not clobber the host candidate slot"
         );
     }
 

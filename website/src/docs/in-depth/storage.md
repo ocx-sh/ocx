@@ -204,6 +204,8 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 
 **`candidates/{tag}`** — pinned to a specific version. Created by [`ocx install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. cmake 3.28 and 3.30 can coexist; both candidates remain until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
 
+This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on a non-Windows host, or `--select` of one) populates the object store but leaves both `candidates/{tag}` and `current` untouched, so a platformless resolver never hands you a package the host cannot run. Reference a foreign-platform install by its digest instead.
+
 **`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment — from [`ocx package env`][cmd-package-env], or the global toolchain activation `eval "$(ocx --global env --shell=sh)"` — emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew

@@ -182,6 +182,7 @@ impl PackageManager {
                 size: i64::try_from(parts.manifest_bytes.len()).unwrap_or(i64::MAX),
             }],
             final_manifest: parts.manifest,
+            platform: info.platform.clone(),
         };
 
         // Step 7: Hand off to setup_owned with a fresh SetupGroups (singleflight bypass).

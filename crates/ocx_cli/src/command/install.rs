@@ -65,12 +65,18 @@ impl Install {
             .zip(oci_packages.iter())
             .zip(install_infos.iter())
             .map(|((raw, oci_pkg), info)| {
-                // `--select` moves the `current` pointer, so surface that path; a
-                // plain install only writes the tag-pinned candidate.
-                let path = if self.select {
-                    fs.symlinks.current(oci_pkg)
+                // Report the symlink actually written. A foreign-platform install
+                // writes neither host pointer (issue #179), so surface no path;
+                // otherwise `--select` moves the `current` pointer while a plain
+                // install writes the tag-pinned candidate. The host-runnable check
+                // is the same gate `wire_selection` applied, so the report never
+                // claims a path that was suppressed.
+                let path = if !info.is_host_runnable() {
+                    None
+                } else if self.select {
+                    Some(fs.symlinks.current(oci_pkg))
                 } else {
-                    fs.symlinks.candidate(oci_pkg)
+                    Some(fs.symlinks.candidate(oci_pkg))
                 };
                 (
                     raw.raw().to_string(),

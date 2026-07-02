@@ -12,13 +12,15 @@ use crate::api::Printable;
 
 /// A single install or select result entry for CLI output.
 ///
-/// The `path` field holds the symlink that was created or updated
-/// (candidate for install, current for select).
+/// The `path` field holds the symlink that was created or updated (candidate
+/// for install, current for select), or `None` when no host symlink was written
+/// — a foreign-platform install populates the object store but writes neither
+/// host pointer (issue #179).
 #[derive(Serialize)]
 pub struct InstallEntry {
     pub identifier: oci::Identifier,
     pub metadata: Metadata,
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
 }
 
 /// Installed or selected packages keyed by the user-supplied identifier string.
@@ -50,7 +52,12 @@ impl Printable for Installs {
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
             rows[1].push(theme.of(&entry.identifier));
-            rows[2].push(entry.path.display().to_string());
+            rows[2].push(
+                entry
+                    .path
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |path| path.display().to_string()),
+            );
         }
         printer.print_table(
             &["Package".into(), "Version".into(), "Path".into()],
@@ -103,7 +110,7 @@ mod tests {
                     InstallEntry {
                         identifier: Identifier::new_registry(*name, "registry.example"),
                         metadata: sample_metadata(),
-                        path: PathBuf::from(format!("/packages/{name}")),
+                        path: Some(PathBuf::from(format!("/packages/{name}"))),
                     },
                 )
             })

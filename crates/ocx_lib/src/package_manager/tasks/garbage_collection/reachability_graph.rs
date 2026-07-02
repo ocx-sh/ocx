@@ -464,6 +464,12 @@ async fn has_live_refs(pkg_dir: &Path) -> bool {
         return false;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
+        // Skip `replace_atomic`/`register` staging temps: a crash-orphaned
+        // `.tmp-*` symlink must never root a package (issue #179), mirroring
+        // `ProjectRegistry::live_projects`.
+        if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+            continue;
+        }
         let path = entry.path();
         if crate::symlink::is_link(&path)
             && let Ok(target) = tokio::fs::read_link(&path).await

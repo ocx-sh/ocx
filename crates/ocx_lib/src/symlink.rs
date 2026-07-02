@@ -208,13 +208,20 @@ fn temp_link_name() -> String {
 /// On Windows `std::fs::rename` fails if the destination exists, so a
 /// junction/symlink at `to` is removed first, then the staging link is renamed
 /// onto it. This remove-then-rename has a **bounded non-atomic window**: a
-/// concurrent same-hash `register` racing a reader between the remove and the
-/// rename can briefly expose no entry at `to`. The `.tmp-*` staging name does
-/// **not** cover this window — `ProjectRegistry::live_projects` deliberately
-/// skips `.tmp-*` entries, so the staged link is invisible to a reader by
-/// design. This is a documented residual on Windows only (POSIX is atomic); a
-/// Windows FFI atomic-replace (`MoveFileEx`/`ReplaceFile`) is a deferred scope
-/// decision, not attempted here.
+/// concurrent same-hash writer racing a reader between the remove and the rename
+/// can briefly expose no entry at `to`. The `.tmp-*` staging name does **not**
+/// cover this window — `ProjectRegistry::live_projects` and the GC root scan
+/// deliberately skip `.tmp-*` entries, so the staged link is invisible to a
+/// reader by design.
+///
+/// A concurrent *writer* that republishes `to` inside that window would make the
+/// loser's rename fail with `AlreadyExists`. Because install symlinks are
+/// idempotent (racers publish an equivalent link, or last-writer-wins on a
+/// mutable candidate under a tag advance), the loser **converges** on the
+/// existing link instead of surfacing the `EEXIST` that issue #179 fixes on
+/// POSIX. Only the reader-visibility window remains; a Windows FFI atomic
+/// replace (`MoveFileEx`/`ReplaceFile`) that would close it too is a deferred
+/// scope decision.
 #[cfg(not(windows))]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
@@ -225,7 +232,21 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     if is_link(to) || to.exists() {
         remove_link(to)?;
     }
-    std::fs::rename(from, to)
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // A concurrent installer republished `to` in the remove->rename
+            // window. An idempotent equivalent link now occupies the slot, so
+            // converge instead of surfacing EEXIST (issue #179); drop our unused
+            // stage so it does not leak.
+            if is_link(to) {
+                let _ = remove_link(from);
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Removes the symlink at `link_path`.

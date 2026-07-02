@@ -21,9 +21,26 @@ use crate::{Error, Result, file_structure::FileStructure, file_structure::cas_re
 /// path (16 hex chars of SHA-256).  The symlink's target IS the forward path,
 /// so `readlink refs/<hash>` is the human-readable audit entry.
 ///
-/// All operations are atomic at the individual symlink level.  No locking is
-/// required: symlink creation and deletion are atomic POSIX operations, and each
-/// ref entry maps to a unique path (its hash), so concurrent calls do not race.
+/// Concurrent [`link`](Self::link) calls for the same forward path do not
+/// require locking (issue #179):
+///
+/// - The **forward symlink** is written via [`symlink::replace_atomic`]
+///   (stage-and-`rename(2)`), so two installers racing on the same
+///   `candidates/{tag}` slot converge on a valid link instead of one hitting
+///   `EEXIST`. Its staging temp lives beside the forward path (under
+///   `symlinks/…`), never in a GC-scanned directory.
+/// - The **back-reference** is written with an idempotent create: its name is
+///   `SHA-256(forward_path)` and its target IS the forward path, so two
+///   installers of the same package derive an identical `(name, target)` and a
+///   create race resolves to the one link both wanted. It deliberately does
+///   *not* stage a `.tmp-*` symlink under `refs/symlinks/`, where a crash-orphan
+///   would be mis-read as a live install ref by the GC root scan.
+///
+/// When two installers resolve the same tag to *different* digests (a concurrent
+/// tag advance), the forward link converges to one valid root by last-writer-wins
+/// on the mutable tag alias; the loser leaves a stale back-ref that the next
+/// `ocx clean` reconciles. Both roots are validly installed, so no candidate ever
+/// points at absent content.
 pub struct ReferenceManager {
     file_structure: FileStructure,
 }
@@ -88,18 +105,46 @@ impl ReferenceManager {
             log::debug!("Linking '{}' → '{}'.", forward_path.display(), content_path.display(),);
         }
 
-        symlink::update(content_path, forward_path)?;
+        // Atomic create-or-replace: stage a temp symlink in the same directory
+        // and `rename(2)` it onto the forward path. Unlike remove-then-create,
+        // a concurrent installer writing the same forward symlink never
+        // observes `EEXIST` — the losing rename simply supersedes (or is
+        // superseded by) the winner, and both point at the same content root
+        // because installs of a given package are idempotent. Fixes the
+        // candidate-symlink TOCTOU under concurrent install (issue #179).
+        symlink::replace_atomic(content_path, forward_path)?;
 
         let ref_path = self.back_ref_path(content_path, forward_path)?;
         if let Some(parent) = ref_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
         }
-        // Idempotent: recreate if a stale back-ref already exists at this path.
+        // Idempotent create — never stage a temp under `refs/symlinks/`. The
+        // back-ref name is `SHA-256(forward_path)` and its target is the forward
+        // path, so two installers of the same package derive an identical
+        // `(name, target)`; a create race resolves to the one link both wanted.
+        // `replace_atomic` here would stage a `.tmp-*` symlink in this
+        // GC-scanned directory that a crash could orphan into a phantom install
+        // root (issue #179), so a plain create-or-tolerate-existing is used.
         if symlink::is_link(&ref_path) {
-            log::trace!("Replacing stale back-ref '{}'.", ref_path.display());
-            symlink::remove(&ref_path)?;
+            // A back-ref already exists. If it already points at `forward_path`
+            // the call is a no-op (the common concurrent-install case). A
+            // stale/corrupt entry pointing elsewhere is healed with
+            // remove-then-create; this is not a concurrent-install race
+            // (identical installers all derive the correct target), so it needs
+            // no staging.
+            if std::fs::read_link(&ref_path).ok().as_deref() != Some(forward_path) {
+                log::trace!("Healing stale back-ref '{}'.", ref_path.display());
+                symlink::remove(&ref_path)?;
+                symlink::create(forward_path, &ref_path)?;
+            }
+        } else {
+            match symlink::create(forward_path, &ref_path) {
+                Ok(()) => {}
+                // A concurrent installer created the identical back-ref first.
+                Err(_) if symlink::is_link(&ref_path) => {}
+                Err(e) => return Err(e),
+            }
         }
-        symlink::create(forward_path, &ref_path)?;
         log::trace!(
             "Created back-ref '{}' → '{}'.",
             ref_path.display(),
@@ -323,6 +368,11 @@ async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<
     let mut broken = Vec::new();
 
     while let Ok(Some(entry)) = entries.next_entry().await {
+        // Skip staging temps: a `.tmp-*` symlink is an in-flight or crash-orphaned
+        // stage, never a real back-ref (issue #179).
+        if entry.file_name().to_string_lossy().starts_with(".tmp-") {
+            continue;
+        }
         let back_ref = entry.path();
         if !symlink::is_link(&back_ref) {
             continue;
@@ -526,6 +576,54 @@ mod tests {
 
         // Stale target replaced with the correct forward path.
         assert_eq!(std::fs::read_link(&back_ref).unwrap(), forward);
+    }
+
+    /// Regression (issue #179): many threads calling `link` for the SAME
+    /// forward path and content must all succeed. The pre-fix implementation
+    /// wrote the forward symlink with `symlink::update` and the back-ref with
+    /// `symlink::create` — both check-then-create. Under contention every
+    /// thread saw no link, every thread called `symlink(2)`, and all but one
+    /// hit `EEXIST` (os error 17), surfacing as `internal file error ... File
+    /// exists` and exit 74. The atomic stage-and-rename converges instead.
+    #[test]
+    fn link_is_race_free_under_concurrent_identical_calls() {
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, root, _rm) = setup();
+        let content = make_content(&root, 1);
+
+        // A fresh forward path per round so every round re-runs the
+        // first-create race — a persisted link would hit the no-op fast path.
+        for round in 0..8 {
+            let threads = 32;
+            let barrier = Arc::new(Barrier::new(threads));
+            let forward = fwd(&root, &format!("candidate_{round}"));
+
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let root = root.clone();
+                    let content = content.clone();
+                    let forward = forward.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let rm = ReferenceManager::new(FileStructure::with_root(root));
+                        barrier.wait();
+                        rm.link(&forward, &content)
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("thread panicked")
+                    .expect("concurrent link must not race to EEXIST");
+            }
+
+            // Final state is correct: forward → content and the back-ref exists.
+            assert_eq!(std::fs::read_link(&forward).unwrap(), content);
+            assert!(crate::symlink::is_link(&back_ref_for(&content, &forward)));
+        }
     }
 
     // ── unlink ────────────────────────────────────────────────────────────────
