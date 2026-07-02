@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "match": "*",
+      "packages": ["localhost:5000/patches/corp-ca-bundle:1.0.0"],
+      "required": true
+    }
+  ]
+}

@@ -45,6 +45,32 @@ type DepLoadResult = (
     crate::Result<(metadata::Metadata, ResolvedPackage, oci::PinnedIdentifier)>,
 );
 
+/// The return value of [`compose`].
+///
+/// Carries the emitted env entries together with the **admitted set** — the
+/// ordered, deduped set of `PinnedIdentifier`s whose surface contributions
+/// were actually emitted.  The admitted set is used by `SitePatchResolver` in
+/// `resolve_env` to gate the companion overlay: only identifiers that compose
+/// actually visited get a patch overlay applied.
+///
+/// `compose` itself is **patch-agnostic** — it does not read patch config or
+/// know about companions.  The admitted set is a pure by-product of the
+/// surface-gating and dedup logic already performed during composition.
+pub struct ComposeOutput {
+    /// The composed env entries in emit order.
+    pub entries: Vec<Entry>,
+
+    /// Deduped, visit-order identifiers admitted by the surface gate.
+    ///
+    /// Contains the stripped identifiers (advisory tag dropped) of every
+    /// TC dep **and** every explicit root that was actually emitted during
+    /// this compose call.  Deps appear before their root (topological); roots
+    /// are appended at the end in the same order as `roots`.  Cross-root
+    /// dedup is applied: a shared dep appears only once, at its first-seen
+    /// position across all roots.
+    pub admitted: Vec<oci::PinnedIdentifier>,
+}
+
 /// Compose the runtime env from one or more root packages.
 ///
 /// Reads each root's pre-built TC from `resolve.json` (single read per root),
@@ -55,6 +81,11 @@ type DepLoadResult = (
 /// view); `self_view = true` selects the private surface (`--self` — emits
 /// the package's full runtime env including private entries).
 ///
+/// Returns a [`ComposeOutput`] that carries both the composed entries and the
+/// admitted set (deduped, visit-order identifiers that contributed to the
+/// output).  The admitted set is consumed by `SitePatchResolver` to gate the
+/// companion overlay; `compose` itself is patch-agnostic.
+///
 /// # Errors
 ///
 /// Returns `Err` if any required package metadata cannot be loaded from the
@@ -63,7 +94,11 @@ type DepLoadResult = (
 /// [`check_entrypoints`]), or if the active surface resolves a single
 /// repository to two or more distinct digests (version conflict — see
 /// [`check_repo_digest_conflicts`]).
-pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view: bool) -> crate::Result<Vec<Entry>> {
+pub(crate) async fn compose(
+    roots: &[Arc<InstallInfo>],
+    store: &PackageStore,
+    self_view: bool,
+) -> crate::Result<ComposeOutput> {
     // Multi-root collision gate. Single-root case is already covered at
     // install time by `check_entrypoints`; cross-root collisions can only
     // surface here, when the user composes two or more independent roots.
@@ -86,6 +121,11 @@ pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen: HashSet<oci::PinnedIdentifier> = HashSet::new();
+    // The admitted set records every stripped identifier emitted during this
+    // compose call, in visit order.  Built in parallel with `seen` so the
+    // patch overlay can iterate admitted identifiers in the same topological
+    // order without a second walk.
+    let mut admitted: Vec<oci::PinnedIdentifier> = Vec::new();
 
     // Pre-compute root keys (stripped identifiers) so a TC entry that is
     // also an explicit root is deferred to the root-emission pass instead
@@ -135,6 +175,15 @@ pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view
             if !seen.insert(key) {
                 continue;
             }
+
+            // Record in admitted set (visit order, deduped — used by
+            // SitePatchResolver to gate the companion overlay). Push the
+            // TAG-BEARING identifier: dedup already happened on the
+            // advisory-stripped `key`, but the patch overlay matches descriptor
+            // globs against this identifier and a tag-anchored rule (ADR `*:21`)
+            // needs the tag preserved — otherwise a required overlay that
+            // matched at install time is silently dropped at compose time (C7).
+            admitted.push(tc_entry.identifier.clone());
 
             visible_entries.push((visible_entries.len(), tc_entry.identifier.clone()));
         }
@@ -189,7 +238,14 @@ pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view
         // roots are user input and always contribute. We still dedup roots
         // against each other so passing the same root twice does not
         // double-emit.
-        if seen.insert(root.identifier().strip_advisory()) {
+        let root_key = root.identifier().strip_advisory();
+        if seen.insert(root_key) {
+            // Record root in admitted set (appended after its TC deps, per visit
+            // order — SitePatchResolver relies on this ordering). Push the
+            // TAG-BEARING root identifier (dedup already used the stripped key) so
+            // the patch overlay can match tag-anchored descriptor rules.
+            admitted.push(root.identifier().clone());
+
             // Build root's direct-dep context map for `${deps.NAME.installPath}`
             // interpolation in root's own env vars.
             let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store);
@@ -207,7 +263,7 @@ pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view
         }
     }
 
-    Ok(entries)
+    Ok(ComposeOutput { entries, admitted })
 }
 
 /// Uniqueness check on entrypoint names across the interface projection of
@@ -803,9 +859,9 @@ mod tests {
         // Sanity: must succeed (no env vars in any package, but should still
         // not panic). The deps have no env vars and no entrypoints, so the
         // composed env is empty.
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         assert!(
-            env.is_empty(),
+            out.entries.is_empty(),
             "no env vars or entrypoints declared; composed env must be empty"
         );
     }
@@ -832,9 +888,12 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // SEALED.has_interface() = false → skip in default exec.
-        assert!(env.is_empty(), "SEALED dep must contribute nothing in default exec");
+        assert!(
+            out.entries.is_empty(),
+            "SEALED dep must contribute nothing in default exec"
+        );
     }
 
     /// A SEALED TC entry contributes nothing even under --self.
@@ -854,9 +913,12 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // SEALED.has_private() = false → skip under --self too.
-        assert!(env.is_empty(), "SEALED dep must contribute nothing under --self");
+        assert!(
+            out.entries.is_empty(),
+            "SEALED dep must contribute nothing under --self"
+        );
     }
 
     // ─ Diamond dedup ───────────────────────────────────────────────────────────
@@ -891,9 +953,9 @@ mod tests {
 
         // c, a, b have no env vars + no entrypoints → composed env is empty
         // even when traversed twice. Guards against duplicate emission.
-        let env = compose(&[a, b], &store, false).await.unwrap();
+        let out = compose(&[a, b], &store, false).await.unwrap();
         assert!(
-            env.is_empty(),
+            out.entries.is_empty(),
             "no env vars + no entrypoints declared; composed env must be empty regardless of dedup"
         );
     }
@@ -968,9 +1030,12 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // PRIVATE.has_interface()=false → skip in default exec.
-        assert!(env.is_empty(), "PRIVATE TC entry must be skipped in default exec");
+        assert!(
+            out.entries.is_empty(),
+            "PRIVATE TC entry must be skipped in default exec"
+        );
     }
 
     /// Default exec (self_view=false): INTERFACE TC entry included — INTERFACE.has_interface()=true.
@@ -993,8 +1058,8 @@ mod tests {
         // INTERFACE.has_interface()=true → visit; dep has no env vars,
         // so env is empty but visit happened (no panic from missing
         // store entry).
-        let env = compose(&[root], &store, false).await.unwrap();
-        assert!(env.is_empty(), "no env vars on the dep, so output is empty");
+        let out = compose(&[root], &store, false).await.unwrap();
+        assert!(out.entries.is_empty(), "no env vars on the dep, so output is empty");
     }
 
     /// --self (self_view=true): PRIVATE TC entry included — PRIVATE.has_private()=true.
@@ -1016,10 +1081,10 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // PRIVATE.has_private()=true → emit dep contributions; dep has no
         // env vars so output is empty but visit happened.
-        assert!(env.is_empty(), "no env vars on the dep, so output is empty");
+        assert!(out.entries.is_empty(), "no env vars on the dep, so output is empty");
     }
 
     /// --self (self_view=true): INTERFACE TC entry skipped — INTERFACE.has_private()=false.
@@ -1041,9 +1106,12 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // INTERFACE.has_private()=false → skip under --self.
-        assert!(env.is_empty(), "INTERFACE TC entry must be skipped under --self");
+        assert!(
+            out.entries.is_empty(),
+            "INTERFACE TC entry must be skipped under --self"
+        );
     }
 
     // ─ Synth-PATH gate (interface-projection cells) ────────────────────────────
@@ -1072,9 +1140,10 @@ mod tests {
             "cmake",
         ));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // Synth-PATH for root's entrypoints/ present in default exec.
-        let path_entries: Vec<_> = env
+        let path_entries: Vec<_> = out
+            .entries
             .iter()
             .filter(|e| e.key == "PATH" && e.value.contains("entrypoints"))
             .collect();
@@ -1104,9 +1173,10 @@ mod tests {
             "cmake",
         ));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // No synth-PATH in the --self output (root must not see its own launchers).
-        let path_entries: Vec<_> = env
+        let path_entries: Vec<_> = out
+            .entries
             .iter()
             .filter(|e| e.key == "PATH" && e.value.contains("entrypoints"))
             .collect();
@@ -1148,9 +1218,10 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // PUBLIC.has_interface()=true → dep's synth-PATH emitted.
-        let path_entries: Vec<_> = env
+        let path_entries: Vec<_> = out
+            .entries
             .iter()
             .filter(|e| e.key == "PATH" && e.value.contains("entrypoints"))
             .collect();
@@ -1204,12 +1275,12 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // dep's Interface-tagged var present.
         assert!(
-            env.iter().any(|e| e.key == "DEP_IFACE"),
+            out.entries.iter().any(|e| e.key == "DEP_IFACE"),
             "dep's Interface var must be present: {:?}",
-            env.iter().map(|e| &e.key).collect::<Vec<_>>()
+            out.entries.iter().map(|e| &e.key).collect::<Vec<_>>()
         );
     }
 
@@ -1231,10 +1302,10 @@ mod tests {
             Visibility::INTERFACE,
         ));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // root's Interface var present in default exec.
         assert!(
-            env.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
+            out.entries.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
             "root's Interface var must be present in default exec"
         );
     }
@@ -1257,10 +1328,10 @@ mod tests {
             Visibility::PRIVATE,
         ));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // root's Private var absent in default exec.
         assert!(
-            !env.iter().any(|e| e.key == "PRIVATE_FLAG"),
+            !out.entries.iter().any(|e| e.key == "PRIVATE_FLAG"),
             "root's Private var must be absent in default exec"
         );
     }
@@ -1285,10 +1356,10 @@ mod tests {
             Visibility::PRIVATE,
         ));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // root's Private var present under --self.
         assert!(
-            env.iter().any(|e| e.key == "PRIVATE_FLAG"),
+            out.entries.iter().any(|e| e.key == "PRIVATE_FLAG"),
             "root's Private var must be present under --self"
         );
     }
@@ -1314,10 +1385,10 @@ mod tests {
             Visibility::INTERFACE,
         ));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // root's Interface var absent under --self.
         assert!(
-            !env.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
+            !out.entries.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
             "root's Interface var must be absent under --self"
         );
     }
@@ -1348,9 +1419,9 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // dep's contributions absent in consumer surface.
-        assert!(env.is_empty());
+        assert!(out.entries.is_empty());
     }
 
     /// --self: private-edge dep contributes.
@@ -1374,9 +1445,9 @@ mod tests {
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
         // dep present in --self surface — but has no env vars, so output empty.
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         assert!(
-            env.is_empty(),
+            out.entries.is_empty(),
             "dep has no env vars; visit happened but output is empty"
         );
     }
@@ -1401,9 +1472,9 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // sealed excluded.
-        assert!(env.is_empty());
+        assert!(out.entries.is_empty());
     }
 
     /// Diamond merge: dep reachable via interface and public paths → merged to PUBLIC.
@@ -1431,9 +1502,9 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, true).await.unwrap();
+        let out = compose(&[root], &store, true).await.unwrap();
         // PUBLIC.has_private()=true → leaf visited; no env vars, so empty.
-        assert!(env.is_empty());
+        assert!(out.entries.is_empty());
     }
 
     // ─ Step 3.3 — Composer partition + multi-root dedup + JSON roundtrip ──────
@@ -1483,8 +1554,8 @@ mod tests {
             crate::file_structure::PackageDir { dir: pkg_root },
         ));
 
-        let entries = compose(&[root], &store, false).await.unwrap();
-        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        let out = compose(&[root], &store, false).await.unwrap();
+        let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"PUBLIC_VAR"),
             "PUBLIC_VAR must be present (has_interface=true)"
@@ -1540,8 +1611,8 @@ mod tests {
             crate::file_structure::PackageDir { dir: pkg_root },
         ));
 
-        let entries = compose(&[root], &store, true).await.unwrap();
-        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        let out = compose(&[root], &store, true).await.unwrap();
+        let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"PUBLIC_VAR"),
             "PUBLIC_VAR must be present (has_private=true)"
@@ -1599,14 +1670,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // No deps declare env vars or entrypoints, so output is empty.
         // The gating is observable via the load_object_data calls — sealed
         // and private deps should NOT be visited, while public and iface
         // SHOULD be. The visit happens via on-disk metadata lookup; this
         // test validates the path doesn't panic when sealed/private deps
         // are skipped (no lookup attempt).
-        assert!(env.is_empty());
+        assert!(out.entries.is_empty());
     }
 
     /// --self: TC entry gating by has_private().
@@ -1648,8 +1719,8 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let env = compose(&[root], &store, true).await.unwrap();
-        assert!(env.is_empty());
+        let out = compose(&[root], &store, true).await.unwrap();
+        assert!(out.entries.is_empty());
     }
 
     // ─ Multi-root dedup ────────────────────────────────────────────────────────
@@ -1698,9 +1769,9 @@ mod tests {
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
         let b = Arc::new(make_install_info("b", 'b', b_resolved));
 
-        let env = compose(&[a, b], &store, false).await.unwrap();
+        let out = compose(&[a, b], &store, false).await.unwrap();
         // shared's contributions emitted exactly once (cross-root dedup).
-        let shared_count = env.iter().filter(|e| e.key == "SHARED_VAR").count();
+        let shared_count = out.entries.iter().filter(|e| e.key == "SHARED_VAR").count();
         assert_eq!(
             shared_count, 1,
             "shared dep must emit SHARED_VAR exactly once across multi-root compose"
@@ -1716,8 +1787,8 @@ mod tests {
     async fn compose_empty_roots_returns_empty_env() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
-        let env = compose(&[], &store, false).await.unwrap();
-        assert!(env.is_empty(), "compose(&[], ...) must return empty Env");
+        let out = compose(&[], &store, false).await.unwrap();
+        assert!(out.entries.is_empty(), "compose(&[], ...) must return empty Env");
     }
 
     /// Leaf root (no TC): compose emits only root's own contributions.
@@ -1738,10 +1809,14 @@ mod tests {
             Visibility::PUBLIC,
         ));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // ROOT_VAR present, no dep contributions.
-        assert_eq!(env.len(), 1, "leaf root with one Public var must emit one entry");
-        assert_eq!(env[0].key, "ROOT_VAR");
+        assert_eq!(
+            out.entries.len(),
+            1,
+            "leaf root with one Public var must emit one entry"
+        );
+        assert_eq!(out.entries[0].key, "ROOT_VAR");
     }
 
     // ─ JSON wire-format roundtrip ──────────────────────────────────────────────
@@ -2166,8 +2241,8 @@ mod tests {
         };
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
 
-        let env = compose(&[a, b_root], &store, false).await.unwrap();
-        let keys: Vec<&str> = env.iter().map(|e| e.key.as_str()).collect();
+        let out = compose(&[a, b_root], &store, false).await.unwrap();
+        let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"B_OWN_VAR"),
             "b's own (public) contributions must reach the env when b is an explicit root, \
@@ -2217,10 +2292,15 @@ mod tests {
             Visibility::PUBLIC,
         ));
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
         // dep's contributions appear before ROOT_OWN_VAR in the Env.
-        let dep_pos = env.iter().position(|e| e.key == "DEP_VAR").expect("DEP_VAR present");
-        let root_pos = env
+        let dep_pos = out
+            .entries
+            .iter()
+            .position(|e| e.key == "DEP_VAR")
+            .expect("DEP_VAR present");
+        let root_pos = out
+            .entries
             .iter()
             .position(|e| e.key == "ROOT_OWN_VAR")
             .expect("ROOT_OWN_VAR present");
@@ -2276,10 +2356,15 @@ mod tests {
         // Store is needed by compose but root has no deps, so it stays empty.
         let store = make_store(dir.path());
 
-        let env = compose(&[root], &store, false).await.unwrap();
+        let out = compose(&[root], &store, false).await.unwrap();
 
-        let var_pos = env.iter().position(|e| e.key == "ROOT_VAR").expect("ROOT_VAR present");
-        let path_pos = env
+        let var_pos = out
+            .entries
+            .iter()
+            .position(|e| e.key == "ROOT_VAR")
+            .expect("ROOT_VAR present");
+        let path_pos = out
+            .entries
             .iter()
             .position(|e| e.key == "PATH")
             .expect("synth-PATH entry present");
@@ -2575,9 +2660,9 @@ mod tests {
         // Compose with both b and a as explicit roots. b's TC includes a, but
         // the root-emission pass must handle a exactly once (not from b's TC
         // walk AND again from the explicit-root pass).
-        let env = compose(&[b, a], &store, false).await.unwrap();
+        let out = compose(&[b, a], &store, false).await.unwrap();
 
-        let a_var_count = env.iter().filter(|e| e.key == "A_VAR").count();
+        let a_var_count = out.entries.iter().filter(|e| e.key == "A_VAR").count();
         assert_eq!(
             a_var_count, 1,
             "A_VAR must be emitted exactly once; a is both a root and a TC dep of b. Got {a_var_count} emissions"

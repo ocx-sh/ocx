@@ -349,6 +349,69 @@ impl Platform {
         platforms.push(Self::any());
         platforms
     }
+
+    /// Returns the full supported-platform matrix: every OS/architecture
+    /// combination OCX ships and tests, regardless of which platform is
+    /// running the command.
+    ///
+    /// Distinct from [`supported_set`](Self::supported_set), which is scoped
+    /// to the *current host* (its own platform plus [`any()`](Self::any)).
+    /// `all_supported` is the single source of truth for "every platform a
+    /// team might run" — consumed by `ocx patch sync`'s no-`--platform`
+    /// default, which must pin multi-platform manifests covering every
+    /// platform a team runs (mirroring `ocx lock`), not just the host that
+    /// happens to run the sync. A host-only default would silently miss
+    /// non-host companions and break an offline or required-patch launch on
+    /// a teammate's machine running a different platform.
+    ///
+    /// Fixed list of five, kept in sync with `product-context.md` "Platform
+    /// support": `linux/amd64`, `linux/arm64`, `darwin/amd64`,
+    /// `darwin/arm64`, `windows/amd64`. Never includes [`Any`](Self::Any) —
+    /// callers that need the platform-agnostic fallback add it explicitly.
+    pub fn all_supported() -> Vec<Self> {
+        vec![
+            Self::Specific {
+                os: OperatingSystem::Linux,
+                arch: Architecture::Amd64,
+                variant: None,
+                os_version: None,
+                os_features: None,
+                features: None,
+            },
+            Self::Specific {
+                os: OperatingSystem::Linux,
+                arch: Architecture::Arm64,
+                variant: None,
+                os_version: None,
+                os_features: None,
+                features: None,
+            },
+            Self::Specific {
+                os: OperatingSystem::Darwin,
+                arch: Architecture::Amd64,
+                variant: None,
+                os_version: None,
+                os_features: None,
+                features: None,
+            },
+            Self::Specific {
+                os: OperatingSystem::Darwin,
+                arch: Architecture::Arm64,
+                variant: None,
+                os_version: None,
+                os_features: None,
+                features: None,
+            },
+            Self::Specific {
+                os: OperatingSystem::Windows,
+                arch: Architecture::Amd64,
+                variant: None,
+                os_version: None,
+                os_features: None,
+                features: None,
+            },
+        ]
+    }
 }
 
 /// Defaults to [`Platform::Any`] (platform-agnostic).
@@ -773,6 +836,41 @@ mod tests {
         let current = Platform::current();
         assert!(current.is_some());
         assert!(!current.unwrap().is_any());
+    }
+
+    // --- all_supported() ---
+
+    #[test]
+    fn all_supported_returns_exactly_five_platforms_in_canonical_order() {
+        let platforms = Platform::all_supported();
+        let displayed: Vec<String> = platforms.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            displayed,
+            vec![
+                "linux/amd64",
+                "linux/arm64",
+                "darwin/amd64",
+                "darwin/arm64",
+                "windows/amd64"
+            ],
+            "all_supported must return exactly these five platforms, in this order"
+        );
+    }
+
+    #[test]
+    fn all_supported_never_includes_any() {
+        assert!(
+            !Platform::all_supported().iter().any(Platform::is_any),
+            "all_supported is the concrete platform matrix; Any is added explicitly by callers that need it"
+        );
+    }
+
+    /// `all_supported` is distinct from `supported_set` — the latter is
+    /// scoped to the host (its own platform + `any`, at most 2 entries),
+    /// never the full 5-platform matrix.
+    #[test]
+    fn all_supported_is_distinct_from_supported_set() {
+        assert_ne!(Platform::all_supported().len(), Platform::supported_set().len());
     }
 
     // --- lock_key (V2 map key encoding) ---

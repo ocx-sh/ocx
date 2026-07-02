@@ -31,16 +31,18 @@
 //!   with no select step). The §4 login exporter
 //!   `eval "$(ocx --global env --shell=sh)"` runs on every shell start — it
 //!   MUST NOT contact the registry, install, or hang. A pinned tool not
-//!   materialised locally ⇒ silently skipped. The global tier is LENIENT: ANY
-//!   resolution failure — nothing configured ("no lock / nothing local") OR a
-//!   real fault (corrupt/stale `$OCX_HOME/ocx.lock`, env-composition error) —
-//!   yields the SAME **empty env** (exit 0). This does not depend on `--shell`,
-//!   which only selects the output FORMAT, never the error semantics: one
-//!   predictable rule, an unusable global toolchain is empty. A corrupt global
-//!   lock surfaces loudly via the commands that rewrite it
-//!   (`ocx --global lock`/`add`/`upgrade`), not via this read-only exporter; a
-//!   genuine fault is logged at `debug`. Never exit 74. (The PROJECT tier stays
-//!   strict — see below.)
+//!   materialised locally ⇒ silently skipped. The global tier is LENIENT about
+//!   AVAILABILITY: nothing configured ("no lock / nothing local") OR a
+//!   corrupt/stale `$OCX_HOME/ocx.lock` yields an **empty env** (exit 0) — a
+//!   corrupt lock surfaces loudly via the commands that rewrite it
+//!   (`ocx --global lock`/`add`/`upgrade`), not via this read-only exporter.
+//!   But leniency stops at SECURITY: once a toolchain resolves, its patch overlay
+//!   is composed with project-tier strictness, so a C7 fail-closed failure (a
+//!   `required`/`system_required` companion missing) PROPAGATES rather than
+//!   silently dropping an operator-mandated overlay. This does not depend on
+//!   `--shell`, which only selects the output FORMAT, never the error semantics.
+//!   Still offline, never installs, never hangs. (The PROJECT tier stays strict —
+//!   see below.)
 //! - **project** (no `--global`) routes through `load_project_with_lock` +
 //!   `compose_tool_set`, then a **single batched** `find_or_install_all` over
 //!   all composed identifiers (mirrors `run.rs` — no per-tool N+1 network
@@ -61,6 +63,7 @@ use ocx_lib::{
     cli,
     oci::Platform,
     package::metadata::env::entry::Entry,
+    package_manager::PatchProvenance,
     project::{ALL_GROUP, DEFAULT_GROUP, ProjectLock, compose_tool_set, expand_all_keyword, lock::lock_path_for},
 };
 
@@ -90,12 +93,14 @@ use crate::{
 ///
 /// # Exit codes
 ///
-/// - 0 (`Success`): under `--global`, ANY resolution outcome short of a usage
-///   error — nothing configured (no `$OCX_HOME/ocx.lock`, or nothing resolves
-///   locally) AND a corrupt/stale global lock or composition fault — yields an
-///   empty env on the report path AND the eval-safe `--shell` path. The global
-///   tier is lenient; a corrupt global lock surfaces via `ocx --global lock`/
-///   `add`/`upgrade`, not this read-only exporter.
+/// - 0 (`Success`): under `--global`, nothing configured (no `$OCX_HOME/ocx.lock`,
+///   or nothing resolves locally) or a corrupt/stale global lock yields an empty
+///   env on the report path AND the eval-safe `--shell` path. The global tier is
+///   lenient about availability; a corrupt lock surfaces via `ocx --global lock`/
+///   `add`/`upgrade`, not this read-only exporter. A C7 patch fail-closed failure
+///   (a `required`/`system_required` companion missing on a resolved global
+///   toolchain) instead PROPAGATES as a non-zero exit — the same fail-closed
+///   posture as the project tier.
 /// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); unknown
 ///   `--group` (project tier); empty `--group` comma segment; more than one
 ///   `--platform` value; `--shell`
@@ -156,6 +161,18 @@ pub struct ToolchainEnv {
 
     #[clap(flatten)]
     platforms: options::Platforms,
+
+    /// Annotate each entry with its origin package or companion identifier.
+    ///
+    /// When `[patches]` is configured, companion overlay entries are appended
+    /// after the toolchain's own entries.  `--show-patches` adds a Source column
+    /// to the plain table (or a `"source"` field in JSON) so the origin of each
+    /// entry is visible.
+    ///
+    /// Has no effect when `[patches]` is not configured.  Cannot be combined
+    /// with `--shell` or `--ci`; use the plain or JSON structured report instead.
+    #[arg(long, default_value_t = false, conflicts_with = "shell", conflicts_with = "ci")]
+    show_patches: bool,
 }
 
 impl ToolchainEnv {
@@ -182,36 +199,39 @@ impl ToolchainEnv {
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
         // `ContextOptions`) re-targets resolution to `$OCX_HOME/ocx.toml`;
         // `--global` ⟂ `--project` is rejected at `Context::try_init`.
-        let entries = if context.global() {
-            // OFFLINE current-symlink resolution (ADR D5, handshake §1/§4).
+        //
+        // `patch_start` is the index at which companion-overlay entries begin
+        // (used by the `--show-patches` annotation below). BOTH tiers apply the
+        // Phase 4 overlay from local state and return the boundary: the global
+        // path's `offline_view` preserves the patch tier (only the network is
+        // disabled), so already-installed companions overlay the global env too.
+        let (entries, patch_start, provenance) = if context.global() {
+            // OFFLINE lock-pinned resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             //
-            // The global tier is LENIENT — it is an implicit, optional
-            // toolchain. "No usable global toolchain" is a normal empty result,
-            // not an error. Every non-success outcome — nothing configured
-            // (`Ok(None)`: no `$OCX_HOME/ocx.lock`, or nothing materialised
-            // locally) OR a real fault (`Err`: corrupt/stale lock,
-            // env-composition error) — yields the SAME empty env (exit 0).
+            // The global tier is LENIENT about AVAILABILITY: "no usable global
+            // toolchain" is a normal empty result, not an error. A missing global
+            // lock, a corrupt/unreadable lock, or a toolchain whose packages are
+            // not materialised locally all yield `Ok(None)` → empty env (exit 0).
+            // A corrupt lock also surfaces loudly via the commands that rewrite it
+            // (`ocx --global lock`/`add`/`upgrade`), so this read-only exporter
+            // need not.
             //
-            // This is INDEPENDENT of `--shell`: that flag selects the output
-            // FORMAT (eval-safe lines vs structured report), never the error
-            // semantics. One predictable rule — an unusable global toolchain is
-            // empty, full stop — instead of behaviour that forks on how the
-            // caller happens to format output.
-            //
-            // A genuine fault is logged at `debug` so it stays observable
-            // (`-l debug`); a corrupt global lock also surfaces loudly via the
-            // commands that actually rewrite it (`ocx --global lock`/`add`/
-            // `upgrade`), so this read-only exporter need not. The PROJECT tier
-            // (the `else` arm) stays strict: an explicit project's
-            // missing/stale/corrupt `ocx.lock` IS an error.
+            // But leniency stops at SECURITY: once a global toolchain resolves,
+            // its patch overlay is composed with the SAME strictness as the
+            // project tier. A C7 fail-closed failure (a `required` /
+            // `system_required` companion missing, or a corrupt required
+            // descriptor) — or any other env-composition failure of the resolved
+            // toolchain — propagates as `Err`, so an operator-mandated overlay can
+            // never be silently dropped on the global tier. This is INDEPENDENT of
+            // `--shell`, which only selects the output FORMAT, never the error
+            // semantics. It stays offline, never installs, never hangs. The
+            // PROJECT tier (the `else` arm) stays strict throughout: an explicit
+            // project's missing/stale/corrupt `ocx.lock` IS an error.
             match resolve_global_pinned_env(&context, &target, self.groups.as_slice()).await {
-                Ok(Some(entries)) => entries,
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    tracing::debug!("global toolchain env resolution failed; emitting empty env: {error:#}");
-                    Vec::new()
-                }
+                Ok(Some((entries, patch_start, provenance))) => (entries, patch_start, provenance),
+                Ok(None) => (Vec::new(), 0, Vec::new()),
+                Err(error) => return Err(error),
             }
         } else {
             // Project tier: resolve + a SINGLE batched install (mirror run.rs).
@@ -241,7 +261,9 @@ impl ToolchainEnv {
                 .into_iter()
                 .map(Arc::new)
                 .collect();
-            manager.resolve_env(&infos, false).await?
+            // Per-package opt-out from the in-scope project `ocx.toml`.
+            let scope = ocx_lib::package_manager::PatchScope::Project(ctx.config.no_patches_repositories());
+            manager.resolve_env_with_patch_boundary(&infos, false, scope).await?
         };
 
         // ── Emit ─────────────────────────────────────────────────────────────
@@ -264,10 +286,26 @@ impl ToolchainEnv {
         // `--format`); this command does not override it.
         let env_data: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
-            .map(|e| api::data::env::EnvEntry {
-                key: e.key,
-                value: e.value,
-                kind: e.kind,
+            .enumerate()
+            .map(|(i, e)| {
+                // Annotate origin when `--show-patches` is enabled. Entries at index
+                // `>= patch_start` came from companion overlay projections; the aligned
+                // `provenance` vec names the rule glob + companion for each.
+                let source = if self.show_patches && i >= patch_start {
+                    let prov = &provenance[i - patch_start];
+                    Some(api::data::env::EntrySource::Patch {
+                        rule: prov.rule_match.clone(),
+                        companion: prov.companion.to_string(),
+                    })
+                } else {
+                    None
+                };
+                api::data::env::EnvEntry {
+                    key: e.key,
+                    value: e.value,
+                    kind: e.kind,
+                    source,
+                }
             })
             .collect();
 
@@ -321,12 +359,17 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 /// by `current` back-refs — so dropping the `current` dependency here does not
 /// expose them to garbage collection.
 ///
-/// Returns `Ok(None)` when there is no global `ocx.lock`, or no global tool
-/// resolves locally. A real failure (corrupt lock, composition error) returns
-/// `Err`. The caller treats the global tier as lenient — it maps BOTH `Ok(None)`
-/// and `Err` to a no-op empty env (exit 0) on the report and eval-safe paths
-/// alike (logging the `Err` at `debug`); a corrupt global lock surfaces via the
-/// lock-rewriting commands, not this read-only exporter. Never exit 74.
+/// Returns `Ok(None)` for every benign "no usable global toolchain" outcome:
+/// no global `ocx.lock`, a corrupt/unreadable lock, or no global tool resolving
+/// locally. The caller maps `Ok(None)` to an empty env (exit 0) — a corrupt lock
+/// surfaces via the lock-rewriting commands (`ocx --global lock`/`add`/
+/// `upgrade`), not this read-only exporter.
+///
+/// Returns `Err` ONLY when a resolved toolchain's patch overlay / env composition
+/// fails — most importantly a C7 fail-closed failure (a `required` /
+/// `system_required` companion missing, or a corrupt required descriptor). The
+/// caller PROPAGATES that error: the global tier fails closed on a mandated
+/// overlay exactly as the project tier does. Never exit 74.
 ///
 /// # Offline guarantee
 ///
@@ -337,18 +380,31 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 ///
 /// # Errors
 ///
-/// Propagates `resolve_env` / index errors.  Never contacts the network.
+/// Propagates a `resolve_env_with_patch_boundary` failure (C7 fail-closed or env
+/// composition) for a resolved toolchain. Benign toolchain faults (no/corrupt
+/// lock, nothing materialised) return `Ok(None)`, not `Err`. Never contacts the
+/// network.
 pub(crate) async fn resolve_global_pinned_env(
     context: &crate::app::Context,
     target: &Platform,
     groups: &[String],
-) -> anyhow::Result<Option<Vec<Entry>>> {
+) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>)>> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
 
-    let Some(lock) = ProjectLock::from_path(&global_lock_path).await? else {
-        return Ok(None);
+    // A missing OR corrupt/unreadable global lock is benign here — the login
+    // exporter stays lenient (empty env). Only a patch-enforcement /
+    // env-composition failure of a RESOLVED toolchain (the `resolve_env_with_patch_boundary`
+    // call below) propagates. A corrupt lock surfaces loudly via the commands that
+    // rewrite it (`ocx --global lock`/`add`/`upgrade`).
+    let lock = match ProjectLock::from_path(&global_lock_path).await {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            tracing::debug!("global lock unreadable; emitting empty env: {error:#}");
+            return Ok(None);
+        }
     };
 
     let selected_groups = selected_groups_global(groups, &lock);
@@ -400,8 +456,22 @@ pub(crate) async fn resolve_global_pinned_env(
         return Ok(None);
     }
 
-    let entries = manager.resolve_env(&infos, false).await?;
-    Ok(Some(entries))
+    // Per-package opt-out from the global `$OCX_HOME/ocx.toml`. The global lock
+    // can exist without a sibling `ocx.toml`; a missing or unparseable file
+    // yields an empty opt-out set (lenient — the login exporter must never fail
+    // on a malformed global config, matching this path's overall posture).
+    let no_patches = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+        Ok(config) => config.no_patches_repositories(),
+        Err(_) => std::collections::BTreeSet::new(),
+    };
+
+    // Patch overlays apply offline: companions are already installed locally and
+    // `offline_view` preserves the patch tier (the network alone is disabled).
+    // Return the companion-overlay boundary so `--show-patches` can annotate
+    // companion entries on the global path, exactly as on the project path.
+    let scope = ocx_lib::package_manager::PatchScope::Project(no_patches);
+    let (entries, patch_start, provenance) = manager.resolve_env_with_patch_boundary(&infos, false, scope).await?;
+    Ok(Some((entries, patch_start, provenance)))
 }
 
 /// Resolve the raw `-g` values into the concrete global-tier group set.

@@ -562,6 +562,7 @@ ocx env [OPTIONS]
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
+| `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
 | `-h`, `--help` | | Print help information. | — |
 
 **Reserved group keywords**
@@ -656,6 +657,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 - `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`.
 - `--ci[=PROVIDER]`: Write the resolved environment into the CI system's persistence channel so later pipeline steps see the exported paths and variables. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects from [`GITHUB_ACTIONS`][env-github-actions] / [`GITLAB_CI`][env-gitlab-ci] (exits 64 if neither detected). Equals-form required. Mutually exclusive with `--shell`. See [CI Integration][in-depth-ci] for full walkthrough.
 - `--export-file=PATH`: Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines output to `PATH`. Requires `--ci=gitlab`; rejected with exit 64 for `--ci=github` or when given without `--ci`.
+- `--show-patches`: Annotate each entry with its origin. Adds a `Source` column (plain) or a `"source"` object (JSON) naming the descriptor rule and companion behind each companion-overlay entry appended after the package's own entries. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`.
 - `-h`, `--help`: Print help information.
 
 ### `exec` {#exec}
@@ -2519,6 +2521,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |
 | `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
 | `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
+| `--show-patches` | | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the package's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. |
 | `-h`, `--help` | | Print help information. |
 
 ::: warning `--ci=gitlab` requires GitLab Functions / step runner
@@ -2528,6 +2531,250 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 ::: info Windows: synthetic `PATHEXT ⊳ .CMD`
 On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this lets callers that adopt the printed env find launchers by bare name without further configuration.
 :::
+
+### `patch` {#patch}
+
+Manage site-infrastructure patch overlays. Patch descriptors map glob patterns over
+package identifiers to **companion packages** that carry operator-controlled environment
+overlays (CA bundles, proxy variables, license-server endpoints). The `[patches]`
+configuration tier must be set before any patch sub-command that contacts the registry.
+
+For a full walkthrough, see the [Patching packages guide][patches-user-guide].
+
+**Usage**
+
+```shell
+ocx patch <SUBCOMMAND>
+```
+
+**Sub-commands**
+
+| Sub-command | Purpose |
+|-------------|---------|
+| `freeze` | Write a `patches.snapshot.json` file that pins companion digests for reproducible builds. |
+| `sync` | Refresh descriptors and install newly-referenced companion packages from the registry. |
+| `publish` | Push a patch descriptor to the configured patch registry. |
+| `test` | Compose a descriptor onto a base package locally without publishing (maintainer preview). |
+| `why` | Show which companion, and which descriptor rule, contributes each patched env var to a base. |
+
+#### `patch freeze` {#patch-freeze}
+
+Resolves every companion and descriptor digest in the active patch overlay and writes
+`patches.snapshot.json` beside `ocx.lock` (or in `$OCX_HOME` under `--global`). Once
+written, set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file path so all
+subsequent composition prefers the pinned digests over live tag lookups.
+
+Works offline: only the local object store is consulted.
+
+**Usage**
+
+```shell
+ocx patch freeze
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand to write `patches.snapshot.json` beside
+`$OCX_HOME/ocx.lock`: `ocx --global patch freeze`. See [`--global`][global-flag] for the
+full root-flag reference.
+:::
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Snapshot written successfully. |
+| 74 | I/O error writing the snapshot file. |
+| 78 | No `ocx.lock` found for the project tier (run `ocx lock` first). |
+
+#### `patch sync` {#patch-sync}
+
+Re-fetches every patch descriptor for all installed packages and the global descriptor. Installs
+any newly-referenced companion packages. Requires network access.
+
+This command also picks up patches for packages installed before the `[patches]` tier was
+configured. All states are re-checked regardless of what was previously recorded. Running
+`patch sync` is equivalent to `ocx index update` for the patch tier.
+
+Without `--platform`, `patch sync` resolves **every supported platform**
+(`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) — not just the
+host platform. A synced descriptor/companion set is shared across a team the same way
+[`ocx lock`](#lock) is: it must cover every platform a teammate might run, or an offline or
+required-patch launch on their machine silently breaks. Pass `--platform` (repeatable) to
+narrow to a subset.
+
+**Usage**
+
+```shell
+ocx patch sync [OPTIONS]
+```
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--platform PLATFORM` | `-p` | Target platform for companion resolution. Repeatable. Defaults to all supported platforms when omitted. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Sync complete, including a no-op when no `[patches]` tier is configured. |
+| 81 | `--offline` blocked the sync — `patch sync` is an explicit online action and always requires network access, unlike lazy discovery at install time. |
+| *other* | A `required` companion failed to install for one of the known bases; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
+
+#### `patch publish` {#patch-publish}
+
+Reads a descriptor JSON file, validates it, and pushes it to the configured
+[`[patches]`][config-patches] registry. Use `--global` for a descriptor that
+applies to every package; supply a base identifier to publish a per-package descriptor.
+Publish companion packages separately with `ocx package push` before publishing the
+descriptor that references them.
+
+Requires network access; fails in offline mode.
+
+**Usage**
+
+```shell
+ocx patch publish --descriptor <FILE> [--global | <BASE-ID>]
+```
+
+**Arguments**
+
+- `<BASE-ID>`: The base package whose per-package patch path receives the descriptor.
+  Required unless `--global` is set.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
+| `--global` | | Publish the descriptor to the reserved `global` repository under the patch registry so it applies to every base. Mutually exclusive with `<BASE-ID>`. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Descriptor published. |
+| 64 | No `[patches]` tier configured; set `[patches]` or `OCX_PATCHES` before publishing. |
+| 65 | Descriptor JSON is malformed or the version is unsupported. |
+| 69 | Registry unreachable. |
+| 81 | `--offline` blocked the publish — `patch publish` requires network access. |
+
+#### `patch test` {#patch-test}
+
+Composes a patch descriptor onto a base package in a scratch environment without
+publishing or modifying `$OCX_HOME`. Use this to verify a descriptor before publishing.
+
+Without a trailing command, prints the composed environment so you can inspect the
+entries contributed by the matched companions. With `-- <COMMAND>`, runs the command in
+the composed environment. With `--script`, runs a [Starlark test script][authoring-testing-scripted]
+against the composed environment.
+
+Required companion packages must be resolvable (installed locally or pullable from the
+registry). An unresolvable required companion fails the command. An optional companion
+that cannot be resolved is warned-and-skipped, matching the production fail-open path.
+
+**Usage**
+
+```shell
+ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
+```
+
+**Arguments**
+
+- `<BASE-ID>`: The base package identifier to compose the descriptor onto. Required.
+- `[-- COMMAND [ARGS...]]`: Command to run in the composed environment. Mutually
+  exclusive with `--script`. When neither is given, the composed environment is printed.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
+| `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. |
+| `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
+| `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
+| `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Environment printed, or the trailing command/script exited 0. |
+| *(child's exit code)* | With a trailing command, the child's exit code is forwarded unchanged — a command that exits 7 makes `patch test` exit 7. |
+| 64 | No `[patches]` tier configured; set `[patches]` or `OCX_PATCHES` before testing. |
+| 65 | Descriptor JSON is malformed or the version is unsupported. |
+| 81 | `--offline` blocked resolving the base or a required companion. |
+| *other* | A required companion could not be resolved; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
+
+With `--script`, the exit code follows the [scripted-tests contract][authoring-testing-scripted-exit-codes] instead — assertion failures exit 1, script-level errors exit 64/65/74.
+
+#### `patch why` {#patch-why}
+
+Shows which companion, and which descriptor rule, contributes each patched env var to a base
+package. Resolves `<BASE-ID>` directly against the configured [`[patches]`][config-patches]
+registry — an OCI-tier diagnostic that never consults `ocx.toml`. Use this to trace a companion
+overlay back to the rule that admitted it, without reading through the full composed environment.
+
+A base with no applicable patch (no `[patches]` tier configured, or no descriptor rule matches
+the base) prints a clean "no patches apply" result and exits `0` — not an error.
+
+**Usage**
+
+```shell
+ocx patch why [OPTIONS] <BASE-ID>
+```
+
+**Arguments**
+
+- `<BASE-ID>`: The base package identifier to trace patch provenance for. Required.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--platform <PLATFORM>` | `-p` | Target platform for resolving the base. Repeatable. Defaults to the host platform. |
+| `-h`, `--help` | | Print help information. |
+
+Output follows the root [`--format`][arg-format] flag like every other command — there is no
+subcommand-level `--format` override. With `--format plain` (default), the result is a
+`Variable | Rule | Companion` table, one row per patched env var:
+
+```shell
+ocx patch why java:21
+```
+
+```
+Variable     Rule          Companion
+JAVA_TRUST   ocx.sh/java:* corp/jdk-trust:1.0
+```
+
+With `--format json`, the result is a bare array of `{ "variable", "rule", "companion" }` objects
+(`[]` when no patches apply):
+
+```shell
+ocx --format json patch why java:21
+```
+
+```json
+[
+  { "variable": "JAVA_TRUST", "rule": "ocx.sh/java:*", "companion": "corp/jdk-trust:1.0" }
+]
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Result printed — including a base with no applicable patch. |
+| 69 | Registry unreachable while resolving the base. |
+| 79 | Base identifier not found in the registry. |
 
 <!-- external -->
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
@@ -2557,6 +2804,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-clicolor-force]: ./environment.md#external-clicolor-force
 [env-ocx-index]: ./environment.md#ocx-index
 [env-ocx-frozen]: ./environment.md#ocx-frozen
+[env-ocx-patch-snapshot]: ./environment.md#ocx-patch-snapshot
 [env-no-config]: ./environment.md#ocx-no-config
 [env-config]: ./environment.md#ocx-config
 [env-project]: ./environment.md#ocx-project
@@ -2578,6 +2826,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 
 <!-- reference -->
 [config-ref]: ./configuration.md
+[config-patches]: ./configuration.md#keys-patches
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/
@@ -2596,6 +2845,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [fs-index]: ../in-depth/indices.md#local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment
+[patches-user-guide]: ../user-guide/patches.md
 
 <!-- commands (package-test options) -->
 [cmd-package-push]: #package-push
@@ -2626,3 +2876,5 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md
+[authoring-testing-scripted]: ../authoring/testing.md#scripted-tests
+[authoring-testing-scripted-exit-codes]: ../authoring/testing.md#scripted-tests-exit-codes

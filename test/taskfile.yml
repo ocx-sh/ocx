@@ -52,7 +52,11 @@ tasks:
       - task: default
         vars:
           SKIP_BUILD: "true"
-          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+          # `--dist loadgroup` honours `@pytest.mark.xdist_group` so resource-
+          # contended modules (test_patches.py shares the registry-wide global
+          # patch descriptor slot) run serially on one worker while the rest
+          # parallelize.
+          CLI_ARGS: '-n auto --dist loadgroup {{.CLI_ARGS | default "-v"}}'
 
   parallel:
     desc: Run acceptance tests in parallel
@@ -71,7 +75,11 @@ tasks:
     cmds:
       - task: default
         vars:
-          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+          # `--dist loadgroup` honours `@pytest.mark.xdist_group` so resource-
+          # contended modules (test_patches.py shares the registry-wide global
+          # patch descriptor slot) run serially on one worker while the rest
+          # parallelize.
+          CLI_ARGS: '-n auto --dist loadgroup {{.CLI_ARGS | default "-v"}}'
 
   shells:
     desc: >-

@@ -172,13 +172,52 @@ impl Context {
                 .unwrap_or_else(|| ocx_lib::oci::DEFAULT_REGISTRY.into()),
         );
 
+        // Resolve the [patches] site-tier config before constructing the manager
+        // so the resolved form can be threaded in at construction time.
+        // The two-step resolution (config-file tier then env fallback) must happen
+        // here — the manager constructor receives the already-resolved form and does
+        // not read config itself.
+        //
+        // The `no_patches` opt-out is a forwarded project-runtime concern, never
+        // a `[patches]` config field, and MUST NOT be grafted onto a
+        // config-file-sourced tier here: doing so makes a project-local opt-out
+        // ambient inherited process state — it lands in `manager.patches()` AND
+        // (via `config_view.patches` below) is re-forwarded over `OCX_PATCHES`
+        // into unrelated child processes. The forwarded opt-out is meaningful
+        // only at the launcher re-entry (`ocx launcher exec`), which decodes it
+        // directly from the env at consumption time. Every other command computes
+        // its own opt-out from its own project (`PatchScope::Project(...)`) or is
+        // OCI-tier (`NoProjectContext`). The env-fallback branch below still
+        // forwards a pure env-sourced tier verbatim (there is no config tier to
+        // be authoritative), which is correct.
+        let resolved_patches = match ocx_lib::resolve_patch_config(&config).map_err(anyhow::Error::new)? {
+            Some(resolved) => Some(resolved),
+            None => ocx_lib::patches_from_env().map_err(anyhow::Error::new)?,
+        };
+
+        // Resolve the active patch snapshot (if any) from `OCX_PATCH_SNAPSHOT`.
+        // Reading happens before manager construction so the snapshot can be
+        // threaded in at construction time — mirrors the resolved_patches flow
+        // above. The env var is the sole selector for now; a future
+        // `--patch-snapshot` flag would populate it here first.
+        let patch_snapshot_path = env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
+        let patch_snapshot = if let Some(ref path) = patch_snapshot_path {
+            ocx_lib::patch::PatchSnapshot::read(path)
+                .await
+                .map_err(anyhow::Error::new)?
+        } else {
+            None
+        };
+
         let manager = package_manager::PackageManager::new(
             file_structure.clone(),
             selected_index.clone(),
             remote_client.clone(),
             &default_registry,
         )
-        .with_progress(progress.clone());
+        .with_progress(progress.clone())
+        .with_patches(resolved_patches.clone())
+        .with_patch_snapshot(patch_snapshot);
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -194,6 +233,18 @@ impl Context {
         // Feed the same resolved mirror map into the forwarding view so a child
         // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
         config_view.mirrors = mirror_pairs;
+        // Thread the already-resolved patches into the config forwarding view
+        // so child ocx processes (launcher exec) inherit the same patch tier
+        // via `OCX_PATCHES` (C5 — forwarding across process boundaries).
+        // `resolved_patches` was resolved above (config-file tier then env
+        // fallback) before being passed to the manager constructor.
+        config_view.patches = resolved_patches;
+        // Forward the already-resolved patch snapshot path into the config view
+        // so child processes (launcher exec) inherit the same snapshot via
+        // `OCX_PATCH_SNAPSHOT` — mirrors how `resolved_patches` is forwarded
+        // above. No `--patch-snapshot` flag exists yet; the env var is the
+        // sole selector for now.
+        config_view.patch_snapshot = patch_snapshot_path;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);

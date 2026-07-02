@@ -242,6 +242,14 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
         # publisher exposes display name "mytool" with stub tag "display"
         "mytool": "mytool:display",
     },
+    "setup:patches-consumer": {
+        "cmake": "cmake:4.2.0",
+        "corp-ca": "corp-ca:1.0.0",
+    },
+    "setup:patches-maintainer": {
+        "mytool": "mytool:1.0.0",
+        "corp-ca": "corp-ca:1.0.0",
+    },
     # ---- scenario family (src.scenarios.SCENARIOS) ----
     "scenario:BasicPackage": {
         "hello": "hello:1.0.0",

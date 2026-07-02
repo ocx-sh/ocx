@@ -209,7 +209,18 @@ impl Run {
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
-        let entries = manager.resolve_env(&install_infos, self.self_view).await?;
+        // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
+        // opted-out bases get no companion overlay unless the tier is
+        // system-required. `run.rs` does not need the patch boundary index.
+        // Bound once here: it drives the parent resolve below AND is forwarded
+        // into the child's patch tier (Phase G) so a generated launcher's
+        // re-entry (`ocx launcher exec`) honours the same opt-out.
+        let no_patches = ctx.config.no_patches_repositories();
+        let scope = ocx_lib::package_manager::PatchScope::Project(no_patches.clone());
+        let entries = manager
+            .resolve_env_with_patch_boundary(&install_infos, self.self_view, scope)
+            .await?
+            .0;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
@@ -221,7 +232,34 @@ impl Run {
         // `Env::new()` so the outer ocx's parsed state is the sole authority
         // for `OCX_*` keys on the child env — no ambient parent-shell export
         // can override it.
-        process_env.apply_ocx_config(context.config_view());
+        //
+        // Inject the project `no-patches` opt-out into the forwarded patch tier:
+        // the base `config_view().patches` carries only the config-file tier
+        // (empty `no_patches`). Forwarding the opt-out over `OCX_PATCHES` lets a
+        // child launcher's `Context` reconstruct it. Only `patches.is_some()`
+        // tiers forward — an absent tier has no companions to re-inject.
+        //
+        // A generated launcher resolves its base via `install_info_from_package_root`,
+        // which mints a synthetic content-addressed identifier with no real
+        // `registry/repository` (see `launcher/exec.rs`), so a repo-key alone
+        // never matches there. Also forward each opted-out base's resolved
+        // content digest (from the already-resolved `install_infos`) so the
+        // launcher's digest-matching leg (`resolve.rs`) can recognise it. The
+        // digest string form (`Digest::to_string()`, e.g. `sha256:<hex>`) must
+        // match exactly what the resolver compares against.
+        let mut forwarded_no_patches = no_patches.clone();
+        for info in &install_infos {
+            let id = info.identifier().as_identifier();
+            let repo_key = format!("{}/{}", id.registry(), id.repository());
+            if no_patches.contains(&repo_key) {
+                forwarded_no_patches.insert(info.identifier().digest().to_string());
+            }
+        }
+        let mut forwarded = context.config_view().clone();
+        if let Some(patches) = forwarded.patches.as_mut() {
+            patches.no_patches = forwarded_no_patches;
+        }
+        process_env.apply_ocx_config(&forwarded);
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.

@@ -7,6 +7,7 @@ use super::modifier::ModifierKind;
 
 /// A single resolved env-var binding (key, value, kind) ready for application
 /// or programmatic consumption.
+#[derive(Debug, Clone)]
 pub struct Entry {
     pub key: String,
     pub value: String,

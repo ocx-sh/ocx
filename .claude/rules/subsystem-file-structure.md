@@ -51,11 +51,22 @@ pub struct FileStructure {
     pub packages: PackageStore,
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
+    pub state: StateStore,
     pub temp: TempStore,
 }
 ```
 
 One instance per session. Sub-stores public fields. `root()` return OCX home path.
+
+### Never Re-Construct a Store (Block-tier)
+
+Never `<Store>::new(root.join("tags"))` / `.join("blobs")` / etc. to reach a store — that
+re-constructs a store `FileStructure` already owns, via a literal path join instead of the
+canonical accessor. Always reach a store through the already-constructed `FileStructure`
+(`FileStructure::with_root(root)` builds all seven stores in one place): `fs.tags`, `fs.blobs`,
+`fs.layers`, `fs.packages`, `fs.symlinks`, `fs.state`, `fs.temp`. A literal `.join(...)` is fine
+when it is a genuine SUB-PATH under an already-correct store root (e.g. a scratch subdir under
+`fs.temp.root()`) — the rule is against RE-CONSTRUCTING the store, not against every join.
 
 **Root-level state files under `$OCX_HOME`:**
 
@@ -67,7 +78,7 @@ One instance per session. Sub-stores public fields. `root()` return OCX home pat
 
 `$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
-## Six Stores
+## Seven Stores
 
 ### BlobStore — Raw OCI blobs
 
@@ -120,6 +131,13 @@ pub enum SymlinkKind { Candidate, Current }
 Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identifier)`, `symlink(identifier, kind)`.
 
 `candidate()` use `identifier.tag_or_latest()` (fall back to `"latest"` if no tag).
+
+### StateStore — Persistent runtime state
+
+Layout: `{root}/state/` — see "Root-level state files under `$OCX_HOME`" above for the full
+path table (`state/update-check/<slug>` etc.).
+
+Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`.
 
 ### TempStore — Download staging
 

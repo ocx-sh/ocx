@@ -83,7 +83,10 @@ impl DirenvExport {
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
         }
 
-        let entries = manager.resolve_env(&applied.infos, false).await?;
+        let scope = ocx_lib::package_manager::PatchScope::Project(project.config.no_patches_repositories());
+        let (entries, _, _) = manager
+            .resolve_env_with_patch_boundary(&applied.infos, false, scope)
+            .await?;
         // Delegate to the shared emit helper (C5 / conventions.rs).
         // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash
         // sub-shell regardless of the user's interactive shell.  There is no

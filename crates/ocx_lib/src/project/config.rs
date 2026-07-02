@@ -13,6 +13,27 @@ use super::error::{ProjectError, ProjectErrorKind};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
 
+/// Per-package resolve-time settings declared in `ocx.toml` under
+/// `[package."<registry/repo[:tag]>"]`.
+///
+/// Currently carries a single opt-out: `no-patches = true` declines the
+/// site-tier companion overlay for that base — EXCEPT a system-required patch
+/// still applies (enforcement beats opt-out, C7). The opt-out is
+/// version-independent: it keys on canonical `registry/repository` and applies
+/// to every installed version.
+///
+/// `#[serde(deny_unknown_fields)]` so a typo in a `[package.*]` key's body
+/// surfaces as a parse error rather than a silent no-op.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSettings {
+    /// Decline the site-tier companion overlay for this base.
+    ///
+    /// A system-required patch still applies (enforcement beats opt-out).
+    #[serde(default, rename = "no-patches")]
+    pub no_patches: bool,
+}
+
 /// Project-tier configuration parsed from `ocx.toml`.
 ///
 /// Schema follows ADR "Project-Level Toolchain Config" decision 1A:
@@ -53,6 +74,16 @@ pub struct ProjectConfig {
     #[serde(default, rename = "group")]
     pub groups: BTreeMap<String, BTreeMap<String, Identifier>>,
 
+    /// Per-package resolve-time settings; `[package."<id>"]` in TOML. Keyed by
+    /// the canonical author string (registry/repo[:tag]) so Serialize
+    /// round-trips byte-faithfully. Currently carries the `no-patches` opt-out.
+    ///
+    /// This is RESOLVE-TIME POLICY, not a tool-binding declaration: it is
+    /// deliberately excluded from [`super::declaration_hash`] (a `no-patches`
+    /// edit must not invalidate `ocx.lock`).
+    #[serde(default, rename = "package")]
+    pub packages: BTreeMap<String, PackageSettings>,
+
     /// Lazily-cached canonical declaration hash (RFC 8785 JCS + SHA-256).
     ///
     /// Populated on first call to [`Self::declaration_hash_cached`]. Mutators
@@ -88,6 +119,7 @@ impl Clone for ProjectConfig {
         Self {
             tools: self.tools.clone(),
             groups: self.groups.clone(),
+            packages: self.packages.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -98,7 +130,7 @@ impl PartialEq for ProjectConfig {
         // The cache is a derived datum; comparing it would conflate "same
         // declaration" with "both cached" / "neither cached". Equality
         // speaks to the declared content only.
-        self.tools == other.tools && self.groups == other.groups
+        self.tools == other.tools && self.groups == other.groups && self.packages == other.packages
     }
 }
 
@@ -123,6 +155,12 @@ struct RawProjectConfig {
 
     #[serde(default, rename = "group")]
     groups: BTreeMap<String, BTreeMap<String, String>>,
+
+    /// Per-package settings. `PackageSettings` deserializes directly (only a
+    /// bool) — the map KEY is validated as a strict [`Identifier`] in
+    /// [`ProjectConfig::from_str_with_path`], not at the serde layer.
+    #[serde(default, rename = "package")]
+    package: BTreeMap<String, PackageSettings>,
 }
 
 impl ProjectConfig {
@@ -137,6 +175,9 @@ impl ProjectConfig {
         Self {
             tools,
             groups,
+            // `packages` is resolve-time policy, not a tool binding; the
+            // programmatic constructor starts with no opt-outs declared.
+            packages: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -169,6 +210,30 @@ impl ProjectConfig {
     /// requiring outer ownership.
     pub fn invalidate_declaration_hash_cache(&mut self) {
         self.declaration_hash_cache.take();
+    }
+
+    /// Set of canonical `"registry/repository"` strings for every
+    /// `[package."<id>"]` entry whose `no-patches == true`.
+    ///
+    /// Tag/digest are EXCLUDED: the opt-out is version-independent — opting a
+    /// package out applies to every installed version. Keys were validated as
+    /// fully-qualified [`Identifier`]s at parse time, so `Identifier::parse`
+    /// here cannot fail for a well-formed config; a key that somehow fails to
+    /// re-parse is silently skipped (it could not match a base anyway).
+    ///
+    /// Consumed by the resolver's site-patch boundary
+    /// (`build_site_patch_set`) to skip the companion overlay for opted-out
+    /// bases — EXCEPT a system-required patch, which still applies.
+    pub fn no_patches_repositories(&self) -> std::collections::BTreeSet<String> {
+        self.packages
+            .iter()
+            .filter(|(_, settings)| settings.no_patches)
+            .filter_map(|(key, _)| {
+                Identifier::parse(key)
+                    .ok()
+                    .map(|id| format!("{}/{}", id.registry(), id.repository()))
+            })
+            .collect()
     }
 
     /// Resolve the project-tier `ocx.toml` and adjacent lock paths.
@@ -373,9 +438,17 @@ impl ProjectConfig {
             groups.insert(group_name, parsed);
         }
 
+        // Validate every `[package."<key>"]` key as a strict, fully-qualified
+        // [`Identifier`] (same path as `[tools]` values: no default-registry
+        // fallback). A bare key without a registry is an error. The validated
+        // map is keyed by the ORIGINAL author string so Serialize round-trips
+        // byte-faithfully; validation here is for early, actionable errors only.
+        let packages = validate_package_keys(raw.package, &path)?;
+
         Ok(Self {
             tools,
             groups,
+            packages,
             declaration_hash_cache: OnceLock::new(),
         })
     }
@@ -432,6 +505,45 @@ fn parse_tool_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTreeMa
     Ok(out)
 }
 
+/// Validate every `[package."<key>"]` key as a strict, fully-qualified
+/// [`Identifier`], returning the map re-keyed by the ORIGINAL author string so
+/// Serialize round-trips byte-faithfully.
+///
+/// Mirrors [`parse_tool_map`]'s error-mapping style: a key missing a registry
+/// maps to [`ProjectErrorKind::PackageKeyMissingRegistry`]; any other identifier
+/// failure maps to [`ProjectErrorKind::PackageKeyInvalid`] (carrying the
+/// underlying [`crate::oci::identifier::error::IdentifierError`] via `#[source]`).
+/// Validation is for early, actionable errors only — the parsed identifier is
+/// discarded; the original key string is retained as the map key.
+fn validate_package_keys(
+    raw: BTreeMap<String, PackageSettings>,
+    path: &Path,
+) -> Result<BTreeMap<String, PackageSettings>, super::Error> {
+    for key in raw.keys() {
+        match Identifier::parse(key) {
+            Ok(_) => {}
+            Err(e) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {
+                return Err(ProjectError::new(
+                    path.to_path_buf(),
+                    ProjectErrorKind::PackageKeyMissingRegistry { key: key.clone() },
+                )
+                .into());
+            }
+            Err(e) => {
+                return Err(ProjectError::new(
+                    path.to_path_buf(),
+                    ProjectErrorKind::PackageKeyInvalid {
+                        key: key.clone(),
+                        source: e,
+                    },
+                )
+                .into());
+            }
+        }
+    }
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod tests {
     //! Contract-first tests for [`ProjectConfig`] parsing and resolution.
@@ -460,6 +572,104 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    // ── [package] per-package settings ──────────────────────────────────────
+
+    /// A `[package."<id>"]` block with `no-patches = true` parses, and the
+    /// accessor returns the canonical `registry/repository` (tag excluded).
+    #[test]
+    fn parse_package_no_patches_and_accessor_strips_tag() {
+        let toml = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+"#;
+        let config = ProjectConfig::from_toml_str(toml).expect("[package] block parses");
+        let opted_out = config.no_patches_repositories();
+        assert!(
+            opted_out.contains("ghcr.io/acme/cli"),
+            "accessor must yield canonical registry/repository (tag stripped); got: {opted_out:?}"
+        );
+        assert_eq!(opted_out.len(), 1);
+    }
+
+    /// `[package."<id>"]` with `no-patches = false` (or absent) does NOT add the
+    /// base to the opt-out set.
+    #[test]
+    fn parse_package_no_patches_false_is_not_opted_out() {
+        let toml = r#"[package."ghcr.io/acme/cli:v1"]
+no-patches = false
+"#;
+        let config = ProjectConfig::from_toml_str(toml).expect("parses");
+        assert!(
+            config.no_patches_repositories().is_empty(),
+            "no-patches=false must not opt the base out"
+        );
+    }
+
+    /// A `[package."<key>"]` key without a registry is rejected with
+    /// `PackageKeyMissingRegistry` (same rule as `[tools]` values).
+    #[test]
+    fn parse_package_bare_key_rejected_missing_registry() {
+        let toml = r#"[package."cmake"]
+no-patches = true
+"#;
+        let err = ProjectConfig::from_toml_str(toml).expect_err("bare package key must reject");
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::PackageKeyMissingRegistry { key } if key == "cmake"),
+            "expected PackageKeyMissingRegistry {{ key: \"cmake\" }}; got {:?}",
+            pe.kind
+        );
+    }
+
+    /// An unknown field inside a `[package."<id>"]` body is rejected
+    /// (`deny_unknown_fields` on `PackageSettings`).
+    #[test]
+    fn parse_package_unknown_field_rejected() {
+        let toml = r#"[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+bogus = "x"
+"#;
+        let err = ProjectConfig::from_toml_str(toml).expect_err("unknown [package] field must reject");
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::TomlParse(_)),
+            "expected TomlParse; got {:?}",
+            pe.kind
+        );
+    }
+
+    /// CHARACTERIZATION: adding a `[package]` opt-out must NOT change the
+    /// declaration hash. The `packages` field is resolve-time policy, not a
+    /// tool-binding declaration — a `no-patches` edit must not invalidate
+    /// `ocx.lock` via the staleness gate.
+    #[test]
+    fn declaration_hash_unchanged_by_no_patches() {
+        let without = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+"#;
+        let with = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+"#;
+        let config_without = ProjectConfig::from_toml_str(without).expect("parse");
+        let config_with = ProjectConfig::from_toml_str(with).expect("parse");
+        assert_eq!(
+            crate::project::declaration_hash(&config_without),
+            crate::project::declaration_hash(&config_with),
+            "declaration hash must be invariant to [package] no-patches edits"
+        );
     }
 
     /// Mutating the config in place after caching MUST invalidate the cache —

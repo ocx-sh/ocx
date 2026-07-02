@@ -82,6 +82,27 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `api/data/*.rs` | Report data types implementing `Printable` |
 | `options/*.rs` | Shared arg parsing helpers |
 
+## Command Module Structure
+
+A command group with subcommands is **flat, not a subdirectory** — no `mod.rs` (reinforces
+`arch-principles.md`'s "one concept per file"):
+
+- `<command>.rs` — dispatcher only: the `Subcommand` enum + `execute` delegating to each leaf.
+- `<command>_<subcommand>.rs` — one leaf file per subcommand: its `Args` struct + `execute`.
+- `<command>_common.rs` (optional) — helpers shared by 2+ leaves that don't belong in any one of them.
+
+Exemplars: `package.rs` + `package_{create,push,test}.rs`; `index.rs` + `index_{list,update}.rs`;
+`patch.rs` + `patch_{freeze,sync,publish,test,why}.rs`.
+
+## Flag Naming Convention
+
+A flag is named for the thing it denotes — its semantic domain name — never suffixed
+`-file`/`-path` (Warn-tier). That suffix is reserved for a flag that **writes to** a file (an
+output sink), e.g. `--export-file`. Existing convention: `--metadata`, `--readme`, `--logo`,
+`--script`, `--descriptor` all take a file path as input and carry no suffix. A qualifier
+distinguishing a local resource from a registry identifier belongs in the domain word itself
+(`--companion-archive`), not tacked on as a `-file` suffix.
+
 ## `--shell` Flag Convention
 
 `--shell` is declared as `Option<Option<Shell>>` with clap `num_args=0..=1, require_equals=true, default_missing_value=…` (pattern from `package_push.rs`):

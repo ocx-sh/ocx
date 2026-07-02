@@ -103,6 +103,10 @@ docs, or ADRs — never in text a user sees. Specifically, no:
   (`/// The format` on `--format`).
 - Abbreviated flag names / value placeholders — prefer full words, hyphen-separated
   (consistent with the identifier rule in `quality-rust.md`).
+- `-file`/`-path` suffix on a flag that reads input — a flag is named for the thing it denotes
+  (`--metadata`, `--readme`, `--logo`, `--script`, `--descriptor`), never suffixed
+  `-file`/`-path`. That suffix is reserved for a flag that **writes to** a file (an output
+  sink), e.g. `--export-file`.
 
 ### Suggest (improvement)
 - Missing documentation deep-link for a behavior-rich command.

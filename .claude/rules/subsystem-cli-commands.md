@@ -39,7 +39,7 @@ The CLI surface splits into two tiers. The split is firm.
 | `--format plain\|json` | — | plain (all commands, no exceptions) | Root-only output format; no subcommand-level `--format` |
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level |
-| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`upgrade`/`pull`/`run`/`env`; mutually exclusive with `--project` |
+| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`upgrade`/`pull`/`run`/`env` (plus `patch freeze`, which reads `context.global()`); mutually exclusive with `--project` |
 
 ## Toolchain-Tier: `--global` vs Project
 
@@ -125,6 +125,22 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 - `--check` calls `self_check_update(Some(Duration::ZERO), TagProbe::Remote)` and reports without installing.
 - Without `--check` calls `self_update()` which routes the install through `install_all`.
 - A `sha256:` digest pin in `self setup` selects a platform-specific package digest; the same tag resolves to a different digest per OS/arch. For CI matrices, pin by tag (each runner resolves its own platform digest) rather than sharing a single digest across platforms.
+
+### Patch Commands (`ocx patch`)
+
+| Command | Purpose | Key Flags |
+|---------|---------|-----------|
+| `patch freeze` | Write `patches.snapshot.json` pinning companion + descriptor digests beside `ocx.lock` (or `$OCX_HOME/ocx.lock` under `--global`) | — |
+| `patch sync [OPTIONS]` | Re-fetch every patch descriptor for all installed packages, install newly-referenced companions | `-p/--platform` |
+| `patch publish --descriptor <FILE> [--global \| <BASE-ID>]` | Push a patch descriptor to the configured `[patches]` registry | `--descriptor`, `--global` |
+| `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview) | `--descriptor`, `--companion-archive`, `-p/--platform`, `--script` |
+| `patch why <BASE-ID>` | List which companion, and which descriptor rule, contributes each patched env var to a base | — |
+
+**`patch` group notes:**
+- Files: `crates/ocx_cli/src/command/patch.rs` (dispatcher) + `patch_{freeze,sync,publish,test,why}.rs` (one leaf per subcommand).
+- Only `freeze` reads the root `context.global()` flag — without it, the snapshot lands beside the project's `ocx.lock`; with `--global` (root flag, before the subcommand), beside `$OCX_HOME/ocx.lock`. `sync`, `publish`, `test`, `why` never call `context.global()`.
+- `publish`'s own `--global` (declared on `PatchPublishArgs`) is unrelated to the root toolchain flag: a subcommand-local selector for the reserved `global` descriptor repository, mutually exclusive with a `<BASE-ID>` positional.
+- `publish`, `test`, `why` are registry/maintainer commands against the configured `[patches]` tier; none consult `ocx.toml`. `sync` re-checks whatever is installed locally, not scoped to one project.
 
 ### Other Commands
 

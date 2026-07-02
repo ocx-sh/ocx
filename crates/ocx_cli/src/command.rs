@@ -34,9 +34,16 @@ pub mod package_inspect;
 pub mod package_pull;
 pub mod package_push;
 pub mod package_test;
+pub mod patch;
+pub mod patch_freeze;
+pub mod patch_publish;
+pub mod patch_sync;
+pub mod patch_test;
+pub mod patch_why;
 pub mod pull;
 pub mod remove;
 pub mod run;
+pub mod script_runner;
 pub mod select;
 pub mod self_group;
 pub mod shell;
@@ -92,6 +99,9 @@ pub enum Command {
     /// Operations related to packages (e.g. bundling or deploying)
     #[command(subcommand)]
     Package(package::Package),
+    /// Manage patch overlays for a project.
+    #[command(subcommand)]
+    Patch(patch::PatchGroup),
     /// Pre-warm the object store from the project ocx.lock without creating symlinks.
     Pull(pull::Pull),
     /// Remove one or more tool bindings from ocx.toml.
@@ -127,6 +137,7 @@ impl Command {
             Command::Upgrade(upgrade) => upgrade.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,
             Command::Package(package) => package.execute(context).await,
+            Command::Patch(patch_group) => patch_group.execute(context).await,
             Command::Pull(pull) => pull.execute(context).await,
             Command::Remove(remove) => remove.execute(context).await,
             Command::Run(r) => r.execute(context).await,

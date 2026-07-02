@@ -83,6 +83,31 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     }
 }
 
+/// Full supported-platform matrix (all five OS/architecture combinations),
+/// used by `ocx patch sync` when the user passes no `--platform`.
+///
+/// Delegates to [`oci::Platform::all_supported`] — the canonical source of
+/// truth. Distinct from [`supported_platforms`], which is host-scoped.
+pub fn all_supported_platforms() -> Vec<oci::Platform> {
+    oci::Platform::all_supported()
+}
+
+/// Like [`platforms_or_default`], but an empty `--platform` list expands to
+/// the full supported-platform matrix instead of the host platform.
+///
+/// A synced patch descriptor/companion set must be shareable across a team
+/// (like `ocx lock`): it pins multi-platform manifests, not a single
+/// GC-prone per-arch index, so a host-only default would silently miss
+/// non-host companions and break an offline or required-patch launch on a
+/// teammate's machine running a different platform.
+pub fn platforms_or_all_supported(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
+    if platforms.is_empty() {
+        all_supported_platforms()
+    } else {
+        platforms.to_vec()
+    }
+}
+
 /// Emit shell-sourceable export lines for a slice of env entries.
 ///
 /// This is the single shared emit helper consumed by:

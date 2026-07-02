@@ -13,6 +13,7 @@ vars:
   CONFIG_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/config"
   PROJECT_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project"
   PROJECT_LOCK_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project-lock"
+  PATCH_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/patch"
 
 tasks:
   generate:
@@ -51,6 +52,15 @@ tasks:
       - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v1.json
 
+  generate-patch:
+    desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)
+    sources: *schema-sources
+    status:
+      - test -f {{.PATCH_SCHEMA_DIR}}/v1.json
+    cmds:
+      - mkdir -p {{.PATCH_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json
+
   default:
     desc: Generate all schemas
     cmds:
@@ -58,3 +68,4 @@ tasks:
       - task: generate-config
       - task: generate-project
       - task: generate-project-lock
+      - task: generate-patch

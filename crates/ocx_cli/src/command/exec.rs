@@ -62,7 +62,13 @@ impl Exec {
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
-        let entries = manager.resolve_env(&install_infos, self.self_view).await?;
+        let entries = manager
+            .resolve_env(
+                &install_infos,
+                self.self_view,
+                ocx_lib::package_manager::PatchScope::NoProjectContext,
+            )
+            .await?;
         self.run_with_env(entries, context.config_view()).await
     }
 

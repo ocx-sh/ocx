@@ -12,7 +12,7 @@ Multi-layer OCI artifacts that let publishers compose packages from reusable bui
 </RoadmapDescription>
 <RoadmapFeatures>
   <RoadmapFeature status="active" issue="20" pr="22">Multi-layer artifacts</RoadmapFeature>
-  <RoadmapFeature status="active" pr="21">Infrastructure patches</RoadmapFeature>
+  <RoadmapFeature status="shipped" pr="21">Infrastructure patches</RoadmapFeature>
   <RoadmapFeature status="planned">Shared internals</RoadmapFeature>
   <RoadmapFeature status="planned">Delta downloads</RoadmapFeature>
 </RoadmapFeatures>

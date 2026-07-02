@@ -6,7 +6,7 @@ pub mod concurrency;
 pub mod error;
 pub mod launcher;
 
-mod tasks;
+pub mod tasks;
 
 #[cfg(test)]
 mod resolve_env_package_root_tests {
@@ -41,7 +41,11 @@ mod resolve_env_package_root_tests {
         let manager = make_test_manager(tmp.path());
         // Non-existent package root — PackageStore cannot read metadata.json.
         let result = manager
-            .resolve_env_from_package_root(Path::new("/nonexistent/pkg"), false)
+            .resolve_env_from_package_root(
+                Path::new("/nonexistent/pkg"),
+                false,
+                super::PatchScope::NoProjectContext,
+            )
             .await;
         assert!(result.is_err(), "missing package root must return Err");
     }
@@ -54,7 +58,9 @@ mod resolve_env_package_root_tests {
         tokio::fs::create_dir_all(&pkg_root).await.unwrap();
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let manager = make_test_manager(tmp.path());
-        let result = manager.resolve_env_from_package_root(&pkg_root, false).await;
+        let result = manager
+            .resolve_env_from_package_root(&pkg_root, false, super::PatchScope::NoProjectContext)
+            .await;
         assert!(result.is_err(), "missing metadata.json must return Err");
     }
 
@@ -73,7 +79,9 @@ mod resolve_env_package_root_tests {
             .await
             .unwrap();
         let manager = make_test_manager(tmp.path());
-        let result = manager.resolve_env_from_package_root(&pkg_root, false).await;
+        let result = manager
+            .resolve_env_from_package_root(&pkg_root, false, super::PatchScope::NoProjectContext)
+            .await;
         assert!(result.is_err(), "missing resolve.json must return Err");
     }
 }
@@ -246,10 +254,12 @@ pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::InspectResult;
-pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+pub use tasks::patch_publish::PatchPublishReport;
+pub use tasks::patch_sync::PatchSyncReport;
+pub use tasks::resolve::{ChainBlob, ChainRole, PatchProvenance, PatchScope, ResolvedChain, SitePatchRoots};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 
-use crate::{file_structure, oci};
+use crate::{config::patch::ResolvedPatchConfig, file_structure, oci, patch::PatchSnapshot};
 
 /// Central facade for package operations (find, install, uninstall, etc.).
 ///
@@ -263,6 +273,10 @@ use crate::{file_structure, oci};
 /// (`crate::cli::progress`); task code creates RAII bar/spinner guards
 /// from it. See ADR adr_progress_architecture for why progress no longer
 /// rides the `tracing` span tree.
+///
+/// The optional [`ResolvedPatchConfig`] enables the patch-discovery hook
+/// after a user-requested base install. When `None`, the patch tier is
+/// disabled and `discover_and_install_patches` is a no-op.
 #[derive(Clone)]
 pub struct PackageManager {
     file_structure: file_structure::FileStructure,
@@ -270,9 +284,26 @@ pub struct PackageManager {
     client: Option<oci::Client>,
     default_registry: String,
     progress: crate::cli::progress::ProgressManager,
+    /// Site-tier patch registry configuration.
+    ///
+    /// `None` = no patch tier configured (the `[patches]` section is absent
+    /// from every loaded config tier). When `Some`, `discover_and_install_patches`
+    /// runs after every user-requested base install (online only).
+    patches: Option<ResolvedPatchConfig>,
+    /// Frozen companion pinning snapshot for opt-in determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups.  `None` = live lookups only.
+    /// Set via `OCX_PATCH_SNAPSHOT` / `ocx patch freeze`.
+    patch_snapshot: Option<PatchSnapshot>,
 }
 
 impl PackageManager {
+    /// Construct a new `PackageManager`.
+    ///
+    /// `patches` comes from `config_view.patches` — pass `None` when no
+    /// `[patches]` section is configured. The patch tier is disabled when
+    /// `None`; discovery is a no-op.
     pub fn new(
         file_structure: file_structure::FileStructure,
         index: oci::index::Index,
@@ -286,7 +317,39 @@ impl PackageManager {
             client,
             default_registry,
             progress: crate::cli::progress::ProgressManager::disabled(),
+            patches: None,
+            patch_snapshot: None,
         }
+    }
+
+    /// Inject the resolved patch configuration into this manager.
+    ///
+    /// Called from `Context::try_init` after `config_view.patches` is resolved.
+    /// Returns `self` for builder-style chaining alongside `with_progress`.
+    pub fn with_patches(mut self, patches: Option<ResolvedPatchConfig>) -> Self {
+        self.patches = patches;
+        self
+    }
+
+    /// Returns the resolved patch configuration, if any.
+    pub fn patches(&self) -> Option<&ResolvedPatchConfig> {
+        self.patches.as_ref()
+    }
+
+    /// Inject the active patch snapshot for opt-in compose determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups. Called from
+    /// `Context::try_init` after loading the snapshot from
+    /// `OCX_PATCH_SNAPSHOT`. Returns `self` for builder-style chaining.
+    pub fn with_patch_snapshot(mut self, patch_snapshot: Option<PatchSnapshot>) -> Self {
+        self.patch_snapshot = patch_snapshot;
+        self
+    }
+
+    /// Returns the active patch snapshot, if any.
+    pub fn patch_snapshot(&self) -> Option<&PatchSnapshot> {
+        self.patch_snapshot.as_ref()
     }
 
     /// Sets the shared span-free progress manager. The CLI injects its
@@ -409,9 +472,10 @@ impl PackageManager {
         &self,
         pkg_root: &std::path::Path,
         self_view: bool,
+        scope: crate::package_manager::tasks::resolve::PatchScope,
     ) -> crate::Result<Vec<crate::package::metadata::env::entry::Entry>> {
         let info = self.install_info_from_package_root(pkg_root).await?;
-        self.resolve_env(&[std::sync::Arc::new(info)], self_view).await
+        self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope).await
     }
 
     /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
@@ -441,6 +505,29 @@ impl PackageManager {
             client: None,
             default_registry: self.default_registry.clone(),
             progress: self.progress.clone(),
+            // Preserve the patch config. `offline_view` disables the *network*
+            // (client = None → `is_offline()` true), NOT the patch tier. These are
+            // two separate concerns:
+            //
+            // - Phase 3 discovery (`discover_and_install_patches`) requires network
+            //   to fetch descriptor blobs, and already short-circuits on
+            //   `self.is_offline()` — so keeping `patches` here does NOT re-enable
+            //   any network discovery on an offline view.
+            // - Phase 4 site-overlay (`build_site_patch_set`) is compose-time and
+            //   purely local (tag store + descriptor blobs + installed companions).
+            //   It MUST still run on offline env paths (`ocx direnv export`, the
+            //   global toolchain) so already-discovered companion overlays apply,
+            //   and so a `required` companion that is unavailable **fails closed**.
+            //
+            // Dropping `patches` here would silently skip required overlays on
+            // exactly those local-only exporters — a fail-OPEN gap violating the
+            // ADR offline contract (C4 "works offline once synced", C6 zip-`OCX_HOME`
+            // parity, C7 fail-closed). So the tier is carried through unchanged.
+            patches: self.patches.clone(),
+            // Carry the snapshot through so offline env paths (direnv export,
+            // global toolchain) still resolve frozen companion digests when a
+            // snapshot is active.
+            patch_snapshot: self.patch_snapshot.clone(),
         }
     }
 }

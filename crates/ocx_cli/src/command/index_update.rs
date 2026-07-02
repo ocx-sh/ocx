@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci::index};
+use ocx_lib::{log, oci, oci::index};
 
 use crate::options;
 
@@ -65,6 +65,34 @@ impl IndexUpdate {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
             return Err(error.into());
+        }
+
+        // ── Piggyback: refresh site-patch descriptors when the patch tier is active. ──
+        //
+        // After the tag index is refreshed, also re-fetch patch descriptors for all
+        // known installed bases so the patch tier stays in sync with the rest of the
+        // index. This is best-effort: a sync failure (offline, registry unreachable,
+        // required-companion error) is logged as a warning and does NOT fail the
+        // index-update command — the tag refresh is the primary job.
+        //
+        // Only runs when:
+        //   1. A `[patches]` section is configured (manager.patches().is_some()), AND
+        //   2. The manager is online (is_offline() is false — sync_patches checks
+        //      this internally, but we skip the call entirely when offline to avoid
+        //      the OfflineMode error allocation overhead).
+        //
+        // ADR decision: piggyback keeps descriptor metadata fresh after every index
+        // refresh without requiring users to remember a separate `ocx patch sync`.
+        if context.manager().patches().is_some() && !context.manager().is_offline() {
+            let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+            match context.manager().sync_patches(&[host]).await {
+                Ok(_report) => {
+                    log::debug!("index update: patch descriptor sync completed");
+                }
+                Err(error) => {
+                    log::warn!("index update: patch descriptor sync failed (non-fatal): {error}");
+                }
+            }
         }
 
         Ok(ExitCode::SUCCESS)

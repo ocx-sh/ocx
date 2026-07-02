@@ -62,6 +62,34 @@ By default `ocx run` **inherits** the spawning shell's environment and merely **
 
 `ocx exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables from the resolved packages, and spawns the command with that environment. No `ocx.toml` is read — not the project file, not the global file. The entire operation is stateless with respect to project configuration.
 
+## Patch Opt-Out Scope {#patch-opt-out-scope}
+
+A project can opt a base package out of the [`[patches]`][config-patches] companion overlay
+with [`no-patches`][config-patches-no-patches]. That opt-out lives in `ocx.toml`, so it is
+subject to the same explicit-scope rule as every other project setting: it applies only where
+the project file is directly read, and nowhere else.
+
+Without an explicit forwarding step, a launcher re-entry would silently break that promise. A
+package's generated entrypoint re-enters ocx through the hidden `ocx launcher exec`
+subcommand, resolving its own base from a synthetic content-addressed identifier rather than
+`ocx.toml` — so on its own it has no way to know the parent project opted this base out, and
+would re-apply the companion the parent just suppressed.
+
+[`ocx run`][cmd-run] closes that gap by forwarding the opt-out to the child process over
+[`OCX_PATCHES`][env-ocx-patches]: alongside the resolved `[patches]` tier, it includes the
+opted-out bases' canonical `registry/repository` keys **and** the content digest of each one
+actually resolved that run. The digest leg is what a launcher's re-entry matches against,
+since it has no repository path to compare. [`ocx env`][cmd-env-root] and
+[`ocx direnv export`][cmd-direnv-export] read the same project config and honor the opt-out
+directly in the environment they compose — they have no child launcher to forward it to.
+
+A launcher invoked outside this chain — standalone, or re-entered through the OCI-tier
+[`ocx package exec`][cmd-package-exec] — decodes no forwarded opt-out from its environment and
+composes the companion overlay as if `no-patches` were never set. A
+[system-required][config-patches-scopes] tier is unaffected either way: enforcement is not
+subject to the opt-out at all. See [Per-package opt-out][patches-no-patches-guide] in the
+Patching packages guide for the full walkthrough.
+
 ## Tier Selection {#tier-selection}
 
 OCX has two toolchain tiers. Selection is always explicit — there is no implicit fallback from project to global.
@@ -125,11 +153,19 @@ See [In Depth — Project Toolchain → Composition order rule][in-depth-project
 [cmd-run]: ./command-line.md#run
 [cmd-upgrade]: ./command-line.md#upgrade
 [cmd-direnv-export]: ./command-line.md#direnv-export
+[cmd-package-exec]: ./command-line.md#package-exec
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
 [env-ocx-project]: ./environment.md#ocx-project
+[env-ocx-patches]: ./environment.md#ocx-patches
+
+<!-- configuration -->
+[config-patches]: ./configuration.md#keys-patches
+[config-patches-no-patches]: ./configuration.md#keys-patches-no-patches
+[config-patches-scopes]: ./configuration.md#keys-patches-scopes
 
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain
 [in-depth-project-composition]: ../in-depth/project.md#running-composition-order
+[patches-no-patches-guide]: ../user-guide/patches.md#patches-no-patches

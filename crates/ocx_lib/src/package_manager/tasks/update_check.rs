@@ -399,8 +399,20 @@ impl PackageManager {
                 // select=true:    updates the `current` symlink to the new version.
                 let candidate = false;
                 let select = true;
-                self.install_all(vec![latest_id], platforms, candidate, select, Concurrency::default())
-                    .await?;
+                // skip_discovery=true: self-update installs ocx itself, not a
+                // user-requested tool. Looking up a patch descriptor for ocx.sh/ocx/cli
+                // at the patch registry is nonsensical and could abort the update with
+                // a spurious required-companion error.
+                let skip_discovery = true;
+                self.install_all(
+                    vec![latest_id],
+                    platforms,
+                    candidate,
+                    select,
+                    Concurrency::default(),
+                    skip_discovery,
+                )
+                .await?;
                 Ok(SelfUpdateResult::Installed {
                     from: current_version,
                     to: to_tag,
@@ -467,7 +479,10 @@ async fn query_installed_version(manager: &PackageManager, identifier: &oci::Ide
 
     // 2. Resolve the composed env (interface view — matches default exec semantics).
     let infos = vec![Arc::new(info)];
-    let entries = manager.resolve_env(&infos, false).await.ok()?;
+    let entries = manager
+        .resolve_env(&infos, false, crate::package_manager::PatchScope::NoProjectContext)
+        .await
+        .ok()?;
 
     // 3. Build env, apply package entries. Resolve `ocx` to its absolute path via
     //    the env PATH. No apply_ocx_config: version query reads no OCX_* config.

@@ -7,10 +7,9 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::script::{ScriptOutcome, ScriptOutcomeKind};
 use ocx_lib::utility::child_process;
 use ocx_lib::utility::fs as ocx_fs;
-use ocx_lib::{cli, cli::UsageError, env, oci, package, prelude::*, publisher::LayerRef};
+use ocx_lib::{cli::UsageError, env, oci, package, prelude::*, publisher::LayerRef};
 
 use crate::{conventions, options};
 
@@ -213,7 +212,13 @@ impl PackageTest {
             .install_info_from_package_root(&dest_path)
             .await
             .context("loading install info from materialized package root")?;
-        let entries = manager.resolve_env(&[Arc::new(info_via_root)], self.self_view).await?;
+        let entries = manager
+            .resolve_env(
+                &[Arc::new(info_via_root)],
+                self.self_view,
+                ocx_lib::package_manager::PatchScope::NoProjectContext,
+            )
+            .await?;
 
         // Step 6: Compose env (mirrors exec.rs).
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
@@ -228,19 +233,6 @@ impl PackageTest {
         // Ok(ExitCode) so main.rs::classify_error is bypassed (ADR Exit Code
         // Scheme). The non-script path below is byte-identical to before.
         if let Some(script_path) = &self.script {
-            // PRECONDITION (Codex C7): run_script is sync and the ocx.run host
-            // fn uses Handle::block_on inside block_in_place — correct ONLY on
-            // Tokio's multi-thread runtime. main.rs uses the default
-            // multi-thread #[tokio::main]; assert it so a future switch to
-            // current_thread fails loudly in debug builds.
-            debug_assert!(
-                matches!(
-                    tokio::runtime::Handle::current().runtime_flavor(),
-                    tokio::runtime::RuntimeFlavor::MultiThread
-                ),
-                "run_script requires the multi-thread Tokio runtime (Handle::block_on in block_in_place)"
-            );
-
             // Read the script source. `-` reads the SOURCE from stdin (R1);
             // any other value is a filesystem path. A missing path file →
             // Usage/64; a stdin stream that errors → Io/74 (distinct: reading
@@ -307,24 +299,20 @@ impl PackageTest {
                 eprintln!("{msg}");
             }
 
-            let limits = ocx_lib::script::ScriptLimits {
-                max_callstack_size: 50,
-                wall_clock: std::time::Duration::from_secs(300),
-            };
-
-            // run_script is SYNC (Evaluator is !Send): invoke via
-            // block_in_place, NOT .await / spawn_blocking (Fix#2).
-            let outcome_res = tokio::task::block_in_place(|| {
-                ocx_lib::script::run_script(
-                    &source,
-                    &label,
-                    &dest_path,
-                    &scratch_root,
-                    &self.platform,
-                    process_env,
-                    limits,
-                )
-            });
+            // Delegate the engine run + structured report + exit-code mapping to
+            // the shared runner (also used by `ocx patch test`). run_script is
+            // SYNC (Evaluator is !Send); the helper invokes it via
+            // block_in_place on the multi-thread runtime.
+            let exit = crate::command::script_runner::run_script_in_env(
+                &context,
+                &source,
+                &label,
+                &dest_path,
+                &scratch_root,
+                &self.platform,
+                process_env,
+            )
+            .await;
 
             // Drop the tempdir guard now the engine finished (success or
             // failure) — same lifecycle as the non-script branch. The scratch
@@ -336,32 +324,7 @@ impl PackageTest {
                 let _ = tokio::fs::remove_dir_all(&scratch_root).await;
             }
 
-            let outcome = match outcome_res {
-                Ok(o) => o,
-                // Host setup/abort (unrecoverable) → Failure(1); never code 2.
-                Err(e) => {
-                    let report = crate::api::data::script_run::ScriptRunReport::new(
-                        crate::api::data::script_run::ScriptStatus::Failed,
-                        Some(crate::api::data::script_run::AssertionRecord {
-                            // Pre/post-engine host abort: not an `expect.*`
-                            // assertion — categorize as the non-assertion kind.
-                            kind: "other".to_string(),
-                            message: format!("script host failure: {e}"),
-                        }),
-                        None,
-                    );
-                    context.api().report(&report)?;
-                    return Ok(cli::ExitCode::Failure.into());
-                }
-            };
-
-            // R3: emit the structured envelope through the existing report
-            // path; the exit code stays authoritative (both emitted).
-            let run_summary = ocx_lib::script::last_run_summary();
-            let report = crate::api::data::script_run::ScriptRunReport::from_outcome(&outcome, run_summary);
-            context.api().report(&report)?;
-
-            return Ok(map_outcome_to_exit_code(outcome).into());
+            return exit;
         }
 
         // Step 7: Resolve command and exec.
@@ -432,84 +395,4 @@ async fn provision_scratch_dir(package_root: &std::path::Path) -> anyhow::Result
         anyhow::Error::from(ocx_lib::error::file_error(&scratch, e))
     })?;
     Ok(scratch)
-}
-
-/// Maps an engine-neutral [`ScriptOutcome`] to the process exit code.
-///
-/// Returns `Ok(ExitCode)` so the command bypasses `main.rs::classify_error`
-/// (ADR Exit Code Scheme). Engine-internal errors map to `Failure` (1) — no
-/// code `2` is invented.
-fn map_outcome_to_exit_code(outcome: ScriptOutcome) -> cli::ExitCode {
-    match outcome.kind {
-        ScriptOutcomeKind::Passed => cli::ExitCode::Success,
-        ScriptOutcomeKind::Failed { .. } => cli::ExitCode::Failure,
-        ScriptOutcomeKind::Usage { .. } => cli::ExitCode::UsageError,
-        ScriptOutcomeKind::ScriptError { .. } => cli::ExitCode::DataError,
-        ScriptOutcomeKind::Io { .. } => cli::ExitCode::IoError,
-        ScriptOutcomeKind::Timeout => cli::ExitCode::Failure,
-        // `ScriptOutcomeKind` is `#[non_exhaustive]` — unmapped kinds fall to
-        // generic failure (locked here, never silently to a new code).
-        _ => cli::ExitCode::Failure,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── map_outcome_to_exit_code — every C8 table row ────────────────────────
-    //
-    // Spec source: plan_package_test_scripting.md C8 exit-code mapping table +
-    // Error Taxonomy. Each assertion quotes the canonical numeric exit value
-    // from the contract, NOT derived by reading the match arm — if the mapping
-    // drifts, the test catches it. The fn is pure; these lock the published
-    // exit-code contract (the PRIMARY machine signal per R3).
-
-    fn outcome(kind: ScriptOutcomeKind) -> ScriptOutcome {
-        ScriptOutcome { kind }
-    }
-
-    #[test]
-    fn passed_maps_to_success_0() {
-        assert_eq!(map_outcome_to_exit_code(outcome(ScriptOutcomeKind::Passed)) as u8, 0);
-    }
-
-    #[test]
-    fn failed_maps_to_failure_1() {
-        let o = outcome(ScriptOutcomeKind::Failed {
-            kind: Some(ocx_lib::script::AssertionKind::Ok),
-            message: "assertion failed".into(),
-        });
-        assert_eq!(map_outcome_to_exit_code(o) as u8, 1);
-    }
-
-    #[test]
-    fn usage_maps_to_usage_error_64() {
-        let o = outcome(ScriptOutcomeKind::Usage {
-            message: "unreadable script".into(),
-        });
-        assert_eq!(map_outcome_to_exit_code(o) as u8, 64);
-    }
-
-    #[test]
-    fn script_error_maps_to_data_error_65() {
-        let o = outcome(ScriptOutcomeKind::ScriptError {
-            message: "syntax error".into(),
-        });
-        assert_eq!(map_outcome_to_exit_code(o) as u8, 65);
-    }
-
-    #[test]
-    fn io_maps_to_io_error_74() {
-        let o = outcome(ScriptOutcomeKind::Io {
-            message: "scratch I/O failed".into(),
-        });
-        assert_eq!(map_outcome_to_exit_code(o) as u8, 74);
-    }
-
-    #[test]
-    fn timeout_maps_to_failure_1() {
-        // C8: Timeout → Failure (1), NOT a dedicated code.
-        assert_eq!(map_outcome_to_exit_code(outcome(ScriptOutcomeKind::Timeout)) as u8, 1);
-    }
 }

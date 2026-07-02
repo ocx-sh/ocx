@@ -24,7 +24,7 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 | `src/catalog/*.md` | **Generated** — per-package pages |
 | `src/docs/reference/dependencies.md` | **Generated** — SBOM dependency list |
 | `src/public/casts/*.cast` | **Generated** — asciinema recordings |
-| `src/public/schemas/metadata/v1.json` | **Generated** — JSON schema from `ocx_schema` crate |
+| `src/public/schemas/{metadata,config,project,project-lock,patch}/v*.json` | **Generated** — JSON schemas from `ocx_schema` crate (`patch` = `ocx patch publish --descriptor` format) |
 | `src/public/data/catalog/` | **Generated** — catalog JSON + per-package info/logos |
 | `src/public/data/dependencies.json` | **Generated** — SBOM data |
 | `taskfile.yml` | Website tasks (install, serve, build, deploy) |

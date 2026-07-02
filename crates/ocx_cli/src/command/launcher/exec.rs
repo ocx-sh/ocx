@@ -62,7 +62,38 @@ impl LauncherExec {
         // package's own env (public + private surface). This is equivalent to
         // the former `--self` flag that was baked into every launcher template.
         let info = manager.install_info_from_package_root(package_dir.root()).await?;
-        let entries = manager.resolve_env(&[std::sync::Arc::new(info)], true).await?;
+        // Thread the project `no-patches` opt-out forwarded over `OCX_PATCHES`
+        // into env resolution. `ocx run` injects the project opt-out into the
+        // forwarded patch tier; here — the launcher re-entry — we decode that
+        // opt-out DIRECTLY from the env (the same decoder `Context` uses for the
+        // tier). Decoding at the consumption site keeps the opt-out scoped to
+        // THIS launcher re-entry: it is never grafted onto the global manager
+        // tier, so it cannot leak as ambient inherited state into unrelated
+        // nested `ocx` commands (which each compute their own opt-out).
+        //
+        // AF1: `install_info_from_package_root` mints a synthetic
+        // `file-url-mode/<content-digest>` identifier here — packages are
+        // content-shared and carry no root registry/repository (see
+        // `ResolvedPackage`) — so a repo-key never matches this base. `ocx run`
+        // additionally forwards each opted-out base's content digest, and the
+        // resolver's opt-out check (`resolve.rs`) matches on repo-key OR digest,
+        // so the digest leg is what suppresses a re-injected companion here.
+        //
+        // A DIRECT launcher invocation (`ocx package exec` → launcher) has no
+        // forwarded `OCX_PATCHES` → `patches_from_env()` is `None` → `Project(empty)`,
+        // byte-identical to the former `NoProjectContext`. A system-required
+        // tier still overlays regardless (the resolver enforces C7).
+        let no_patches = ocx_lib::patches_from_env()
+            .map_err(anyhow::Error::new)?
+            .map(|forwarded| forwarded.no_patches)
+            .unwrap_or_default();
+        let entries = manager
+            .resolve_env(
+                &[std::sync::Arc::new(info)],
+                true,
+                ocx_lib::package_manager::PatchScope::Project(no_patches),
+            )
+            .await?;
 
         // argv[0] is the launcher's own filename — the invocable entrypoint
         // name. argv[1..] are the user args.
