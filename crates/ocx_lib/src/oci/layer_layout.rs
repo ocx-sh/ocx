@@ -49,10 +49,7 @@ impl LayerLayoutSpec {
             );
         }
         if let Some(prefix) = &self.prefix {
-            map.insert(
-                super::annotations::LAYER_PREFIX.to_string(),
-                prefix.as_path().to_string_lossy().into_owned(),
-            );
+            map.insert(super::annotations::LAYER_PREFIX.to_string(), prefix.to_wire());
         }
         Some(map)
     }

@@ -182,7 +182,7 @@ fn layout_suffix(layout: &oci::LayerLayoutSpec) -> String {
         parts.push(format!("strip={strip}"));
     }
     if let Some(prefix) = &layout.prefix {
-        parts.push(format!("prefix={}", prefix.as_path().display()));
+        parts.push(format!("prefix={}", prefix.to_wire()));
     }
     if parts.is_empty() {
         String::new()

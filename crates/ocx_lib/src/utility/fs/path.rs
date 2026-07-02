@@ -249,6 +249,23 @@ impl RelativePath {
         &self.0
     }
 
+    /// Renders the canonical `/`-separated wire form.
+    ///
+    /// The internal `PathBuf` uses the host separator (`\` on Windows), but the
+    /// layer-ref grammar and the `sh.ocx.layer.prefix` annotation are
+    /// platform-independent wire formats. Serializing via `as_path().display()`
+    /// would emit `share\lib` on a Windows host and break the Display→FromStr
+    /// round-trip and cross-platform annotation reads. Only `Normal` components
+    /// remain after normalization, so joining their UTF-8 lossy forms with `/`
+    /// is exact.
+    pub fn to_wire(&self) -> String {
+        self.0
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     /// Returns `true` when this is the empty path (the containment root).
     pub fn is_empty(&self) -> bool {
         self.0.as_os_str().is_empty()
@@ -474,6 +491,26 @@ mod tests {
             matches!(RelativePath::parse(&long), Err(PathEscapeError::TooLong)),
             "an over-long prefix must be TooLong"
         );
+    }
+
+    /// `to_wire` renders the canonical `/`-separated form regardless of the host
+    /// separator — the layer-ref grammar and the `sh.ocx.layer.prefix` annotation
+    /// are platform-independent wire formats. On Windows the internal `PathBuf`
+    /// stores `share\lib`; `to_wire` must still emit `share/lib` so the
+    /// Display→FromStr round-trip and cross-platform annotation reads hold.
+    /// Backslash-separated input normalizes to the same wire form on all hosts.
+    #[test]
+    fn relpath_to_wire_is_always_forward_slash() {
+        for spec in ["share/lib", "share\\lib", "a/b/c"] {
+            let wire = RelativePath::parse(spec).expect("a normal prefix parses").to_wire();
+            assert!(
+                !wire.contains('\\'),
+                "wire form must not carry a backslash: {spec:?} → {wire:?}"
+            );
+        }
+        assert_eq!(RelativePath::parse("share/lib").unwrap().to_wire(), "share/lib");
+        assert_eq!(RelativePath::parse("share\\lib").unwrap().to_wire(), "share/lib");
+        assert_eq!(RelativePath::parse("a").unwrap().to_wire(), "a");
     }
 
     /// A component carrying a control character (newline / NUL) is rejected as
