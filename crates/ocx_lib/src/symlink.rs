@@ -229,10 +229,56 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Bounded retries for the Windows remove-then-rename publish window. Under
 /// heavy same-target contention (issue #179's 32-thread stress) a fault is
-/// benign and resolves within a couple of iterations; the ceiling is a
-/// livelock backstop, not a tuning knob.
+/// benign and resolves within a few iterations; the ceiling is a livelock
+/// backstop plus enough budget to outlast a Defender-held handle.
 #[cfg(windows)]
-const WINDOWS_RENAME_RACE_RETRIES: usize = 64;
+const WINDOWS_RENAME_RACE_RETRIES: usize = 40;
+
+/// Returns `true` for the Windows transient FS errors seen under concurrent
+/// junction churn: `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION`
+/// (32). A peer op — or Windows Defender real-time scanning — momentarily
+/// holding a handle on `to` or its parent makes a remove/rename fail; it heals
+/// on retry (same class `BlobStore::write_blob` retries; rattler precedent).
+#[cfg(windows)]
+fn is_transient_lock_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5) | Some(32))
+}
+
+/// Sleeps a short jittered backoff before a retry (`attempt` ≥ 1). Exponential
+/// ramp capped at 128 ms with ±25% jitter derived from `SystemTime` subsecond
+/// nanos (no `rand` dependency), mirroring `persist_temp_file`.
+#[cfg(windows)]
+fn rename_race_backoff(attempt: usize) {
+    use std::time::Duration;
+    let base_ms = 1u64 << (attempt.min(7) as u32); // 2,4,…,128 ms
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
+    std::thread::sleep(Duration::from_secs_f64((base_ms as f64) * jitter_scale / 1000.0));
+}
+
+/// Retries a single idempotent junction syscall on the transient Windows lock
+/// class (`ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION`) with jittered
+/// backoff. `op` must be a *single* reparse-point create whose failure leaves no
+/// partial state, so re-running it is safe. Non-transient errors surface
+/// immediately; the budget outlasts a Defender-held handle before giving up.
+#[cfg(windows)]
+fn with_transient_retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut last_error: Option<std::io::Error> = None;
+    for attempt in 0..WINDOWS_RENAME_RACE_RETRIES {
+        if attempt > 0 {
+            rename_race_backoff(attempt);
+        }
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_lock_error(&error) => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("junction op retries exhausted")))
+}
 
 #[cfg(windows)]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -244,13 +290,19 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     // installers stage an *equivalent* junction, so every interleaving fault is
     // benign — the slot converges on a valid link. `from` is uniquely named per
     // call, so it is never the victim of a peer's remove.
-    for _ in 0..WINDOWS_RENAME_RACE_RETRIES {
+    let mut last_error: Option<std::io::Error> = None;
+    for attempt in 0..WINDOWS_RENAME_RACE_RETRIES {
+        if attempt > 0 {
+            rename_race_backoff(attempt);
+        }
+
         // Converge without touching `to` when it already resolves to the target
         // we staged. A peer that published first left exactly the link we
         // wanted; removing and re-renaming it would only thrash the winner and
         // widen the reader-visibility window. A genuine re-link (a *different*
         // target, e.g. `ProjectRegistry` repointing a ledger entry) falls
-        // through to the replace below.
+        // through to the replace below. A transient read failure here is not
+        // fatal — fall through and let the remove/rename retry.
         if is_link(to)
             && let (Ok(existing), Ok(staged)) = (std::fs::read_link(to), std::fs::read_link(from))
             && existing == staged
@@ -259,13 +311,21 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
             return Ok(());
         }
 
-        // Clear any existing entry at `to`. A peer removing it first yields
-        // `NotFound` — "already gone" is exactly the state we want, not an error.
+        // Clear any existing entry at `to`. Concurrent junction removal is racy:
+        // a peer that got there first leaves `to` already gone (any error, incl.
+        // `NotFound` or "not a reparse point"), which is exactly the state we
+        // want — re-check and proceed. A still-present `to` we could not remove
+        // is a transient lock we retry, or a hard error we surface.
         if is_link(to) || to.exists() {
-            match remove_link(to) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+            if let Err(error) = remove_link(to) {
+                if is_link(to) || to.exists() {
+                    if is_transient_lock_error(&error) {
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(error);
+                }
+                // `to` is gone despite the error — a peer removed it. Proceed.
             }
         }
 
@@ -280,19 +340,27 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
             Err(error) if error.kind() == ErrorKind::NotFound && !is_link(from) && !from.exists() => {
                 return Ok(());
             }
-            // `to` absent, our stage intact — a transient interleaving; retry.
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            // Any benign publish-race interleaving — a transient lock, a `to`
+            // that a peer removed (NotFound) or republished (AlreadyExists) —
+            // back off and retry; the slot converges within the budget.
+            Err(error)
+                if is_transient_lock_error(&error)
+                    || matches!(error.kind(), ErrorKind::NotFound | ErrorKind::AlreadyExists) =>
+            {
+                last_error = Some(error);
+                continue;
+            }
             Err(error) => return Err(error),
         }
     }
 
     // Retries exhausted. If an equivalent link now occupies the slot, converge;
-    // otherwise surface the final rename error rather than loop forever.
+    // otherwise surface the last observed error rather than loop forever.
     if is_link(to) {
         let _ = remove_link(from);
         return Ok(());
     }
-    std::fs::rename(from, to)
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("rename retries exhausted")))
 }
 
 /// Removes the symlink at `link_path`.
@@ -330,7 +398,14 @@ fn create_link(target: &std::path::Path, link_path: &std::path::Path) -> std::io
     } else {
         std::env::current_dir()?.join(target)
     };
-    junction::create(&abs_target, link_path)
+    // `junction::create` is a single reparse-point write, so a transient
+    // `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` (a peer or Defender holding
+    // the parent dir open under issue #179's concurrent-install storm) is safe to
+    // retry — the failed attempt created nothing. This covers both the staging
+    // junction in `replace_atomic` and the back-ref create in `ReferenceManager`,
+    // so the whole install-link path is resilient to the same lock class that
+    // `rename_replace` already retries.
+    with_transient_retry(|| junction::create(&abs_target, link_path))
 }
 
 #[cfg(windows)]
