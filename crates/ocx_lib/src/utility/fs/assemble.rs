@@ -77,13 +77,52 @@ pub enum AssemblyError {
     #[error("walker task panicked: {0}")]
     TaskPanicked(#[source] tokio::task::JoinError),
 
-    /// Two layers contribute conflicting entries at the same path.
-    #[error("layer overlap: path exists as non-directory in dest")]
-    LayerOverlap,
+    /// Two layers — or one layer's two post-strip subtrees — contribute
+    /// conflicting entries at the same destination path. The inner
+    /// [`LayerOverlapKind`] distinguishes an intra-layer self-collapse from a
+    /// cross-layer overlap (F1) so the message names the layer(s) at fault; it
+    /// never affects the fail-closed policy or placement.
+    #[error("layer overlap: {0}")]
+    LayerOverlap(LayerOverlapKind),
 
     /// Layer symlinks are not supported on Windows.
     #[error("layer symlinks are not supported on Windows")]
     WindowsSymlinksUnsupported,
+}
+
+/// Which shape of layer overlap fired. Used purely to word the
+/// [`AssemblyError::LayerOverlap`] message (F1) — the fail-closed collision
+/// policy is identical for both.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LayerOverlapKind {
+    /// One layer's two post-strip subtrees collapse onto a single destination
+    /// path (e.g. `a/bin/tool` + `b/bin/tool` under `strip=1`). The strip depth
+    /// that produced the collapse is named so the publisher can reduce it or
+    /// restructure the layer.
+    #[error("intra-layer collision — layer {layer_idx} collapses two subtrees onto one path after strip={strip}")]
+    IntraLayer { layer_idx: usize, strip: u8 },
+
+    /// Two or more distinct layers contribute the same destination path. Layers
+    /// merge, never override, so the publisher must strip or prefix them apart.
+    #[error("cross-layer collision — layers {layer_indices:?} contribute the same path")]
+    CrossLayer { layer_indices: Vec<usize> },
+}
+
+/// Classifies an overlap as intra- or cross-layer from the colliding
+/// contributors' originating layer indices (F1 — error message only). One
+/// distinct layer ⇒ intra-layer self-collapse; two or more ⇒ cross-layer.
+fn overlap_kind(contributors: &[(usize, EntryKind, PathBuf)], strip: u8) -> LayerOverlapKind {
+    let mut layer_indices: Vec<usize> = contributors.iter().map(|(idx, _, _)| *idx).collect();
+    layer_indices.sort_unstable();
+    layer_indices.dedup();
+    match layer_indices.as_slice() {
+        [single] => LayerOverlapKind::IntraLayer {
+            layer_idx: *single,
+            strip,
+        },
+        _ => LayerOverlapKind::CrossLayer { layer_indices },
+    }
 }
 
 /// Maximum number of filesystem entries the walker will process per
@@ -115,6 +154,12 @@ pub struct AssemblyStats {
     pub dirs_created: usize,
     /// Total bytes across the files that were hardlinked. Informational.
     pub bytes_hardlinked: u64,
+    /// Files and symlinks dropped because a package-wide `strip` collapsed
+    /// their path to empty (entry at depth ≤ `strip`). Zero on the verbatim
+    /// (`strip == 0`) path. Populated by the strip-aware assembler; a whole
+    /// layer that strips to nothing surfaces here as a non-zero drop count
+    /// with an empty destination contribution.
+    pub entries_stripped_to_empty: usize,
 }
 
 impl AssemblyStats {
@@ -123,6 +168,7 @@ impl AssemblyStats {
         self.symlinks_recreated += other.symlinks_recreated;
         self.dirs_created += other.dirs_created;
         self.bytes_hardlinked += other.bytes_hardlinked;
+        self.entries_stripped_to_empty += other.entries_stripped_to_empty;
     }
 }
 
@@ -194,14 +240,149 @@ pub async fn assemble_from_layers(sources: &[&Path], dest_content: &Path) -> Res
     assemble_from_layers_with_cap(sources, dest_content, MAX_WALK_ENTRIES).await
 }
 
-/// Internal multi-layer walker entry point with configurable entry cap.
-/// Exposed for tests so resource-limit checks can be exercised.
-async fn assemble_from_layers_with_cap(
-    sources: &[&Path],
-    dest_content: &Path,
+/// Assembles overlap-free layers, dropping the leading `strip` path components
+/// of every source before the overlap merge (a uniform, package-wide strip).
+///
+/// `strip == 0` is identical to [`assemble_from_layers`]. For `strip > 0` each
+/// layer is seed-time expanded via [`expand`] — the leading `strip` path
+/// components are dropped, files and symlinks at depth ≤ `strip` are skipped
+/// (and counted), and the resulting post-strip roots are merged with the same
+/// overlap policy as the verbatim walker. Each post-strip root keeps its
+/// *original* layer index so a collision error can distinguish an intra-layer
+/// self-collapse from a cross-layer overlap (F1).
+///
+/// # Errors
+///
+/// Same as [`assemble_from_layers`], plus [`AssemblyError::LayerOverlap`] when
+/// two post-strip destinations collide — whether they come from two different
+/// layers (cross-layer) or from one layer's two post-strip subtrees
+/// (intra-layer). Post-strip collisions fail closed because assemble-time strip
+/// has lost the tar archive order that would define a deterministic winner.
+pub async fn assemble_from_layers_stripped(sources: &[&Path], strip: u8, dest_content: &Path) -> Result<AssemblyStats> {
+    // strip == 0 routes through the verbatim assembler verbatim so the result
+    // is byte-identical to `assemble_from_layers` (U2) — no expansion overhead.
+    if strip == 0 {
+        return assemble_from_layers_with_cap(sources, dest_content, MAX_WALK_ENTRIES).await;
+    }
+
+    prepare_destination(sources, dest_content).await?;
+
+    // Seed-time expansion drops the leading `strip` components of every layer,
+    // preserving each post-strip root's original layer index for error wording.
+    // The expansion shares the walker's entry counter so the cap covers both.
+    let entries_seen = Arc::new(AtomicUsize::new(0));
+    let mut seed_roots: Vec<(usize, PathBuf)> = Vec::new();
+    let mut entries_stripped_to_empty = 0usize;
+    for (layer_idx, src) in sources.iter().enumerate() {
+        let (roots, dropped) = expand(layer_idx, src, strip, &entries_seen, MAX_WALK_ENTRIES).await?;
+        seed_roots.extend(roots);
+        entries_stripped_to_empty += dropped;
+    }
+
+    let mut stats = run_merge_walker(seed_roots, dest_content, strip, entries_seen, MAX_WALK_ENTRIES).await?;
+    stats.entries_stripped_to_empty += entries_stripped_to_empty;
+    if entries_stripped_to_empty > 0 {
+        crate::log::debug!(
+            "assemble strip={strip} dropped {entries_stripped_to_empty} entr{} that stripped to empty",
+            if entries_stripped_to_empty == 1 { "y" } else { "ies" }
+        );
+    }
+    Ok(stats)
+}
+
+/// Bounded seed-time strip expansion for a single layer.
+///
+/// Drops the leading `strip` path components of `src`, returning
+/// `(post_strip_roots, entries_stripped_to_empty)`. Each root directory is
+/// tagged with the *original* `layer_idx` (used only to word intra- vs
+/// cross-layer overlap errors — never for placement). For `strip == 0` the
+/// single root is `src` itself and nothing is read. Files and symlinks
+/// encountered at depth ≤ `strip` strip to an empty path and are skipped; each
+/// is counted (both into the returned drop count and against
+/// `entries_seen`/`max_entries`) so a malformed layer cannot amplify during
+/// expansion. Expansion depth is bounded by `strip` (`u8`).
+///
+/// # Errors
+///
+/// [`AssemblyError::EntryLimitExceeded`] when the entry cap is exceeded, or an
+/// I/O error (wrapped in [`crate::Error::InternalFile`]) if a directory read
+/// fails.
+async fn expand(
+    layer_idx: usize,
+    src: &Path,
+    strip: u8,
+    entries_seen: &AtomicUsize,
     max_entries: usize,
-) -> Result<AssemblyStats> {
-    // ── Pre-condition: all sources must be existing directories. ────────────
+) -> Result<(Vec<(usize, PathBuf)>, usize)> {
+    // Base case: no more components to strip — `src` itself is a post-strip
+    // root. Not read here; the merge walker reads it and counts its entries.
+    if strip == 0 {
+        return Ok((vec![(layer_idx, src.to_path_buf())], 0));
+    }
+
+    let mut roots: Vec<(usize, PathBuf)> = Vec::new();
+    let mut dropped = 0usize;
+
+    let mut entries = tokio::fs::read_dir(src)
+        .await
+        .map_err(|e| crate::error::file_error(src, e))?;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| crate::error::file_error(src, e))?
+    {
+        let prev = entries_seen.fetch_add(1, Ordering::Relaxed);
+        if prev + 1 > max_entries {
+            return Err(crate::error::file_error(
+                src,
+                std::io::Error::other(AssemblyError::EntryLimitExceeded),
+            ));
+        }
+
+        let child = entry.path();
+
+        // Classify like `process_directory`: a symlink (incl. NTFS junction)
+        // is a non-directory even when `file_type()` reports a directory. A
+        // non-directory at depth ≤ strip strips to empty and is dropped.
+        if crate::symlink::is_link(&child) {
+            dropped += 1;
+            continue;
+        }
+
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| crate::error::file_error(&child, e))?;
+
+        if file_type.is_dir() {
+            // Recurse one level deeper; async recursion needs an explicit box.
+            let (child_roots, child_dropped) =
+                Box::pin(expand(layer_idx, &child, strip - 1, entries_seen, max_entries)).await?;
+            roots.extend(child_roots);
+            dropped += child_dropped;
+        } else if file_type.is_file() {
+            dropped += 1;
+        }
+        // Other entry types (sockets, fifos, devices) are skipped silently, as
+        // in `process_directory` — OCI layers should never contain them.
+    }
+
+    Ok((roots, dropped))
+}
+
+/// Validates every source is an existing directory and prepares `dest_content`.
+///
+/// `dest_content` is created if absent (its parent must already exist), even for
+/// zero sources — callers rely on `content/` existing after assembly (e.g.
+/// config-only packages with no layers).
+///
+/// # Errors
+///
+/// - [`AssemblyError::SourceNotDirectory`] if any source is not a directory.
+/// - [`AssemblyError::DestinationParentMissing`] if `dest_content.parent()`
+///   does not exist.
+async fn prepare_destination(sources: &[&Path], dest_content: &Path) -> Result<()> {
     for src in sources {
         let meta = tokio::fs::metadata(src)
             .await
@@ -214,9 +395,6 @@ async fn assemble_from_layers_with_cap(
         }
     }
 
-    // ── Pre-condition: prepare dest_content. ────────────────────────────────
-    // Always created, even with zero sources — callers rely on `content/`
-    // existing after assembly (e.g. config-only packages with no layers).
     if !super::path_exists_lossy(dest_content).await {
         if let Some(parent) = dest_content.parent()
             && !super::path_exists_lossy(parent).await
@@ -231,26 +409,68 @@ async fn assemble_from_layers_with_cap(
             .map_err(|e| crate::error::file_error(dest_content, e))?;
     }
 
+    Ok(())
+}
+
+/// Internal multi-layer walker entry point with configurable entry cap.
+/// Exposed for tests so resource-limit checks can be exercised.
+async fn assemble_from_layers_with_cap(
+    sources: &[&Path],
+    dest_content: &Path,
+    max_entries: usize,
+) -> Result<AssemblyStats> {
+    prepare_destination(sources, dest_content).await?;
+
     // ── Early return: no sources to walk, empty content/ is the result. ─────
     if sources.is_empty() {
         return Ok(AssemblyStats::default());
     }
 
-    // ── Parallel directory-level fan-out (multi-layer). ─────────────────────
-    let semaphore = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
+    // Seed with the root directory set. Each root source is tagged with its
+    // layer index (its position in `sources`); the tag rides through recursion.
+    // Verbatim assembly applies no strip, so `strip == 0` for error wording.
+    let seed_roots: Vec<(usize, PathBuf)> = sources.iter().enumerate().map(|(i, s)| (i, s.to_path_buf())).collect();
     let entries_seen = Arc::new(AtomicUsize::new(0));
+    run_merge_walker(seed_roots, dest_content, 0, entries_seen, max_entries).await
+}
+
+/// Runs the semaphore-bounded, directory-parallel merge walker over a set of
+/// layer-index-tagged root directories, mirroring them into `dest_content`.
+///
+/// `seed_roots` is the initial `(layer_idx, dir)` set fed to the root level —
+/// either the verbatim layer roots (`strip == 0`) or the post-strip roots from
+/// [`expand`]. `strip` is threaded through solely so a collision error can be
+/// worded as intra- vs cross-layer (F1); it never affects placement. The shared
+/// `entries_seen` counter enforces `max_entries` across the whole walk (and,
+/// for the strip path, across the preceding expansion).
+async fn run_merge_walker(
+    seed_roots: Vec<(usize, PathBuf)>,
+    dest_content: &Path,
+    strip: u8,
+    entries_seen: Arc<AtomicUsize>,
+    max_entries: usize,
+) -> Result<AssemblyStats> {
+    let semaphore = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
     let dest_root = dest_content.to_path_buf();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SpawnRequest>();
     let mut join_set: JoinSet<Result<AssemblyStats>> = JoinSet::new();
 
-    // Seed with the root directory set.
     tx.send(SpawnRequest {
-        src_dirs: sources.iter().map(|s| s.to_path_buf()).collect(),
+        src_dirs: seed_roots,
         dest_dir: dest_content.to_path_buf(),
         depth: 0,
     })
     .expect("rx alive");
+
+    // Walk-invariant context, cloned into each spawned directory task.
+    let ctx = WalkContext {
+        dest_root: dest_root.clone(),
+        entries_seen,
+        max_entries,
+        strip,
+        join_set_tx: tx.clone(),
+    };
 
     let mut stats = AssemblyStats::default();
 
@@ -262,20 +482,9 @@ async fn assemble_from_layers_with_cap(
                 .acquire_owned()
                 .await
                 .expect("semaphore is never closed");
-            let tx_child = tx.clone();
-            let entries_seen_child = entries_seen.clone();
-            let dest_root_child = dest_root.clone();
+            let ctx = ctx.clone();
             join_set.spawn(async move {
-                let res = process_directory(
-                    req.src_dirs,
-                    req.dest_dir,
-                    dest_root_child,
-                    req.depth,
-                    entries_seen_child,
-                    max_entries,
-                    tx_child,
-                )
-                .await;
+                let res = process_directory(req, ctx).await;
                 drop(permit);
                 res
             });
@@ -295,20 +504,9 @@ async fn assemble_from_layers_with_cap(
                     .acquire_owned()
                     .await
                     .expect("semaphore is never closed");
-                let tx_child = tx.clone();
-                let entries_seen_child = entries_seen.clone();
-                let dest_root_child = dest_root.clone();
+                let ctx = ctx.clone();
                 join_set.spawn(async move {
-                    let res = process_directory(
-                        req.src_dirs,
-                        req.dest_dir,
-                        dest_root_child,
-                        req.depth,
-                        entries_seen_child,
-                        max_entries,
-                        tx_child,
-                    )
-                    .await;
+                    let res = process_directory(req, ctx).await;
                     drop(permit);
                     res
                 });
@@ -361,11 +559,31 @@ enum EntryKind {
 
 /// Work item for the scheduler. Each request represents one directory level
 /// that needs to be walked across one or more source layers.
+///
+/// Each source directory carries the *original* layer index it descends from.
+/// The index is preserved through recursion so the merge phase can word an
+/// overlap error as intra- vs cross-layer (F1) — it never affects placement.
+/// A minimal tuple (not a struct) until Part 2 adds a `virtual_prefix` field.
 #[derive(Debug)]
 struct SpawnRequest {
-    src_dirs: Vec<PathBuf>,
+    src_dirs: Vec<(usize, PathBuf)>,
     dest_dir: PathBuf,
     depth: usize,
+}
+
+/// Walk-invariant context shared by every `process_directory` task: the
+/// destination root (error paths + symlink containment), the shared entry
+/// counter and its cap, the package-wide `strip` (error wording only, F1), and
+/// the scheduler channel for posting child directory levels. Cloned once per
+/// spawned task — every field is cheap to clone (an `Arc`, a sender handle, one
+/// `PathBuf`, and two scalars), which is exactly what the walker cloned before.
+#[derive(Clone)]
+struct WalkContext {
+    dest_root: PathBuf,
+    entries_seen: Arc<AtomicUsize>,
+    max_entries: usize,
+    strip: u8,
+    join_set_tx: tokio::sync::mpsc::UnboundedSender<SpawnRequest>,
 }
 
 /// Processes one directory level across one or more source layers.
@@ -373,21 +591,25 @@ struct SpawnRequest {
 /// Reads entries from all `src_dirs`, merges by name into a `BTreeMap`,
 /// detects overlaps, and places files/symlinks. Directories are posted
 /// back to the scheduler with only the contributing layers.
-async fn process_directory(
-    src_dirs: Vec<PathBuf>,
-    dest_dir: PathBuf,
-    dest_root: PathBuf,
-    depth: usize,
-    entries_seen: Arc<AtomicUsize>,
-    max_entries: usize,
-    join_set_tx: tokio::sync::mpsc::UnboundedSender<SpawnRequest>,
-) -> Result<AssemblyStats> {
+async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<AssemblyStats> {
+    let SpawnRequest {
+        src_dirs,
+        dest_dir,
+        depth,
+    } = req;
+    let WalkContext {
+        dest_root,
+        entries_seen,
+        max_entries,
+        strip,
+        join_set_tx,
+    } = ctx;
     let mut stats = AssemblyStats::default();
 
     // ── Phase 1: Collect entries from all source layers. ────────────────────
     let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf)>> = BTreeMap::new();
 
-    for (layer_idx, src_dir) in src_dirs.iter().enumerate() {
+    for &(layer_idx, ref src_dir) in &src_dirs {
         let mut entries = tokio::fs::read_dir(src_dir)
             .await
             .map_err(|e| crate::error::file_error(src_dir, e))?;
@@ -449,28 +671,25 @@ async fn process_directory(
     for (name, contributors) in &merged {
         let dest_path = dest_dir.join(name);
 
-        // Partition into dirs and non-dirs.
-        let mut dirs: Vec<&PathBuf> = Vec::new();
+        // Partition into dirs and non-dirs. Directories keep their originating
+        // layer index so it survives into the child `SpawnRequest`.
+        let mut dirs: Vec<(usize, &PathBuf)> = Vec::new();
         let mut non_dirs: Vec<(&EntryKind, &PathBuf)> = Vec::new();
 
-        for (_layer_idx, kind, src_path) in contributors {
+        for (layer_idx, kind, src_path) in contributors {
             match kind {
-                EntryKind::Dir => dirs.push(src_path),
+                EntryKind::Dir => dirs.push((*layer_idx, src_path)),
                 _ => non_dirs.push((kind, src_path)),
             }
         }
 
-        // Overlap checks.
-        if non_dirs.len() > 1 {
+        // Overlap checks. Fail closed on any non-dir/non-dir duplicate or
+        // dir/non-dir mix (B2/F1). The colliding contributors' distinct layer
+        // indices word the error as intra- vs cross-layer.
+        if non_dirs.len() > 1 || (!dirs.is_empty() && !non_dirs.is_empty()) {
             return Err(crate::error::file_error(
                 &dest_path,
-                std::io::Error::other(AssemblyError::LayerOverlap),
-            ));
-        }
-        if !dirs.is_empty() && !non_dirs.is_empty() {
-            return Err(crate::error::file_error(
-                &dest_path,
-                std::io::Error::other(AssemblyError::LayerOverlap),
+                std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors, strip))),
             ));
         }
 
@@ -509,7 +728,7 @@ async fn process_directory(
                     if !existing.is_dir() {
                         return Err(crate::error::file_error(
                             &dest_path,
-                            std::io::Error::other(AssemblyError::LayerOverlap),
+                            std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors, strip))),
                         ));
                     }
                     // Directory already exists — don't increment dirs_created.
@@ -524,8 +743,10 @@ async fn process_directory(
                 ));
             }
 
-            // Post subdirectory request with only the contributing layers.
-            let child_src_dirs: Vec<PathBuf> = dirs.into_iter().cloned().collect();
+            // Post subdirectory request with only the contributing layers,
+            // preserving each one's original layer index.
+            let child_src_dirs: Vec<(usize, PathBuf)> =
+                dirs.into_iter().map(|(idx, path)| (idx, path.clone())).collect();
             if join_set_tx
                 .send(SpawnRequest {
                     src_dirs: child_src_dirs,
@@ -2549,7 +2770,7 @@ mod tests {
                 assert!(
                     source
                         .downcast_ref::<AssemblyError>()
-                        .is_some_and(|e| matches!(e, AssemblyError::LayerOverlap))
+                        .is_some_and(|e| matches!(e, AssemblyError::LayerOverlap(_)))
                         || io_err.kind() == std::io::ErrorKind::AlreadyExists,
                     "expected LayerOverlap or AlreadyExists, got kind={:?} path={}",
                     io_err.kind(),
@@ -2905,5 +3126,310 @@ mod tests {
         assert!(deep_dest.join("y.txt").exists(), "y.txt must exist at depth 20");
         assert_eq!(std::fs::read(deep_dest.join("x.txt")).unwrap(), b"deep x");
         assert_eq!(std::fs::read(deep_dest.join("y.txt")).unwrap(), b"deep y");
+    }
+
+    // ── Part 1: strip-aware assembly (assemble_from_layers_stripped) ─────────
+    //
+    // Contract-first specification tests for the package-wide strip that moved
+    // out of the two extraction paths (client.rs registry pull +
+    // pull_local::extract_archive_to_temp) and into assemble time. Against the
+    // P1.1 `unimplemented!()` stub every test in this section PANICS — that is
+    // the required TDD-red. P1.7 implements `expand` + the strip-aware merge to
+    // turn them green. Rows cite the plan Test Matrix tag (U#).
+
+    /// Downcast the walker's wrapped error to the inner [`AssemblyError`].
+    ///
+    /// The walker surfaces all invariant violations as
+    /// `crate::Error::InternalFile(path, io::Error::other(AssemblyError))`, so a
+    /// spec test that asserts on the assembly error kind or its Display must peel
+    /// both layers. Returns the owned Display string plus a downcast confirmation
+    /// so callers stay resilient to the variant becoming a struct variant in P1.7
+    /// (the `LayerOverlap` unit variant is enriched with layer-index fields then).
+    fn assembly_error_message(err: &crate::Error) -> String {
+        let crate::Error::InternalFile(_, io_err) = err else {
+            panic!("expected Error::InternalFile wrapping an AssemblyError, got {err:?}");
+        };
+        let assembly = io_err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<AssemblyError>())
+            .expect("inner io::Error source must be an AssemblyError");
+        assembly.to_string()
+    }
+
+    /// U1 (happy · D4): strip=1 drops the single leading directory so the files
+    /// beneath it land directly at the destination root.
+    #[tokio::test]
+    async fn strip_one_hoists_single_top_directory() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer/content/topdir/bin/tool", b"tool bytes");
+        make_file(&root, "layer/content/topdir/lib/foo.so", b"lib bytes");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        assert_eq!(stats.files_hardlinked, 2, "both files under topdir must be placed");
+        assert!(dest.join("bin/tool").is_file(), "bin/tool must be hoisted to dest root");
+        assert!(
+            dest.join("lib/foo.so").is_file(),
+            "lib/foo.so must be hoisted to dest root"
+        );
+        assert!(
+            !dest.join("topdir").exists(),
+            "the stripped leading component must be gone"
+        );
+        assert_eq!(std::fs::read(dest.join("bin/tool")).unwrap(), b"tool bytes");
+    }
+
+    /// U2 (D4): strip=0 is byte-for-byte identical to the verbatim
+    /// `assemble_from_layers` — same tree, same stats.
+    #[tokio::test]
+    async fn strip_zero_matches_verbatim_assembly() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer/content/bin/tool", b"tool bytes");
+        make_file(&root, "layer/content/lib/foo.so", b"lib bytes");
+        make_file(&root, "layer/content/share/doc/readme.md", b"readme");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg_verbatim")).unwrap();
+        let dest_verbatim = root.join("pkg_verbatim/content");
+        let stats_verbatim = assemble_from_layers(&[src.as_path()], &dest_verbatim).await.unwrap();
+
+        std::fs::create_dir_all(root.join("pkg_strip0")).unwrap();
+        let dest_strip0 = root.join("pkg_strip0/content");
+        let stats_strip0 = assemble_from_layers_stripped(&[src.as_path()], 0, &dest_strip0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stats_strip0, stats_verbatim,
+            "strip=0 stats must equal the verbatim assembler's stats"
+        );
+        assert_eq!(stats_strip0.entries_stripped_to_empty, 0, "strip=0 drops nothing");
+        assert!(dest_strip0.join("bin/tool").is_file());
+        assert!(dest_strip0.join("lib/foo.so").is_file());
+        assert!(dest_strip0.join("share/doc/readme.md").is_file());
+    }
+
+    /// U3 (strip-to-empty · D7): an entry at depth ≤ strip strips to empty and
+    /// is skipped while deeper entries survive; the drop count reflects it.
+    #[tokio::test]
+    async fn strip_drops_shallow_entry_and_counts_it() {
+        let (_dir, root) = setup();
+        // Survives strip=1 via topdir; its contents hoist to the dest root.
+        make_file(&root, "layer/content/topdir/bin/tool", b"tool bytes");
+        // A root-level file (depth 1) — strips to empty, must be dropped.
+        make_file(&root, "layer/content/rootfile.txt", b"root");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        assert!(
+            dest.join("bin/tool").is_file(),
+            "deep entry under topdir survives strip"
+        );
+        assert!(
+            !dest.join("rootfile.txt").exists(),
+            "root-level file at depth 1 must be stripped away"
+        );
+        assert!(!dest.join("topdir").exists(), "the consumed top dir must not appear");
+        assert_eq!(stats.files_hardlinked, 1, "only the surviving file is placed");
+        assert_eq!(
+            stats.entries_stripped_to_empty, 1,
+            "the dropped root-level file must be counted"
+        );
+    }
+
+    /// U4 (D7): a whole layer that strips to nothing yields an empty destination
+    /// contribution plus a non-zero drop count — the dest dir is still created.
+    #[tokio::test]
+    async fn strip_whole_layer_to_empty() {
+        let (_dir, root) = setup();
+        // Only root-level files: strip=1 collapses every one to empty.
+        make_file(&root, "layer/content/a.txt", b"a");
+        make_file(&root, "layer/content/b.txt", b"b");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        assert!(
+            dest.is_dir(),
+            "dest must still be created even when the layer strips to empty"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dest).unwrap().count(),
+            0,
+            "the destination contribution must be empty"
+        );
+        assert_eq!(stats.files_hardlinked, 0, "no files survive the strip");
+        assert_eq!(
+            stats.entries_stripped_to_empty, 2,
+            "both root-level files strip to empty and are counted"
+        );
+    }
+
+    /// U5 (dangling-after-strip · D7): a relative symlink that survives strip
+    /// but whose target endpoint does not survive is recreated verbatim (target
+    /// string byte-for-byte) and left dangling — the walker never rewrites or
+    /// resolves symlink targets, so a stripped-away endpoint is not an error.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn strip_dangling_relative_symlink_recreated_verbatim_no_error() {
+        let (_dir, root) = setup();
+        make_dir(&root, "layer/content/topdir/lib");
+        // Same-directory relative link; its endpoint is absent after strip.
+        crate::symlink::create(
+            std::path::Path::new("libfoo.so.1.2.3"),
+            root.join("layer/content/topdir/lib/libfoo.so"),
+        )
+        .unwrap();
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        let link = dest.join("lib/libfoo.so");
+        assert!(link.is_symlink(), "the symlink must survive strip");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("libfoo.so.1.2.3"),
+            "the target string must be preserved verbatim"
+        );
+        assert!(
+            std::fs::read(&link).is_err(),
+            "the link must be dangling — the endpoint was stripped away"
+        );
+        assert_eq!(stats.symlinks_recreated, 1, "the dangling symlink is still recreated");
+    }
+
+    /// U6 (D7 note 2): a file under a stripped top dir is still hardlinked into
+    /// the destination sharing an inode with its layer source — strip changes
+    /// placement, never the hardlink-dedup invariant.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn strip_hardlinks_file_sharing_inode_with_source() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+        let source = make_file(&root, "layer/content/topdir/bin/tool", b"binary content");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        let dest_tool = dest.join("bin/tool");
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().ino(),
+            std::fs::metadata(&dest_tool).unwrap().ino(),
+            "the stripped file must still be hardlinked (share inode) with its layer source"
+        );
+    }
+
+    /// U7 (verbatim symlink · D7): under a uniform strip the whole subtree moves
+    /// together, so an in-subtree relative symlink keeps its verbatim target and
+    /// still resolves to its (also-moved) sibling.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn strip_preserves_symlink_target_byte_for_byte() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer/content/topdir/lib/libfoo.so.1.2.3", b"lib bytes");
+        crate::symlink::create(
+            std::path::Path::new("libfoo.so.1.2.3"),
+            root.join("layer/content/topdir/lib/libfoo.so"),
+        )
+        .unwrap();
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+
+        let link = dest.join("lib/libfoo.so");
+        assert!(link.is_symlink(), "libfoo.so must be a symlink after strip");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("libfoo.so.1.2.3"),
+            "the uniform strip must preserve the symlink target byte-for-byte"
+        );
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            b"lib bytes",
+            "the link must resolve to the sibling that moved with it"
+        );
+        assert_eq!(stats.symlinks_recreated, 1);
+        assert_eq!(stats.files_hardlinked, 1);
+    }
+
+    /// U8a (B2/F1): an INTRA-layer post-strip collision — one layer whose two
+    /// post-strip subtrees (`a/bin/tool` + `b/bin/tool`, strip=1) collapse onto
+    /// the same destination path — fails closed with `LayerOverlap`; the message
+    /// identifies it as intra-layer.
+    #[tokio::test]
+    async fn strip_intra_layer_collision_fails_closed() {
+        let (_dir, root) = setup();
+        // Both `a` and `b` are consumed by strip=1; their contents (`bin/tool`)
+        // then collide at the same post-strip destination — from ONE layer.
+        make_file(&root, "layer/content/a/bin/tool", b"tool from a");
+        make_file(&root, "layer/content/b/bin/tool", b"tool from b");
+        let src = root.join("layer/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let err = assemble_from_layers_stripped(&[src.as_path()], 1, &dest)
+            .await
+            .expect_err("an intra-layer post-strip collision must fail closed");
+
+        let message = assembly_error_message(&err).to_lowercase();
+        assert!(
+            message.contains("overlap"),
+            "must surface a LayerOverlap error, got: {message}"
+        );
+        assert!(
+            message.contains("intra-layer"),
+            "an intra-layer self-collapse message must name it 'intra-layer', got: {message}"
+        );
+    }
+
+    /// U8b (overlap-after-transform · B2/D6): a CROSS-layer collision after
+    /// strip — two layers whose post-strip trees land on the same path — fails
+    /// closed with `LayerOverlap`; the message identifies it as cross-layer.
+    #[tokio::test]
+    async fn strip_cross_layer_collision_fails_closed() {
+        let (_dir, root) = setup();
+        let src_a = make_dir(&root, "layer_a/content");
+        make_file(&root, "layer_a/content/topA/bin/tool", b"tool from A");
+        let src_b = make_dir(&root, "layer_b/content");
+        make_file(&root, "layer_b/content/topB/bin/tool", b"tool from B");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let err = assemble_from_layers_stripped(&[src_a.as_path(), src_b.as_path()], 1, &dest)
+            .await
+            .expect_err("a cross-layer post-strip collision must fail closed");
+
+        let message = assembly_error_message(&err).to_lowercase();
+        assert!(
+            message.contains("overlap"),
+            "must surface a LayerOverlap error, got: {message}"
+        );
+        assert!(
+            message.contains("cross-layer"),
+            "a cross-layer overlap message must name it 'cross-layer', got: {message}"
+        );
     }
 }

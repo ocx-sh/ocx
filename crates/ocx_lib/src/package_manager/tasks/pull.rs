@@ -372,7 +372,7 @@ pub async fn setup_owned(
 
     // Extract layers to layers/ store and pull dependencies in parallel.
     let (layer_digests, dependencies) = tokio::join!(
-        extract_layers(mgr, pinned, &manifest, &metadata, groups.layers.clone()),
+        extract_layers(mgr, pinned, &manifest, groups.layers.clone()),
         setup_dependencies(mgr, &metadata, pinned, platforms, groups.clone()),
     );
     let (layer_digests, dependencies) = (layer_digests?, dependencies?);
@@ -403,7 +403,10 @@ pub async fn setup_owned(
         .map(|d| fs.layers.content(pinned.registry(), d))
         .collect();
     let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    crate::utility::fs::assemble_from_layers(&sources, &pkg.content())
+    // Layers are stored verbatim (strip = 0); the package-wide strip is applied
+    // once here, at assemble time (Part 1: single scalar strip for all layers).
+    let strip = metadata.strip_components().unwrap_or(0);
+    crate::utility::fs::assemble_from_layers_stripped(&sources, strip, &pkg.content())
         .await
         .map_err(PackageErrorKind::Internal)?;
 
@@ -670,7 +673,6 @@ async fn extract_layers(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
     manifest: &oci::ImageManifest,
-    metadata: &metadata::Metadata,
     layer_group: LayerGroup,
 ) -> Result<Vec<oci::Digest>, PackageErrorKind> {
     // Parse all layer digests up front so we can return a typed error
@@ -692,10 +694,9 @@ async fn extract_layers(
     for (idx, (layer, digest)) in parsed.into_iter().enumerate() {
         let mgr = mgr.clone();
         let pinned = pinned.clone();
-        let metadata = metadata.clone();
         let layer_group = layer_group.clone();
         tasks.spawn(crate::cli::progress::inherit_scope(async move {
-            let res = extract_layer_atomic(&mgr, &pinned, &layer, &digest, &metadata, layer_group).await;
+            let res = extract_layer_atomic(&mgr, &pinned, &layer, &digest, layer_group).await;
             (idx, res)
         }));
     }
@@ -735,7 +736,6 @@ async fn extract_layer_atomic(
     pinned: &oci::PinnedIdentifier,
     layer: &oci::Descriptor,
     layer_digest: &oci::Digest,
-    metadata: &metadata::Metadata,
     layer_group: LayerGroup,
 ) -> Result<oci::Digest, PackageErrorKind> {
     let fs = mgr.file_structure();
@@ -771,7 +771,7 @@ async fn extract_layer_atomic(
     };
 
     // We own the handle. Either complete on Ok or fail on Err before return.
-    match extract_layer_inner(pinned, layer, layer_digest, metadata, client, fs).await {
+    match extract_layer_inner(pinned, layer, layer_digest, client, fs).await {
         Ok(()) => {
             handle.complete(());
             Ok(layer_digest.clone())
@@ -788,7 +788,6 @@ async fn extract_layer_inner(
     pinned: &oci::PinnedIdentifier,
     layer: &oci::Descriptor,
     layer_digest: &oci::Digest,
-    metadata: &metadata::Metadata,
     client: &oci::Client,
     fs: &file_structure::FileStructure,
 ) -> Result<(), PackageErrorKind> {
@@ -825,7 +824,7 @@ async fn extract_layer_inner(
     }
 
     // Step 5: pull the layer blob.
-    client.pull_layer(pinned, layer, metadata, &temp.dir.dir).await?;
+    client.pull_layer(pinned, layer, &temp.dir.dir).await?;
 
     // Step 6: write digest file for CAS-path recovery.
     file_structure::write_digest_file(&temp.dir.dir.join(file_structure::DIGEST_FILENAME), layer_digest)

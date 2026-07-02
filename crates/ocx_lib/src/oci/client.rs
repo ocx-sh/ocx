@@ -5,7 +5,7 @@ use crate::{
     ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_DESCRIPTION_V1, MEDIA_TYPE_MARKDOWN, MEDIA_TYPE_OCI_EMPTY_CONFIG,
     MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_V1, MEDIA_TYPE_PNG, MEDIA_TYPE_SVG,
     Result, archive, compression, log, media_type_from_path, oci,
-    package::{self, info::Info, metadata, tag::InternalTag},
+    package::{self, info::Info, tag::InternalTag},
 };
 
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -404,7 +404,6 @@ impl Client {
         &self,
         identifier: &oci::PinnedIdentifier,
         layer: &oci::Descriptor,
-        metadata: &metadata::Metadata,
         output_dir: &std::path::Path,
     ) -> std::result::Result<(), ClientError> {
         // A descriptor `size` that is non-positive (zero or negative) or does not
@@ -435,15 +434,8 @@ impl Client {
         let decompressed_cap =
             (blob_total_size.saturating_mul(DECOMPRESSED_CAP_MULTIPLIER)).max(DECOMPRESSED_CAP_MINIMUM);
 
-        self.pull_layer_with_caps(
-            identifier,
-            layer,
-            metadata,
-            output_dir,
-            blob_total_size,
-            decompressed_cap,
-        )
-        .await
+        self.pull_layer_with_caps(identifier, layer, output_dir, blob_total_size, decompressed_cap)
+            .await
     }
 
     /// Pipeline body for [`pull_layer`] with the decompressed-side cap passed in.
@@ -458,7 +450,6 @@ impl Client {
         &self,
         identifier: &oci::PinnedIdentifier,
         layer: &oci::Descriptor,
-        metadata: &metadata::Metadata,
         output_dir: &std::path::Path,
         blob_total_size: u64,
         decompressed_cap: u64,
@@ -530,12 +521,11 @@ impl Client {
         let hashing_reader = HashingAsyncReader::new(capped_stream, layer_digest.algorithm());
         let progress_reader = ProgressReader::new(hashing_reader, on_progress);
 
-        // Dispatch decoder based on the layer's media type.
-        // async-compression decoders require a BufReader input.
-        let strip_components = match metadata {
-            metadata::Metadata::Bundle(bundle) => bundle.strip_components.unwrap_or(0),
-        };
-
+        // Layer blobs extract verbatim (strip = 0) into the shared
+        // content-addressed layer store; the package-wide strip is applied once,
+        // later, at assemble time (see `assemble_from_layers_stripped`). Baking
+        // strip in here would corrupt the shared store when two packages reuse
+        // one blob digest with different strip.
         let content_path_clone = content_path.clone();
         let identifier_label = identifier.to_string();
 
@@ -606,8 +596,7 @@ impl Client {
                     // it makes the sync-side boundary explicit at construction.
                     // Wrap with std::io::Read::take for the decompressed-side cap.
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) =
-                        archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
                     // limit() == 0 means all `cap + 1` bytes were consumed → the
                     // decompressed output exceeded `decompressed_cap`.
                     let cap_exceeded = bridge.limit() == 0;
@@ -626,8 +615,7 @@ impl Client {
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) =
-                        archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
                     let cap_exceeded = bridge.limit() == 0;
                     let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
                     (extract_result, hashing_reader.finalize(), cap_exceeded)
@@ -642,8 +630,7 @@ impl Client {
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) =
-                        archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
                     let cap_exceeded = bridge.limit() == 0;
                     let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
                     (extract_result, hashing_reader.finalize(), cap_exceeded)
@@ -1182,6 +1169,10 @@ mod tests {
     use super::*;
     use crate::MEDIA_TYPE_PACKAGE_METADATA_V1;
     use crate::oci;
+    // `pull_layer` no longer takes a `metadata` param (Part 1), so production
+    // client.rs no longer imports the `metadata` module. Test fixtures still
+    // construct `metadata::Metadata` values, so import it directly here.
+    use crate::package::metadata;
 
     use std::sync::Mutex;
 
@@ -1481,10 +1472,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         match result {
             Err(ClientError::DigestMismatch { expected, actual }) => {
                 assert_eq!(
@@ -1624,10 +1614,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         match result {
             Err(ClientError::DigestMismatch { expected, actual }) => {
                 assert_eq!(
@@ -1682,10 +1671,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         // If the pipeline succeeds or fails with Internal (codesign, tar), that's fine;
         // the key invariant is that no .tar.gz blob file exists in output_dir.
         match &result {
@@ -1742,10 +1730,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         match result {
             Err(ClientError::Internal(_)) => {
                 // expected — garbage tar body wrapping valid xz compression → archive error
@@ -1799,12 +1786,11 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
         let blob_total_size = tar_gz_bytes.len() as u64;
         let result = client
-            .pull_layer_with_caps(&id, &layer, &metadata, dir.path(), blob_total_size, 512)
+            .pull_layer_with_caps(&id, &layer, dir.path(), blob_total_size, 512)
             .await;
         match result {
             Err(ClientError::DecompressionCapExceeded { cap }) => {
@@ -1834,10 +1820,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         match result {
             Err(ClientError::InvalidManifest(msg)) => {
                 assert!(
@@ -1847,6 +1832,60 @@ mod tests {
             }
             other => panic!("expected InvalidManifest for size: 0 descriptor, got {other:?}"),
         }
+    }
+
+    /// U10 (BC-core · D12): the registry extraction path writes a VERBATIM layer
+    /// tree — the package-wide strip is NOT applied at extraction time (it moved
+    /// to assemble). A tarball with a leading top-level directory must land in
+    /// `output_dir/content/` with that directory intact so the shared
+    /// content-addressed layer store stays faithful regardless of any package's
+    /// `strip_components`.
+    #[tokio::test]
+    async fn pull_layer_extracts_verbatim_without_strip() {
+        // A single-file tar entry whose path carries a leading directory. tar's
+        // unpack creates the parent dirs, so `topdir/bin/tool` is materialized.
+        let tar_gz_bytes = make_minimal_tar_gz(b"tool bytes\n", "topdir/bin/tool");
+        let layer_digest = Algorithm::Sha256.hash(&tar_gz_bytes);
+        let digest_str = layer_digest.to_string();
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_gz_bytes.clone());
+        let client = stub(&data);
+
+        let id = {
+            let hex = digest_str.strip_prefix("sha256:").unwrap();
+            test_pinned(hex)
+        };
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: digest_str.clone(),
+            size: tar_gz_bytes.len() as i64,
+            urls: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        client
+            .pull_layer(&id, &layer, dir.path())
+            .await
+            .expect("pull_layer must extract the layer");
+
+        let content = dir.path().join("content");
+        // Verbatim: the leading directory is preserved (strip NOT applied here).
+        assert!(
+            content.join("topdir/bin/tool").is_file(),
+            "extraction must be verbatim — topdir/bin/tool must exist under content/"
+        );
+        // If strip had (wrongly) been baked into extraction, the top dir is gone.
+        assert!(
+            !content.join("bin/tool").exists(),
+            "extraction must NOT strip the leading component into the shared layer store"
+        );
+        assert_eq!(
+            std::fs::read(content.join("topdir/bin/tool")).unwrap(),
+            b"tool bytes\n",
+            "extracted file contents must be intact"
+        );
     }
 
     // ── Mid-stream interruption test (3.7) ─────────────────────────────
@@ -2052,10 +2091,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
 
         // spec §UX Scenario 1 error case + spec §D1 digest-first ordering:
         //
@@ -2119,10 +2157,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
 
         // After a mid-stream error with non-matching bytes, we expect either:
         // - ClientError::Io (stream I/O error before digest could be verified), or
@@ -2234,13 +2271,12 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
         // pull_layer must NOT hang (take(layer.size) bounds read) and must return an error.
         // DigestMismatch is expected: the first declared_size bytes of the served stream
         // do not hash to the declared digest.
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         match result {
             Ok(()) => panic!(
                 "over-length compressed stream with mismatched content must not succeed; \
@@ -2278,10 +2314,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         assert!(
             result.is_ok(),
             "exact-length compressed stream must succeed: {result:?}"
@@ -2324,10 +2359,9 @@ mod tests {
             urls: None,
             annotations: None,
         };
-        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path()).await;
         assert!(
             result.is_ok(),
             "small valid archive must not be affected by decompressed-side cap: {result:?}"
@@ -2738,11 +2772,10 @@ mod tests {
                 urls: None,
                 annotations: None,
             };
-            let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
             let dir = tempfile::tempdir().unwrap();
 
             // Outcome is irrelevant — auth must precede the blob fetch either way.
-            let _ = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+            let _ = client.pull_layer(&id, &layer, dir.path()).await;
             let calls = auth_calls(&data);
             assert_eq!(calls.len(), 1);
             assert!(matches!(calls[0].1, RegistryOperation::Pull));

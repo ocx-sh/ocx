@@ -137,8 +137,7 @@ impl PackageManager {
         // Step 1: Resolve layer descriptors locally.
         // File layers → hash + write to blobs/ + extract to layers/{digest}/content/
         // Digest layers → pull from registry on demand (or error offline).
-        let layer_descriptors =
-            stage_layers(self, layers, &info.identifier, &registry, &info.metadata, &coordinator).await?;
+        let layer_descriptors = stage_layers(self, layers, &info.identifier, &registry, &coordinator).await?;
 
         // Step 2: Synthesize the OCI image manifest from the info + layer descriptors.
         // Shared with `Publisher::push_package_image` so push and test agree byte-for-byte.
@@ -219,7 +218,6 @@ async fn stage_layers(
     layers: &[publisher::LayerRef],
     base_identifier: &oci::Identifier,
     registry: &str,
-    metadata: &metadata::Metadata,
     coordinator: &PullCoordinator,
 ) -> Result<Vec<oci::Descriptor>, PackageErrorKind> {
     use crate::MEDIA_TYPE_TAR_GZ;
@@ -264,7 +262,7 @@ async fn stage_layers(
                 if !crate::utility::fs::path_exists_lossy(&layer_content).await {
                     let layer_path = fs.layers.path(registry, &digest);
                     let temp_extract = layer_path.with_extension("_extract_tmp");
-                    extract_archive_to_temp(path, &temp_extract, &digest, metadata).await?;
+                    extract_archive_to_temp(path, &temp_extract, &digest).await?;
                     super::layer_staging::finalize_layer_dir(fs, registry, &digest, &temp_extract).await?;
                 }
 
@@ -296,8 +294,7 @@ async fn stage_layers(
                     let layer_path = fs.layers.path(registry, digest);
                     let temp_layer = layer_path.with_extension("_tmp");
                     let blob_size =
-                        pull_digest_layer_to_temp(mgr, base_identifier, digest, media_type, metadata, &temp_layer)
-                            .await?;
+                        pull_digest_layer_to_temp(mgr, base_identifier, digest, media_type, &temp_layer).await?;
                     super::layer_staging::finalize_layer_dir(fs, registry, digest, &temp_layer).await?;
 
                     descriptors.push(oci::Descriptor {
@@ -421,7 +418,6 @@ async fn pull_digest_layer_to_temp(
     base_identifier: &oci::Identifier,
     digest: &oci::Digest,
     media_type: &publisher::ArchiveMediaType,
-    metadata: &metadata::Metadata,
     temp_layer: &std::path::Path,
 ) -> Result<i64, PackageErrorKind> {
     let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
@@ -449,9 +445,7 @@ async fn pull_digest_layer_to_temp(
     let synth_pinned = oci::PinnedIdentifier::try_from(base_identifier.clone_with_digest(digest.clone()))
         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
 
-    client
-        .pull_layer(&synth_pinned, &layer_desc, metadata, temp_layer)
-        .await?;
+    client.pull_layer(&synth_pinned, &layer_desc, temp_layer).await?;
 
     file_structure::write_digest_file(&temp_layer.join(file_structure::DIGEST_FILENAME), digest)
         .await
@@ -464,23 +458,23 @@ async fn pull_digest_layer_to_temp(
 /// CAS-recovery digest file at `temp_extract/{DIGEST_FILENAME}`. Stops *before* the
 /// atomic rename into the layer store — caller owns that step.
 ///
-/// `strip_components` is read from the bundle metadata.
+/// The archive extracts verbatim (`strip_components: 0`) into the shared
+/// content-addressed layer store, exactly like the registry pull path. The
+/// package-wide strip is applied once, later, at assemble time — extracting
+/// with a strip here would both corrupt the shared store on blob reuse and
+/// double-strip, because the same assemble step re-applies it.
 async fn extract_archive_to_temp(
     src: &std::path::Path,
     temp_extract: &std::path::Path,
     digest: &oci::Digest,
-    metadata: &metadata::Metadata,
 ) -> Result<(), PackageErrorKind> {
     let content_in_temp = temp_extract.join("content");
     tokio::fs::create_dir_all(&content_in_temp)
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(content_in_temp.clone(), e)))?;
 
-    let strip = match metadata {
-        metadata::Metadata::Bundle(b) => b.strip_components.unwrap_or(0).into(),
-    };
     let extract_options = archive::ExtractOptions {
-        strip_components: strip,
+        strip_components: 0,
         algorithm: None,
     };
     archive::Archive::extract_with_options(src, &content_in_temp, Some(extract_options))
@@ -642,6 +636,67 @@ mod tests {
             "package must NOT be materialized in $OCX_HOME/packages/ when dest_override is set; \
              found: {}",
             object_store_path.display()
+        );
+    }
+
+    // ── extract_archive_to_temp_writes_verbatim_tree (U11) ────────────────────
+    //
+    // U11 (B1 · D12): the local materialization path extracts a VERBATIM layer
+    // tree into the shared content-addressed layer store — the package-wide
+    // strip is NOT applied here (it moved to assemble time). A bundle whose tar
+    // carries a leading top-level directory keeps that directory in `content/`.
+    // This is what prevents the double-strip a partial fix would create on the
+    // local path (extract-strip + the same assemble-strip re-applied).
+    #[tokio::test]
+    async fn extract_archive_to_temp_writes_verbatim_tree() {
+        // Build a .tar.gz whose single entry carries a leading directory; tar's
+        // unpack creates the parent dirs, materializing `topdir/bin/tool`.
+        let archive_bytes = {
+            let mut buf = Vec::new();
+            let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let content = b"tool bytes\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "topdir/bin/tool", &content[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+            buf
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("bundle.tar.gz");
+        std::fs::write(&archive_path, &archive_bytes).unwrap();
+
+        let temp_extract = dir.path().join("temp-extract");
+        std::fs::create_dir_all(&temp_extract).unwrap();
+
+        // The digest is only written to the CAS-recovery marker; any valid
+        // sha256 works — extraction never consults it.
+        let digest = oci::Digest::Sha256("a".repeat(64));
+
+        super::extract_archive_to_temp(&archive_path, &temp_extract, &digest)
+            .await
+            .expect("extract_archive_to_temp must succeed");
+
+        let content = temp_extract.join("content");
+        // Verbatim: the leading directory is preserved (no strip on the local path).
+        assert!(
+            content.join("topdir/bin/tool").is_file(),
+            "local extraction must be verbatim — topdir/bin/tool must exist under content/"
+        );
+        // No strip / no double-strip: the top dir must NOT be removed at extraction.
+        assert!(
+            !content.join("bin/tool").exists(),
+            "local extraction must NOT strip the leading component into the shared layer store"
+        );
+        assert_eq!(
+            std::fs::read(content.join("topdir/bin/tool")).unwrap(),
+            b"tool bytes\n",
+            "extracted file contents must be intact"
         );
     }
 
