@@ -14,6 +14,29 @@ pub enum Error {
     /// A file I/O error with path context.
     #[error("internal file error for '{path}': {source}", path = .0.display(), source = .1)]
     InternalFile(std::path::PathBuf, #[source] std::io::Error),
+
+    /// A per-layer layout annotation read from a manifest layer descriptor could
+    /// not be resolved into a placement.
+    ///
+    /// Carries the [`LayerLayoutError`](crate::oci::LayerLayoutError) cause via
+    /// `#[source]` so exit-code classification descends the chain and reaches it
+    /// (→ `DataError` 65 for a malformed/hostile manifest annotation), instead
+    /// of the generic `IoError` (74) that wrapping in [`Self::InternalFile`]
+    /// would force. `io::Error::source` skips a boxed inner error, so the layout
+    /// cause must be carried as a first-class `#[source]` field here, not
+    /// smuggled through `io::Error::other`.
+    #[error("layer layout resolution failed: {0}")]
+    LayerLayout(#[source] crate::oci::layer_layout::LayerLayoutError),
+
+    /// A destination-path symlink-safety check failed while assembling package
+    /// content — an untrusted output prefix resolved through a symlink.
+    ///
+    /// Transparent so classification delegates to the inner
+    /// [`SymlinkWalkError`](crate::utility::fs::SymlinkWalkError) (an ancestor
+    /// symlink is a `UsageError` 64, an I/O failure is `IoError` 74), instead of
+    /// the flat `IoError` (74) that wrapping in [`Self::InternalFile`] forced.
+    #[error(transparent)]
+    SymlinkWalk(crate::utility::fs::SymlinkWalkError),
     /// A path has an unexpected structure.
     #[error("path '{}' has an unexpected structure", .0.display())]
     InternalPathInvalid(std::path::PathBuf),
@@ -186,6 +209,13 @@ impl ClassifyExitCode for Error {
         match self {
             Self::OfflineMode => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
+            // Delegate to the wrapped `LayerLayoutError` via the chain walker so
+            // a malformed manifest annotation classifies as `DataError` (65),
+            // not the generic `IoError` (74) `InternalFile` returns.
+            Self::LayerLayout(_) => None,
+            // Delegate to the wrapped `SymlinkWalkError` (ancestor symlink → 64,
+            // I/O → 74), not the flat `IoError` (74) `InternalFile` returns.
+            Self::SymlinkWalk(e) => e.classify(),
             Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
             Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),
             // Transparent wrappers delegate to the inner error's classification.

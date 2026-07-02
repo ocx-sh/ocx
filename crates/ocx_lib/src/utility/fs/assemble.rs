@@ -88,6 +88,12 @@ pub enum AssemblyError {
     /// Layer symlinks are not supported on Windows.
     #[error("layer symlinks are not supported on Windows")]
     WindowsSymlinksUnsupported,
+
+    /// The per-layer placement array length does not match the source count —
+    /// an internal caller-invariant violation for
+    /// [`assemble_from_layers_with_layouts`].
+    #[error("layer placement arity mismatch: {placements} placements for {sources} sources")]
+    LayoutArityMismatch { sources: usize, placements: usize },
 }
 
 /// Which shape of layer overlap fired. Used purely to word the
@@ -111,15 +117,17 @@ pub enum LayerOverlapKind {
 
 /// Classifies an overlap as intra- or cross-layer from the colliding
 /// contributors' originating layer indices (F1 — error message only). One
-/// distinct layer ⇒ intra-layer self-collapse; two or more ⇒ cross-layer.
-fn overlap_kind(contributors: &[(usize, EntryKind, PathBuf)], strip: u8) -> LayerOverlapKind {
-    let mut layer_indices: Vec<usize> = contributors.iter().map(|(idx, _, _)| *idx).collect();
+/// distinct layer ⇒ intra-layer self-collapse (the strip depth that produced it
+/// is read from the contributors, all of which share that layer's strip); two or
+/// more ⇒ cross-layer.
+fn overlap_kind(contributors: &[Contributor]) -> LayerOverlapKind {
+    let mut layer_indices: Vec<usize> = contributors.iter().map(|c| c.layer_idx).collect();
     layer_indices.sort_unstable();
     layer_indices.dedup();
     match layer_indices.as_slice() {
         [single] => LayerOverlapKind::IntraLayer {
             layer_idx: *single,
-            strip,
+            strip: contributors.first().map(|c| c.strip).unwrap_or(0),
         },
         _ => LayerOverlapKind::CrossLayer { layer_indices },
     }
@@ -240,53 +248,109 @@ pub async fn assemble_from_layers(sources: &[&Path], dest_content: &Path) -> Res
     assemble_from_layers_with_cap(sources, dest_content, MAX_WALK_ENTRIES).await
 }
 
-/// Assembles overlap-free layers, dropping the leading `strip` path components
-/// of every source before the overlap merge (a uniform, package-wide strip).
+/// Per-layer placement the assembler applies to each source before the overlap
+/// merge. Utility-local — carries no `oci` type — so `utility/fs` never depends
+/// on `oci` (W2 / DIP). `prefix` defaults to the empty path (package root).
+#[derive(Debug, Clone)]
+pub struct LayerPlacement {
+    /// Leading path components to drop from this layer.
+    pub strip: u8,
+    /// Output prefix under which this layer's post-strip tree is placed.
+    pub prefix: super::path::RelativePath,
+}
+
+/// Assembles overlap-free layers, applying each layer's [`LayerPlacement`]
+/// (strip then output prefix) before the overlap merge.
 ///
-/// `strip == 0` is identical to [`assemble_from_layers`]. For `strip > 0` each
-/// layer is seed-time expanded via [`expand`] — the leading `strip` path
-/// components are dropped, files and symlinks at depth ≤ `strip` are skipped
-/// (and counted), and the resulting post-strip roots are merged with the same
-/// overlap policy as the verbatim walker. Each post-strip root keeps its
-/// *original* layer index so a collision error can distinguish an intra-layer
-/// self-collapse from a cross-layer overlap (F1).
+/// Supersedes the Part-1 scalar strip entrypoint. `placements.len()` must equal
+/// `sources.len()` — the per-layer array makes arity meaningful, so a mismatch
+/// is [`AssemblyError::LayoutArityMismatch`]. Each `placements[i].strip` drops
+/// the leading path components of `sources[i]`; each non-empty
+/// `placements[i].prefix` places the layer's post-strip tree under a validated
+/// subdirectory. Overlap detection runs on the already-transformed destination
+/// paths.
 ///
 /// # Errors
 ///
-/// Same as [`assemble_from_layers`], plus [`AssemblyError::LayerOverlap`] when
-/// two post-strip destinations collide — whether they come from two different
-/// layers (cross-layer) or from one layer's two post-strip subtrees
-/// (intra-layer). Post-strip collisions fail closed because assemble-time strip
-/// has lost the tar archive order that would define a deterministic winner.
-pub async fn assemble_from_layers_stripped(sources: &[&Path], strip: u8, dest_content: &Path) -> Result<AssemblyStats> {
-    // strip == 0 routes through the verbatim assembler verbatim so the result
-    // is byte-identical to `assemble_from_layers` (U2) — no expansion overhead.
-    if strip == 0 {
-        return assemble_from_layers_with_cap(sources, dest_content, MAX_WALK_ENTRIES).await;
+/// Same as [`assemble_from_layers`], plus [`AssemblyError::LayoutArityMismatch`]
+/// when `placements.len() != sources.len()`, and [`AssemblyError::LayerOverlap`]
+/// when two transformed destinations collide (cross-layer or one layer's two
+/// post-strip subtrees). Post-strip collisions fail closed because assemble-time
+/// strip has lost the tar archive order that would define a deterministic winner.
+pub async fn assemble_from_layers_with_layouts(
+    sources: &[&Path],
+    placements: &[LayerPlacement],
+    dest_content: &Path,
+) -> Result<AssemblyStats> {
+    // The per-layer array makes arity meaningful — a mismatch is a caller bug.
+    if placements.len() != sources.len() {
+        return Err(crate::error::file_error(
+            dest_content,
+            std::io::Error::other(AssemblyError::LayoutArityMismatch {
+                sources: sources.len(),
+                placements: placements.len(),
+            }),
+        ));
     }
 
     prepare_destination(sources, dest_content).await?;
 
-    // Seed-time expansion drops the leading `strip` components of every layer,
-    // preserving each post-strip root's original layer index for error wording.
-    // The expansion shares the walker's entry counter so the cap covers both.
-    let entries_seen = Arc::new(AtomicUsize::new(0));
-    let mut seed_roots: Vec<(usize, PathBuf)> = Vec::new();
-    let mut entries_stripped_to_empty = 0usize;
-    for (layer_idx, src) in sources.iter().enumerate() {
-        let (roots, dropped) = expand(layer_idx, src, strip, &entries_seen, MAX_WALK_ENTRIES).await?;
-        seed_roots.extend(roots);
-        entries_stripped_to_empty += dropped;
+    // ── Early return: no sources to walk, empty content/ is the result. ─────
+    if sources.is_empty() {
+        return Ok(AssemblyStats::default());
     }
 
-    let mut stats = run_merge_walker(seed_roots, dest_content, strip, entries_seen, MAX_WALK_ENTRIES).await?;
-    stats.entries_stripped_to_empty += entries_stripped_to_empty;
-    if entries_stripped_to_empty > 0 {
-        crate::log::debug!(
-            "assemble strip={strip} dropped {entries_stripped_to_empty} entr{} that stripped to empty",
-            if entries_stripped_to_empty == 1 { "y" } else { "ies" }
-        );
+    let max_entries = MAX_WALK_ENTRIES;
+    // Shared across the strip expansion below and the merge walker, so a
+    // malformed layer cannot amplify across either phase.
+    let entries_seen = Arc::new(AtomicUsize::new(0));
+    let mut stats = AssemblyStats::default();
+    let mut seed_roots: Vec<LayerSource> = Vec::new();
+
+    for (layer_idx, (src, placement)) in sources.iter().zip(placements).enumerate() {
+        // Guard a non-empty prefix BEFORE any create_dir/hardlink runs (D9):
+        // re-validate it against the destination root (registries are untrusted,
+        // D10) and refuse a destination whose ancestor chain resolves through a
+        // symlink. This runs before the walker, so nothing is written when it
+        // fails.
+        let virtual_prefix: Vec<OsString> = if placement.prefix.is_empty() {
+            Vec::new()
+        } else {
+            let resolved = super::path::join_under_root(dest_content, placement.prefix.as_path())
+                .map_err(|e| crate::error::file_error(dest_content, std::io::Error::other(e)))?;
+            // Bound the walk at `dest_content`: OCX's store root above it is
+            // trusted (a symlinked `$OCX_HOME` is a supported setup); only the
+            // untrusted prefix-created portion below it is checked. Route the
+            // error through the delegating `Error::SymlinkWalk` variant so a
+            // symlinked-intermediate-dir refusal classifies as UsageError (64),
+            // not the IoError (74) that `file_error`/`io::Error::other` forced.
+            super::refuse_if_symlink_in_path(&resolved, Some(dest_content))
+                .await
+                .map_err(crate::Error::SymlinkWalk)?;
+            placement
+                .prefix
+                .as_path()
+                .components()
+                .map(|component| component.as_os_str().to_os_string())
+                .collect()
+        };
+
+        // Apply the layer's strip, then tag each post-strip root with the
+        // prefix to synthesize above it.
+        let (roots, dropped) = expand(layer_idx, src, placement.strip, &entries_seen, max_entries).await?;
+        stats.entries_stripped_to_empty += dropped;
+        for (idx, path) in roots {
+            seed_roots.push(LayerSource {
+                layer_idx: idx,
+                strip: placement.strip,
+                path,
+                virtual_prefix: virtual_prefix.clone(),
+            });
+        }
     }
+
+    let walk_stats = run_merge_walker(seed_roots, dest_content, entries_seen, max_entries).await?;
+    stats.merge(walk_stats);
     Ok(stats)
 }
 
@@ -428,25 +492,29 @@ async fn assemble_from_layers_with_cap(
 
     // Seed with the root directory set. Each root source is tagged with its
     // layer index (its position in `sources`); the tag rides through recursion.
-    // Verbatim assembly applies no strip, so `strip == 0` for error wording.
-    let seed_roots: Vec<(usize, PathBuf)> = sources.iter().enumerate().map(|(i, s)| (i, s.to_path_buf())).collect();
+    // Verbatim assembly applies no strip and no prefix (`LayerSource::rooted`).
+    let seed_roots: Vec<LayerSource> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, s)| LayerSource::rooted(i, s.to_path_buf()))
+        .collect();
     let entries_seen = Arc::new(AtomicUsize::new(0));
-    run_merge_walker(seed_roots, dest_content, 0, entries_seen, max_entries).await
+    run_merge_walker(seed_roots, dest_content, entries_seen, max_entries).await
 }
 
 /// Runs the semaphore-bounded, directory-parallel merge walker over a set of
-/// layer-index-tagged root directories, mirroring them into `dest_content`.
+/// layer-tagged root directories, mirroring them into `dest_content`.
 ///
-/// `seed_roots` is the initial `(layer_idx, dir)` set fed to the root level —
-/// either the verbatim layer roots (`strip == 0`) or the post-strip roots from
-/// [`expand`]. `strip` is threaded through solely so a collision error can be
-/// worded as intra- vs cross-layer (F1); it never affects placement. The shared
-/// `entries_seen` counter enforces `max_entries` across the whole walk (and,
-/// for the strip path, across the preceding expansion).
+/// `seed_roots` is the initial [`LayerSource`] set fed to the root level —
+/// either the verbatim layer roots (via [`LayerSource::rooted`]) or the
+/// post-strip, prefix-tagged roots built by [`assemble_from_layers_with_layouts`].
+/// Each source carries its own `strip` (error wording only, F1) and
+/// `virtual_prefix`. The shared `entries_seen` counter enforces `max_entries`
+/// across the whole walk (and, for the strip path, across the preceding
+/// expansion).
 async fn run_merge_walker(
-    seed_roots: Vec<(usize, PathBuf)>,
+    seed_roots: Vec<LayerSource>,
     dest_content: &Path,
-    strip: u8,
     entries_seen: Arc<AtomicUsize>,
     max_entries: usize,
 ) -> Result<AssemblyStats> {
@@ -468,7 +536,6 @@ async fn run_merge_walker(
         dest_root: dest_root.clone(),
         entries_seen,
         max_entries,
-        strip,
         join_set_tx: tx.clone(),
     };
 
@@ -557,32 +624,76 @@ enum EntryKind {
     Symlink,
 }
 
+/// One source directory contributing to a destination level.
+///
+/// Carries the *original* `layer_idx` it descends from (preserved through
+/// recursion so the merge phase can word an overlap error as intra- vs
+/// cross-layer (F1) — never for placement), the layer's `strip` depth (used only
+/// to word an intra-layer collision message), and the output-prefix components
+/// still to be synthesized as virtual directories above it.
+///
+/// When `virtual_prefix` is non-empty the source does **not** read its `path`;
+/// instead it contributes a single synthetic directory entry named by the first
+/// remaining component, which merges by name with real directories and other
+/// synthetic dirs through the existing name-grouping walker. Once
+/// `virtual_prefix` is exhausted the source reads `path` as a real directory.
+#[derive(Debug)]
+struct LayerSource {
+    layer_idx: usize,
+    strip: u8,
+    path: PathBuf,
+    virtual_prefix: Vec<OsString>,
+}
+
+impl LayerSource {
+    /// A source rooted directly at `path` with no strip and no prefix to
+    /// synthesize (the verbatim `assemble_from_layers` seed).
+    fn rooted(layer_idx: usize, path: PathBuf) -> Self {
+        Self {
+            layer_idx,
+            strip: 0,
+            path,
+            virtual_prefix: Vec::new(),
+        }
+    }
+}
+
+/// One contributor to a merged destination name during
+/// [`process_directory`]'s grouping phase.
+///
+/// Carries everything needed to (a) word an overlap error (`layer_idx`, `strip`)
+/// and (b) reconstruct a child [`LayerSource`] for a directory (`src_path`,
+/// `virtual_prefix`). `virtual_prefix` is non-empty only for a synthetic
+/// output-prefix directory; real entries always carry an empty one.
+#[derive(Debug)]
+struct Contributor {
+    layer_idx: usize,
+    strip: u8,
+    kind: EntryKind,
+    src_path: PathBuf,
+    virtual_prefix: Vec<OsString>,
+}
+
 /// Work item for the scheduler. Each request represents one directory level
 /// that needs to be walked across one or more source layers.
-///
-/// Each source directory carries the *original* layer index it descends from.
-/// The index is preserved through recursion so the merge phase can word an
-/// overlap error as intra- vs cross-layer (F1) — it never affects placement.
-/// A minimal tuple (not a struct) until Part 2 adds a `virtual_prefix` field.
 #[derive(Debug)]
 struct SpawnRequest {
-    src_dirs: Vec<(usize, PathBuf)>,
+    src_dirs: Vec<LayerSource>,
     dest_dir: PathBuf,
     depth: usize,
 }
 
 /// Walk-invariant context shared by every `process_directory` task: the
 /// destination root (error paths + symlink containment), the shared entry
-/// counter and its cap, the package-wide `strip` (error wording only, F1), and
-/// the scheduler channel for posting child directory levels. Cloned once per
-/// spawned task — every field is cheap to clone (an `Arc`, a sender handle, one
-/// `PathBuf`, and two scalars), which is exactly what the walker cloned before.
+/// counter and its cap, and the scheduler channel for posting child directory
+/// levels. Per-layer `strip` rides on each [`LayerSource`] (error wording only,
+/// F1), not here. Cloned once per spawned task — every field is cheap to clone
+/// (an `Arc`, a sender handle, one `PathBuf`, and one scalar).
 #[derive(Clone)]
 struct WalkContext {
     dest_root: PathBuf,
     entries_seen: Arc<AtomicUsize>,
     max_entries: usize,
-    strip: u8,
     join_set_tx: tokio::sync::mpsc::UnboundedSender<SpawnRequest>,
 }
 
@@ -601,15 +712,42 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
         dest_root,
         entries_seen,
         max_entries,
-        strip,
         join_set_tx,
     } = ctx;
     let mut stats = AssemblyStats::default();
 
     // ── Phase 1: Collect entries from all source layers. ────────────────────
-    let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf)>> = BTreeMap::new();
+    let mut merged: BTreeMap<OsString, Vec<Contributor>> = BTreeMap::new();
 
-    for &(layer_idx, ref src_dir) in &src_dirs {
+    for source in &src_dirs {
+        let layer_idx = source.layer_idx;
+        let strip = source.strip;
+
+        // A source that still has output-prefix components to synthesize does
+        // NOT read its directory: it contributes a single synthetic directory
+        // entry named by the first remaining component (carrying the tail), so
+        // the layer's tree lands under the prefix. That synthetic dir merges by
+        // name with real dirs and other synthetic dirs through the same grouping
+        // below — nested/overlapping cross-layer prefixes merge (or collide).
+        if let Some((first, rest)) = source.virtual_prefix.split_first() {
+            let prev = entries_seen.fetch_add(1, Ordering::Relaxed);
+            if prev + 1 > max_entries {
+                return Err(crate::error::file_error(
+                    &dest_root,
+                    std::io::Error::other(AssemblyError::EntryLimitExceeded),
+                ));
+            }
+            merged.entry(first.clone()).or_default().push(Contributor {
+                layer_idx,
+                strip,
+                kind: EntryKind::Dir,
+                src_path: source.path.clone(),
+                virtual_prefix: rest.to_vec(),
+            });
+            continue;
+        }
+
+        let src_dir = &source.path;
         let mut entries = tokio::fs::read_dir(src_dir)
             .await
             .map_err(|e| crate::error::file_error(src_dir, e))?;
@@ -634,10 +772,13 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             // `DirEntry::file_type` reports as plain directories — checking
             // it first prevents misclassification.
             if crate::symlink::is_link(&src_path) {
-                merged
-                    .entry(file_name)
-                    .or_default()
-                    .push((layer_idx, EntryKind::Symlink, src_path));
+                merged.entry(file_name).or_default().push(Contributor {
+                    layer_idx,
+                    strip,
+                    kind: EntryKind::Symlink,
+                    src_path,
+                    virtual_prefix: Vec::new(),
+                });
                 continue;
             }
 
@@ -647,20 +788,26 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                 .map_err(|e| crate::error::file_error(&src_path, e))?;
 
             if file_type.is_dir() {
-                merged
-                    .entry(file_name)
-                    .or_default()
-                    .push((layer_idx, EntryKind::Dir, src_path));
+                merged.entry(file_name).or_default().push(Contributor {
+                    layer_idx,
+                    strip,
+                    kind: EntryKind::Dir,
+                    src_path,
+                    virtual_prefix: Vec::new(),
+                });
             } else if file_type.is_file() {
                 let size = entry
                     .metadata()
                     .await
                     .map_err(|e| crate::error::file_error(&src_path, e))?
                     .len();
-                merged
-                    .entry(file_name)
-                    .or_default()
-                    .push((layer_idx, EntryKind::File { size }, src_path));
+                merged.entry(file_name).or_default().push(Contributor {
+                    layer_idx,
+                    strip,
+                    kind: EntryKind::File { size },
+                    src_path,
+                    virtual_prefix: Vec::new(),
+                });
             }
             // Other entry types (sockets, fifos, block/char devices) are
             // skipped silently — OCI layers should never contain them.
@@ -671,15 +818,16 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
     for (name, contributors) in &merged {
         let dest_path = dest_dir.join(name);
 
-        // Partition into dirs and non-dirs. Directories keep their originating
-        // layer index so it survives into the child `SpawnRequest`.
-        let mut dirs: Vec<(usize, &PathBuf)> = Vec::new();
-        let mut non_dirs: Vec<(&EntryKind, &PathBuf)> = Vec::new();
+        // Partition into dirs and non-dirs. Directory contributors carry the
+        // fields needed to rebuild a child `LayerSource` (layer index, strip,
+        // real path, and any remaining synthetic prefix).
+        let mut dirs: Vec<&Contributor> = Vec::new();
+        let mut non_dirs: Vec<&Contributor> = Vec::new();
 
-        for (layer_idx, kind, src_path) in contributors {
-            match kind {
-                EntryKind::Dir => dirs.push((*layer_idx, src_path)),
-                _ => non_dirs.push((kind, src_path)),
+        for contributor in contributors {
+            match contributor.kind {
+                EntryKind::Dir => dirs.push(contributor),
+                _ => non_dirs.push(contributor),
             }
         }
 
@@ -689,34 +837,36 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
         if non_dirs.len() > 1 || (!dirs.is_empty() && !non_dirs.is_empty()) {
             return Err(crate::error::file_error(
                 &dest_path,
-                std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors, strip))),
+                std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors))),
             ));
         }
 
-        if let Some((kind, src_path)) = non_dirs.first() {
-            // Single non-directory entry.
-            match kind {
+        if let Some(contributor) = non_dirs.first() {
+            // Single non-directory entry (always a real entry — synthetic prefix
+            // contributors are directories).
+            match &contributor.kind {
                 EntryKind::File { size } => {
                     // `dest_dir` is always pre-created: subdirectories are
                     // created in the Dir branch below (or by the pre-condition
                     // setup for the root `dest_content` dir). Skip the
                     // `create_dir_all` inside `hardlink::create` to avoid one
                     // redundant no-op syscall per file.
-                    crate::hardlink::create_in_existing_parent(src_path, &dest_path)?;
+                    crate::hardlink::create_in_existing_parent(&contributor.src_path, &dest_path)?;
                     stats.files_hardlinked += 1;
                     stats.bytes_hardlinked += size;
                 }
                 EntryKind::Symlink => {
-                    handle_symlink_entry(src_path, &dest_path, &dest_root, &mut stats).await?;
+                    handle_symlink_entry(&contributor.src_path, &dest_path, &dest_root, &mut stats).await?;
                 }
                 EntryKind::Dir => unreachable!("dirs filtered out above"),
             }
         } else if !dirs.is_empty() {
-            // All contributors are directories — create the merged directory.
-            // Handle AlreadyExists: dest may contain directories from a prior
-            // assemble_from_layer call (sequential multi-layer usage) or from
-            // manual pre-population. Accept if existing entry is a directory;
-            // error if it's a non-directory (type mismatch).
+            // All contributors are directories (real and/or synthetic prefix) —
+            // create the merged directory. Handle AlreadyExists: dest may
+            // contain directories from a prior assemble_from_layer call
+            // (sequential multi-layer usage) or from manual pre-population.
+            // Accept if existing entry is a directory; error if it's a
+            // non-directory (type mismatch).
             match tokio::fs::create_dir(&dest_path).await {
                 Ok(()) => {
                     stats.dirs_created += 1;
@@ -728,7 +878,7 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                     if !existing.is_dir() {
                         return Err(crate::error::file_error(
                             &dest_path,
-                            std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors, strip))),
+                            std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors))),
                         ));
                     }
                     // Directory already exists — don't increment dirs_created.
@@ -744,9 +894,16 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             }
 
             // Post subdirectory request with only the contributing layers,
-            // preserving each one's original layer index.
-            let child_src_dirs: Vec<(usize, PathBuf)> =
-                dirs.into_iter().map(|(idx, path)| (idx, path.clone())).collect();
+            // preserving each one's layer index, strip, and remaining prefix.
+            let child_src_dirs: Vec<LayerSource> = dirs
+                .iter()
+                .map(|contributor| LayerSource {
+                    layer_idx: contributor.layer_idx,
+                    strip: contributor.strip,
+                    path: contributor.src_path.clone(),
+                    virtual_prefix: contributor.virtual_prefix.clone(),
+                })
+                .collect();
             if join_set_tx
                 .send(SpawnRequest {
                     src_dirs: child_src_dirs,
@@ -1877,8 +2034,10 @@ mod tests {
     // ── 3.1: Boundary / degenerate inputs ───────────────────────────────────
 
     /// ML-1: Empty sources slice returns AssemblyStats::default() and creates
-    /// an empty dest_content. Consumers (e.g. the pull pipeline for config-only
-    /// packages with zero layers) rely on `content/` existing after assembly.
+    /// an empty dest_content. The pull pipeline routes config-only packages
+    /// through `assemble_from_layers_with_layouts`; this verbatim seed's
+    /// empty-sources contract is retained for the strip=0/verbatim path, these
+    /// unit tests, and potential external callers (e.g. ocx-mirror).
     #[tokio::test]
     async fn ml_empty_sources_creates_empty_dest() {
         let (_dir, root) = setup();
@@ -3128,14 +3287,33 @@ mod tests {
         assert_eq!(std::fs::read(deep_dest.join("y.txt")).unwrap(), b"deep y");
     }
 
-    // ── Part 1: strip-aware assembly (assemble_from_layers_stripped) ─────────
+    // ── Part 1 strip coverage on assemble_from_layers_with_layouts ───────────
     //
-    // Contract-first specification tests for the package-wide strip that moved
-    // out of the two extraction paths (client.rs registry pull +
-    // pull_local::extract_archive_to_temp) and into assemble time. Against the
-    // P1.1 `unimplemented!()` stub every test in this section PANICS — that is
-    // the required TDD-red. P1.7 implements `expand` + the strip-aware merge to
-    // turn them green. Rows cite the plan Test Matrix tag (U#).
+    // Package-wide strip moved out of the two extraction paths (client.rs
+    // registry pull + pull_local::extract_archive_to_temp) and into assemble
+    // time. Part 2 removed the scalar `assemble_from_layers_stripped`; these
+    // U1–U8b rows drive the surviving `assemble_from_layers_with_layouts` with
+    // one uniform `LayerPlacement { strip, prefix: "" }` per source (empty
+    // prefix == pure strip), preserving the Part-1 strip coverage on the Part-2
+    // API. Rows cite the plan Test Matrix tag (U#).
+
+    /// Builds one uniform `LayerPlacement { strip, prefix: "" }` per source —
+    /// the pure-strip case the removed `assemble_from_layers_stripped` covered.
+    /// An empty prefix means "strip only, no relocation".
+    fn uniform_strip(count: usize, strip: u8) -> Vec<LayerPlacement> {
+        (0..count)
+            .map(|_| LayerPlacement {
+                strip,
+                prefix: crate::utility::fs::path::RelativePath::default(),
+            })
+            .collect()
+    }
+
+    /// Parses a test prefix into a `RelativePath`, panicking on an invalid prefix
+    /// (all test inputs are valid).
+    fn rel(spec: &str) -> crate::utility::fs::path::RelativePath {
+        crate::utility::fs::path::RelativePath::parse(spec).expect("test prefix parses")
+    }
 
     /// Downcast the walker's wrapped error to the inner [`AssemblyError`].
     ///
@@ -3168,7 +3346,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         assert_eq!(stats.files_hardlinked, 2, "both files under topdir must be placed");
         assert!(dest.join("bin/tool").is_file(), "bin/tool must be hoisted to dest root");
@@ -3199,7 +3379,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join("pkg_strip0")).unwrap();
         let dest_strip0 = root.join("pkg_strip0/content");
-        let stats_strip0 = assemble_from_layers_stripped(&[src.as_path()], 0, &dest_strip0)
+        let stats_strip0 = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 0), &dest_strip0)
             .await
             .unwrap();
 
@@ -3227,7 +3407,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         assert!(
             dest.join("bin/tool").is_file(),
@@ -3258,7 +3440,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         assert!(
             dest.is_dir(),
@@ -3296,7 +3480,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         let link = dest.join("lib/libfoo.so");
         assert!(link.is_symlink(), "the symlink must survive strip");
@@ -3327,7 +3513,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         let dest_tool = dest.join("bin/tool");
         assert_eq!(
@@ -3355,7 +3543,9 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let stats = assemble_from_layers_stripped(&[src.as_path()], 1, &dest).await.unwrap();
+        let stats = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
+            .await
+            .unwrap();
 
         let link = dest.join("lib/libfoo.so");
         assert!(link.is_symlink(), "libfoo.so must be a symlink after strip");
@@ -3389,7 +3579,7 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let err = assemble_from_layers_stripped(&[src.as_path()], 1, &dest)
+        let err = assemble_from_layers_with_layouts(&[src.as_path()], &uniform_strip(1, 1), &dest)
             .await
             .expect_err("an intra-layer post-strip collision must fail closed");
 
@@ -3418,7 +3608,7 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
 
-        let err = assemble_from_layers_stripped(&[src_a.as_path(), src_b.as_path()], 1, &dest)
+        let err = assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &uniform_strip(2, 1), &dest)
             .await
             .expect_err("a cross-layer post-strip collision must fail closed");
 
@@ -3430,6 +3620,200 @@ mod tests {
         assert!(
             message.contains("cross-layer"),
             "a cross-layer overlap message must name it 'cross-layer', got: {message}"
+        );
+    }
+
+    // ── Part 2: per-layer layout via assemble_from_layers_with_layouts (U23–U28) ─
+    //
+    // Cover the strip+prefix layout walker: prefix placement, nested-prefix
+    // merge, overlap-after-transform, symlinked-prefix refusal, whiteout
+    // pass-through, and arity mismatch. Rows cite the plan Test Matrix tag (U#).
+
+    /// U23 (prefix · D5): a non-empty prefix places a layer's tree under a
+    /// subdirectory; two layers under nested prefixes sharing a parent (`share`)
+    /// merge that parent and diverge below it without collision.
+    #[tokio::test]
+    async fn layout_prefix_places_layers_under_nested_subdirs() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer_a/content/tool", b"tool a");
+        make_file(&root, "layer_b/content/data", b"data b");
+        let src_a = root.join("layer_a/content");
+        let src_b = root.join("layer_b/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let placements = vec![
+            LayerPlacement {
+                strip: 0,
+                prefix: rel("share/a"),
+            },
+            LayerPlacement {
+                strip: 0,
+                prefix: rel("share/b"),
+            },
+        ];
+        assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
+            .await
+            .unwrap();
+
+        assert!(dest.join("share/a/tool").is_file(), "layer A placed under its prefix");
+        assert!(dest.join("share/b/data").is_file(), "layer B placed under its prefix");
+        assert!(
+            dest.join("share").is_dir() && !dest.join("share").is_symlink(),
+            "the shared prefix parent must be one merged real directory"
+        );
+    }
+
+    /// U24 (overlap-after-transform · D6): two layers whose strip+prefix
+    /// transforms land on the same destination path fail closed with
+    /// `LayerOverlap` — overlap detection runs on the already-transformed paths.
+    #[tokio::test]
+    async fn layout_cross_layer_collision_after_transform() {
+        let (_dir, root) = setup();
+        // After strip=1 both hoist `bin/tool`; both prefixed to `share` collide.
+        make_file(&root, "layer_a/content/topA/bin/tool", b"a");
+        make_file(&root, "layer_b/content/topB/bin/tool", b"b");
+        let src_a = root.join("layer_a/content");
+        let src_b = root.join("layer_b/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let placements = vec![
+            LayerPlacement {
+                strip: 1,
+                prefix: rel("share"),
+            },
+            LayerPlacement {
+                strip: 1,
+                prefix: rel("share"),
+            },
+        ];
+        let err = assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
+            .await
+            .expect_err("colliding transformed destinations must fail closed");
+        let message = assembly_error_message(&err).to_lowercase();
+        assert!(message.contains("overlap"), "must be a LayerOverlap, got: {message}");
+    }
+
+    /// U25 (symlinked-intermediate-dir · D9): when the destination prefix root
+    /// resolves through a pre-existing (attacker-controlled) symlink, assembly
+    /// refuses before writing — nothing is written through the symlink.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn layout_refuses_symlinked_prefix_ancestor() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer_a/content/tool", b"tool");
+        let src_a = root.join("layer_a/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // A symlink sits where the prefix dir `share` would be created, pointing
+        // outside the package tree.
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        crate::symlink::create(&outside, dest.join("share")).unwrap();
+
+        let placements = vec![LayerPlacement {
+            strip: 0,
+            prefix: rel("share/lib"),
+        }];
+        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest)
+            .await
+            .expect_err("a symlinked prefix ancestor must be refused");
+
+        assert!(
+            !outside.join("lib/tool").exists(),
+            "no file may be written through the symlinked prefix ancestor"
+        );
+    }
+
+    /// U26 (whiteout pass-through · W5): OCI whiteout entries (`.wh.*`,
+    /// `.wh..wh..opq`) copy through verbatim as inert files — OCX is a flat
+    /// spatial merge, not an overlay stack, so they carry no delete semantics.
+    #[tokio::test]
+    async fn layout_whiteouts_pass_through_inert() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer_a/content/.wh.deleted", b"");
+        make_file(&root, "layer_a/content/dir/.wh..wh..opq", b"");
+        make_file(&root, "layer_a/content/dir/real", b"real");
+        let src_a = root.join("layer_a/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let placements = uniform_strip(1, 0);
+        assemble_from_layers_with_layouts(&[src_a.as_path()], &placements, &dest)
+            .await
+            .unwrap();
+
+        assert!(
+            dest.join(".wh.deleted").is_file(),
+            "whiteout marker passes through inert"
+        );
+        assert!(
+            dest.join("dir/.wh..wh..opq").is_file(),
+            "opaque whiteout passes through inert"
+        );
+        assert!(dest.join("dir/real").is_file(), "the sibling real file survives");
+    }
+
+    /// U27 (invariant): a placement array whose length differs from the source
+    /// count is a caller-invariant violation → `LayoutArityMismatch`.
+    #[tokio::test]
+    async fn layout_arity_mismatch_is_rejected() {
+        let (_dir, root) = setup();
+        let src = make_dir(&root, "layer/content");
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        // One source, two placements.
+        let placements = uniform_strip(2, 0);
+        let err = assemble_from_layers_with_layouts(&[src.as_path()], &placements, &dest)
+            .await
+            .expect_err("a placement/source arity mismatch must be rejected");
+        let message = assembly_error_message(&err).to_lowercase();
+        assert!(
+            message.contains("arity") || message.contains("placement"),
+            "must be a LayoutArityMismatch, got: {message}"
+        );
+    }
+
+    /// U28 (B5 known-limitation): two sources shipping byte-distinct
+    /// `README.md` / `readme.md` are BOTH placed as distinct entries on Linux —
+    /// the byte-exact name grouping does NO case-folding. A case-insensitive
+    /// filesystem would collapse them; this documents the current Linux behaviour
+    /// (not a collision here). Linux-only: macOS/Windows default filesystems fold
+    /// case.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn layout_case_distinct_names_both_placed_on_linux() {
+        let (_dir, root) = setup();
+        make_file(&root, "layer_a/content/README.md", b"upper");
+        make_file(&root, "layer_b/content/readme.md", b"lower");
+        let src_a = root.join("layer_a/content");
+        let src_b = root.join("layer_b/content");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let placements = uniform_strip(2, 0);
+        assemble_from_layers_with_layouts(&[src_a.as_path(), src_b.as_path()], &placements, &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("README.md")).unwrap(),
+            b"upper",
+            "the uppercase entry is placed"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("readme.md")).unwrap(),
+            b"lower",
+            "the byte-distinct lowercase entry is placed too (no case-fold)"
         );
     }
 }

@@ -85,12 +85,15 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::digest::error::DigestError;
     use crate::oci::identifier::error::IdentifierError;
     use crate::oci::index::error::Error as OciIndexError;
+    use crate::oci::layer_layout::LayerLayoutError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
     use crate::package::error::Error as PackageError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::project::error::Error as ProjectError;
+    use crate::publisher::LayerRefParseError;
     use crate::setup::error::Error as SetupError;
+    use crate::utility::fs::path::PathEscapeError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
     use crate::utility::singleflight::Error as SingleflightError;
 
@@ -129,6 +132,11 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
+    // Per-layer layout errors: publish-side layer-ref parse → UsageError (64);
+    // read-side annotation resolution + containment checks → DataError (65).
+    try_downcast!(LayerRefParseError);
+    try_downcast!(LayerLayoutError);
+    try_downcast!(PathEscapeError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
@@ -566,5 +574,84 @@ mod tests {
         // a representative "unclassified" error.
         let err = std::io::Error::other("something unclassified");
         assert_eq!(classify(err), ExitCode::Failure);
+    }
+
+    // ── Per-layer layout error classification (Part 2) ───────────────────────
+
+    #[test]
+    fn layer_ref_parse_error_maps_to_usage_error() {
+        // A layer-ref string is CLI (publish-side) input, so a malformed one is
+        // a usage error (64) — for both the layout-tail and bare-digest variants.
+        let malformed = crate::publisher::LayerRefParseError::MalformedLayout {
+            spec: "layer.tar.gz:strip=x".to_string(),
+            reason: "strip must be a u8".to_string(),
+        };
+        assert_eq!(classify(malformed), ExitCode::UsageError);
+
+        let bare = crate::publisher::LayerRefParseError::BareDigest(format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(classify(bare), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn layer_layout_error_maps_to_data_error() {
+        // Read-side annotation resolution failure from an untrusted manifest →
+        // DataError (65), for both the strip and prefix variants.
+        let bad_strip = crate::oci::LayerLayoutError::BadStrip("notanumber".to_string());
+        assert_eq!(classify(bad_strip), ExitCode::DataError);
+
+        let bad_prefix = crate::oci::LayerLayoutError::BadPrefix(crate::utility::fs::path::PathEscapeError::Escapes);
+        assert_eq!(classify(bad_prefix), ExitCode::DataError);
+    }
+
+    #[test]
+    fn path_escape_error_maps_to_data_error() {
+        // A read-side containment rejection (re-validated hostile annotation) is
+        // malformed input data → DataError (65).
+        let err = crate::utility::fs::path::PathEscapeError::Escapes;
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Regression (exit-code 74 -> 65): a hostile manifest layer annotation
+    /// resolved at pull time is wrapped exactly as `pull.rs` wraps it —
+    /// `PackageErrorKind::Internal(crate::Error::LayerLayout(LayerLayoutError))`.
+    /// Before the fix `pull.rs` wrapped it via `crate::Error::InternalFile`, whose
+    /// `classify()` hard-returns `IoError` (74) and short-circuits the chain
+    /// walker before it can reach the inner `LayerLayoutError` (65); `io::Error`'s
+    /// `source()` also skips a boxed inner error, so chain-walking alone would not
+    /// recover it. The delegating `crate::Error::LayerLayout` variant
+    /// (`classify() == None`, `#[source]` carrying the cause) lets the walker
+    /// descend to the layout error → 65. This test reproduces that exact wrapping
+    /// shape and must fail if the read boundary regresses to `InternalFile`.
+    #[test]
+    fn pull_wrapped_layer_layout_error_classifies_to_data_error() {
+        let layout_err = crate::oci::LayerLayoutError::BadPrefix(crate::utility::fs::path::PathEscapeError::Escapes);
+        let wrapped = PackageErrorKind::Internal(crate::Error::LayerLayout(layout_err));
+        assert_eq!(
+            classify(wrapped),
+            ExitCode::DataError,
+            "a wrapped hostile layout annotation must classify as DataError (65), not IoError (74)"
+        );
+    }
+
+    /// Regression (exit-code 74 -> 64, second instance): the assemble-time D9
+    /// symlinked-intermediate-dir check wraps a `SymlinkWalkError` as
+    /// `PackageErrorKind::Internal(crate::Error::SymlinkWalk(..))`. Before the
+    /// fix it wrapped via `file_error`/`io::Error::other` -> `InternalFile` ->
+    /// `IoError` (74), swallowing the `SymlinkWalkError::Ancestor` -> UsageError
+    /// (64) classification. The delegating `crate::Error::SymlinkWalk` variant
+    /// (`classify()` delegates to the inner) restores 64. This reproduces the
+    /// exact wrapping shape from `assemble.rs`.
+    #[test]
+    fn assemble_symlink_walk_error_classifies_to_usage_error() {
+        let walk_err = crate::utility::fs::SymlinkWalkError::Ancestor {
+            path: PathBuf::from("/pkg/content/share/lib"),
+            ancestor: PathBuf::from("/pkg/content/share"),
+        };
+        let wrapped = PackageErrorKind::Internal(crate::Error::SymlinkWalk(walk_err));
+        assert_eq!(
+            classify(wrapped),
+            ExitCode::UsageError,
+            "a symlinked-intermediate-dir refusal must classify as UsageError (64), not IoError (74)"
+        );
     }
 }

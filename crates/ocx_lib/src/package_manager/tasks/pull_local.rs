@@ -227,7 +227,7 @@ async fn stage_layers(
 
     for layer_ref in layers {
         match layer_ref {
-            publisher::LayerRef::File(path) => {
+            publisher::LayerRef::File { path, layout } => {
                 validate_file_layer(path).await?;
 
                 // Read + hash the archive in one pass.
@@ -271,11 +271,17 @@ async fn stage_layers(
                     digest: digest.to_string(),
                     size,
                     urls: None,
-                    annotations: None,
+                    // Emits keys only when the publisher set layout (BC2); the
+                    // default spec yields `None`, keeping the manifest identical.
+                    annotations: layout.to_annotations(),
                 });
             }
 
-            publisher::LayerRef::Digest { digest, media_type } => {
+            publisher::LayerRef::Digest {
+                digest,
+                media_type,
+                layout,
+            } => {
                 // Check if the layer content is already present locally.
                 let layer_content = fs.layers.content(registry, digest);
                 if crate::utility::fs::path_exists_lossy(&layer_content).await {
@@ -285,7 +291,7 @@ async fn stage_layers(
                         digest: digest.to_string(),
                         size,
                         urls: None,
-                        annotations: None,
+                        annotations: layout.to_annotations(),
                     });
                 } else if mgr.is_offline() {
                     return Err(PackageErrorKind::Internal(crate::Error::OfflineMode));
@@ -302,7 +308,7 @@ async fn stage_layers(
                         digest: digest.to_string(),
                         size: blob_size,
                         urls: None,
-                        annotations: None,
+                        annotations: layout.to_annotations(),
                     });
                 }
             }
@@ -846,6 +852,7 @@ mod tests {
         let layers = [crate::publisher::LayerRef::Digest {
             digest: digest.clone(),
             media_type: ArchiveMediaType::TarXz,
+            layout: oci::LayerLayoutSpec::default(),
         }];
 
         let result = mgr.pull_local(info, &layers, Some(&dest)).await;
@@ -945,7 +952,10 @@ mod tests {
             f.seek(std::io::SeekFrom::End(0)).unwrap();
         }
 
-        let layers = [crate::publisher::LayerRef::File(archive_path)];
+        let layers = [crate::publisher::LayerRef::File {
+            path: archive_path,
+            layout: oci::LayerLayoutSpec::default(),
+        }];
         let result = mgr.pull_local(info, &layers, None).await;
 
         assert!(
@@ -1018,6 +1028,7 @@ mod tests {
         let layers = [crate::publisher::LayerRef::Digest {
             digest: digest.clone(),
             media_type: ArchiveMediaType::TarXz,
+            layout: oci::LayerLayoutSpec::default(),
         }];
 
         let result = mgr.pull_local(info, &layers, Some(&dest)).await;
@@ -1074,7 +1085,10 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path)
             .expect("must be able to bind a Unix socket in temp dir");
 
-        let layers = [crate::publisher::LayerRef::File(socket_path)];
+        let layers = [crate::publisher::LayerRef::File {
+            path: socket_path,
+            layout: oci::LayerLayoutSpec::default(),
+        }];
         let result = mgr.pull_local(info, &layers, None).await;
 
         assert!(

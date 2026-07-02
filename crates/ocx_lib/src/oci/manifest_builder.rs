@@ -239,6 +239,52 @@ mod tests {
         }
     }
 
+    /// A5 (BC2 · W8/F2 — byte+digest golden): the DEFAULT (no per-layer layout)
+    /// publish path must reproduce a frozen manifest byte-for-byte, digest
+    /// included. Both descriptor-build sites — `client.rs::push_multi_layer_manifest`
+    /// and `pull_local::stage_layers` — route through `build_package_manifest`
+    /// (the shared builder chain that
+    /// `build_package_manifest_matches_explicit_builder_chain` asserts equal to
+    /// the explicit chain), so freezing this helper's output freezes both. Also
+    /// asserts every layer descriptor carries no annotations — the fast
+    /// structural guard on top of the golden.
+    #[test]
+    fn default_publish_manifest_matches_byte_digest_golden() {
+        // Captured 2026-07-02 from the current default publish path. The Part-2
+        // stub keeps default → annotations None, so these bytes are identical to
+        // pre-change; a `LayerLayoutSpec::default()` layer must reproduce them
+        // exactly. Freezing them catches any future regression that changes the
+        // default manifest serialization / field order / descriptor construction.
+        const GOLDEN_MANIFEST_JSON: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.sh.ocx.package.v1+json","digest":"sha256:186be378707a65d521086e7ae2e1e8aa328d8d583cb655d981bc0335fa0708f4","size":29},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:abababababababababababababababababababababababababababababababab","size":1024}],"artifactType":"application/vnd.sh.ocx.package.v1"}"#;
+        const GOLDEN_MANIFEST_DIGEST: &str = "sha256:514d43fd877fcf6790844f6d5d82f29ee9d3868e26a35a525f155c0b64f8ba15";
+
+        let metadata = fixture_metadata();
+        let layer = fixture_layer_descriptor();
+        assert!(
+            layer.annotations.is_none(),
+            "the default-path layer descriptor carries no annotations"
+        );
+
+        let built = build_package_manifest(&metadata, vec![layer]).expect("default publish manifest builds");
+
+        assert_eq!(
+            String::from_utf8(built.manifest_bytes.clone()).expect("manifest bytes are UTF-8"),
+            GOLDEN_MANIFEST_JSON,
+            "default publish manifest bytes drifted from the frozen golden (BC2 regression)"
+        );
+        assert_eq!(
+            built.manifest_digest.to_string(),
+            GOLDEN_MANIFEST_DIGEST,
+            "default publish manifest digest drifted from the frozen golden (BC2 regression)"
+        );
+        for descriptor in &built.manifest.layers {
+            assert!(
+                descriptor.annotations.is_none(),
+                "every layer descriptor on the default path must have annotations: None (BC2)"
+            );
+        }
+    }
+
     #[test]
     fn build_package_manifest_matches_explicit_builder_chain() {
         // Canary: if someone changes `build_package_manifest`'s call sequence

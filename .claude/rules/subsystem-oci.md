@@ -192,6 +192,18 @@ Tokio blocking pool cap is 512. Deferred: add semaphore if install parallelism g
 unbounded. Note: `SyncIoBridge` uses `Handle::block_on` per read (not `block_in_place`);
 creating it inside the closure is idiomatic (tokio issue #6795).
 
+## Per-Layer Layout {#per-layer-layout}
+
+`oci/layer_layout.rs` is the read/write boundary for optional per-layer strip + output
+prefix. Manifest layer descriptors carry it as `annotations` keys `sh.ocx.layer.strip-components`
+/ `sh.ocx.layer.prefix` (`oci/annotations.rs`), set only when a publisher supplies a
+`<ref>:strip=N,prefix=P` layer-ref (`publisher/layer_ref.rs`) — a default push writes no
+annotations, so manifests stay byte-identical. `resolve_layer_placement(annotations,
+bundle_default)` resolves the fallback chain (`annotation → Bundle.strip_components → 0`)
+into a `utility::fs::LayerPlacement`, called from `pull.rs` before
+`assemble_from_layers_with_layouts` — the boundary exists so `utility/fs` never depends on
+`oci` (DIP).
+
 ## Gotchas {#gotchas}
 
 - **OCI tags mutable.** Never assume tag "frozen" or "pinned." Only digests immutable.

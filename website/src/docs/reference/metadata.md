@@ -400,13 +400,20 @@ resolved on the composed `PATH`. `mytool` uses `args` to bake the script path: i
 
 Many upstream archives wrap their content in a single top-level directory
 (e.g. `cmake-3.28/bin/cmake`). Rather than repackaging, set `strip_components` to
-remove leading path components during extraction — analogous to `tar --strip-components`.
+remove leading path components when the package is assembled — analogous to `tar --strip-components`.
 
 | Value | Effect |
 |---|---|
 | omitted / `0` | Extract as-is. |
 | `1` | Remove one leading directory: `cmake-3.28/bin` → `bin`. |
 | `2` | Remove two: `a/b/bin` → `bin`. |
+
+`strip_components` is the package-wide default, applied to any layer that carries no
+layout of its own. A multi-layer package can override it per layer with a `strip`/`prefix`
+pair carried in the manifest layer descriptor's annotations, set via the `<ref>:strip=N,prefix=P`
+syntax on [`ocx package push`][cmd-package-push] — see [layer layout][cmd-package-push-layout]
+for the grammar and the fallback chain. There is no separate `layers` field in this schema;
+per-layer layout lives entirely in the manifest, not in `metadata.json`.
 
 ## JSON Schema {#json-schema}
 
@@ -501,6 +508,8 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-exec]: ./command-line.md#exec
 [cmd-launcher-exec]: ./command-line.md#launcher-exec
 [cmd-env]: ./command-line.md#env
+[cmd-package-push]: ./command-line.md#package-push
+[cmd-package-push-layout]: ./command-line.md#package-push-layout
 
 <!-- guide -->
 [authoring-migration]: ../authoring/env-surface.md#migrating

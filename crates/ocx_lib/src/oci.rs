@@ -44,6 +44,10 @@ pub use oci_client::{
 pub const INDEX_SCHEMA_VERSION: u8 = 2;
 
 pub mod annotations;
+
+pub mod layer_layout;
+pub use layer_layout::{LayerLayoutError, LayerLayoutSpec, resolve_layer_placement};
+
 pub mod client;
 pub use client::Client;
 pub use client::ClientBuilder;

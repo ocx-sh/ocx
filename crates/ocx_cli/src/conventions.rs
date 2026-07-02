@@ -53,7 +53,7 @@ pub fn resolve_metadata_path(
     }
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for layer in layers {
-        if let LayerRef::File(file) = layer {
+        if let LayerRef::File { path: file, .. } = layer {
             let candidate = infer_metadata_file(file)?;
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);

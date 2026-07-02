@@ -13,7 +13,8 @@ mod same_filesystem;
 mod symlink_walk;
 
 pub use assemble::{
-    AssemblyError, AssemblyStats, assemble_from_layer, assemble_from_layers, assemble_from_layers_stripped,
+    AssemblyError, AssemblyStats, LayerPlacement, assemble_from_layer, assemble_from_layers,
+    assemble_from_layers_with_layouts,
 };
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;

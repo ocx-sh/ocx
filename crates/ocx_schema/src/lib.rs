@@ -30,6 +30,8 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// top-level `$comment` flagging the format as machine-generated.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
+        // Per-layer strip/prefix layout lives in manifest layer-descriptor annotations
+        // (`sh.ocx.layer.*`), not on `Bundle` — do not add a `layers` field here.
         "metadata" => Some(generate_schema::<Metadata>(
             "https://ocx.sh/schemas/metadata/v1.json",
             None,

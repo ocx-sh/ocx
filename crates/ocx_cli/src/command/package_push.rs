@@ -72,14 +72,25 @@ pub struct PackagePush {
     ///     does not expose a layer's media type via blob HEAD, so the suffix
     ///     is required: OCX refuses to guess.
     ///
+    /// Either form may carry an optional layout tail `:strip=N,prefix=P` that
+    /// controls how the layer is placed when the package is installed:
+    ///   - `strip=N` drops the leading N path components (like
+    ///     `tar --strip-components=N`).
+    ///   - `prefix=P` relocates the layer under the relative subdirectory `P`
+    ///     (must stay inside the package; `..`, absolute, and Windows-style
+    ///     paths are rejected).
+    ///
+    /// Both keys are optional and comma-separated; omit the tail for the
+    /// default (no strip, package root).
+    ///
     /// Digest references enable layer reuse: a base layer pushed once can be
     /// referenced by digest from many packages without re-uploading. Zero
     /// layers is valid (produces a config-only OCI artifact) when
     /// `--metadata` is supplied.
     ///
     /// Examples:
-    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.gz ./new.tar.zst
-    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz
+    ///   ocx package push repo:2.0.0 ./libs.tar.gz:strip=1,prefix=share
+    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst
     layers: Vec<LayerRef>,
 }
 

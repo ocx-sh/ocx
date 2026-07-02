@@ -68,6 +68,11 @@ pub struct PackageTest {
     /// referring to a layer already present in the target registry. Digest
     /// refs are auto-pulled from the registry on demand; in `--offline`,
     /// missing digest blobs error with `PolicyBlocked`.
+    ///
+    /// A layer may carry an optional layout tail `:strip=N,prefix=P`
+    /// (`strip=N` drops N leading path components; `prefix=P` relocates the
+    /// layer under the relative subdirectory `P`), e.g.
+    /// `./libs.tar.gz:strip=1,prefix=share`.
     #[clap(num_args = 0.., value_terminator = "--")]
     layers: Vec<LayerRef>,
 
@@ -141,8 +146,9 @@ impl PackageTest {
                 (Some(out), _) => {
                     // Refuse if --output resolves through any symlink in its ancestor chain.
                     // Symlink traversal in a destination path can redirect writes to
-                    // attacker-controlled locations.
-                    ocx_fs::refuse_if_symlink_in_path(out).await?;
+                    // attacker-controlled locations. `--output` is a fully user-supplied
+                    // path, so walk the whole chain (no trusted boundary).
+                    ocx_fs::refuse_if_symlink_in_path(out, None).await?;
                     // Validate same filesystem as $OCX_HOME/layers/.
                     let layers_root = fs.layers.root();
                     if !ocx_fs::same_filesystem(out, layers_root).await? {

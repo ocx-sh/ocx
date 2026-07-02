@@ -522,10 +522,11 @@ impl Client {
         let progress_reader = ProgressReader::new(hashing_reader, on_progress);
 
         // Layer blobs extract verbatim (strip = 0) into the shared
-        // content-addressed layer store; the package-wide strip is applied once,
-        // later, at assemble time (see `assemble_from_layers_stripped`). Baking
-        // strip in here would corrupt the shared store when two packages reuse
-        // one blob digest with different strip.
+        // content-addressed layer store; per-layer strip + output prefix are
+        // applied once, later, at assemble time (see
+        // `assemble_from_layers_with_layouts`). Baking strip in here would
+        // corrupt the shared store when two packages reuse one blob digest with
+        // different strip.
         let content_path_clone = content_path.clone();
         let identifier_label = identifier.to_string();
 
@@ -825,7 +826,7 @@ impl Client {
                 async move {
                     let progress_label = format!("{}/{}", index + 1, total_layers);
                     match layer {
-                        LayerRef::File(path) => {
+                        LayerRef::File { path, layout } => {
                             let package_media_type =
                                 media_type_from_path(path).map(|mt| mt.to_string()).ok_or_else(|| {
                                     ClientError::InvalidManifest(format!("unsupported archive: {}", path.display()))
@@ -875,10 +876,16 @@ impl Client {
                                 digest: digest.to_string(),
                                 size,
                                 urls: None,
-                                annotations: None,
+                                // BC2: default (empty) layout → `None`, so the
+                                // manifest stays byte-identical to today.
+                                annotations: layout.to_annotations(),
                             })
                         }
-                        LayerRef::Digest { digest, media_type } => {
+                        LayerRef::Digest {
+                            digest,
+                            media_type,
+                            layout,
+                        } => {
                             // The caller supplies `media_type` because the OCI
                             // distribution spec does not expose a layer's media
                             // type via blob HEAD — only the blob bytes and
@@ -900,7 +907,7 @@ impl Client {
                                 digest: digest.to_string(),
                                 size,
                                 urls: None,
-                                annotations: None,
+                                annotations: layout.to_annotations(),
                             })
                         }
                     }
@@ -2804,7 +2811,10 @@ mod tests {
                 platform: "linux/amd64".parse().unwrap(),
             };
 
-            let layers = [crate::publisher::LayerRef::File(archive_path)];
+            let layers = [crate::publisher::LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+            }];
             let _ = client.push_package(info, &layers).await;
             let calls = auth_calls(&data);
             // Must authenticate with Push before any blob/manifest operations.
@@ -2886,6 +2896,7 @@ mod tests {
             let layers = [crate::publisher::LayerRef::Digest {
                 digest: oci::Digest::try_from(layer_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarGz,
+                layout: oci::LayerLayoutSpec::default(),
             }];
 
             let _ = client.push_multi_layer_manifest(&info, &layers).await;
@@ -2917,7 +2928,10 @@ mod tests {
                 platform: "linux/amd64".parse().unwrap(),
             };
 
-            let layers = [crate::publisher::LayerRef::File(archive_path)];
+            let layers = [crate::publisher::LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+            }];
             let _ = client.push_package(info, &layers).await;
 
             // Verify auth happened before any transport method calls.
@@ -2999,6 +3013,7 @@ mod tests {
             let layers = [LayerRef::Digest {
                 digest: oci::Digest::try_from(layer_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarXz,
+                layout: oci::LayerLayoutSpec::default(),
             }];
             let (manifest, _bytes, _digest) = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)
@@ -3040,6 +3055,7 @@ mod tests {
             let layers = [LayerRef::Digest {
                 digest: oci::Digest::try_from(missing_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarGz,
+                layout: oci::LayerLayoutSpec::default(),
             }];
             let err = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)
@@ -3067,7 +3083,10 @@ mod tests {
             let data = StubTransportData::new();
             let client = stub_with_capture(&data);
 
-            let layers = [LayerRef::File(weird_path)];
+            let layers = [LayerRef::File {
+                path: weird_path,
+                layout: oci::LayerLayoutSpec::default(),
+            }];
             let err = client
                 .push_multi_layer_manifest(&info("1.0.0"), &layers)
                 .await
@@ -3124,7 +3143,10 @@ mod tests {
             let data = StubTransportData::new();
             let client = stub_with_capture(&data);
 
-            let layers = [LayerRef::File(archive_path)];
+            let layers = [LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+            }];
             let extra_tags = ["3".to_string(), "latest".to_string()];
             client
                 .push_manifest_and_merge_tags(&info("1.2.3"), &layers, &extra_tags)

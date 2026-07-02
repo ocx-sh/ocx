@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use crate::{log, prelude::*, utility::fs::path::lexical_normalize};
+use crate::{log, prelude::*};
 
 /// Validates that a symlink target resolves within `root`.
 ///
@@ -27,21 +27,31 @@ use crate::{log, prelude::*, utility::fs::path::lexical_normalize};
 /// the layer assembly walker (as defence-in-depth against any path that
 /// populates `layers/.../content/` without going through the archive layer).
 pub fn validate_target(root: &Path, link_path: &Path, target: &Path) -> Result<()> {
+    let escape = || {
+        Error::Archive(crate::archive::Error::SymlinkEscape {
+            link: link_path.to_path_buf(),
+            target: target.to_path_buf(),
+        })
+    };
+
+    // 1. Absolute targets are rejected unconditionally — `join_under_root`
+    //    expects a relative candidate, and an absolute target cannot be
+    //    contained by a root it does not descend from.
     if target.is_absolute() {
-        return Err(Error::Archive(crate::archive::Error::SymlinkEscape {
-            link: link_path.to_path_buf(),
-            target: target.to_path_buf(),
-        }));
+        return Err(escape());
     }
+
+    // 2. Express the link's parent *relative to root*, so the target (which may
+    //    contain `..`) is validated as a relative path from that parent. A
+    //    parent outside root is a defensive rejection — in practice the link is
+    //    always inside the package/layer content.
     let parent = link_path.parent().unwrap_or(root);
-    let resolved = lexical_normalize(&parent.join(target));
-    let normalized_root = lexical_normalize(root);
-    if !resolved.starts_with(&normalized_root) {
-        return Err(Error::Archive(crate::archive::Error::SymlinkEscape {
-            link: link_path.to_path_buf(),
-            target: target.to_path_buf(),
-        }));
-    }
+    let rel_parent = parent.strip_prefix(root).map_err(|_| escape())?;
+
+    // 3-4. Join the target onto the relative parent and validate containment via
+    //      the shared primitive (host-independent Windows-prefix + `..` checks).
+    let candidate = rel_parent.join(target);
+    crate::utility::fs::path::join_under_root(root, &candidate).map_err(|_| escape())?;
     Ok(())
 }
 
@@ -300,6 +310,48 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         p
+    }
+
+    // ── validate_target characterization (U15) — safety net for P2.7 ─────────
+    //
+    // These lock the CURRENT behaviour of `validate_target` before P2.7
+    // refactors its internals onto `join_under_root` (Two Hats: structure
+    // changes, behaviour must not). They are GREEN now and must stay GREEN after
+    // the refactor. The comprehensive pre-existing suite in `archive.rs`
+    // (test_validate_symlink_*) is the companion net and must remain unmodified.
+
+    /// U15 (behavior-preserving · D8/F3): a parent-relative link that stays in
+    /// root is accepted; an escaping `../../` target and an absolute target are
+    /// both rejected as `SymlinkEscape`.
+    #[test]
+    fn validate_target_characterization() {
+        let root = Path::new("/tmp/root");
+
+        // Parent-relative but in-root: lib/link -> ../bin/tool.
+        assert!(
+            validate_target(root, Path::new("/tmp/root/lib/link"), Path::new("../bin/tool")).is_ok(),
+            "a parent-relative target that stays within root must be accepted"
+        );
+
+        // Escaping traversal from a depth-1 link.
+        let escaping = validate_target(root, Path::new("/tmp/root/sub/link"), Path::new("../../etc"));
+        assert!(
+            matches!(
+                escaping,
+                Err(crate::Error::Archive(crate::archive::Error::SymlinkEscape { .. }))
+            ),
+            "an escaping `../../` target must be rejected as SymlinkEscape, got {escaping:?}"
+        );
+
+        // Absolute target is rejected unconditionally.
+        let absolute = validate_target(root, Path::new("/tmp/root/link"), Path::new("/etc/passwd"));
+        assert!(
+            matches!(
+                absolute,
+                Err(crate::Error::Archive(crate::archive::Error::SymlinkEscape { .. }))
+            ),
+            "an absolute target must be rejected as SymlinkEscape, got {absolute:?}"
+        );
     }
 
     // ── is_link ──────────────────────────────────────────────────────────────

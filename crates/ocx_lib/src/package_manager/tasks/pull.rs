@@ -403,10 +403,19 @@ pub async fn setup_owned(
         .map(|d| fs.layers.content(pinned.registry(), d))
         .collect();
     let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    // Layers are stored verbatim (strip = 0); the package-wide strip is applied
-    // once here, at assemble time (Part 1: single scalar strip for all layers).
-    let strip = metadata.strip_components().unwrap_or(0);
-    crate::utility::fs::assemble_from_layers_stripped(&sources, strip, &pkg.content())
+    // Layers are stored verbatim (strip = 0). Per-layer placement (strip +
+    // output prefix) is resolved from each manifest layer descriptor's
+    // annotations, falling back to the package-wide `Bundle.strip_components`
+    // (BC1), and applied once here at assemble time. `extract_layers` preserves
+    // manifest declaration order, so `placements` aligns 1:1 with `sources`.
+    let bundle_strip = metadata.strip_components();
+    let mut placements: Vec<crate::utility::fs::LayerPlacement> = Vec::with_capacity(manifest.layers.len());
+    for layer in &manifest.layers {
+        let placement = crate::oci::resolve_layer_placement(layer.annotations.as_ref(), bundle_strip)
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::LayerLayout(e)))?;
+        placements.push(placement);
+    }
+    crate::utility::fs::assemble_from_layers_with_layouts(&sources, &placements, &pkg.content())
         .await
         .map_err(PackageErrorKind::Internal)?;
 

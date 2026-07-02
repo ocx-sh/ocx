@@ -159,6 +159,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Watch-based async singleflight (dedupe in-flight work by key) | `utility::singleflight` | `utility/singleflight.rs` |
 | Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |
 | Lexical path normalize / containment check (no FS I/O) | `utility::fs::path::{lexical_normalize, escapes_root, validate_symlinks_in_dir}` | `utility/fs/path.rs` |
+| Join an untrusted relative path under a containment root (lexical, host-independent Windows drive/UNC/verbatim rejection); bounded, non-escaping relative-path newtype for untrusted annotation input | `utility::fs::path::join_under_root` + `RelativePath` | `utility/fs/path.rs` |
 | Move directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
 | Atomically publish a written `NamedTempFile` to a target path (Windows transient-lock retry — `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` backoff; single persist off-Windows; blocking — wrap in `spawn_blocking`) | `utility::fs::persist_temp_file` | `utility/fs.rs` (the one atomic-publish primitive; used by `BlobStore::write_blob`) |
 | Probe whether path exists, swallow I/O errors as `false` with debug log | `utility::fs::path_exists_lossy` | `utility/fs.rs` |
@@ -167,7 +168,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Verify a path is absent or an empty directory | `utility::fs::ensure_empty_or_absent` | `utility/fs/empty_or_absent.rs` |
 | Hardlink file (dedup layer into package) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
 | Create / update / probe symlink (cross-platform, junction-aware) | `symlink::create` / `update` / `remove` / `is_link` | `crates/ocx_lib/src/symlink.rs` |
-| Assemble layer's content tree into package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |
+| Assemble layer's content tree into package (hardlinks + symlinks); layout-aware entrypoint applies per-layer strip + output prefix before the overlap merge | `utility::fs::assemble_from_layer(s)` / `assemble_from_layers_with_layouts` + `LayerPlacement` | `utility/fs/assemble.rs` |
 | Boolean-like env string (`true/1/yes/on`) | `utility::boolean_string::BooleanString` | `utility/boolean_string.rs` |
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `utility::child_process::propagate_exit_code` | `utility/child_process.rs` |
 | Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `utility::path::move_to_front` | `utility/path.rs` |

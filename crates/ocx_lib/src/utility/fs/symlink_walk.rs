@@ -54,11 +54,21 @@ impl ClassifyExitCode for SymlinkWalkError {
     }
 }
 
-/// Refuses when `path` itself or any existing ancestor is a symlink.
+/// Refuses when `path` itself or any existing ancestor below `boundary` is a
+/// symlink.
 ///
 /// Walks ancestors from `path` upward (most specific first) and calls
 /// [`tokio::fs::symlink_metadata`] on each that exists. Missing ancestors
 /// are tolerated — only existing symlinks fail the check.
+///
+/// `boundary` marks a **trusted** root: the walk stops when it reaches that
+/// path, so `boundary` and everything above it are never checked. Pass
+/// `Some(dest_content)` when only the untrusted portion strictly *below* a
+/// package's content root should be validated — OCX's own store path (e.g. a
+/// `~/.ocx` that is itself a symlink onto a larger disk) is trusted and must not
+/// fail-close every prefix-using install. Pass `None` to walk the whole
+/// ancestor chain up to the filesystem root (for a fully untrusted path such as
+/// a user-supplied `--output` directory).
 ///
 /// # Security note
 ///
@@ -66,9 +76,15 @@ impl ClassifyExitCode for SymlinkWalkError {
 /// directory create can still redirect writes. Single-user use cases are
 /// unaffected; CI automation should validate the exact path passed in,
 /// not derive it from untrusted input.
-pub async fn refuse_if_symlink_in_path(path: &Path) -> Result<(), SymlinkWalkError> {
+pub async fn refuse_if_symlink_in_path(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
     let mut current: Option<&Path> = Some(path);
     while let Some(p) = current {
+        // Stop at the trusted boundary: `boundary` and its ancestors are OCX's
+        // own store path, which may legitimately be a symlink. Only the
+        // untrusted portion strictly below it is in scope.
+        if boundary == Some(p) {
+            break;
+        }
         match tokio::fs::symlink_metadata(p).await {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(SymlinkWalkError::Ancestor {
@@ -110,13 +126,13 @@ mod tests {
     async fn absent_path_passes() {
         let (_td, root) = temp_root();
         let target = root.join("does/not/exist");
-        refuse_if_symlink_in_path(&target).await.unwrap();
+        refuse_if_symlink_in_path(&target, None).await.unwrap();
     }
 
     #[tokio::test]
     async fn regular_dir_passes() {
         let (_td, root) = temp_root();
-        refuse_if_symlink_in_path(&root).await.unwrap();
+        refuse_if_symlink_in_path(&root, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -124,7 +140,7 @@ mod tests {
         let (_td, root) = temp_root();
         let f = root.join("file");
         tokio::fs::write(&f, b"x").await.unwrap();
-        refuse_if_symlink_in_path(&f).await.unwrap();
+        refuse_if_symlink_in_path(&f, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -135,7 +151,7 @@ mod tests {
         tokio::fs::create_dir(&real).await.unwrap();
         let link = td.path().join("link");
         tokio::fs::symlink(&real, &link).await.unwrap();
-        match refuse_if_symlink_in_path(&link).await.unwrap_err() {
+        match refuse_if_symlink_in_path(&link, None).await.unwrap_err() {
             SymlinkWalkError::Ancestor { ancestor, .. } => assert_eq!(ancestor, link),
             other => panic!("expected Ancestor, got {other}"),
         }
@@ -150,7 +166,7 @@ mod tests {
         let link = td.path().join("link");
         tokio::fs::symlink(&real, &link).await.unwrap();
         let target = link.join("nested");
-        match refuse_if_symlink_in_path(&target).await.unwrap_err() {
+        match refuse_if_symlink_in_path(&target, None).await.unwrap_err() {
             SymlinkWalkError::Ancestor { ancestor, .. } => assert_eq!(ancestor, link),
             other => panic!("expected Ancestor, got {other}"),
         }
@@ -162,9 +178,42 @@ mod tests {
         let td = TempDir::new().unwrap();
         let link = td.path().join("dangling");
         tokio::fs::symlink(td.path().join("missing"), &link).await.unwrap();
-        match refuse_if_symlink_in_path(&link).await.unwrap_err() {
+        match refuse_if_symlink_in_path(&link, None).await.unwrap_err() {
             SymlinkWalkError::Ancestor { .. } => {}
             other => panic!("expected Ancestor, got {other}"),
+        }
+    }
+
+    /// A symlinked ancestor ABOVE the trusted boundary (simulating a symlinked
+    /// `$OCX_HOME`, e.g. `~/.ocx` pointing at a larger disk) must NOT fail the
+    /// check: only the untrusted portion strictly below `boundary` is in scope.
+    /// Without the boundary the same symlinked ancestor is (correctly) rejected.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn symlinked_ancestor_above_boundary_passes() {
+        let td = TempDir::new().unwrap();
+        // `store` is the real on-disk directory; `home_link -> store` simulates a
+        // symlinked $OCX_HOME. The package content root lives under it.
+        let store = td.path().join("store");
+        tokio::fs::create_dir_all(store.join("content/prefix")).await.unwrap();
+        let home_link = td.path().join("home_link");
+        tokio::fs::symlink(&store, &home_link).await.unwrap();
+
+        // dest_content and the prefix are addressed THROUGH the symlink, exactly
+        // as an install under a symlinked $OCX_HOME would be.
+        let dest_content = home_link.join("content");
+        let prefix = dest_content.join("prefix");
+
+        // Bounded at dest_content: the symlinked `home_link` ancestor is above
+        // the boundary and never checked → passes.
+        refuse_if_symlink_in_path(&prefix, Some(&dest_content))
+            .await
+            .expect("a symlinked ancestor above the boundary must not fail");
+
+        // Unbounded: the same symlinked ancestor is now in scope → rejected.
+        match refuse_if_symlink_in_path(&prefix, None).await.unwrap_err() {
+            SymlinkWalkError::Ancestor { ancestor, .. } => assert_eq!(ancestor, home_link),
+            other => panic!("expected Ancestor for the unbounded walk, got {other}"),
         }
     }
 }
