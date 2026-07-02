@@ -227,26 +227,72 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
+/// Bounded retries for the Windows remove-then-rename publish window. Under
+/// heavy same-target contention (issue #179's 32-thread stress) a fault is
+/// benign and resolves within a couple of iterations; the ceiling is a
+/// livelock backstop, not a tuning knob.
+#[cfg(windows)]
+const WINDOWS_RENAME_RACE_RETRIES: usize = 64;
+
 #[cfg(windows)]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    if is_link(to) || to.exists() {
-        remove_link(to)?;
-    }
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            // A concurrent installer republished `to` in the remove->rename
-            // window. An idempotent equivalent link now occupies the slot, so
-            // converge instead of surfacing EEXIST (issue #179); drop our unused
-            // stage so it does not leak.
-            if is_link(to) {
-                let _ = remove_link(from);
-                Ok(())
-            } else {
-                Err(error)
+    use std::io::ErrorKind;
+
+    // Windows has no atomic directory-junction replace (`MoveFileEx`
+    // REPLACE_EXISTING refuses a directory destination), so publish via
+    // remove-then-rename inside a bounded retry loop. Concurrent same-hash
+    // installers stage an *equivalent* junction, so every interleaving fault is
+    // benign — the slot converges on a valid link. `from` is uniquely named per
+    // call, so it is never the victim of a peer's remove.
+    for _ in 0..WINDOWS_RENAME_RACE_RETRIES {
+        // Converge without touching `to` when it already resolves to the target
+        // we staged. A peer that published first left exactly the link we
+        // wanted; removing and re-renaming it would only thrash the winner and
+        // widen the reader-visibility window. A genuine re-link (a *different*
+        // target, e.g. `ProjectRegistry` repointing a ledger entry) falls
+        // through to the replace below.
+        if is_link(to)
+            && let (Ok(existing), Ok(staged)) = (std::fs::read_link(to), std::fs::read_link(from))
+            && existing == staged
+        {
+            let _ = remove_link(from);
+            return Ok(());
+        }
+
+        // Clear any existing entry at `to`. A peer removing it first yields
+        // `NotFound` — "already gone" is exactly the state we want, not an error.
+        if is_link(to) || to.exists() {
+            match remove_link(to) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
+
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            // A peer republished `to` between our remove and rename. Recheck at
+            // the loop top: it either matches our target (converge) or is a
+            // stale different target we retry to replace.
+            Err(_) if is_link(to) => continue,
+            // `to` is momentarily absent and our own stage is gone — a peer's
+            // remove consumed the window; nothing left to publish, converge.
+            Err(error) if error.kind() == ErrorKind::NotFound && !is_link(from) && !from.exists() => {
+                return Ok(());
+            }
+            // `to` absent, our stage intact — a transient interleaving; retry.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
     }
+
+    // Retries exhausted. If an equivalent link now occupies the slot, converge;
+    // otherwise surface the final rename error rather than loop forever.
+    if is_link(to) {
+        let _ = remove_link(from);
+        return Ok(());
+    }
+    std::fs::rename(from, to)
 }
 
 /// Removes the symlink at `link_path`.

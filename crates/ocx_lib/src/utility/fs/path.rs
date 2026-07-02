@@ -131,8 +131,10 @@ pub fn join_under_root(root: &Path, untrusted_relative: &Path) -> std::result::R
         return Err(PathEscapeError::WindowsPrefix);
     }
 
-    // 2. A single-slash absolute path (`/etc`) is not a relative path.
-    if untrusted_relative.is_absolute() {
+    // 2. A single-separator absolute path (`/etc`, `\etc`) is not a relative
+    //    path. Checked host-independently because `Path::is_absolute` misses the
+    //    single-leading-separator case on Windows (drive-relative → not absolute).
+    if has_leading_separator(untrusted_relative) || untrusted_relative.is_absolute() {
         return Err(PathEscapeError::Absolute);
     }
 
@@ -178,6 +180,20 @@ fn has_windows_prefix(path: &Path) -> bool {
     bytes.len() >= 2 && is_sep(bytes[0]) && is_sep(bytes[1])
 }
 
+/// Returns `true` when `path` begins with a single path separator (`/etc`,
+/// `\etc`) — a root-relative absolute path.
+///
+/// [`Path::is_absolute`] only recognizes this on Unix; on Windows a single
+/// leading separator is "relative to the current drive" and reports
+/// `is_absolute() == false`, so an untrusted `/etc` would otherwise slip past
+/// the absolute-path rejection and be accepted as a relative path. The
+/// byte-level check keeps rejection host-independent, mirroring
+/// [`has_windows_prefix`]. Callers must check [`has_windows_prefix`] first so a
+/// two-separator lead classifies as a Windows prefix, not a plain absolute path.
+fn has_leading_separator(path: &Path) -> bool {
+    matches!(path.as_os_str().as_encoded_bytes().first(), Some(b'/' | b'\\'))
+}
+
 /// A validated, non-escaping, **bounded** relative path. Its [`Default`] is the
 /// empty path (the containment root itself).
 ///
@@ -205,7 +221,7 @@ impl RelativePath {
         if has_windows_prefix(path) {
             return Err(PathEscapeError::WindowsPrefix);
         }
-        if path.is_absolute() {
+        if has_leading_separator(path) || path.is_absolute() {
             return Err(PathEscapeError::Absolute);
         }
 
@@ -447,6 +463,20 @@ mod tests {
             matches!(join_under_root(root, Path::new("/etc")), Err(PathEscapeError::Absolute)),
             "a single-slash absolute path must be Absolute, not WindowsPrefix"
         );
+        // Host-independent: a single leading separator (either flavour) is an
+        // absolute path on every platform. `Path::is_absolute` misses this on
+        // Windows (drive-relative), so `RelativePath::parse` must reject both
+        // itself rather than accept `/etc` / `\etc` as a containable relative path.
+        for spec in ["/etc", "\\etc"] {
+            assert!(
+                matches!(join_under_root(root, Path::new(spec)), Err(PathEscapeError::Absolute)),
+                "a single-separator absolute path {spec:?} must be Absolute"
+            );
+            assert!(
+                matches!(RelativePath::parse(spec), Err(PathEscapeError::Absolute)),
+                "RelativePath::parse must reject {spec:?} as Absolute"
+            );
+        }
         assert!(
             matches!(join_under_root(root, Path::new("../x")), Err(PathEscapeError::Escapes)),
             "residual `..` traversal must be Escapes"
