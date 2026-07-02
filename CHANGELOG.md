@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11] - 2026-07-02
+
+### Added
+
+- Accept multiple identifiers across add/remove/inspect/info *(cli)* **BREAKING**
+- Expose --platform on toolchain-tier commands *(cli)*
+- Scope ocx env composition by group (#176) *(cli)*
+
+### Changed
+
+- Dedup group/platform validation across pull and env *(cli)*
+
+### Documentation
+
+- Adopt setup.ocx.sh as the canonical install path
+
+### Fixed
+
+- Self update probes registry by default *(self)*
+- Order batch errors by input index *(package-manager)*
+- Unique temp file per batch live-test invocation *(shell)*
+
 ## [0.3.10] - 2026-06-30
 
 ### Added
@@ -22,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make nushell shim PATH activation parse on nu without get --optional *(setup)*
 - Wire ~/.profile for non-bash POSIX login shells *(setup)*
 - Decouple elvish completion from PATH activation *(setup)*
+
+### Release
+
+- V0.3.10
 
 ## [0.3.9] - 2026-06-21
 
@@ -524,6 +550,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.11]: https://github.com/ocx-sh/ocx/compare/v0.3.10..v0.3.11
 [0.3.10]: https://github.com/ocx-sh/ocx/compare/v0.3.9..v0.3.10
 [0.3.9]: https://github.com/ocx-sh/ocx/compare/v0.3.8..v0.3.9
 [0.3.8]: https://github.com/ocx-sh/ocx/compare/v0.3.7..v0.3.8
