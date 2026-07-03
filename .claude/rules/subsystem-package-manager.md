@@ -153,6 +153,16 @@ The slug is `to_slug(identifier.to_string())` — replaces all non-alphanumeric 
 - **Parallel** (via `JoinSet`): `find_all`, `find_or_install_all`, `install_all`, `inspect_all`
 - **Sequential**: `find_symlink_all`, `uninstall_all`, `deselect_all`, `clean`, `select_all` (resolve phase is parallel via `find_all`; only the `current` wire-up loops sequentially)
 
+## Garbage Collection: canonical-path keying
+
+`ReachabilityGraph::build` keys `all_entries` and every edge by **canonical**
+paths (`canonicalize_or_keep` → `dunce`); `GarbageCollector::build` canonicalizes
+each `patch_roots` seed before the membership guard. GC tests that seed real
+`tempfile::TempDir` dirs must therefore canonicalize their expected paths before
+asserting on `unreachable_objects()` / `orphaned_by_seeds()` — a raw `store.path(..)`
+value never matches a canonical key behind a symlinked `/tmp`. See `quality-rust.md`
+→ Cross-Platform Path Handling for the general rule (incl. the `!contains` trap).
+
 ## Progress Pattern
 
 Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`

@@ -171,6 +171,36 @@ See `quality-core.md` for universal YAGNI. Rust applications:
 
 ---
 
+## Cross-Platform Path Handling
+
+A path is not canonical the same way on every OS. This inconsistency produces
+tests and code that pass on Linux but fail on macOS/Windows CI — a recurring
+class of "green locally, red on the matrix" failures.
+
+- **macOS**: `/tmp`, `/var`, `/etc` are symlinks (`/tmp` → `/private/tmp`). A
+  `tempfile::TempDir` under `/tmp` therefore has a *non-canonical* path.
+- **Windows**: `std::fs::canonicalize` returns a `\\?\` verbatim-prefixed path;
+  short (8.3) vs long names also differ. The verbatim prefix breaks string
+  comparison, `Display`, and further `Path::join`.
+
+Rules:
+
+- **Prefer `dunce::canonicalize` over `std::fs::canonicalize`.** `dunce` returns
+  ordinary paths (strips the `\\?\` prefix when the path is expressible without
+  it), so canonicalized values stay comparable and printable across platforms.
+  Reach for bare `std::fs::canonicalize` only when a verbatim path is required.
+- **Canonicalize both sides before a path equality/membership assertion.** When
+  code canonicalizes internally (any structure keyed by real filesystem paths),
+  a raw `TempDir::path()`-derived expected value will not match. Canonicalize the
+  tempdir root once at test setup and derive expected paths from it, or
+  canonicalize the expected value at the assertion.
+- **Negative path assertions are the trap.** `assert!(!set.contains(&raw_path))`
+  passes *trivially* when `set` is canonical-keyed and `raw_path` never could
+  match — masking a real regression. Pair each `!contains` with a positive
+  assertion on a known-present canonical path, or assert on canonical paths only.
+
+---
+
 ## Refactoring Tooling (Rust-Specific)
 
 LSP tool available → use rust-analyzer for symbol ops — `findReferences`, `goToDefinition`, `workspaceSymbol` give semantically precise results. See `quality-core.md` for general principle.
