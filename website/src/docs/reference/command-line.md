@@ -1005,6 +1005,7 @@ ocx login [OPTIONS] [REGISTRY]
 | `--username <USER>` | `-u` | Username for the registry. Prompted interactively when omitted on a TTY. | *(prompt)* |
 | `--password-stdin` | — | Read the password or token from stdin. Required in non-interactive contexts. No `-p/--password VALUE` flag — argv-visible secrets leak via `ps` and shell history (CWE-214). | off |
 | `--allow-insecure-store` | — | Permit storing credentials as base64 in `auths[registry]` when no native credential helper is configured. Default: refuse, exit 78. | off |
+| `--verify` / `--no-verify` | — | Verify the credentials against the registry (`GET /v2/`) before storing them. On rejection, nothing is written (exit 80). `--no-verify` stores without a round-trip. | verify |
 | `-h`, `--help` | | Print help information. | — |
 
 :::details Reserved flags

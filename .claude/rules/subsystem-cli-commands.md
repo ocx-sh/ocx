@@ -147,7 +147,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `login [REGISTRY]` | Authenticate to a registry | `-u/--username`, `--password-stdin`, `--insecure` |
+| `login [REGISTRY]` | Authenticate to a registry (verifies credentials against the registry before storing; `--no-verify` opts out) | `-u/--username`, `--password-stdin`, `--verify`/`--no-verify`, `--insecure` |
 | `logout [REGISTRY]` | Remove stored credentials | — |
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |

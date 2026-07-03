@@ -62,7 +62,11 @@ def _run_login(
         env["PATH"] = f"{helper_dir}:{env.get('PATH', '')}"
     if extra_env:
         env.update(extra_env)
-    cmd = [str(ocx.binary), "login", *args]
+    # These tests isolate credential-storage behavior; they use fake credentials
+    # against registries with no auth backend. --no-verify skips the registry
+    # round-trip so the store logic is exercised without network/auth. Verify
+    # wiring itself is covered by the Rust unit tests in command/login.rs.
+    cmd = [str(ocx.binary), "login", "--no-verify", *args]
     return subprocess.run(
         cmd,
         capture_output=True,
@@ -183,7 +187,7 @@ def test_login_interactive_tty_stores_credential(
     env["PATH"] = f"{helper_dir}:{env.get('PATH', '')}"
 
     child = pexpect.spawn(
-        str(ocx.binary), ["login", "ghcr.io"], env=env, timeout=15, encoding="utf-8"
+        str(ocx.binary), ["login", "--no-verify", "ghcr.io"], env=env, timeout=15, encoding="utf-8"
     )
     child.expect("Username: ")
     child.sendline("ocx-bot")
@@ -497,6 +501,7 @@ def test_login_json_format_emits_minimal_payload(
         "--format",
         "json",
         "login",
+        "--no-verify",
         "-u",
         "u",
         "--password-stdin",

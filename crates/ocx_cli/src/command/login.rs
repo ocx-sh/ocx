@@ -6,12 +6,13 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::auth::login::{RegistryPing, login};
+use ocx_lib::auth::login::{OciClientPing, RegistryPing, login};
 use ocx_lib::auth::store::{Credential, DockerCredentialStore, StoreOptions};
 use ocx_lib::cli::error::UsageError;
 use secrecy::SecretString;
 
 use crate::api::data::login::LoginResult;
+use crate::options;
 
 /// Authenticate to a registry and persist the credentials via a docker-compatible store.
 ///
@@ -43,6 +44,11 @@ pub struct Login {
     #[clap(long = "auth-type", hide = true)]
     #[allow(dead_code)]
     auth_type: Option<String>,
+
+    /// Verify the credentials against the registry (`GET /v2/`) before storing
+    /// them (default). `--no-verify` stores without a round-trip.
+    #[clap(flatten)]
+    verify: options::Verify,
 
     /// Registry hostname (e.g. `ghcr.io`, `registry.example.com`).
     /// Optional - falls back to `OCX_DEFAULT_REGISTRY`.
@@ -137,11 +143,16 @@ impl Login {
             detect_default_native_store: false,
         })?;
 
-        // v1: no-op Ping (see plan Notes 2026-05-14). Library `RegistryPing`
-        // trait remains the seam where a future opt-in `--verify` flag plugs
-        // in for credential validation; the security invariant
-        // ("Ping failure ⇒ no put") is proven by `MockPing` unit tests.
-        login(&registry, &cred, &store, &NoopPing).await?;
+        // Verify credentials against the registry before storing them (default).
+        // `--no-verify` swaps in the no-op Ping to store without a round-trip.
+        // Either way the security invariant ("Ping failure ⇒ no put") holds,
+        // proven by `MockPing` unit tests in `auth/login.rs`.
+        let ping: &dyn RegistryPing = if self.verify.enabled() {
+            &OciClientPing
+        } else {
+            &NoopPing
+        };
+        login(&registry, &cred, &store, ping).await?;
 
         // 5. Blank line separates prompts from the success line for legibility,
         // then structured report (registry name reported in its user-supplied
@@ -157,10 +168,11 @@ impl Login {
     }
 }
 
-/// v1 no-op `RegistryPing`. Always returns `Ok(())` so `login()` proceeds
-/// straight to `store.put`. The library-layer trait remains the seam for a
-/// future `--verify` opt-in; the security invariant ("Ping failure → no
-/// store") is still proven by `MockPing` tests in `auth/login.rs`.
+/// No-op `RegistryPing` used on the `--no-verify` path. Always returns `Ok(())`
+/// so `login()` proceeds straight to `store.put` without a registry round-trip.
+/// The default (`--verify`) path uses `OciClientPing` instead; the security
+/// invariant ("Ping failure → no store") is proven by `MockPing` tests in
+/// `auth/login.rs`.
 struct NoopPing;
 
 #[async_trait::async_trait]
@@ -241,9 +253,22 @@ mod tests {
             "--password-stdin",
             "--insecure",
             "--allow-insecure-store",
+            "--no-verify",
             "ghcr.io",
         ])
         .expect("full flag set must parse");
+    }
+
+    #[test]
+    fn login_clap_verify_defaults_on() {
+        let login = Login::try_parse_from(["login", "ghcr.io"]).expect("parse");
+        assert!(login.verify.enabled(), "verification must default on");
+    }
+
+    #[test]
+    fn login_clap_no_verify_disables() {
+        let login = Login::try_parse_from(["login", "--no-verify", "ghcr.io"]).expect("parse");
+        assert!(!login.verify.enabled(), "--no-verify must disable verification");
     }
 
     #[test]
