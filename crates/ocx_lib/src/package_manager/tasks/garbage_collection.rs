@@ -530,7 +530,10 @@ mod tests {
         std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
         let resolved_json = serde_json::to_string(&crate::package::resolved_package::ResolvedPackage::new()).unwrap();
         std::fs::write(pkg_path.join("resolve.json"), resolved_json).unwrap();
-        pkg_path
+        // Return the canonical path: `ReachabilityGraph::build` keys `all_entries`
+        // by canonical paths, so on platforms where the tempdir sits behind a
+        // symlink (macOS /tmp -> /private/tmp) the raw path never matches.
+        dunce::canonicalize(&pkg_path).unwrap_or(pkg_path)
     }
 
     /// Seed a descriptor blob at the CAS path for `(registry, digest)`.
@@ -542,7 +545,9 @@ mod tests {
         let blob_path = store.path(registry, digest);
         std::fs::create_dir_all(&blob_path).unwrap();
         std::fs::write(blob_path.join("data"), b"fake-blob").unwrap();
-        blob_path
+        // Canonicalize to match the canonical keys in `all_entries` (see
+        // seed_companion_pkg_dir).
+        dunce::canonicalize(&blob_path).unwrap_or(blob_path)
     }
 
     /// Spec test 4 — patch_roots retains companion package + descriptor blob.
