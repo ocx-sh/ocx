@@ -15,7 +15,6 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use clap::Args;
 use ocx_lib::{
-    cli::UsageError,
     oci,
     package_manager::tasks::patch_discovery::{global_descriptor_id, patch_descriptor_id},
 };
@@ -39,20 +38,21 @@ pub struct PatchPublishArgs {
     /// descriptor. Omit with `--global` for the global descriptor.
     #[clap(value_name = "BASE-ID", required_unless_present = "global")]
     base: Option<options::Identifier>,
+
+    /// Patch registry to publish to, as `HOST/PATH`
+    /// (e.g. registry.corp.example/ocx-patches).
+    ///
+    /// Overrides the configured `[patches]` tier for this command, so you can
+    /// publish to (and thereby bootstrap) a new patch registry without first
+    /// adding a `[patches]` config block. Defaults to the configured registry.
+    #[clap(long = "registry", value_name = "HOST/PATH")]
+    registry: Option<String>,
 }
 
 impl PatchPublishArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── Step 1: The patch tier must be configured. ──
-        let patches = context
-            .manager()
-            .patches()
-            .ok_or_else(|| {
-                UsageError::new(
-                    "no patch registry configured; set a [patches] config tier or OCX_PATCHES before publishing",
-                )
-            })?
-            .clone();
+        // ── Step 1: Resolve the effective patch tier (honours --registry). ──
+        let patches = crate::command::patch_common::effective_patches(self.registry.as_deref(), &context)?;
 
         // ── Step 2: Read + validate the descriptor JSON file. ──
         let descriptor_bytes = tokio::fs::read(&self.descriptor)
@@ -183,6 +183,29 @@ mod tests {
         };
         assert_eq!(args.descriptor, PathBuf::from("p.json"));
         assert!(args.global);
+    }
+
+    /// `--registry` overrides the target patch registry and threads through to
+    /// the args struct — the ad-hoc bootstrap path.
+    #[test]
+    fn registry_flag_parses() {
+        use clap::Parser as _;
+
+        let cli = crate::app::Cli::try_parse_from([
+            "ocx",
+            "patch",
+            "publish",
+            "--descriptor",
+            "p.json",
+            "--global",
+            "--registry",
+            "registry.corp.example/ocx-patches",
+        ])
+        .expect("--registry must parse");
+        let Some(crate::command::Command::Patch(crate::command::patch::PatchGroup::Publish(args))) = cli.command else {
+            panic!("expected Patch(Publish(..)) subcommand");
+        };
+        assert_eq!(args.registry.as_deref(), Some("registry.corp.example/ocx-patches"));
     }
 
     /// `--descriptor-file` is the OLD flag name — it must be an unknown flag

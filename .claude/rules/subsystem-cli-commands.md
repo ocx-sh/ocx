@@ -132,8 +132,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 |---------|---------|-----------|
 | `patch freeze` | Write `patches.snapshot.json` pinning companion + descriptor digests beside `ocx.lock` (or `$OCX_HOME/ocx.lock` under `--global`) | — |
 | `patch sync [OPTIONS]` | Re-fetch every patch descriptor for all installed packages, install newly-referenced companions | `-p/--platform` |
-| `patch publish --descriptor <FILE> [--global \| <BASE-ID>]` | Push a patch descriptor to the configured `[patches]` registry | `--descriptor`, `--global` |
-| `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview) | `--descriptor`, `--companion-archive`, `-p/--platform`, `--script` |
+| `patch publish --descriptor <FILE> [--global \| <BASE-ID>]` | Push a patch descriptor to the configured (or `--registry`) `[patches]` registry | `--descriptor`, `--global`, `--registry` |
+| `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview) | `--descriptor`, `--companion-archive`, `-p/--platform`, `--script`, `--registry` |
 | `patch why <BASE-ID>` | List which companion, and which descriptor rule, contributes each patched env var to a base | — |
 
 **`patch` group notes:**
@@ -141,6 +141,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 - Only `freeze` reads the root `context.global()` flag — without it, the snapshot lands beside the project's `ocx.lock`; with `--global` (root flag, before the subcommand), beside `$OCX_HOME/ocx.lock`. `sync`, `publish`, `test`, `why` never call `context.global()`.
 - `publish`'s own `--global` (declared on `PatchPublishArgs`) is unrelated to the root toolchain flag: a subcommand-local selector for the reserved `global` descriptor repository, mutually exclusive with a `<BASE-ID>` positional.
 - `publish`, `test`, `why` are registry/maintainer commands against the configured `[patches]` tier; none consult `ocx.toml`. `sync` re-checks whatever is installed locally, not scoped to one project.
+- `publish` and `test` accept `--registry <HOST/PATH>` (via shared `patch_common::effective_patches`) to override — or stand in for a missing — `[patches]` tier, so a maintainer can bootstrap a brand-new patch registry without a config block. No configured tier and no `--registry` → usage error (exit 64).
 
 ### Other Commands
 

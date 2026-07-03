@@ -35,6 +35,7 @@ pub mod package_pull;
 pub mod package_push;
 pub mod package_test;
 pub mod patch;
+pub mod patch_common;
 pub mod patch_freeze;
 pub mod patch_publish;
 pub mod patch_sync;

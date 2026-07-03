@@ -2654,6 +2654,7 @@ ocx patch publish --descriptor <FILE> [--global | <BASE-ID>]
 |------|-------|-------------|
 | `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
 | `--global` | | Publish the descriptor to the reserved `global` repository under the patch registry so it applies to every base. Mutually exclusive with `<BASE-ID>`. |
+| `--registry <HOST/PATH>` | | Patch registry to publish to, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can bootstrap a brand-new patch registry without first adding a config block. Defaults to the configured registry. |
 | `-h`, `--help` | | Print help information. |
 
 **Exit codes**
@@ -2661,7 +2662,7 @@ ocx patch publish --descriptor <FILE> [--global | <BASE-ID>]
 | Code | Meaning |
 |------|---------|
 | 0 | Descriptor published. |
-| 64 | No `[patches]` tier configured; set `[patches]` or `OCX_PATCHES` before publishing. |
+| 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before publishing. |
 | 65 | Descriptor JSON is malformed or the version is unsupported. |
 | 69 | Registry unreachable. |
 | 81 | `--offline` blocked the publish — `patch publish` requires network access. |
@@ -2699,6 +2700,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
 | `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. |
 | `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
+| `--registry <HOST/PATH>` | | Patch registry to compose against, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can preview a descriptor against a new patch registry without a config block. Defaults to the configured registry. |
 | `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
 | `-h`, `--help` | | Print help information. |
 
@@ -2708,7 +2710,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 |------|---------|
 | 0 | Environment printed, or the trailing command/script exited 0. |
 | *(child's exit code)* | With a trailing command, the child's exit code is forwarded unchanged — a command that exits 7 makes `patch test` exit 7. |
-| 64 | No `[patches]` tier configured; set `[patches]` or `OCX_PATCHES` before testing. |
+| 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before testing. |
 | 65 | Descriptor JSON is malformed or the version is unsupported. |
 | 81 | `--offline` blocked resolving the base or a required companion. |
 | *other* | A required companion could not be resolved; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |

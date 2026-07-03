@@ -216,6 +216,22 @@ ocx patch publish \
   java:21
 ```
 
+:::tip Bootstrapping a new patch registry
+You do not need a `[patches]` config block to publish the first descriptor. Pass
+`--registry <HOST/PATH>` to target a patch registry ad-hoc — it overrides the configured
+tier, or stands in when none is configured:
+
+```sh
+ocx patch publish \
+  --descriptor ./my-descriptor.json \
+  --registry registry.corp.example/ocx-patches \
+  --global
+```
+
+`ocx patch test --registry …` composes against the same ad-hoc registry for a local preview.
+Roll out the `[patches]` config to consumers once the registry is seeded.
+:::
+
 ### 4. Freeze for reproducible builds {#patches-maintainer-freeze}
 
 OCI tags are mutable. The same `ca-bundle:latest` tag may point to a different digest

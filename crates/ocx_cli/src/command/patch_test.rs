@@ -42,6 +42,15 @@ pub struct PatchTestArgs {
     #[clap(value_name = "BASE-ID", required = true)]
     base: options::Identifier,
 
+    /// Patch registry to compose against, as `HOST/PATH`
+    /// (e.g. registry.corp.example/ocx-patches).
+    ///
+    /// Overrides the configured `[patches]` tier for this command, so you can
+    /// preview a descriptor against a new patch registry without first adding a
+    /// `[patches]` config block. Defaults to the configured registry.
+    #[clap(long = "registry", value_name = "HOST/PATH")]
+    registry: Option<String>,
+
     /// Path to a Starlark test script to run in the composed environment.
     /// Mutually exclusive with a trailing command.
     #[clap(long, conflicts_with = "command")]
@@ -68,6 +77,7 @@ impl PatchTestArgs {
 fn build_scratch_manager(
     context: &crate::app::Context,
     scratch_root: &std::path::Path,
+    patches: &ocx_lib::ResolvedPatchConfig,
 ) -> ocx_lib::package_manager::PackageManager {
     use ocx_lib::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
 
@@ -91,7 +101,7 @@ fn build_scratch_manager(
     let index = Index::from_chained(local_index, sources, mode);
 
     ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
-        .with_patches(context.manager().patches().cloned())
+        .with_patches(Some(patches.clone()))
 }
 
 /// Implementation of `ocx patch test`.
@@ -103,14 +113,8 @@ fn build_scratch_manager(
 /// Finally either runs a Starlark script, runs a trailing command, or prints the
 /// composed environment.
 async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-    // ── Step 0: Patch tier must be configured. ──
-    let patches = context
-        .manager()
-        .patches()
-        .ok_or_else(|| {
-            UsageError::new("no patch registry configured; set a [patches] config tier or OCX_PATCHES before testing")
-        })?
-        .clone();
+    // ── Step 0: Resolve the effective patch tier (honours --registry). ──
+    let patches = crate::command::patch_common::effective_patches(args.registry.as_deref(), &context)?;
 
     let platform = args
         .platform
@@ -136,7 +140,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         .map_err(|e| ocx_lib::error::file_error(&temp_root, e))?;
     let scratch_root = scratch.path().to_path_buf();
 
-    let manager = build_scratch_manager(&context, &scratch_root);
+    let manager = build_scratch_manager(&context, &scratch_root, &patches);
 
     // ── Step 3: Materialize the base into the scratch store. ──
     //
@@ -381,6 +385,29 @@ mod tests {
             panic!("expected Patch(Test(..)) subcommand");
         };
         assert_eq!(args.descriptor, PathBuf::from("p.json"));
+    }
+
+    /// `--registry` overrides the target patch registry and threads through to
+    /// the args struct — the ad-hoc bootstrap/preview path.
+    #[test]
+    fn registry_flag_parses() {
+        use clap::Parser as _;
+
+        let cli = crate::app::Cli::try_parse_from([
+            "ocx",
+            "patch",
+            "test",
+            "--descriptor",
+            "p.json",
+            "--registry",
+            "registry.corp.example/ocx-patches",
+            "cmake:1.0",
+        ])
+        .expect("--registry must parse");
+        let Some(crate::command::Command::Patch(crate::command::patch::PatchGroup::Test(args))) = cli.command else {
+            panic!("expected Patch(Test(..)) subcommand");
+        };
+        assert_eq!(args.registry.as_deref(), Some("registry.corp.example/ocx-patches"));
     }
 
     /// `--descriptor-file` is the OLD flag name — it must be an unknown flag
