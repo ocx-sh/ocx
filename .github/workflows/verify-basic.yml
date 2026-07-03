@@ -83,10 +83,14 @@ jobs:
         continue-on-error: true
       - name: Build
         run: task rust:build
-      - name: Test
-        run: task rust:test:unit -- --profile ci
-      - name: Generate Schema
-        run: task schema:generate
+      # Upload the acceptance binary *before* the Test step. `task rust:build`
+      # compiles target/release/ocx with `--features ocx/__testing`, enabling the
+      # `__OCX_SELF_IMAGE` seam that the self-setup / self-update acceptance tests
+      # rely on to redirect the canonical `ocx.sh/ocx/cli` identifier to the local
+      # fixture registry. The Test step below runs `cargo nextest --workspace
+      # --release` WITHOUT that feature, which recompiles and overwrites
+      # target/release/ocx seam-free — so a download after Test would ship a
+      # binary that ignores the redirect and every self-* acceptance test fails.
       - name: Upload Binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -94,6 +98,10 @@ jobs:
           path: target/release/ocx
           compression-level: 0
           retention-days: 1
+      - name: Test
+        run: task rust:test:unit -- --profile ci
+      - name: Generate Schema
+        run: task schema:generate
       - name: Upload Schema
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
