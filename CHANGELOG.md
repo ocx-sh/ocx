@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-03
+
+### Added
+
+- Add --registry override to patch publish and test *(patches)*
+- Add --[no-]verify flag to verify credentials before storing *(login)*
+
+### Fixed
+
+- Gate install-time discovery failure on required posture *(patches)*
+- Keep bare host in patch-registry identifier *(patches)*
+- Resolve `any` companions during patch sync *(patches)*
+- Static-link liblzma so the macOS binary is self-contained *(build)*
+- Upload acceptance binary before the test step clobbers the seam *(ci)*
+
 ## [0.4.0] - 2026-07-03
 
 ### Added
@@ -15,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Canonicalize seeded paths in patch_roots GC tests *(gc)*
 - Converge concurrent junction back-ref race and drive-joined PATH literal *(windows)*
+
+### Release
+
+- V0.4.0
 
 ## [0.3.12] - 2026-07-02
 
@@ -584,6 +603,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.4.1]: https://github.com/ocx-sh/ocx/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/ocx-sh/ocx/compare/v0.3.12..v0.4.0
 [0.3.12]: https://github.com/ocx-sh/ocx/compare/v0.3.11..v0.3.12
 [0.3.11]: https://github.com/ocx-sh/ocx/compare/v0.3.10..v0.3.11

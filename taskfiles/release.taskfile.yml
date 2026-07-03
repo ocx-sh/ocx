@@ -40,16 +40,35 @@ tasks:
 
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
+  #
+  # Version selection:
+  #   task release:prepare                 # interactive menu: auto | patch | minor | major
+  #   task release:prepare BUMP=minor      # skip the menu, force a bump level
+  #   task release:prepare BUMP=auto VERSION=1.4.0   # pin an exact version (v prefix optional)
+  #
+  # BUMP is a required enum: with interactive mode on (.taskrc.yml) and a TTY it
+  # renders a selection menu; on CI / no TTY it must be passed on the CLI.
   prepare:
-    desc: Prepare a release (compute version, update changelog, verify)
+    desc: 'Prepare a release (interactive: pick auto|patch|minor|major; or BUMP=<level> / VERSION=x.y.z)'
     deps:
       - install:cargo-edit
+    requires:
+      vars:
+        - name: BUMP
+          enum: [auto, patch, minor, major]
     vars:
-      # Compute next version from git history. When tags exist, git-cliff bumps
-      # from the latest tag. When no tags exist yet, it uses initial_tag from
-      # cliff.toml and bumps based on conventional commits.
+      # git-cliff computes the next version from git history. `auto` lets it pick
+      # the bump from conventional commits; otherwise BUMP forces the level.
+      # VERSION pins an exact value and wins over BUMP.
       NEXT_VERSION:
-        sh: git-cliff --bumped-version
+        sh: |
+          if [ -n "{{.VERSION}}" ]; then
+            printf 'v%s' "{{.VERSION | default "" | trimPrefix "v"}}"
+          elif [ "{{.BUMP}}" = "auto" ]; then
+            git-cliff --bumped-version
+          else
+            git-cliff --bumped-version --bump "{{.BUMP}}"
+          fi
     cmds:
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
