@@ -547,7 +547,10 @@ impl PackageManager {
         let global_tags_path = tag_store.tags(&global_id);
         let global_descriptor_result = load_descriptor_frozen_or_live(
             blob_store,
-            patches.registry.as_str(),
+            // Blob CAS namespace: the descriptor id's bare-host registry — the same
+            // key `fetch_and_persist_descriptor` persists under. Must NOT be the
+            // path-prefixed `patches.registry`, which would look under the wrong dir.
+            global_id.registry(),
             &global_id,
             &global_tags_path,
             self.patch_snapshot(),
@@ -625,7 +628,6 @@ impl PackageManager {
         // is what matches them. A system-required tier still applies regardless of
         // which leg matched: enforcement beats opt-out.
         let snapshot: Arc<Option<crate::patch::PatchSnapshot>> = Arc::new(self.patch_snapshot().cloned());
-        let registry = patches.registry.clone();
         let system_required = patches.system_required;
         let load_semaphore = package_manager::concurrency::Concurrency::cores().semaphore();
         let mut descriptor_load_tasks: JoinSet<(usize, crate::Result<DescriptorLoadResult>)> = JoinSet::new();
@@ -640,8 +642,10 @@ impl PackageManager {
             // the live tag store.
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
             let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+            // Blob CAS namespace: the descriptor id's bare-host registry — the same
+            // key `fetch_and_persist_descriptor` persists under (see the global leg).
+            let registry = pkg_specific_id.registry().to_string();
             let blob_store = blob_store.clone();
-            let registry = registry.clone();
             let snapshot = snapshot.clone();
             let semaphore = load_semaphore.clone();
             descriptor_load_tasks.spawn(async move {
@@ -1181,7 +1185,10 @@ impl PackageManager {
         // Load global descriptor once (blob digests and descriptor value).
         let (global_descriptor_opt, global_manifest_digest) = collect_descriptor_digests(
             blob_store,
-            patches.registry.as_str(),
+            // Blob CAS namespace: the descriptor id's bare-host registry (see the
+            // matching note in `build_site_patch_set`) — NOT the path-prefixed
+            // `patches.registry`.
+            global_id.registry(),
             &global_tags_path,
             &mut descriptor_digests,
         )
@@ -1208,7 +1215,7 @@ impl PackageManager {
 
             let (pkg_descriptor_opt, pkg_manifest_digest) = collect_descriptor_digests(
                 blob_store,
-                patches.registry.as_str(),
+                pkg_specific_id.registry(),
                 &pkg_tags_path,
                 &mut descriptor_digests,
             )

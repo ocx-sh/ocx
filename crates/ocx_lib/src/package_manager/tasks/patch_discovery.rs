@@ -610,7 +610,7 @@ impl PackageManager {
                 // Warn if the companion's registry host differs from the patch
                 // registry's host. A cross-registry companion is permitted but
                 // surfaced so the operator can notice unusual descriptor content.
-                if companion.identifier.registry() != patches.registry.as_str() {
+                if companion.identifier.registry() != patch_registry_host(patches) {
                     log::warn!(
                         "patch discovery: companion '{}' is hosted on registry '{}' which differs from the configured patch registry '{}'; this is allowed but unexpected — verify your patch descriptor",
                         companion.identifier,
@@ -723,7 +723,49 @@ pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) 
     } else {
         sub_path
     };
-    Identifier::new_registry(&sub_path, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
+    patch_registry_identifier(patches, &sub_path)
+}
+
+/// Build the patch-registry `Identifier` for a descriptor repository, keeping the
+/// identifier's registry field a *bare host authority*.
+///
+/// The configured patch registry (`patches.registry`) MAY carry a path prefix
+/// after the host authority — e.g. `registry.corp.example/ocx-patches`. An
+/// [`Identifier`]'s registry field, however, must be a bare `host[:port]`: the
+/// OCI transport builds request URLs as `https://<registry>/v2/<repository>/…`,
+/// so any path prefix left in the registry field produces the malformed
+/// `https://host/ocx-patches/v2/<repo>/…` (which 404s) instead of the correct
+/// `https://host/v2/ocx-patches/<repo>/…`. Split the configured registry at the
+/// first `/` and fold the prefix in front of `repository` so the transport URL,
+/// the CAS blob namespace, and the tag-store path are all well-formed.
+fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) -> Identifier {
+    let (registry, repository) = match patches.registry.split_once('/') {
+        // `host/prefix…` → registry is the bare host; the prefix precedes the repo.
+        Some((host, prefix)) => {
+            let prefix = prefix.trim_matches('/');
+            let repository = if prefix.is_empty() {
+                repository.to_string()
+            } else {
+                format!("{prefix}/{repository}")
+            };
+            (host.to_string(), repository)
+        }
+        // Bare host, no path prefix — the repository stands alone.
+        None => (patches.registry.clone(), repository.to_string()),
+    };
+    Identifier::new_registry(repository, registry).clone_with_tag(InternalTag::PATCH_TAG)
+}
+
+/// The bare host authority of the configured patch registry — the portion
+/// before any `/` path prefix (e.g. `registry.corp.example/ocx-patches` →
+/// `registry.corp.example`). Companion identifiers carry only the bare host in
+/// their registry field, so cross-registry comparisons must use the host, not
+/// the path-prefixed `patches.registry` string.
+fn patch_registry_host(patches: &ResolvedPatchConfig) -> &str {
+    patches
+        .registry
+        .split_once('/')
+        .map_or(patches.registry.as_str(), |(host, _)| host)
 }
 
 /// The reserved repository name for the global patch descriptor.
@@ -748,7 +790,7 @@ pub const GLOBAL_PATCH_REPOSITORY: &str = "global";
 /// structurally distinct from any package-specific sub-path (which always has
 /// two or more segments), so the two identifiers never collide.
 pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
-    Identifier::new_registry(GLOBAL_PATCH_REPOSITORY, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
+    patch_registry_identifier(patches, GLOBAL_PATCH_REPOSITORY)
 }
 
 /// Whether a lazy patch-discovery failure must abort a user-requested base install.
@@ -1470,6 +1512,51 @@ mod tests {
             pkg_specific_id.repository(),
             "global descriptor repository must differ from package-specific sub-path"
         );
+    }
+
+    /// A patch registry configured WITH a path prefix (`host/path`) must yield an
+    /// identifier whose registry field is the *bare host* and whose repository
+    /// carries the path prefix. Otherwise the OCI transport builds the malformed
+    /// URL `https://host/path/v2/<repo>/…` (404) instead of the correct
+    /// `https://host/v2/path/<repo>/…`.
+    ///
+    /// Regression guard: `bash publish.sh` 404'd because the whole `host/patches`
+    /// string was placed in the identifier's registry field.
+    #[test]
+    fn path_prefixed_registry_keeps_bare_host_and_folds_prefix() {
+        let patches = ResolvedPatchConfig {
+            registry: "registry.corp.example/ocx-patches".to_string(),
+            ..test_patch_config()
+        };
+
+        // Global descriptor: registry is the bare host; the prefix precedes `global`.
+        let global_id = global_descriptor_id(&patches);
+        assert_eq!(
+            global_id.registry(),
+            "registry.corp.example",
+            "registry field must be the bare host, not the path-prefixed config value; got '{}'",
+            global_id.registry()
+        );
+        assert_eq!(
+            global_id.repository(),
+            "ocx-patches/global",
+            "path prefix must be folded in front of the repository; got '{}'",
+            global_id.repository()
+        );
+
+        // Package-specific descriptor: same host, prefix in front of the sub-path.
+        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let pkg_id = patch_descriptor_id(&patches, &base_id);
+        assert_eq!(pkg_id.registry(), "registry.corp.example");
+        assert!(
+            pkg_id.repository().starts_with("ocx-patches/"),
+            "package-specific repository must carry the path prefix; got '{}'",
+            pkg_id.repository()
+        );
+        assert!(pkg_id.repository().contains("cmake"));
+
+        // Host helper strips the path prefix for cross-registry companion checks.
+        assert_eq!(patch_registry_host(&patches), "registry.corp.example");
     }
 
     /// A misconfigured literal template `path = "global"` must NOT route a
