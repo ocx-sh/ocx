@@ -182,6 +182,10 @@ class of "green locally, red on the matrix" failures.
 - **Windows**: `std::fs::canonicalize` returns a `\\?\` verbatim-prefixed path;
   short (8.3) vs long names also differ. The verbatim prefix breaks string
   comparison, `Display`, and further `Path::join`.
+- **Windows absoluteness ≠ POSIX absoluteness**: a driveless `/root/bin` has a
+  root but no drive prefix, so `Path::is_absolute()` is *false* on Windows.
+  Code that joins a "relative" path onto a base (`base.join("/root/bin")`)
+  then drops the base's directory and keeps only its drive → `C:/root/bin`.
 
 Rules:
 
@@ -198,6 +202,11 @@ Rules:
   passes *trivially* when `set` is canonical-keyed and `raw_path` never could
   match — masking a real regression. Pair each `!contains` with a positive
   assertion on a known-present canonical path, or assert on canonical paths only.
+- **Never assert a POSIX-absolute literal against a resolved path value.** A test
+  fixture using `"/root/bin"` as a `PATH`/path value matches verbatim on Linux
+  but the resolver drive-joins it to `"C:/root/bin"` on Windows. Assert the
+  invariant under test (ordering, identity via a distinctive segment), not the
+  exact literal; or build the expected value the same way the resolver does.
 
 ---
 
