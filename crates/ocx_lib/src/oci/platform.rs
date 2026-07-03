@@ -364,10 +364,17 @@ impl Platform {
     /// non-host companions and break an offline or required-patch launch on
     /// a teammate's machine running a different platform.
     ///
-    /// Fixed list of five, kept in sync with `product-context.md` "Platform
-    /// support": `linux/amd64`, `linux/arm64`, `darwin/amd64`,
-    /// `darwin/arm64`, `windows/amd64`. Never includes [`Any`](Self::Any) —
-    /// callers that need the platform-agnostic fallback add it explicitly.
+    /// The five concrete OS/arch ship targets come first, kept in sync with
+    /// `product-context.md` "Platform support": `linux/amd64`, `linux/arm64`,
+    /// `darwin/amd64`, `darwin/arm64`, `windows/amd64`. [`Any`](Self::Any)
+    /// trails the list as a platform-agnostic fallback, mirroring the
+    /// suitable-first / `any`-last shape of [`supported_set`](Self::supported_set):
+    /// [`select`](crate::oci::Index::select) iterates the list as a preference
+    /// order and short-circuits on the first match, so the trailing `Any` is
+    /// consulted only when no concrete platform matched. That lets an
+    /// `any`-published companion (CA bundle, tool config) resolve during
+    /// `ocx patch sync` while normal multi-platform companions still match
+    /// their specific manifest first.
     pub fn all_supported() -> Vec<Self> {
         vec![
             Self::Specific {
@@ -410,6 +417,9 @@ impl Platform {
                 os_features: None,
                 features: None,
             },
+            // Trailing platform-agnostic fallback (mirrors `supported_set`): only
+            // reached by `select` when no concrete platform above matched.
+            Self::Any,
         ]
     }
 }
@@ -841,7 +851,7 @@ mod tests {
     // --- all_supported() ---
 
     #[test]
-    fn all_supported_returns_exactly_five_platforms_in_canonical_order() {
+    fn all_supported_returns_five_concrete_then_any_fallback() {
         let platforms = Platform::all_supported();
         let displayed: Vec<String> = platforms.iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -851,23 +861,29 @@ mod tests {
                 "linux/arm64",
                 "darwin/amd64",
                 "darwin/arm64",
-                "windows/amd64"
+                "windows/amd64",
+                "any"
             ],
-            "all_supported must return exactly these five platforms, in this order"
+            "all_supported must return the five concrete platforms in canonical order, then `any` last"
         );
     }
 
     #[test]
-    fn all_supported_never_includes_any() {
+    fn all_supported_includes_any_as_trailing_fallback() {
+        let platforms = Platform::all_supported();
         assert!(
-            !Platform::all_supported().iter().any(Platform::is_any),
-            "all_supported is the concrete platform matrix; Any is added explicitly by callers that need it"
+            platforms.last().is_some_and(Platform::is_any),
+            "all_supported must end with the platform-agnostic `any` fallback so an `any`-published \
+             companion resolves when no concrete platform matches; got {:?}",
+            platforms.iter().map(ToString::to_string).collect::<Vec<_>>()
         );
     }
 
     /// `all_supported` is distinct from `supported_set` — the latter is
     /// scoped to the host (its own platform + `any`, at most 2 entries),
-    /// never the full 5-platform matrix.
+    /// while `all_supported` carries the full concrete matrix plus `any`.
+    /// The distinction is concrete breadth, not `any`-presence (both now
+    /// end with `any`).
     #[test]
     fn all_supported_is_distinct_from_supported_set() {
         assert_ne!(Platform::all_supported().len(), Platform::supported_set().len());

@@ -57,11 +57,17 @@ mod tests {
 
     /// Empty `--platform` must expand to the full supported matrix, not just
     /// the host platform — regression guard for a host-only default that
-    /// would silently miss non-host companions (C6).
+    /// would silently miss non-host companions (C6). The matrix ends with the
+    /// platform-agnostic `any` fallback so an `any`-published companion still
+    /// resolves.
     #[test]
     fn empty_platform_list_covers_full_supported_matrix() {
         let resolved = platforms_or_all_supported(&[]);
-        assert_eq!(resolved.len(), 5, "must cover all five supported platforms");
+        assert_eq!(
+            resolved.len(),
+            6,
+            "must cover all five concrete platforms plus the `any` fallback"
+        );
         let displayed: Vec<String> = resolved.iter().map(ToString::to_string).collect();
         for expected in ["darwin/arm64", "windows/amd64"] {
             assert!(
@@ -69,6 +75,10 @@ mod tests {
                 "resolved platform set must include non-host platform '{expected}'; got {displayed:?}"
             );
         }
+        assert!(
+            resolved.last().is_some_and(ocx_lib::oci::Platform::is_any),
+            "the matrix must end with the `any` fallback; got {displayed:?}"
+        );
     }
 
     /// An explicit `--platform` list is passed through unchanged (narrows,
