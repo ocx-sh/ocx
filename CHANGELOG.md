@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-03
+
+### Added
+
+- Infrastructure patches for toolchain environment overlays *(patch)*
+
+### Fixed
+
+- Canonicalize seeded paths in patch_roots GC tests *(gc)*
+- Converge concurrent junction back-ref race and drive-joined PATH literal *(windows)*
+
 ## [0.3.12] - 2026-07-02
 
 ### Added
@@ -19,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct absolute-path classification and concurrent link race *(windows)*
 - Retry transient lock errors across concurrent junction ops *(windows)*
 - Tolerate concurrent junction teardown in remove_link *(windows)*
+
+### Release
+
+- V0.3.12
 
 ## [0.3.11] - 2026-07-02
 
@@ -569,6 +584,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.4.0]: https://github.com/ocx-sh/ocx/compare/v0.3.12..v0.4.0
 [0.3.12]: https://github.com/ocx-sh/ocx/compare/v0.3.11..v0.3.12
 [0.3.11]: https://github.com/ocx-sh/ocx/compare/v0.3.10..v0.3.11
 [0.3.10]: https://github.com/ocx-sh/ocx/compare/v0.3.9..v0.3.10
