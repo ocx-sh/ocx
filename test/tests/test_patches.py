@@ -358,6 +358,57 @@ def test_required_false_missing_companion_fails_open(
 
 
 # ---------------------------------------------------------------------------
+# Scenario 4c: unreachable/empty patch registry — the descriptor *fetch* failure
+# is gated on the tier `required` posture, not fatal unconditionally.
+# ---------------------------------------------------------------------------
+
+# A patch registry host with nothing listening: the descriptor fetch fails to
+# connect (connection refused), which is DISTINCT from a reachable-but-empty
+# registry that returns a clean 404 (recorded as "no patch", never an error).
+# Port 1 is privileged and unused, so the connect fails immediately.
+_UNREACHABLE_PATCH_REGISTRY = "127.0.0.1:1"
+
+
+def test_unreachable_patch_registry_required_false_installs(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Regression: a non-required patch tier whose registry is unreachable must NOT
+    abort the base install. Discovery is a side effect of install, so a
+    descriptor-fetch failure under `required = false` warns and continues.
+
+    Before the fix, the fetch error propagated through `install` and failed the
+    base install regardless of `required` — the empty/unreachable patch-server bug.
+    """
+    # Publish + index the base BEFORE writing the patch config, so the only
+    # discovery pass that probes the unreachable registry is our explicit install.
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    _write_config(ocx, _UNREACHABLE_PATCH_REGISTRY, required=False)
+
+    result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
+    assert result.returncode == 0, (
+        "Installing a base with a non-required, unreachable patch registry must "
+        f"succeed (warn + continue). Got exit {result.returncode}.\nstderr: {result.stderr}"
+    )
+
+
+def test_unreachable_patch_registry_required_true_fails_closed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Counterpart: a required patch tier whose registry is unreachable fails the
+    install closed — OCX cannot confirm that no mandated companion applies, so it
+    must not silently install the base without the overlay (C7).
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    _write_config(ocx, _UNREACHABLE_PATCH_REGISTRY, required=True)
+
+    result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
+    assert result.returncode != 0, (
+        "Installing a base with a required, unreachable patch registry must fail "
+        f"closed. Got exit 0.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scenario 4b: explicit `ocx patch sync` fails closed on a required companion (F-A)
 # ---------------------------------------------------------------------------
 

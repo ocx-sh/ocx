@@ -751,6 +751,35 @@ pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
     Identifier::new_registry(GLOBAL_PATCH_REPOSITORY, &patches.registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
+/// Whether a lazy patch-discovery failure must abort a user-requested base install.
+///
+/// Lazy discovery is a side effect of `install` / `install_all`, not an explicit
+/// user action. Its fatality is gated on the patch tier's fail posture, mirroring
+/// the compose-time gating in
+/// [`build_site_patch_set`](PackageManager::build_site_patch_set) and the
+/// best-effort model of [`sync_patches`](PackageManager::sync_patches):
+///
+/// - **Required tier** (`patches.required == true`): fatal. An unreachable or
+///   erroring patch server means we cannot confirm that no mandated companion
+///   (e.g. a corporate CA overlay) applies to this base, so the install fails
+///   closed rather than silently proceed without the overlay (C7).
+/// - **`RequiredCompanionFailed`**: fatal regardless of the tier posture — a
+///   rule-level `required = true` companion that failed to install is a
+///   fail-closed event even under a non-required tier.
+/// - **Otherwise** (non-required tier, e.g. a descriptor fetch/parse failure
+///   against an empty or unreachable patch server): NOT fatal. The caller warns
+///   and continues installing the base without companions.
+///
+/// `patches` is `None` only when no tier is configured, in which case discovery
+/// short-circuits before it can error; the `false` result then keeps the
+/// function total.
+pub(super) fn install_discovery_error_is_fatal(
+    patches: Option<&ResolvedPatchConfig>,
+    error: &PackageErrorKind,
+) -> bool {
+    patches.is_some_and(|patches| patches.required) || matches!(error, PackageErrorKind::RequiredCompanionFailed { .. })
+}
+
 /// A deferred `LookedHasDescriptor` tag-store advance (A1 hybrid commit — deferred leg).
 ///
 /// A re-sync over an existing `LookedHasDescriptor` records its pointer advance
@@ -1035,6 +1064,48 @@ mod tests {
     }
 
     // ── Three-state TagStore helper ───────────────────────────────────────────
+
+    /// `install_discovery_error_is_fatal` gates install-time discovery fatality
+    /// on the patch tier's fail posture — the empty/unreachable patch-server bug.
+    ///
+    /// A non-required tier tolerates a descriptor-fetch failure (warn + continue),
+    /// a required tier fails closed (C7), and a `RequiredCompanionFailed` is fatal
+    /// under either posture. Deleting the `patches.required` clause makes the
+    /// non-required assertion fail (regression guard for the fix).
+    #[test]
+    fn install_discovery_fatality_gated_on_required() {
+        use crate::patch::PatchError;
+
+        // A descriptor fetch/parse failure — the class raised against an empty or
+        // unreachable patch server (stands in for `FetchFailed`, which needs a
+        // network error to construct).
+        let fetch_error = PackageErrorKind::PatchDiscovery(PatchError::UnsupportedVersion { version: 999 });
+        let required_companion = PackageErrorKind::RequiredCompanionFailed {
+            companion: Identifier::parse("patches.corp.com/corp-ca:1.0").expect("valid identifier"),
+            source: Box::new(PackageErrorKind::NotFound),
+        };
+
+        let required_tier = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let optional_tier = ResolvedPatchConfig {
+            required: false,
+            ..test_patch_config()
+        };
+
+        // Required tier: any discovery error is fatal (fail-closed).
+        assert!(install_discovery_error_is_fatal(Some(&required_tier), &fetch_error));
+        // Non-required tier: a descriptor-fetch failure is tolerated (the fix).
+        assert!(!install_discovery_error_is_fatal(Some(&optional_tier), &fetch_error));
+        // RequiredCompanionFailed is fatal even under a non-required tier.
+        assert!(install_discovery_error_is_fatal(
+            Some(&optional_tier),
+            &required_companion
+        ));
+        // No tier configured → nothing can fail (defensive totality).
+        assert!(!install_discovery_error_is_fatal(None, &fetch_error));
+    }
 
     /// State (a): file absent → `NeverLooked`.
     ///

@@ -47,7 +47,19 @@ impl PackageManager {
         // materialized. This is the user-requested-install boundary — the only
         // site that triggers discovery. Companion installs (install_companion)
         // and transitive-dep pulls (setup_dependencies) do NOT call this.
-        self.discover_and_install_patches(package, &platforms).await?;
+        //
+        // Discovery is a side effect of the install, so a non-required patch tier
+        // whose server is empty or unreachable must not abort the base install:
+        // gate the failure on the tier posture (see `install_discovery_error_is_fatal`).
+        if let Err(error) = self.discover_and_install_patches(package, &platforms).await {
+            if super::patch_discovery::install_discovery_error_is_fatal(self.patches(), &error) {
+                return Err(error);
+            }
+            crate::log::warn!(
+                "patch discovery for '{package}' failed (patch tier not required): {error}; \
+                 continuing without companions"
+            );
+        }
 
         Ok(install_info)
     }
@@ -174,7 +186,21 @@ impl PackageManager {
                     // after the await returns, releasing the slot for the
                     // next queued discovery task.
                     let _permit = concurrency::acquire_permit(&sem).await;
-                    let result = mgr.discover_and_install_patches(&pkg, &platforms).await;
+                    // Gate discovery failure on the tier posture: a non-required
+                    // patch tier whose server is empty/unreachable warns and
+                    // continues without companions rather than failing the install.
+                    let result = match mgr.discover_and_install_patches(&pkg, &platforms).await {
+                        Err(error)
+                            if !super::patch_discovery::install_discovery_error_is_fatal(mgr.patches(), &error) =>
+                        {
+                            crate::log::warn!(
+                                "patch discovery for '{pkg}' failed (patch tier not required): {error}; \
+                                 continuing without companions"
+                            );
+                            Ok(0)
+                        }
+                        other => other,
+                    };
                     (index, result)
                 });
             }

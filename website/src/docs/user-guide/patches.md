@@ -274,6 +274,13 @@ The `required` field controls what happens when a matched companion is unavailab
 | `true` (default) | Execution aborts with an error. Use for CA bundles, proxy config — anything that makes running without the companion unsafe. |
 | `false` | OCX logs a warning and continues. Use for convenience overlays (metrics endpoints, license server hints) where running without the companion is acceptable. |
 
+The same posture governs patch **discovery** at install time. Installing a base package
+triggers a lazy lookup of the patch descriptors on the registry. If that registry is empty
+or unreachable, a non-required tier (`required = false`) logs a warning and installs the base
+without companions; a required tier fails the install closed, because OCX cannot confirm that
+no mandated companion applies. A registry that simply carries no descriptor yet is not an
+error under either posture — discovery records "no patch" and moves on.
+
 System administrators can set `required = true` in `/etc/ocx/config.toml` to make the
 entire patch tier non-overridable. A system-level required tier cannot be redirected or
 suppressed by a user-level config file.
