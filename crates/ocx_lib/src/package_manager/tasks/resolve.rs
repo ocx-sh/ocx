@@ -3931,14 +3931,22 @@ mod phase4_spec_tests {
             path_entries.len()
         );
 
-        // C1 global-last: root's PATH ("/root/bin") comes first; companion's ("/companion/bin") last.
-        assert_eq!(
-            path_entries[0].value, "/root/bin",
-            "F7: first PATH must be root's /root/bin (compose-phase, before overlay)"
+        // C1 global-last: the root's PATH comes first (compose-phase), the
+        // companion's last (overlay). The fixture values are POSIX-absolute
+        // literals; on Windows a driveless `/root/bin` is not `is_absolute`, so
+        // the resolver joins it onto the install drive (yielding `C:/root/bin`).
+        // Assert identity by the distinctive path segment — which survives that
+        // platform join — since the invariant under test is the ORDER, not the
+        // exact byte value.
+        assert!(
+            path_entries[0].value.contains("root"),
+            "F7: first PATH must be the root's (compose-phase, before overlay); got {:?}",
+            path_entries[0].value
         );
-        assert_eq!(
-            path_entries[1].value, "/companion/bin",
-            "F7: second PATH must be companion's /companion/bin (overlay, appended globally last)"
+        assert!(
+            path_entries[1].value.contains("companion"),
+            "F7: second PATH must be the companion's (overlay, appended globally last); got {:?}",
+            path_entries[1].value
         );
     }
 

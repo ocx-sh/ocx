@@ -140,7 +140,16 @@ impl ReferenceManager {
         } else {
             match symlink::create(forward_path, &ref_path) {
                 Ok(()) => {}
-                // A concurrent installer created the identical back-ref first.
+                // A concurrent installer created — or, on Windows, is mid-way
+                // through the two-step junction create (atomic `mkdir` won, the
+                // reparse-point write still pending) of — the identical back-ref.
+                // The `mkdir` loser gets `AlreadyExists` (Windows error 183)
+                // *before* the winner's reparse data lands, so `is_link` is
+                // transiently false and cannot be the sole guard. Every racer
+                // derives an identical `(name, target)` — name is
+                // `SHA-256(forward_path)`, target is `forward_path` — so a
+                // colliding create is by construction the link we wanted; converge.
+                Err(Error::InternalFile(_, ref io)) if io.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) if symlink::is_link(&ref_path) => {}
                 Err(e) => return Err(e),
             }
