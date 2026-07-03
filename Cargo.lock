@@ -3040,6 +3040,7 @@ dependencies = [
  "indicatif",
  "junction",
  "libc",
+ "liblzma",
  "lzma-rust2",
  "oci-client",
  "regex",
