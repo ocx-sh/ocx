@@ -8,12 +8,6 @@ use super::Client;
 use super::MirrorMap;
 use super::native_transport::NativeTransport;
 
-/// Default push chunk size for OCX (16 MiB).
-///
-/// Overrides the oci-client default of 4 MiB to reduce HTTP round-trips
-/// when uploading large package archives.
-const DEFAULT_PUSH_CHUNK_SIZE: usize = 16 * 1024 * 1024;
-
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
@@ -27,7 +21,11 @@ impl ClientBuilder {
         ClientBuilder {
             auth: auth::Auth::default(),
             config: oci::native::ClientConfig {
-                push_chunk_size: DEFAULT_PUSH_CHUNK_SIZE,
+                // 16 MiB PATCH bodies keep chunked-push round-trips low for large
+                // package blobs (the fork default is 4 MiB). Independent of the
+                // 128 KiB progress-frame size in `native_transport::progress_body_stream`
+                // — that governs progress granularity, this governs request count.
+                push_chunk_size: 16 * 1024 * 1024,
                 ..Default::default()
             },
             lock_timeout: None,
@@ -113,12 +111,6 @@ impl ClientBuilder {
         self
     }
 
-    /// Maximum chunk size in bytes for chunked blob uploads.
-    pub fn push_chunk_size(mut self, size: usize) -> Self {
-        self.config.push_chunk_size = size;
-        self
-    }
-
     /// Timeout for acquiring file locks during install and status checks.
     pub fn lock_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.lock_timeout = Some(timeout);
@@ -126,8 +118,7 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Client {
-        let push_chunk_size = self.config.push_chunk_size;
-        let transport = NativeTransport::new(oci::native::Client::new(self.config), self.auth, push_chunk_size);
+        let transport = NativeTransport::new(oci::native::Client::new(self.config), self.auth);
         Client {
             transport: Box::new(transport),
             lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),

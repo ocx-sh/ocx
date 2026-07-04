@@ -1201,6 +1201,7 @@ mod tests {
                     let ocx: Platform = p.parse().expect("valid platform string");
                     crate::oci::native::Platform::from(&ocx)
                 }),
+                artifact_type: None,
                 annotations: None,
             })
             .collect();

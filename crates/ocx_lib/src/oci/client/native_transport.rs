@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream;
+use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
 use super::error::ClientError;
-use super::progress_writer::ProgressWriter;
+use super::progress_reader::ProgressReader;
 use super::transport::{OciTransport, ProgressFn, Result};
 use crate::{auth, log, oci};
 
@@ -36,16 +36,11 @@ use crate::{auth, log, oci};
 pub(super) struct NativeTransport {
     client: oci::native::Client,
     auth: auth::Auth,
-    push_chunk_size: usize,
 }
 
 impl NativeTransport {
-    pub fn new(client: oci::native::Client, auth: auth::Auth, push_chunk_size: usize) -> Self {
-        Self {
-            client,
-            auth,
-            push_chunk_size,
-        }
+    pub fn new(client: oci::native::Client, auth: auth::Auth) -> Self {
+        Self { client, auth }
     }
 
     async fn auth_for(&self, image: &oci::native::Reference) -> oci::native::Auth {
@@ -203,32 +198,21 @@ impl OciTransport for NativeTransport {
         Ok(buf)
     }
 
-    async fn pull_blob_to_file(
-        &self,
-        image: &oci::native::Reference,
-        digest: &oci::Digest,
-        path: &Path,
-        total_size: u64,
-        on_progress: ProgressFn,
-    ) -> Result<()> {
+    async fn pull_blob_to_file(&self, image: &oci::native::Reference, digest: &oci::Digest, path: &Path) -> Result<()> {
         let digest_str = digest.to_string();
         log::debug!("Pulling blob {} for image {} to {}", digest_str, image, path.display());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
         }
-        let file = tokio::fs::OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)
             .await
             .map_err(|e| io_error(path, e))?;
-        // Pass `&mut writer` so we retain the writer after pull_blob returns,
-        // allowing an explicit shutdown below. ProgressWriter<W>: Unpin so
-        // &mut ProgressWriter<W>: AsyncWrite via the tokio blanket impl.
-        let mut writer = ProgressWriter::new(file, total_size, on_progress);
         self.client
-            .pull_blob(image, digest_str.as_str(), &mut writer)
+            .pull_blob(image, digest_str.as_str(), &mut file)
             .await
             .map_err(registry_error)?;
         // Explicitly flush + close the write handle before returning.
@@ -241,7 +225,7 @@ impl OciTransport for NativeTransport {
         // (os error 33). POSIX advisory locks are optional so Linux tolerates
         // the overlap silently. `shutdown()` drives the tokio file through its
         // internal sync + close path synchronously before we return.
-        writer.shutdown().await.map_err(|e| io_error(path, e))?;
+        file.shutdown().await.map_err(|e| io_error(path, e))?;
         Ok(())
     }
 
@@ -378,11 +362,18 @@ pub(super) fn map_fork_io_error_to_client_error(error: std::io::Error) -> super:
 }
 
 impl NativeTransport {
-    /// Checks blob existence, then uploads with chunked streaming and progress.
+    /// Checks blob existence, then uploads the blob via a streamed chunked push
+    /// with fluent progress.
     ///
-    /// Splits data into [`self.push_chunk_size`] chunks and streams them via
-    /// `push_blob_stream`. Falls back to `push_blob` (no progress) on
-    /// `SpecViolationError` (registry doesn't support chunked uploads).
+    /// Wraps the in-RAM blob in a [`ProgressReader`]-backed byte stream (see
+    /// [`progress_body_stream`]) and hands it to the fork's `push_blob_stream` with
+    /// the total size. The fork streams each `push_chunk_size`-bounded PATCH body
+    /// directly from that stream, pulling it only as the socket accepts more, so
+    /// progress advances per [`UPLOAD_FRAME_SIZE`] frame as it is pulled for the
+    /// wire (not in `push_chunk_size` upload-session steps) while each request body
+    /// stays bounded for proxies/registries that cap single-request body size. On
+    /// `SpecViolationError` it falls back to the fork's buffered `push_blob` (its
+    /// own chunked-then-monolithic retry, no progress).
     async fn do_push_blob(
         &self,
         image: &oci::native::Reference,
@@ -413,41 +404,28 @@ impl NativeTransport {
         let total = data.len() as u64;
         let data = Bytes::from(data);
 
-        // Build a stream that yields chunks via zero-copy slicing and reports progress.
-        // Clone data for the fallback path (Bytes clone is cheap — reference-counted).
+        // Clone the blob for the fallback path (Bytes clone is cheap — refcounted).
         let fallback_data = data.clone();
-        let chunk_size = self.push_chunk_size;
-        let chunk_count = (total as usize).div_ceil(chunk_size);
-        let progress = Arc::clone(&on_progress);
-        let progress_stream = stream::unfold((0usize, 0u64), move |(index, confirmed)| {
-            if index >= chunk_count {
-                return std::future::ready(None);
-            }
-            let start = index * chunk_size;
-            let end = ((index + 1) * chunk_size).min(total as usize);
-            let chunk = data.slice(start..end);
-            // Report progress for previously confirmed bytes (prior chunks have been
-            // consumed by push_blob_stream, meaning their HTTP PATCHes completed).
-            progress(confirmed);
-            if confirmed > 0 {
-                tracing::debug!(confirmed, total, "Uploaded {} / {} bytes", confirmed, total);
-            }
-            let confirmed = confirmed + chunk.len() as u64;
-            std::future::ready(Some((Ok(chunk), (index + 1, confirmed))))
-        });
 
         match self
             .client
-            .push_blob_stream(image, progress_stream, digest_str.as_str())
+            .push_blob_stream(
+                image,
+                progress_body_stream(data, Arc::clone(&on_progress)),
+                digest_str.as_str(),
+                Some(total as usize),
+            )
             .await
         {
             Ok(url) => {
+                // The final frame already reported `total`; repeat so callers still
+                // see completion for a zero-length blob (which yields no frames).
                 on_progress(total);
                 Ok(url)
             }
             Err(oci_client::errors::OciDistributionError::SpecViolationError(violation)) => {
-                log::warn!("Registry spec violation during chunked push: {}", violation);
-                log::warn!("Falling back to monolithic push (no progress)");
+                log::warn!("Registry spec violation during streamed chunked push: {}", violation);
+                log::warn!("Falling back to buffered push (chunked-then-monolithic retry, no progress)");
                 self.client
                     .push_blob(image, fallback_data, digest_str.as_str())
                     .await
@@ -456,6 +434,35 @@ impl NativeTransport {
             Err(e) => Err(registry_error(e)),
         }
     }
+}
+
+/// Frame size for the streamed push body — the granularity at which upload
+/// progress advances. Small enough that progress looks smooth, large enough that
+/// per-frame overhead stays negligible against the blob size.
+const UPLOAD_FRAME_SIZE: usize = 128 * 1024;
+
+/// Wraps an in-RAM blob as a progress-reporting byte stream for a streamed push.
+///
+/// The blob is exposed as an [`AsyncRead`](tokio::io::AsyncRead) via
+/// [`std::io::Cursor`], teed through [`ProgressReader`] (cumulative byte count on
+/// every read), then framed into [`UPLOAD_FRAME_SIZE`] chunks by
+/// [`ReaderStream`](tokio_util::io::ReaderStream). The fork's `push_blob_stream`
+/// pulls from this stream only as the socket accepts more of each streamed PATCH
+/// body (backpressure), so `ProgressReader` fires per [`UPLOAD_FRAME_SIZE`] frame
+/// as it is pulled for the wire — progress leads the actual socket hand-off by at
+/// most one frame. This mirrors the pull path (`Client::pull_layer`), which wraps
+/// the fork's streaming reader in the same [`ProgressReader`].
+fn progress_body_stream(
+    data: Bytes,
+    on_progress: ProgressFn,
+) -> impl futures::Stream<Item = std::result::Result<Bytes, oci_client::errors::OciDistributionError>> + Send + 'static
+{
+    let reader = ProgressReader::new(std::io::Cursor::new(data), on_progress);
+    tokio_util::io::ReaderStream::with_capacity(reader, UPLOAD_FRAME_SIZE).map(|frame| {
+        // `Cursor` reads never fail; this only reconciles the frame error type with
+        // the fork's stream item (`Result<Bytes, OciDistributionError>`).
+        frame.map_err(|error| oci_client::errors::OciDistributionError::GenericError(Some(error.to_string())))
+    })
 }
 
 #[cfg(test)]
@@ -534,76 +541,96 @@ mod tests {
         }
     }
 
-    /// Creates a chunked progress stream that mirrors `do_push_blob`'s upload logic.
-    ///
-    /// Returns the progress reports collector and the byte stream.
-    fn make_progress_stream(
-        data: Bytes,
-        chunk_size: usize,
-    ) -> (
-        Arc<Mutex<Vec<u64>>>,
-        impl futures::Stream<Item = std::result::Result<Bytes, std::io::Error>>,
-    ) {
-        let total = data.len() as u64;
-        let chunk_count = (total as usize).div_ceil(chunk_size);
-        let reports = Arc::new(Mutex::new(Vec::new()));
+    /// Drives `progress_body_stream` to completion, returning the yielded frames
+    /// and the cumulative progress values reported along the way.
+    async fn collect_push_frames_and_progress(blob: Vec<u8>) -> (Vec<Bytes>, Vec<u64>) {
+        let reports = Arc::new(Mutex::new(Vec::<u64>::new()));
         let reports_clone = Arc::clone(&reports);
-        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n| {
-            reports_clone.lock().unwrap().push(n);
-        });
-        let progress_stream = stream::unfold((0usize, 0u64), move |(index, confirmed)| {
-            if index >= chunk_count {
-                return std::future::ready(None);
-            }
-            let start = index * chunk_size;
-            let end = ((index + 1) * chunk_size).min(total as usize);
-            let chunk = data.slice(start..end);
-            progress(confirmed);
-            let confirmed = confirmed + chunk.len() as u64;
-            std::future::ready(Some((Ok::<_, std::io::Error>(chunk), (index + 1, confirmed))))
-        });
-        (reports, progress_stream)
+        let on_progress: ProgressFn = Arc::new(move |n| reports_clone.lock().unwrap().push(n));
+
+        let frames: Vec<Bytes> = progress_body_stream(Bytes::from(blob), on_progress)
+            .map(|frame| frame.expect("Cursor-backed frames never error"))
+            .collect()
+            .await;
+
+        let reports = reports.lock().unwrap().clone();
+        (frames, reports)
     }
 
-    /// Replicates the chunking + progress stream from `do_push_blob` and verifies
-    /// that progress reports lag behind yielded chunks (conservative reporting).
-    #[tokio::test]
-    async fn upload_progress_stream_reports_confirmed_bytes() {
-        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 100]), 30);
-
-        // Consume the stream (simulates push_blob_stream polling).
-        let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
-
-        let reports = reports.lock().unwrap();
-
-        // 100 bytes / 30-byte chunks = 4 chunks (30, 30, 30, 10).
-        assert_eq!(collected.len(), 4);
-        assert_eq!(collected[0].len(), 30);
-        assert_eq!(collected[1].len(), 30);
-        assert_eq!(collected[2].len(), 30);
-        assert_eq!(collected[3].len(), 10);
-
-        // Progress reports are conservative: each report reflects bytes from
-        // previously consumed chunks, not the chunk being yielded.
-        assert_eq!(reports.len(), 4);
-        assert_eq!(reports[0], 0); // yielding chunk[0], nothing confirmed yet
-        assert_eq!(reports[1], 30); // yielding chunk[1], chunk[0] confirmed
-        assert_eq!(reports[2], 60); // yielding chunk[2], chunks[0-1] confirmed
-        assert_eq!(reports[3], 90); // yielding chunk[3], chunks[0-2] confirmed
-        // After stream completes, caller adds on_progress(total=100).
+    /// Concatenates streamed frames back into a single buffer.
+    fn reassemble(frames: &[Bytes]) -> Vec<u8> {
+        frames.iter().flat_map(|frame| frame.iter().copied()).collect()
     }
 
+    /// Streamed-push progress wiring (the push-side mirror of the `ProgressReader`
+    /// unit test): the `Cursor → ProgressReader → ReaderStream` pipeline that
+    /// `do_push_blob` hands to `push_blob_stream` must report cumulative bytes on
+    /// each frame — strictly increasing across frames, ending exactly at the blob
+    /// size — and must forward the blob bytes unchanged.
     #[tokio::test]
-    async fn upload_chunking_single_chunk() {
-        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 10]), 1024);
+    async fn streamed_push_progress_is_cumulative_and_reaches_total() {
+        // Larger than UPLOAD_FRAME_SIZE so the stream yields several frames.
+        let blob: Vec<u8> = (0..300 * 1024).map(|byte| byte as u8).collect();
+        let total = blob.len() as u64;
 
-        let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
+        let (frames, reports) = collect_push_frames_and_progress(blob.clone()).await;
 
-        assert_eq!(collected.len(), 1);
-        assert_eq!(collected[0].len(), 10);
+        assert_eq!(
+            reassemble(&frames),
+            blob,
+            "streamed frames must reassemble to the original blob"
+        );
+        assert!(
+            reports.len() > 1,
+            "a >128 KiB blob must produce multiple progress callbacks, got {}",
+            reports.len()
+        );
+        for window in reports.windows(2) {
+            assert!(
+                window[1] > window[0],
+                "progress must be strictly increasing across frames: {reports:?}"
+            );
+        }
+        assert_eq!(
+            *reports.last().unwrap(),
+            total,
+            "final progress callback must equal the blob size"
+        );
+    }
 
-        let reports = reports.lock().unwrap();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0], 0); // nothing confirmed when yielding the only chunk
+    /// A blob smaller than one frame (the common case for OCX config / README /
+    /// patch layers) must still stream unchanged and report a single cumulative
+    /// callback equal to the blob size.
+    #[tokio::test]
+    async fn streamed_push_sub_frame_blob_reports_total_once() {
+        let blob: Vec<u8> = (0..1000u32).map(|byte| byte as u8).collect();
+        let total = blob.len() as u64;
+
+        let (frames, reports) = collect_push_frames_and_progress(blob.clone()).await;
+
+        assert_eq!(reassemble(&frames), blob, "sub-frame blob must reassemble unchanged");
+        assert_eq!(
+            reports,
+            vec![total],
+            "a blob smaller than one frame must report exactly one callback equal to total"
+        );
+    }
+
+    /// A zero-length blob yields no frames, so `progress_body_stream` fires no
+    /// callbacks — this is why `do_push_blob` re-fires `on_progress(total)` after a
+    /// successful push, to still signal completion for an empty blob.
+    #[tokio::test]
+    async fn streamed_push_empty_blob_yields_no_frames_or_progress() {
+        let (frames, reports) = collect_push_frames_and_progress(Vec::new()).await;
+
+        assert!(
+            frames.is_empty(),
+            "empty blob must yield no frames, got {}",
+            frames.len()
+        );
+        assert!(
+            reports.is_empty(),
+            "empty blob must fire no progress callbacks, got {reports:?}"
+        );
     }
 }

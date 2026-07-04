@@ -24,7 +24,6 @@ pub(super) mod hashing_reader;
 mod mirror_map;
 pub(crate) mod native_transport;
 pub(super) mod progress_reader;
-mod progress_writer;
 #[cfg(test)]
 pub(crate) mod test_transport;
 mod transport;
@@ -262,6 +261,7 @@ impl Client {
                             digest: digest_str,
                             size: blob_size,
                             platform: None,
+                            artifact_type: None,
                             annotations: None,
                         };
                         oci::ImageIndex {
@@ -294,6 +294,7 @@ impl Client {
             digest: manifest_sha256.to_string(),
             size: manifest_size,
             platform,
+            artifact_type: None,
             annotations: None,
         });
 
@@ -876,6 +877,7 @@ impl Client {
                                 digest: digest.to_string(),
                                 size,
                                 urls: None,
+                                artifact_type: None,
                                 // BC2: default (empty) layout → `None`, so the
                                 // manifest stays byte-identical to today.
                                 annotations: layout.to_annotations(),
@@ -907,6 +909,7 @@ impl Client {
                                 digest: digest.to_string(),
                                 size,
                                 urls: None,
+                                artifact_type: None,
                                 annotations: layout.to_annotations(),
                             })
                         }
@@ -985,6 +988,7 @@ impl Client {
             digest: readme_digest.to_string(),
             size: readme_size,
             urls: None,
+            artifact_type: None,
             annotations: Some([(oci::annotations::TITLE.to_string(), "README.md".to_string())].into()),
         }];
 
@@ -1007,6 +1011,7 @@ impl Client {
                 digest: logo_digest.to_string(),
                 size: logo_size,
                 urls: None,
+                artifact_type: None,
                 annotations: Some([(oci::annotations::TITLE.to_string(), format!("logo.{ext}"))].into()),
             });
         }
@@ -1093,6 +1098,7 @@ impl Client {
             digest: layer_digest.to_string(),
             size: layer_size,
             urls: None,
+            artifact_type: None,
             annotations: Some([(oci::annotations::TITLE.to_string(), InternalTag::PATCH_TAG.to_string())].into()),
         }];
 
@@ -1167,7 +1173,7 @@ impl Client {
                 ClientError::InvalidManifest(format!("description layer digest '{}' is malformed: {e}", layer.digest))
             })?;
             self.transport
-                .pull_blob_to_file(&image, &layer_digest, &blob_path, 0, transport::no_progress())
+                .pull_blob_to_file(&image, &layer_digest, &blob_path)
                 .await?;
 
             match layer.media_type.as_str() {
@@ -1397,6 +1403,7 @@ mod tests {
                 digest: normalize(config_digest),
                 size: 100,
                 urls: None,
+                artifact_type: None,
                 annotations: None,
             },
             layers: vec![oci::Descriptor {
@@ -1404,6 +1411,7 @@ mod tests {
                 digest: normalize(layer_digest),
                 size: 200,
                 urls: None,
+                artifact_type: None,
                 annotations: None,
             }],
             ..Default::default()
@@ -1650,6 +1658,7 @@ mod tests {
             digest: claimed_digest.clone(),
             size: served_len,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1792,6 +1801,7 @@ mod tests {
             digest: claimed_digest.clone(),
             size: served_len,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1849,6 +1859,7 @@ mod tests {
             digest: digest_str.clone(),
             size: tar_gz_bytes.len() as i64,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1908,6 +1919,7 @@ mod tests {
             digest: digest_str.clone(),
             size: xz_bytes.len() as i64,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1964,6 +1976,7 @@ mod tests {
             digest: digest_str.clone(),
             size: tar_gz_bytes.len() as i64,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1998,6 +2011,7 @@ mod tests {
             digest: claimed_digest,
             size: 0,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2041,6 +2055,7 @@ mod tests {
             digest: digest_str.clone(),
             size: tar_gz_bytes.len() as i64,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2134,8 +2149,6 @@ mod tests {
             _image: &oci::native::Reference,
             _digest: &oci::Digest,
             path: &std::path::Path,
-            _total_size: u64,
-            _on_progress: super::transport::ProgressFn,
         ) -> super::transport::Result<()> {
             // Write partial bytes then return an I/O error to simulate
             // a mid-stream network interruption.
@@ -2269,6 +2282,7 @@ mod tests {
             digest: claimed_digest.clone(),
             size: 1024,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2335,6 +2349,7 @@ mod tests {
             digest: claimed_digest.clone(),
             size: 1024,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2449,6 +2464,7 @@ mod tests {
             digest: digest_str.clone(),
             size: declared_size,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2492,6 +2508,7 @@ mod tests {
             digest: digest_str.clone(),
             size: declared_size,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2537,6 +2554,7 @@ mod tests {
             digest: digest_str.clone(),
             size: declared_size,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -2666,6 +2684,7 @@ mod tests {
                     digest: "sha256:arm64_digest".to_string(),
                     size: 50,
                     platform: Some(platform("linux/arm64").into()),
+                    artifact_type: None,
                     annotations: None,
                 }],
                 annotations: None,
@@ -2703,6 +2722,7 @@ mod tests {
                     digest: "sha256:old_amd64".to_string(),
                     size: 50,
                     platform: Some(platform("linux/amd64").into()),
+                    artifact_type: None,
                     annotations: None,
                 }],
                 annotations: None,
@@ -2737,6 +2757,7 @@ mod tests {
                     digest: "sha256:old_config".to_string(),
                     size: 42,
                     urls: None,
+                    artifact_type: None,
                     annotations: None,
                 },
                 ..Default::default()
@@ -2950,6 +2971,7 @@ mod tests {
                 // still fails afterward, which is fine — only auth ordering matters.
                 size: 1,
                 urls: None,
+                artifact_type: None,
                 annotations: None,
             };
             let dir = tempfile::tempdir().unwrap();

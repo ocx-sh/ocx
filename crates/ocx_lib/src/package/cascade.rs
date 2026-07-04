@@ -608,6 +608,7 @@ mod tests {
                         digest: format!("sha256:fake_{tag}_{p}"),
                         size: 100,
                         platform: Some(native),
+                        artifact_type: None,
                         annotations: None,
                     }
                 })

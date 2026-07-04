@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Async read wrapper that reports cumulative download progress via callback.
+//! Async read wrapper that reports cumulative transfer progress via callback.
 //!
-//! Replaces [`super::progress_writer::ProgressWriter`] on the download path.
-//! `ProgressWriter` is retained for the upload path (`push_package`).
+//! Serves both directions: the download path (`Client::pull_layer` wraps the
+//! fork's streaming reader) and the upload path
+//! (`native_transport::progress_body_stream` wraps the in-RAM blob before
+//! streaming it to the registry).
 
 use std::io;
 use std::pin::Pin;
@@ -18,14 +20,13 @@ use super::transport::ProgressFn;
 /// An [`AsyncRead`] wrapper that calls `on_progress(bytes_read_so_far)` after
 /// every successful read.
 ///
-/// Unlike [`super::progress_writer::ProgressWriter`] — which capped writes at
-/// 32 KiB to produce frequent callbacks — `ProgressReader` does not impose any
-/// size cap. Progress is reported on natural chunk boundaries (typically 8–64 KiB
-/// HTTP/2 frames), producing smoother progress without artificial I/O
-/// fragmentation.
+/// `ProgressReader` imposes no size cap: progress is reported on natural chunk
+/// boundaries (typically 8–64 KiB HTTP/2 frames on download, ~128 KiB
+/// `ReaderStream` frames on upload), producing smooth progress without
+/// artificial I/O fragmentation.
 ///
 /// The callback is non-blocking and is invoked with the **cumulative** total of
-/// bytes read so far, matching the contract of `ProgressWriter`.
+/// bytes read so far.
 pub(super) struct ProgressReader<R> {
     inner: R,
     on_progress: ProgressFn,
@@ -131,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn large_chunk_fires_single_callback_at_full_chunk_size() {
         // spec §ProgressReader: "no size cap — calls back on natural chunk boundaries"
-        let chunk_size = 64 * 1024; // 64 KiB — larger than old ProgressWriter cap of 32 KiB
+        let chunk_size = 64 * 1024; // 64 KiB, fed as one read to prove no size cap
         let data = vec![0u8; chunk_size];
         let (cb, log) = make_progress_log();
         let mut reader = ProgressReader::new(&data[..], cb);

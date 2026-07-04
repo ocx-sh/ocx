@@ -196,8 +196,6 @@ impl OciTransport for StubTransport {
         _image: &oci::native::Reference,
         digest: &oci::Digest,
         path: &std::path::Path,
-        total_size: u64,
-        on_progress: super::transport::ProgressFn,
     ) -> Result<()> {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob_to_file:{}", digest_key));
@@ -215,8 +213,6 @@ impl OciTransport for StubTransport {
                 path: path.to_path_buf(),
                 source: e,
             })?;
-            // Simulate progress: report total_size or blob length.
-            on_progress(if total_size > 0 { total_size } else { blob.len() as u64 });
         }
         Ok(())
     }

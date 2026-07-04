@@ -676,6 +676,7 @@ pub mod tests {
             digest: format!("sha256:{child_hex}"),
             size: 100,
             platform: None,
+            artifact_type: None,
             annotations: Some(std::collections::BTreeMap::from([(
                 "org.opencontainers.image.title".to_string(),
                 "x".repeat(256),
@@ -687,6 +688,7 @@ pub mod tests {
                 digest: format!("sha256:{:064x}", i + 1),
                 size: 100,
                 platform: None,
+                artifact_type: None,
                 annotations: Some(std::collections::BTreeMap::from([(
                     "org.opencontainers.image.title".to_string(),
                     "y".repeat(256),
@@ -802,6 +804,7 @@ pub mod tests {
                     digest: unique(0x0c, index_number * children_per_index + child_number).to_string(),
                     size: 100,
                     platform: None,
+                    artifact_type: None,
                     annotations: None,
                 })
                 .collect();

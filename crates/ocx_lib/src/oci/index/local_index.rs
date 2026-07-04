@@ -765,6 +765,7 @@ mod spec_tests {
                             digest: self.child_digest_str.clone(),
                             size: 1,
                             platform: None,
+                            artifact_type: None,
                             annotations: None,
                         }],
                         artifact_type: None,

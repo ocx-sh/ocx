@@ -79,19 +79,7 @@ pub trait OciTransport: Send + Sync {
     async fn pull_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<Vec<u8>>;
 
     /// Pulls a blob and writes it to the specified file path.
-    ///
-    /// The output file is wrapped in a
-    /// [`ProgressWriter`](super::progress_writer::ProgressWriter) that calls
-    /// `on_progress` after each write. Pass [`no_progress()`] and `total_size = 0`
-    /// when progress reporting is not needed.
-    async fn pull_blob_to_file(
-        &self,
-        image: &oci::native::Reference,
-        digest: &oci::Digest,
-        path: &Path,
-        total_size: u64,
-        on_progress: ProgressFn,
-    ) -> Result<()>;
+    async fn pull_blob_to_file(&self, image: &oci::native::Reference, digest: &oci::Digest, path: &Path) -> Result<()>;
 
     /// HEAD a blob to verify existence and retrieve its content length.
     ///
@@ -134,8 +122,7 @@ pub trait OciTransport: Send + Sync {
             source: e,
         })?;
         let temp_path = temp_file.path().to_path_buf();
-        self.pull_blob_to_file(image, digest, &temp_path, 0, no_progress())
-            .await?;
+        self.pull_blob_to_file(image, digest, &temp_path).await?;
         let file = tokio::fs::File::open(&temp_path).await.map_err(|e| ClientError::Io {
             path: temp_path.clone(),
             source: e,
@@ -170,8 +157,8 @@ pub trait OciTransport: Send + Sync {
 
     /// Pushes in-memory blob data. Returns the resulting digest string.
     ///
-    /// When `on_progress` is provided, the implementation streams data in
-    /// chunks and calls `on_progress` after each chunk is uploaded.
+    /// The implementation streams the blob to the registry, invoking
+    /// `on_progress` with the cumulative byte count as data reaches the wire.
     /// Pass [`no_progress()`] when progress reporting is not needed.
     async fn push_blob(
         &self,
@@ -288,8 +275,6 @@ mod tests {
             _image: &oci::native::Reference,
             digest: &oci::Digest,
             path: &Path,
-            _total_size: u64,
-            on_progress: ProgressFn,
         ) -> Result<()> {
             use super::super::error::ClientError;
             let key = digest.to_string();
@@ -306,7 +291,6 @@ mod tests {
                 path: path.to_path_buf(),
                 source: e,
             })?;
-            on_progress(bytes.len() as u64);
             Ok(())
         }
 

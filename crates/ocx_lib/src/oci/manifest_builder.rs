@@ -163,6 +163,7 @@ impl ManifestBuilder {
                 digest: config_digest.to_string(),
                 size: config_size,
                 urls: None,
+                artifact_type: None,
                 annotations: None,
             },
             layers: self.layers,
@@ -235,6 +236,7 @@ mod tests {
             digest,
             size: 1024,
             urls: None,
+            artifact_type: None,
             annotations: None,
         }
     }
@@ -326,6 +328,7 @@ mod tests {
                 digest: config_digest.to_string(),
                 size: config_size,
                 urls: None,
+                artifact_type: None,
                 annotations: None,
             },
             layers: vec![layer.clone()],
@@ -367,6 +370,7 @@ mod tests {
             digest: readme_digest.to_string(),
             size: readme_size,
             urls: None,
+            artifact_type: None,
             annotations: Some([(oci::annotations::TITLE.to_string(), "README.md".to_string())].into()),
         };
 
@@ -424,6 +428,7 @@ mod tests {
             digest: "sha256:".to_string() + &format!("{i:02x}").repeat(32),
             size: 1,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let built = ManifestBuilder::new()
@@ -452,6 +457,7 @@ mod tests {
             digest: "sha256:".to_string() + &"ff".repeat(32),
             size: -1,
             urls: None,
+            artifact_type: None,
             annotations: None,
         };
         let result = ManifestBuilder::new()

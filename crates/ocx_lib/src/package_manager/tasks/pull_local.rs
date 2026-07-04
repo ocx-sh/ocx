@@ -272,6 +272,7 @@ async fn stage_layers(
                     digest: digest.to_string(),
                     size,
                     urls: None,
+                    artifact_type: None,
                     // Emits keys only when the publisher set layout (BC2); the
                     // default spec yields `None`, keeping the manifest identical.
                     annotations: layout.to_annotations(),
@@ -292,6 +293,7 @@ async fn stage_layers(
                         digest: digest.to_string(),
                         size,
                         urls: None,
+                        artifact_type: None,
                         annotations: layout.to_annotations(),
                     });
                 } else if mgr.is_offline() {
@@ -309,6 +311,7 @@ async fn stage_layers(
                         digest: digest.to_string(),
                         size: blob_size,
                         urls: None,
+                        artifact_type: None,
                         annotations: layout.to_annotations(),
                     });
                 }
@@ -446,6 +449,7 @@ async fn pull_digest_layer_to_temp(
         digest: digest.to_string(),
         size: blob_size,
         urls: None,
+        artifact_type: None,
         annotations: None,
     };
 

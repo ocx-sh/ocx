@@ -35,6 +35,7 @@ mod tests {
                     digest: digest.to_string(),
                     size,
                     platform: Some(native),
+                    artifact_type: None,
                     annotations: None,
                 }
             })
