@@ -496,6 +496,33 @@ The location of the Docker configuration directory. Read by the Docker credentia
 
 `OCX_AUTH_*` environment variables (see above) take priority over any credential stored in the Docker configuration directory at read time. The resolution order for a given registry is: `OCX_AUTH_TOKEN` / `OCX_AUTH_USER` + `OCX_AUTH_PASSWORD` (highest) → `credHelpers[registry]` → `credsStore` → `auths[registry]` (lowest).
 
+### CA certificates — `SSL_CERT_FILE`, `SSL_CERT_DIR` {#external-ca-certificates}
+
+OCX verifies registry TLS against a **compiled-in copy of the [Mozilla CA root store][mozilla-ca]**, so HTTPS works out of the box even on a host with no certificates installed — a scratch or [distroless][distroless] container, a stripped CI image, an air-gapped runner. This is what makes the single static binary self-contained: it never depends on the system trust store being present.
+
+On top of those built-in roots, OCX **also** loads the host's own trust store and *merges* the two sets — it never replaces the public roots. Any certificate the operating system already trusts, including a privately installed corporate root, is honored alongside the bundled ones. Both a public registry and an internal one fronted by a TLS-intercepting proxy work in the same invocation, with no verification disabled.
+
+On Linux the host trust store is discovered through the platform's standard mechanism, overridable with two well-known variables read from the ambient environment (they are not OCX configuration and carry no `OCX_` prefix):
+
+| Variable | Meaning |
+|----------|---------|
+| `SSL_CERT_FILE` | Path to a single file containing one or more certificates in **PEM** format. |
+| `SSL_CERT_DIR` | One or more directories (`:`-separated) of PEM certificate files. |
+
+Point `SSL_CERT_FILE` at a bundle that includes your corporate root CA to pull from a proxy-fronted registry:
+
+```sh
+SSL_CERT_FILE=/etc/pki/corp-root.pem ocx install internal/tool:1.2
+```
+
+::: warning PEM text, not DER
+These variables expect **PEM** armor (`-----BEGIN CERTIFICATE-----`), regardless of file extension — a `.crt` file is loaded only if its contents are PEM. A raw DER/binary certificate is ignored. Convert one with `openssl x509 -inform der -in corp.crt -out corp.pem`.
+:::
+
+::: tip Disabling TLS for a local registry
+To skip HTTPS entirely for a development registry that has no certificate, use [`OCX_INSECURE_REGISTRIES`](#ocx-insecure-registries) instead. It is scoped to the hosts you name and never weakens verification for public registries.
+:::
+
 ### `XDG_CONFIG_HOME` {#external-xdg-config-home}
 
 User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. On Linux, OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.
@@ -539,6 +566,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
 [apple-dirs-env]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
+[mozilla-ca]: https://wiki.mozilla.org/CA/Included_Certificates
+[distroless]: https://github.com/GoogleContainerTools/distroless
 
 <!-- commands -->
 [cmd-ref]: command-line.md

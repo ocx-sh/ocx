@@ -5,6 +5,8 @@
 pub mod native {
     pub use oci_client;
 
+    pub use oci_client::client::Certificate;
+    pub use oci_client::client::CertificateEncoding;
     pub use oci_client::client::Client;
     pub use oci_client::client::ClientConfig;
     pub use oci_client::client::ClientProtocol;

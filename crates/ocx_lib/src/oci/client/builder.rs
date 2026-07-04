@@ -26,6 +26,7 @@ impl ClientBuilder {
                 // 128 KiB progress-frame size in `native_transport::progress_body_stream`
                 // — that governs progress granularity, this governs request count.
                 push_chunk_size: 16 * 1024 * 1024,
+                extra_root_certificates: bundled_root_certificates(),
                 ..Default::default()
             },
             lock_timeout: None,
@@ -136,6 +137,32 @@ impl Default for ClientBuilder {
     }
 }
 
+/// Mozilla's CA root set, compiled into the binary.
+///
+/// The vendored `oci-client` builds its reqwest client with rustls, which under
+/// reqwest 0.13 delegates trust to `rustls-platform-verifier`. With no explicit
+/// roots the verifier loads roots *only* from the system store and hard-errors
+/// (`No CA certificates were loaded from the system`) when that store is empty —
+/// a minimal container, a CI runner without `ca-certificates`, or an
+/// `SSL_CERT_FILE` pointing at a bundle that yields no certificates. `Client::new`
+/// then "falls back" to `reqwest::Client::default()`, whose internal `.expect()`
+/// re-triggers the identical failure as a process-crashing panic.
+///
+/// Seeding these bundled roots makes the client self-contained: reqwest takes the
+/// `Verifier::new_with_extra_roots` path, which never errors on an empty system
+/// store and still *merges* whatever the native store provides — so an operator's
+/// corporate root (via `SSL_CERT_FILE`/`SSL_CERT_DIR`) keeps working alongside the
+/// public roots.
+fn bundled_root_certificates() -> Vec<oci::native::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|cert| oci::native::Certificate {
+            encoding: oci::native::CertificateEncoding::Der,
+            data: cert.as_ref().to_vec(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 impl ClientBuilder {
     /// Test-only inspector: the resolved plain-HTTP host list the transport
@@ -154,6 +181,13 @@ impl ClientBuilder {
             oci::native::ClientProtocol::HttpsExcept(hosts) => Some(hosts.as_slice()),
             _ => None,
         }
+    }
+
+    /// Test-only inspector: how many bundled CA roots were seeded into the
+    /// client config. Non-zero proves the trust store is self-contained and the
+    /// empty-system-store panic path cannot be reached.
+    pub(crate) fn root_certificate_count(&self) -> usize {
+        self.config.extra_root_certificates.len()
     }
 }
 
@@ -190,6 +224,47 @@ fn mirrors_from_env() -> Result<MirrorMap, MirrorConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: every client ships with the full bundled Mozilla CA root
+    /// set, DER-encoded, so TLS works without a system trust store.
+    ///
+    /// The reported crash was a panic — `No CA certificates were loaded from the
+    /// system` — when reqwest's rustls path (0.13) found an empty system store
+    /// and `Client::new` "fell back" to `reqwest::Client::default()`, whose
+    /// internal `.expect()` re-triggered the identical failure.
+    ///
+    /// That empty-store state cannot be reproduced deterministically in-process:
+    /// `rustls-native-certs` discovers the store via `openssl_probe::probe()`,
+    /// which *unconditionally* re-adds any existing system cert directory
+    /// (`/etc/ssl/certs`, …), so `SSL_CERT_FILE` / `SSL_CERT_DIR` overrides can
+    /// never make it empty on a host that has certs — every dev box and CI runner
+    /// does. What *is* assertable host-independently is the fix's invariant: the
+    /// config the whole builder funnels through carries the complete root set,
+    /// which forces reqwest onto the `Verifier::new_with_extra_roots` branch that
+    /// never errors on an empty store.
+    #[test]
+    fn new_seeds_full_der_encoded_ca_root_set() {
+        let builder = ClientBuilder::new();
+
+        // Fix present, and the *entire* Mozilla set — guards against a future
+        // change that truncates the list to a stray cert or two.
+        assert_eq!(
+            builder.root_certificate_count(),
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS.len(),
+            "every bundled Mozilla root must be seeded into the client config"
+        );
+        assert!(
+            builder.root_certificate_count() > 100,
+            "the Mozilla root set should be well over 100 certificates, got {}",
+            builder.root_certificate_count()
+        );
+
+        // Constructing the client runs `convert_certificates` → reqwest's
+        // `Certificate::from_der` over every seeded root; reaching this line
+        // proves they are valid DER. A wrong encoding tag (PEM over DER bytes)
+        // would fail conversion and trip the very `Client::new` panic under test.
+        let _client = builder.build();
+    }
 
     // ── Step 3.1 specification tests ─────────────────────────────────────────
 
