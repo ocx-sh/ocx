@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use super::error::ClientError;
-use super::transport::{OciTransport, Result};
+use super::transport::{MountOutcome, OciTransport, Result};
 use crate::oci::{self, Algorithm, RegistryOperation};
 
 /// Test data backing a [`StubTransport`].
@@ -38,6 +38,11 @@ pub(crate) struct StubTransportInner {
     /// When set, `pull_manifest_raw` returns a `Registry` error with this
     /// message for any image not in `manifests` (instead of `ManifestNotFound`).
     pub pull_manifest_error_override: Option<String>,
+    /// Successive results for `mount_blob` calls (consumed FIFO); an empty
+    /// queue falls through to the trait's default `Ok(UploadRequired)`.
+    pub mount_results: Vec<Result<MountOutcome>>,
+    /// Log of `mount_blob` calls: `(target_repository, source_repository, digest)`.
+    pub mount_calls: Vec<(String, String, String)>,
 }
 
 /// Shared data handle for [`StubTransport`].
@@ -263,6 +268,26 @@ impl OciTransport for StubTransport {
         // Simulate progress: report full size in one shot.
         on_progress(data.len() as u64);
         self.next_push_result()
+    }
+
+    async fn mount_blob(
+        &self,
+        image: &oci::native::Reference,
+        source_repository: &str,
+        digest: &oci::Digest,
+    ) -> Result<MountOutcome> {
+        self.record("mount_blob");
+        let mut inner = self.data.write();
+        inner.mount_calls.push((
+            image.repository().to_string(),
+            source_repository.to_string(),
+            digest.to_string(),
+        ));
+        if inner.mount_results.is_empty() {
+            Ok(MountOutcome::UploadRequired)
+        } else {
+            inner.mount_results.remove(0)
+        }
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {

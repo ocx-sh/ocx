@@ -279,6 +279,7 @@ async fn materialize_companions(
         let layer = LayerRef::File {
             path: archive.clone(),
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         };
         let metadata_path = conventions::resolve_metadata_path(std::slice::from_ref(&layer), None)
             .with_context(|| format!("locating metadata sibling for companion archive {}", archive.display()))?;

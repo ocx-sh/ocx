@@ -23,6 +23,18 @@ pub fn no_progress() -> ProgressFn {
     Arc::new(|_| {})
 }
 
+/// Outcome of a cross-repository blob mount attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountOutcome {
+    /// The registry mounted the blob into the target repository; no upload
+    /// is needed.
+    Mounted,
+    /// The registry declined the mount (spec-legal 202 miss, transport error,
+    /// or a transport that doesn't implement mounting); the caller must
+    /// upload the blob through the normal path.
+    UploadRequired,
+}
+
 /// Low-level OCI registry transport operations.
 ///
 /// Abstracts the wire-level OCI distribution API calls, enabling the
@@ -167,6 +179,26 @@ pub trait OciTransport: Send + Sync {
         digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String>;
+
+    /// Attempts to mount `digest` from `source_repository` into `image`'s
+    /// repository, avoiding a redundant upload when the blob is already
+    /// present elsewhere in the registry.
+    ///
+    /// # Default implementation
+    ///
+    /// Always returns [`MountOutcome::UploadRequired`]. Mounting is a
+    /// registry-side optimization, not a correctness requirement — a
+    /// transport that doesn't implement it (or a test double) falls back
+    /// to the normal upload path unchanged.
+    async fn mount_blob(
+        &self,
+        image: &oci::native::Reference,
+        source_repository: &str,
+        digest: &oci::Digest,
+    ) -> Result<MountOutcome> {
+        let _ = (image, source_repository, digest);
+        Ok(MountOutcome::UploadRequired)
+    }
 
     // ── Clone support ────────────────────────────────────────────────
 

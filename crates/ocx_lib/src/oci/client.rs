@@ -18,6 +18,51 @@ use super::{Algorithm, Digest, Identifier, native};
 /// uploading, so unbounded fan-out would OOM on multi-GB layers.
 const LAYER_PUSH_CONCURRENCY: usize = 4;
 
+/// Per-layer outcome recorded by `push_multi_layer_manifest`, aggregated by
+/// the caller into a [`LayerCounts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerPushOutcome {
+    /// Uploaded via `push_blob` — which may itself have HEAD-skipped an
+    /// already-present blob (`NativeTransport::do_push_blob`'s
+    /// blob-exists short-circuit); this variant only means "no mount was
+    /// used," not "bytes definitely crossed the wire."
+    Uploaded,
+    /// A cross-repository blob mount succeeded; no upload was performed.
+    Mounted,
+    /// A `LayerRef::Digest` layer verified present via `head_blob` — no
+    /// mount was attempted, or a mount attempt fell back.
+    Verified,
+}
+
+/// Aggregate counts of layer-push outcomes for a single package push.
+///
+/// Only layer blobs are counted — the config blob and the manifest itself
+/// are not layers and are excluded. An `uploaded` count may still have
+/// HEAD-skipped an already-present blob inside `push_blob` (see
+/// [`LayerPushOutcome::Uploaded`]); this struct distinguishes mount vs.
+/// explicit-upload vs. verify-by-digest at the `push_multi_layer_manifest`
+/// call site, not whether bytes actually crossed the wire.
+///
+/// `Serialize` derives directly on this type (rather than a CLI-side
+/// wrapper) so `ocx_cli`'s `PushReport` can embed it verbatim as the
+/// `layers` field of the push JSON report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LayerCounts {
+    pub mounted: usize,
+    pub uploaded: usize,
+    pub verified: usize,
+}
+
+impl LayerCounts {
+    fn record(&mut self, outcome: LayerPushOutcome) {
+        match outcome {
+            LayerPushOutcome::Mounted => self.mounted += 1,
+            LayerPushOutcome::Uploaded => self.uploaded += 1,
+            LayerPushOutcome::Verified => self.verified += 1,
+        }
+    }
+}
+
 mod builder;
 pub mod error;
 pub(super) mod hashing_reader;
@@ -30,7 +75,7 @@ mod transport;
 
 pub use builder::ClientBuilder;
 pub use mirror_map::MirrorMap;
-pub use transport::OciTransport;
+pub use transport::{MountOutcome, OciTransport};
 
 use error::ClientError;
 
@@ -745,9 +790,9 @@ impl Client {
         &self,
         package_info: Info,
         layers: &[crate::publisher::LayerRef],
-    ) -> Result<(Digest, oci::Manifest)> {
-        let (index_digest, index) = self.push_manifest_and_merge_tags(&package_info, layers, &[]).await?;
-        Ok((index_digest, oci::Manifest::ImageIndex(index)))
+    ) -> Result<(Digest, oci::Manifest, LayerCounts)> {
+        let (index_digest, index, layer_counts) = self.push_manifest_and_merge_tags(&package_info, layers, &[]).await?;
+        Ok((index_digest, oci::Manifest::ImageIndex(index), layer_counts))
     }
 
     /// Pushes the package manifest and merges the resulting platform entry
@@ -765,7 +810,7 @@ impl Client {
         package_info: &Info,
         layers: &[crate::publisher::LayerRef],
         extra_tags: &[String],
-    ) -> Result<(Digest, oci::ImageIndex)> {
+    ) -> Result<(Digest, oci::ImageIndex, LayerCounts)> {
         log::debug!(
             "Pushing package {} with {} layer(s)",
             package_info.identifier,
@@ -776,7 +821,8 @@ impl Client {
         let image = package_info.identifier.canonical_reference();
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
-        let (_manifest, manifest_data, manifest_sha256) = self.push_multi_layer_manifest(package_info, layers).await?;
+        let (_manifest, manifest_data, manifest_sha256, layer_counts) =
+            self.push_multi_layer_manifest(package_info, layers).await?;
         let manifest_size = i64::try_from(manifest_data.len()).map_err(|_| {
             ClientError::InvalidManifest(format!("manifest size {} exceeds i64::MAX", manifest_data.len()))
         })?;
@@ -804,7 +850,7 @@ impl Client {
             .await?;
         }
 
-        Ok((index_digest, index))
+        Ok((index_digest, index, layer_counts))
     }
 
     /// Pushes config blob + N layer blobs + image manifest.
@@ -815,12 +861,19 @@ impl Client {
     /// for the manifest descriptor. The OCI spec does not expose a
     /// layer's media type via blob HEAD, so the caller is responsible
     /// for declaring it at the CLI (see `LayerRef::FromStr`).
-    /// Returns the manifest, its serialized bytes, and its SHA-256 digest string.
+    ///
+    /// A layer carrying `mount_from` first attempts a cross-repository blob
+    /// mount from that source repository. Mounting is a pure optimization —
+    /// a mount failure (spec-legal 202 miss, or any transport error) never
+    /// fails the push; the layer falls back to its normal upload/verify path.
+    ///
+    /// Returns the manifest, its serialized bytes, its SHA-256 digest string,
+    /// and the aggregate [`LayerCounts`] for the layers pushed.
     pub(crate) async fn push_multi_layer_manifest(
         &self,
         package_info: &Info,
         layers: &[crate::publisher::LayerRef],
-    ) -> std::result::Result<(oci::ImageManifest, Vec<u8>, String), ClientError> {
+    ) -> std::result::Result<(oci::ImageManifest, Vec<u8>, String, LayerCounts), ClientError> {
         use crate::publisher::LayerRef;
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
@@ -831,7 +884,7 @@ impl Client {
         // Upload file layers and verify digest layers concurrently, preserving
         // input order so manifest descriptors match the caller-supplied order.
         // Bounded by `LAYER_PUSH_CONCURRENCY` to cap in-memory archive buffers.
-        let layer_descriptors: Vec<oci::Descriptor> = stream::iter(layers.iter().enumerate())
+        let layer_results: Vec<(oci::Descriptor, LayerPushOutcome)> = stream::iter(layers.iter().enumerate())
             .map(|(index, layer)| {
                 // `async move` owns its captures, so each concurrent future needs
                 // its own copy of the image reference; clones are cheap
@@ -841,7 +894,11 @@ impl Client {
                 async move {
                     let progress_label = format!("{}/{}", index + 1, total_layers);
                     match layer {
-                        LayerRef::File { path, layout } => {
+                        LayerRef::File {
+                            path,
+                            layout,
+                            mount_from,
+                        } => {
                             let package_media_type =
                                 media_type_from_path(path).map(|mt| mt.to_string()).ok_or_else(|| {
                                     ClientError::InvalidManifest(format!("unsupported archive: {}", path.display()))
@@ -873,34 +930,47 @@ impl Client {
                                 package_data_len
                             );
 
-                            let bar = self.progress.bytes(
-                                format!("Uploading {progress_label} {}", path.display()),
-                                package_data_len as u64,
-                            );
-                            let on_progress = bar.callback();
-                            self.transport
-                                .push_blob(&image, package_data, &digest, on_progress)
-                                .await?;
-                            drop(bar);
+                            let mounted = self
+                                .try_mount_layer(&image, mount_from.as_deref(), &digest, &progress_label)
+                                .await;
+
+                            let outcome = if mounted {
+                                LayerPushOutcome::Mounted
+                            } else {
+                                let bar = self.progress.bytes(
+                                    format!("Uploading {progress_label} {}", path.display()),
+                                    package_data_len as u64,
+                                );
+                                let on_progress = bar.callback();
+                                self.transport
+                                    .push_blob(&image, package_data, &digest, on_progress)
+                                    .await?;
+                                drop(bar);
+                                LayerPushOutcome::Uploaded
+                            };
 
                             let size = i64::try_from(package_data_len).map_err(|_| {
                                 ClientError::InvalidManifest(format!("blob size {package_data_len} exceeds i64::MAX"))
                             })?;
-                            Ok::<oci::Descriptor, ClientError>(oci::Descriptor {
-                                media_type: package_media_type,
-                                digest: digest.to_string(),
-                                size,
-                                urls: None,
-                                artifact_type: None,
-                                // BC2: default (empty) layout → `None`, so the
-                                // manifest stays byte-identical to today.
-                                annotations: layout.to_annotations(),
-                            })
+                            Ok::<(oci::Descriptor, LayerPushOutcome), ClientError>((
+                                oci::Descriptor {
+                                    media_type: package_media_type,
+                                    digest: digest.to_string(),
+                                    size,
+                                    urls: None,
+                                    artifact_type: None,
+                                    // BC2: default (empty) layout → `None`, so the
+                                    // manifest stays byte-identical to today.
+                                    annotations: layout.to_annotations(),
+                                },
+                                outcome,
+                            ))
                         }
                         LayerRef::Digest {
                             digest,
                             media_type,
                             layout,
+                            mount_from,
                         } => {
                             // The caller supplies `media_type` because the OCI
                             // distribution spec does not expose a layer's media
@@ -908,7 +978,15 @@ impl Client {
                             // Content-Length. See `LayerRef::FromStr` for the
                             // `sha256:<hex>.<ext>` CLI syntax that carries this
                             // information from the user to here.
+                            let mounted = self
+                                .try_mount_layer(&image, mount_from.as_deref(), digest, &progress_label)
+                                .await;
+
                             log::info!("Reusing layer {progress_label} {digest} ({media_type})");
+                            // HEAD is always required: even after a successful
+                            // mount, the (adapted) mount path doesn't return the
+                            // blob's size, and it doubles as existence
+                            // verification for the non-mounted path.
                             let size = self.transport.head_blob(&image, digest).await?;
 
                             log::trace!(
@@ -918,14 +996,22 @@ impl Client {
                             let size = i64::try_from(size).map_err(|_| {
                                 ClientError::InvalidManifest(format!("blob size {size} exceeds i64::MAX"))
                             })?;
-                            Ok(oci::Descriptor {
-                                media_type: media_type.as_media_type().to_string(),
-                                digest: digest.to_string(),
-                                size,
-                                urls: None,
-                                artifact_type: None,
-                                annotations: layout.to_annotations(),
-                            })
+                            let outcome = if mounted {
+                                LayerPushOutcome::Mounted
+                            } else {
+                                LayerPushOutcome::Verified
+                            };
+                            Ok((
+                                oci::Descriptor {
+                                    media_type: media_type.as_media_type().to_string(),
+                                    digest: digest.to_string(),
+                                    size,
+                                    urls: None,
+                                    artifact_type: None,
+                                    annotations: layout.to_annotations(),
+                                },
+                                outcome,
+                            ))
                         }
                     }
                 }
@@ -933,6 +1019,15 @@ impl Client {
             .buffered(LAYER_PUSH_CONCURRENCY)
             .try_collect()
             .await?;
+
+        let mut layer_counts = LayerCounts::default();
+        let layer_descriptors: Vec<oci::Descriptor> = layer_results
+            .into_iter()
+            .map(|(descriptor, outcome)| {
+                layer_counts.record(outcome);
+                descriptor
+            })
+            .collect();
 
         // Assemble the manifest from the resolved descriptors (pure, no I/O).
         // Shared with `pull_local` so the two paths produce byte-identical manifests.
@@ -962,7 +1057,38 @@ impl Client {
             .await?;
         log::debug!("Pushed manifest with digest '{}'", pushed_digest);
 
-        Ok((parts.manifest, parts.manifest_bytes, manifest_sha256))
+        Ok((parts.manifest, parts.manifest_bytes, manifest_sha256, layer_counts))
+    }
+
+    /// Attempts a cross-repository blob mount for a layer carrying
+    /// `mount_from`, returning `true` on success.
+    ///
+    /// A `None` source (no `from=` tail on the layer ref) short-circuits to
+    /// `false` without a transport call. Any non-`Mounted` transport
+    /// response — a spec-legal miss, or a transport error — is logged and
+    /// treated as `false`: mounting is purely an upload-avoidance
+    /// optimization and must never fail the push.
+    async fn try_mount_layer(
+        &self,
+        image: &native::Reference,
+        mount_from: Option<&str>,
+        digest: &oci::Digest,
+        progress_label: &str,
+    ) -> bool {
+        let Some(source_repository) = mount_from else {
+            return false;
+        };
+        match self.transport.mount_blob(image, source_repository, digest).await {
+            Ok(MountOutcome::Mounted) => true,
+            Ok(MountOutcome::UploadRequired) => false,
+            Err(e) => {
+                log::warn!(
+                    "Mount of layer {progress_label} {digest} from {source_repository} into {image} \
+                     declined, falling back: {e}"
+                );
+                false
+            }
+        }
     }
 
     // ── Description operations ────────────────────────────────────────
@@ -3436,6 +3562,7 @@ mod tests {
             let layers = [crate::publisher::LayerRef::File {
                 path: archive_path,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
             let _ = client.push_package(info, &layers).await;
             let calls = auth_calls(&data);
@@ -3519,6 +3646,7 @@ mod tests {
                 digest: oci::Digest::try_from(layer_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarGz,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
 
             let _ = client.push_multi_layer_manifest(&info, &layers).await;
@@ -3553,6 +3681,7 @@ mod tests {
             let layers = [crate::publisher::LayerRef::File {
                 path: archive_path,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
             let _ = client.push_package(info, &layers).await;
 
@@ -3636,11 +3765,20 @@ mod tests {
                 digest: oci::Digest::try_from(layer_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarXz,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
-            let (manifest, _bytes, _digest) = client
+            let (manifest, _bytes, _digest, counts) = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)
                 .await
                 .expect("push_multi_layer_manifest must succeed with a live blob and declared media type");
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    verified: 1,
+                    ..Default::default()
+                },
+                "a digest layer with no mount_from must count as verified"
+            );
 
             assert_eq!(manifest.layers.len(), 1);
             assert_eq!(
@@ -3678,6 +3816,7 @@ mod tests {
                 digest: oci::Digest::try_from(missing_digest).unwrap(),
                 media_type: crate::publisher::ArchiveMediaType::TarGz,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
             let err = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)
@@ -3708,6 +3847,7 @@ mod tests {
             let layers = [LayerRef::File {
                 path: weird_path,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
             let err = client
                 .push_multi_layer_manifest(&info("1.0.0"), &layers)
@@ -3717,6 +3857,262 @@ mod tests {
             assert!(
                 matches!(err, ClientError::InvalidManifest(_)),
                 "expected InvalidManifest, got {err:?}"
+            );
+        }
+    }
+
+    // ── Cross-repository blob mount ──────────────────────────────────
+
+    /// Exercises `push_multi_layer_manifest`'s `mount_from` handling against
+    /// `StubTransport`'s configurable `mount_results` queue: a successful
+    /// mount must skip `push_blob` entirely, a declined mount (or a
+    /// transport error) must fall back to the normal upload/verify path,
+    /// and the aggregate `LayerCounts` must reflect exactly what happened
+    /// across a mixed layer list.
+    mod mount_reuse {
+        use super::*;
+        use crate::publisher::LayerRef;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn info(tag: &str) -> Info {
+            Info {
+                identifier: test_identifier(tag),
+                metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    version: package::metadata::bundle::Version::V1,
+                    strip_components: None,
+                    env: Default::default(),
+                    dependencies: Default::default(),
+                    entrypoints: Default::default(),
+                }),
+                platform: "linux/amd64".parse().unwrap(),
+            }
+        }
+
+        /// A `LayerRef::File` with `mount_from` set, backed by a stub that
+        /// reports `Mounted`, must skip `push_blob` and count as `mounted`.
+        #[tokio::test]
+        async fn file_layer_mount_success_skips_push_blob() {
+            let dir = tempfile::tempdir().unwrap();
+            let archive_path = dir.path().join("pkg.tar.gz");
+            let archive_bytes = b"fake-archive".to_vec();
+            tokio::fs::write(&archive_path, &archive_bytes).await.unwrap();
+            let layer_digest = Algorithm::Sha256.hash(&archive_bytes).to_string();
+
+            let data = StubTransportData::new();
+            data.write().mount_results.push(Ok(MountOutcome::Mounted));
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+                mount_from: Some("pip-test/pkg".to_string()),
+            }];
+            let (_manifest, _bytes, _digest, counts) = client
+                .push_multi_layer_manifest(&info("1.0.0"), &layers)
+                .await
+                .expect("mount success must not fail the push");
+
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    mounted: 1,
+                    ..Default::default()
+                }
+            );
+            let inner = data.read();
+            // Only the layer's own blob push must be skipped — the config
+            // blob (an unrelated, unconditional push_blob call) still fires.
+            assert!(
+                !inner.calls.contains(&format!("push_blob:{layer_digest}")),
+                "a successful mount must skip push_blob for the mounted layer, calls: {:?}",
+                inner.calls
+            );
+            assert_eq!(
+                inner.mount_calls,
+                vec![("test/pkg".to_string(), "pip-test/pkg".to_string(), layer_digest)]
+            );
+        }
+
+        /// A `LayerRef::File` whose mount attempt reports `UploadRequired`
+        /// must fall back to `push_blob` and count as `uploaded`.
+        #[tokio::test]
+        async fn file_layer_mount_declined_falls_back_to_upload() {
+            let dir = tempfile::tempdir().unwrap();
+            let archive_path = dir.path().join("pkg.tar.gz");
+            tokio::fs::write(&archive_path, b"fake-archive").await.unwrap();
+
+            let data = StubTransportData::new();
+            data.write().mount_results.push(Ok(MountOutcome::UploadRequired));
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+                mount_from: Some("pip-test/pkg".to_string()),
+            }];
+            let (_manifest, _bytes, _digest, counts) = client
+                .push_multi_layer_manifest(&info("1.0.0"), &layers)
+                .await
+                .expect("a declined mount must still succeed via upload fallback");
+
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    uploaded: 1,
+                    ..Default::default()
+                }
+            );
+            let inner = data.read();
+            assert!(
+                inner.calls.iter().any(|c| c.starts_with("push_blob:")),
+                "a declined mount must fall back to push_blob, calls: {:?}",
+                inner.calls
+            );
+        }
+
+        /// A transport error from `mount_blob` must never fail the push: the
+        /// layer falls back to upload and the push succeeds, counting as
+        /// `uploaded`.
+        #[tokio::test]
+        async fn file_layer_mount_transport_error_falls_back_and_push_succeeds() {
+            let dir = tempfile::tempdir().unwrap();
+            let archive_path = dir.path().join("pkg.tar.gz");
+            tokio::fs::write(&archive_path, b"fake-archive").await.unwrap();
+
+            let data = StubTransportData::new();
+            data.write()
+                .mount_results
+                .push(Err(ClientError::Registry("mount transport failure".into())));
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::File {
+                path: archive_path,
+                layout: oci::LayerLayoutSpec::default(),
+                mount_from: Some("pip-test/pkg".to_string()),
+            }];
+            let (_manifest, _bytes, _digest, counts) = client
+                .push_multi_layer_manifest(&info("1.0.0"), &layers)
+                .await
+                .expect("mount must never fail the push");
+
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    uploaded: 1,
+                    ..Default::default()
+                }
+            );
+            let inner = data.read();
+            assert!(
+                inner.calls.iter().any(|c| c.starts_with("push_blob:")),
+                "a mount transport error must fall back to push_blob, calls: {:?}",
+                inner.calls
+            );
+        }
+
+        /// A `LayerRef::Digest` layer with `mount_from` set still calls
+        /// `head_blob` after a successful mount (the adapted mount path
+        /// doesn't return size), and counts as `mounted`.
+        #[tokio::test]
+        async fn digest_layer_mount_success_still_verifies_and_counts_mounted() {
+            let layer_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+            let data = StubTransportData::new();
+            data.write().blobs.insert(layer_digest.to_string(), vec![0u8; 8]);
+            data.write().mount_results.push(Ok(MountOutcome::Mounted));
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::Digest {
+                digest: oci::Digest::try_from(layer_digest).unwrap(),
+                media_type: crate::publisher::ArchiveMediaType::TarGz,
+                layout: oci::LayerLayoutSpec::default(),
+                mount_from: Some("base/image".to_string()),
+            }];
+            let (_manifest, _bytes, _digest, counts) = client
+                .push_multi_layer_manifest(&info("1.0.0"), &layers)
+                .await
+                .expect("mount success must not fail the push");
+
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    mounted: 1,
+                    ..Default::default()
+                }
+            );
+            let inner = data.read();
+            assert!(
+                inner.calls.iter().any(|c| c == &format!("head_blob:{layer_digest}")),
+                "head_blob must still be called after a successful mount, calls: {:?}",
+                inner.calls
+            );
+        }
+
+        /// A mixed layer list — one mounted, one declined-then-uploaded, one
+        /// plain digest verify with no `mount_from` — produces the exact
+        /// counter breakdown, over the input order.
+        #[tokio::test]
+        async fn mixed_layer_list_produces_correct_counter_breakdown() {
+            let dir = tempfile::tempdir().unwrap();
+            let archive_a = dir.path().join("a.tar.gz");
+            let archive_b = dir.path().join("b.tar.gz");
+            tokio::fs::write(&archive_a, b"layer-a").await.unwrap();
+            tokio::fs::write(&archive_b, b"layer-b").await.unwrap();
+
+            let verified_digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+            let data = StubTransportData::new();
+            data.write().blobs.insert(verified_digest.to_string(), vec![0u8; 4]);
+            // Consumed FIFO in layer order: layer 0 (a.tar.gz) mounts, layer 1
+            // (b.tar.gz) is declined and falls back to upload. Layer 2 (the
+            // digest layer) carries no mount_from, so it never calls mount_blob.
+            data.write().mount_results.push(Ok(MountOutcome::Mounted));
+            data.write().mount_results.push(Ok(MountOutcome::UploadRequired));
+            let client = stub_with_capture(&data);
+
+            let layers = [
+                LayerRef::File {
+                    path: archive_a,
+                    layout: oci::LayerLayoutSpec::default(),
+                    mount_from: Some("pip-test/pkg".to_string()),
+                },
+                LayerRef::File {
+                    path: archive_b,
+                    layout: oci::LayerLayoutSpec::default(),
+                    mount_from: Some("pip-test/pkg".to_string()),
+                },
+                LayerRef::Digest {
+                    digest: oci::Digest::try_from(verified_digest).unwrap(),
+                    media_type: crate::publisher::ArchiveMediaType::TarGz,
+                    layout: oci::LayerLayoutSpec::default(),
+                    mount_from: None,
+                },
+            ];
+            let (_manifest, _bytes, _digest, counts) = client
+                .push_multi_layer_manifest(&info("1.0.0"), &layers)
+                .await
+                .expect("mixed layer list must succeed");
+
+            assert_eq!(
+                counts,
+                LayerCounts {
+                    mounted: 1,
+                    uploaded: 1,
+                    verified: 1,
+                }
+            );
+            // mount_blob is only ever called for layers carrying mount_from.
+            assert_eq!(
+                data.read().mount_calls.len(),
+                2,
+                "only the two mount_from layers call mount_blob"
             );
         }
     }
@@ -3768,6 +4164,7 @@ mod tests {
             let layers = [LayerRef::File {
                 path: archive_path,
                 layout: oci::LayerLayoutSpec::default(),
+                mount_from: None,
             }];
             let extra_tags = ["3".to_string(), "latest".to_string()];
             client

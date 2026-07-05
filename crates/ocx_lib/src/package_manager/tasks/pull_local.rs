@@ -228,7 +228,7 @@ async fn stage_layers(
 
     for layer_ref in layers {
         match layer_ref {
-            publisher::LayerRef::File { path, layout } => {
+            publisher::LayerRef::File { path, layout, .. } => {
                 validate_file_layer(path).await?;
 
                 // Read + hash the archive in one pass.
@@ -283,6 +283,7 @@ async fn stage_layers(
                 digest,
                 media_type,
                 layout,
+                ..
             } => {
                 // Check if the layer content is already present locally.
                 let layer_content = fs.layers.content(registry, digest);
@@ -858,6 +859,7 @@ mod tests {
             digest: digest.clone(),
             media_type: ArchiveMediaType::TarXz,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         }];
 
         let result = mgr.pull_local(info, &layers, Some(&dest)).await;
@@ -960,6 +962,7 @@ mod tests {
         let layers = [crate::publisher::LayerRef::File {
             path: archive_path,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         }];
         let result = mgr.pull_local(info, &layers, None).await;
 
@@ -1034,6 +1037,7 @@ mod tests {
             digest: digest.clone(),
             media_type: ArchiveMediaType::TarXz,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         }];
 
         let result = mgr.pull_local(info, &layers, Some(&dest)).await;
@@ -1093,6 +1097,7 @@ mod tests {
         let layers = [crate::publisher::LayerRef::File {
             path: socket_path,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         }];
         let result = mgr.pull_local(info, &layers, None).await;
 

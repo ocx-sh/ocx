@@ -10,8 +10,8 @@ use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
 use super::error::ClientError;
-use super::progress_reader::ProgressReader;
-use super::transport::{OciTransport, ProgressFn, Result};
+use super::progress_writer::ProgressWriter;
+use super::transport::{MountOutcome, OciTransport, ProgressFn, Result};
 use crate::{auth, log, oci};
 
 /// Real OCI transport that delegates to the `oci_client` crate.
@@ -310,6 +310,53 @@ impl OciTransport for NativeTransport {
         on_progress: ProgressFn,
     ) -> Result<String> {
         self.do_push_blob(image, data, digest, on_progress).await
+    }
+
+    async fn mount_blob(
+        &self,
+        image: &oci::native::Reference,
+        source_repository: &str,
+        digest: &oci::Digest,
+    ) -> Result<MountOutcome> {
+        // Only `repository()` is read by the fork's `mount_blob` (it becomes the
+        // `from` query param); registry/tag on this synthetic reference are never
+        // used, so "latest" is an inert placeholder.
+        let source = oci::native::Reference::with_tag(
+            image.registry().to_string(),
+            source_repository.to_string(),
+            "latest".to_string(),
+        );
+        let digest_str = digest.to_string();
+        log::debug!(
+            "Attempting to mount blob {} from {} into {}",
+            digest_str,
+            source_repository,
+            image
+        );
+        // ponytail: the pinned fork commit still conflates a spec-legal 202
+        // mount-miss with a hard `SpecViolationError` (the typed
+        // `BlobMountResponse::{Mounted,UploadSessionOpened}` split lives on the
+        // fork's `ocx/integration` branch but hasn't been bumped into this
+        // submodule pin yet). Every mount failure is swallowed here rather than
+        // propagated, because mounting is purely an upload-avoidance
+        // optimization — a 202 miss and a genuine registry error both mean
+        // "fall back to a normal push_blob" to this caller. When the fork bump
+        // lands, replace this `match` with a `?`-propagating call against the
+        // typed response and let `push_multi_layer_manifest`'s own
+        // `log::warn` + fallback (mount must never fail the push) take over.
+        match self.client.mount_blob(image, &source, digest_str.as_str()).await {
+            Ok(()) => Ok(MountOutcome::Mounted),
+            Err(e) => {
+                log::warn!(
+                    "Mount of blob {} from {} into {} declined, falling back to upload: {}",
+                    digest_str,
+                    source_repository,
+                    image,
+                    e
+                );
+                Ok(MountOutcome::UploadRequired)
+            }
+        }
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {

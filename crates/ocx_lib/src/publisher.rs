@@ -42,6 +42,11 @@ pub struct PushOutcome {
     /// Rolling cascade tags written in addition to the primary version tag
     /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push.
     pub cascade_tags: Vec<String>,
+    /// Counts of layer-push outcomes (mounted/uploaded/verified) for this
+    /// push. Layer blobs only — the config blob and manifest are not layers
+    /// and are excluded. An `uploaded` count may still have HEAD-skipped an
+    /// already-present blob inside `push_blob`'s blob-exists short-circuit.
+    pub layer_counts: oci::LayerCounts,
 }
 
 impl Publisher {
@@ -74,10 +79,11 @@ impl Publisher {
     pub async fn push(&self, info: Info, layers: &[LayerRef], build_meta: Option<&str>) -> Result<PushOutcome> {
         let info = apply_build_meta(info, build_meta)?;
         log::info!("pushing package with identifier {}", info.identifier);
-        let (manifest_digest, _manifest) = self.client.push_package(info, layers).await?;
+        let (manifest_digest, _manifest, layer_counts) = self.client.push_package(info, layers).await?;
         Ok(PushOutcome {
             manifest_digest,
             cascade_tags: Vec::new(),
+            layer_counts,
         })
     }
 
@@ -99,11 +105,12 @@ impl Publisher {
         let version = Version::parse(info.identifier.tag_or_latest())
             .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 
-        let (manifest_digest, cascade_tags) =
+        let (manifest_digest, cascade_tags, layer_counts) =
             package::cascade::push_with_cascade(&self.client, info, layers, existing_versions, &version).await?;
         Ok(PushOutcome {
             manifest_digest,
             cascade_tags,
+            layer_counts,
         })
     }
 

@@ -53,6 +53,7 @@ pub use layer_layout::{LayerLayoutError, LayerLayoutSpec, resolve_layer_placemen
 pub mod client;
 pub use client::Client;
 pub use client::ClientBuilder;
+pub use client::LayerCounts;
 pub use client::MirrorMap;
 
 pub mod index;
