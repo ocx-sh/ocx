@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::{cli::Cell, publisher::PushOutcome};
+use ocx_lib::{cli::Cell, oci::LayerCounts, publisher::PushOutcome};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -9,18 +9,19 @@ use crate::api::Printable;
 /// Result of a successful `ocx package push`.
 ///
 /// Plain format: a one-row table — `Identifier`, `Digest`, `Tags` (the rolling
-/// cascade tags, comma-joined) and `Canonical Tags` (how many were written).
-/// Keeps a plain push from being silent; progress still surfaces on stderr via
-/// the log layer. `status` is plain-omitted (it is the constant `"pushed"`) and
-/// the canonical tags are counted rather than listed — each is a 71-column
-/// `sha256.<hex>` and there is one per distinct platform manifest.
+/// cascade tags, comma-joined), `Canonical Tags` (how many were written) and
+/// `Layers` (the mounted/uploaded/verified counts). Keeps a plain push from
+/// being silent; progress still surfaces on stderr via the log layer. `status`
+/// is plain-omitted (it is the constant `"pushed"`) and the canonical tags are
+/// counted rather than listed — each is a 71-column `sha256.<hex>` and there is
+/// one per distinct platform manifest.
 ///
 /// JSON format:
 /// `{ "identifier", "status", "manifest_digest", "cascade_tags_written",
-/// "canonical_tags_written" }`.
-/// This is the machine-readable contract consumed by `ocx-mirror pipeline
-/// push`, which keys its go/no-go bookkeeping off `status` and records
-/// `cascade_tags_written` in the run summary.
+/// "canonical_tags_written", "layers": { "mounted", "uploaded", "verified" } }`.
+/// The first five keys are the machine-readable contract consumed by
+/// `ocx-mirror pipeline push`, which keys its go/no-go bookkeeping off `status`
+/// and records `cascade_tags_written` in the run summary; `layers` is additive.
 #[derive(Serialize)]
 pub struct PushReport {
     /// The pushed package identifier (`registry/repository:tag`).
@@ -39,6 +40,10 @@ pub struct PushReport {
     /// list. Empty under `--no-canonical-tag`. Reports what reached the
     /// registry, not what was requested.
     pub canonical_tags_written: Vec<String>,
+    /// Counts of layer-push outcomes (mounted/uploaded/verified), summed over
+    /// every platform this push fanned out to. Layer blobs only — the config
+    /// blob and manifest are not layers.
+    pub layers: LayerCounts,
 }
 
 impl PushReport {
@@ -55,14 +60,16 @@ impl PushReport {
             manifest_digest: outcome.manifest_digest.to_string(),
             cascade_tags_written: outcome.cascade_tags,
             canonical_tags_written: outcome.canonical_tags,
+            layers: outcome.layer_counts,
         }
     }
 }
 
 impl Printable for PushReport {
-    /// One-row table: identifier, digest, the rolling cascade tags, and the
-    /// number of canonical tags written. Machine consumers should prefer
-    /// `--format json`; this line keeps a plain push from emitting nothing.
+    /// One-row table: identifier, digest, the rolling cascade tags, the number
+    /// of canonical tags written, and the layer-push counter breakdown. Machine
+    /// consumers should prefer `--format json`; this line keeps a plain push
+    /// from emitting nothing.
     ///
     /// `status` has no column because it is always `"pushed"`, and the
     /// canonical tags are a count because listing them is 71 columns each.
@@ -74,12 +81,17 @@ impl Printable for PushReport {
                 "Digest".into(),
                 "Tags".into(),
                 "Canonical Tags".into(),
+                "Layers".into(),
             ],
             &[
                 vec![Cell::from(self.identifier.clone())],
                 vec![Cell::from(self.manifest_digest.clone())],
                 vec![Cell::from(self.cascade_tags_written.join(","))],
                 vec![Cell::from(self.canonical_tags_written.len().to_string())],
+                vec![Cell::from(format!(
+                    "mounted={},uploaded={},verified={}",
+                    self.layers.mounted, self.layers.uploaded, self.layers.verified
+                ))],
             ],
         );
     }
@@ -89,7 +101,7 @@ impl Printable for PushReport {
 mod tests {
     use ocx_lib::{
         cli::{DataInterface, Printer},
-        oci,
+        oci::{self, LayerCounts},
         publisher::PushOutcome,
     };
 
@@ -159,17 +171,47 @@ mod tests {
         );
     }
 
+    /// `layers` serializes as an additive keyed object with the three
+    /// mount/upload/verify counts.
+    #[test]
+    fn layers_json_shape() {
+        let report = PushReport::from_outcome(
+            "tool:1.0.0".to_string(),
+            PushOutcome {
+                layer_counts: LayerCounts {
+                    mounted: 2,
+                    uploaded: 1,
+                    verified: 3,
+                },
+                ..outcome("d", Vec::new(), Vec::new())
+            },
+        );
+        let value = serde_json::to_value(&report).unwrap();
+
+        let layers = value.get("layers").expect("layers key present");
+        assert_eq!(layers.get("mounted").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(layers.get("uploaded").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(layers.get("verified").and_then(|v| v.as_u64()), Some(3));
+    }
+
     /// `print_plain` emits the one-row table without panicking when colour is
     /// disabled — keeps a plain push from being silent.
     #[test]
     fn print_plain_smoke() {
         let report = PushReport::from_outcome(
             "tool:1.0.0".to_string(),
-            outcome(
-                "d",
-                vec!["1".to_string(), "latest".to_string()],
-                vec![format!("sha256.{}", "b".repeat(64))],
-            ),
+            PushOutcome {
+                layer_counts: LayerCounts {
+                    mounted: 1,
+                    uploaded: 0,
+                    verified: 0,
+                },
+                ..outcome(
+                    "d",
+                    vec!["1".to_string(), "latest".to_string()],
+                    vec![format!("sha256.{}", "b".repeat(64))],
+                )
+            },
         );
         let data = DataInterface::new(Printer::new(false, false));
         report.print_plain(&data);
