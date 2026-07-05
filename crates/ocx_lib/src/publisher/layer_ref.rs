@@ -135,54 +135,71 @@ pub enum LayerRef {
     /// An archive file to upload as a new layer. Media type is
     /// inferred from the file extension at push time. `layout` carries
     /// optional per-layer strip + output prefix (default: none).
+    /// `mount_from` carries an optional source repository to attempt a
+    /// cross-repository blob mount from before falling back to upload
+    /// (default: none).
     File {
         path: PathBuf,
         layout: oci::LayerLayoutSpec,
+        mount_from: Option<String>,
     },
     /// An existing layer already present in the registry, referenced
     /// by digest. The `media_type` is declared by the caller because
     /// the OCI spec does not expose it via blob HEAD; see the
     /// [`FromStr`](std::str::FromStr) impl for the CLI syntax. `layout`
     /// carries optional per-layer strip + output prefix (default: none).
+    /// `mount_from` carries an optional source repository to attempt a
+    /// cross-repository blob mount from before falling back to a
+    /// blob-existence check (default: none).
     Digest {
         digest: oci::Digest,
         media_type: ArchiveMediaType,
         layout: oci::LayerLayoutSpec,
+        mount_from: Option<String>,
     },
 }
 
 impl std::fmt::Display for LayerRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LayerRef::File { path, layout } => {
-                write!(f, "{}{}", path.display(), layout_suffix(layout))
+            LayerRef::File {
+                path,
+                layout,
+                mount_from,
+            } => {
+                write!(f, "{}{}", path.display(), layout_suffix(layout, mount_from.as_deref()))
             }
             LayerRef::Digest {
                 digest,
                 media_type,
                 layout,
+                mount_from,
             } => {
                 write!(
                     f,
                     "{digest}.{}{}",
                     media_type.canonical_extension(),
-                    layout_suffix(layout)
+                    layout_suffix(layout, mount_from.as_deref())
                 )
             }
         }
     }
 }
 
-/// Renders the `:strip=…,prefix=…` layout tail, emitting only fields the
-/// publisher set (order: strip, then prefix). Returns an empty string for the
-/// default (empty) layout so a layout-free ref round-trips to today's output.
-fn layout_suffix(layout: &oci::LayerLayoutSpec) -> String {
+/// Renders the `:strip=…,prefix=…,from=…` layout tail, emitting only fields
+/// the publisher set (order: strip, prefix, from). Returns an empty string
+/// for the default (no layout, no mount source) so an unadorned ref
+/// round-trips to today's output.
+fn layout_suffix(layout: &oci::LayerLayoutSpec, mount_from: Option<&str>) -> String {
     let mut parts = Vec::new();
     if let Some(strip) = layout.strip {
         parts.push(format!("strip={strip}"));
     }
     if let Some(prefix) = &layout.prefix {
         parts.push(format!("prefix={}", prefix.to_wire()));
+    }
+    if let Some(from) = mount_from {
+        parts.push(format!("from={from}"));
     }
     if parts.is_empty() {
         String::new()
@@ -191,15 +208,15 @@ fn layout_suffix(layout: &oci::LayerLayoutSpec) -> String {
     }
 }
 
-/// Splits off an optional `:strip=…,prefix=…` layout tail per the commit rule:
-/// the split point is the **last** `:` whose tail begins with `strip=` or
-/// `prefix=`. Returns `(ref, tail)` when such a `:` exists, else `None` (the
-/// whole string is the ref).
+/// Splits off an optional `:strip=…,prefix=…,from=…` layout tail per the
+/// commit rule: the split point is the **last** `:` whose tail begins with
+/// `strip=`, `prefix=`, or `from=`. Returns `(ref, tail)` when such a `:`
+/// exists, else `None` (the whole string is the ref).
 fn split_layout_tail(s: &str) -> Option<(&str, &str)> {
     let mut search_end = s.len();
     while let Some(idx) = s[..search_end].rfind(':') {
         let tail = &s[idx + 1..];
-        if tail.starts_with("strip=") || tail.starts_with("prefix=") {
+        if tail.starts_with("strip=") || tail.starts_with("prefix=") || tail.starts_with("from=") {
             return Some((&s[..idx], tail));
         }
         search_end = idx;
@@ -207,21 +224,42 @@ fn split_layout_tail(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Parses a committed layout tail (`strip=N`, `prefix=P`, comma-separated) into
-/// a [`oci::LayerLayoutSpec`]. `full` is the original ref string, echoed in the
-/// error for context.
+/// Checks that a `from=` value is a plausible OCI repository path: nonempty,
+/// restricted to `[a-z0-9._/-]`, and without a leading or trailing `/`.
+///
+/// This is a syntax-only check (mirrors the repository-name character class
+/// the OCI distribution spec expects) — it does not verify the repository
+/// exists.
+fn validate_mount_from(value: &str) -> Result<(), String> {
+    if value.starts_with('/') || value.ends_with('/') {
+        return Err("must not start or end with '/'".to_string());
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '/' | '-'))
+    {
+        return Err("must contain only lowercase letters, digits, '.', '_', '/', '-'".to_string());
+    }
+    Ok(())
+}
+
+/// Parses a committed layout tail (`strip=N`, `prefix=P`, `from=REPO`,
+/// comma-separated) into a [`oci::LayerLayoutSpec`] plus an optional mount
+/// source repository. `full` is the original ref string, echoed in the error
+/// for context.
 ///
 /// Once the tail is committed to layout parsing (see [`split_layout_tail`]), any
-/// invalid value — non-`u8` strip, escaping/over-long prefix, unknown key,
-/// duplicate key, or empty value — is a hard [`LayerRefParseError::MalformedLayout`],
-/// never a silent fallback to a file ref.
-fn parse_layout_tail(full: &str, tail: &str) -> Result<oci::LayerLayoutSpec, LayerRefParseError> {
+/// invalid value — non-`u8` strip, escaping/over-long prefix, malformed `from`
+/// repository, unknown key, duplicate key, or empty value — is a hard
+/// [`LayerRefParseError::MalformedLayout`], never a silent fallback to a file ref.
+fn parse_layout_tail(full: &str, tail: &str) -> Result<(oci::LayerLayoutSpec, Option<String>), LayerRefParseError> {
     let malformed = |reason: String| LayerRefParseError::MalformedLayout {
         spec: full.to_string(),
         reason,
     };
 
     let mut layout = oci::LayerLayoutSpec::default();
+    let mut mount_from = None;
     for entry in tail.split(',') {
         let (key, value) = entry
             .split_once('=')
@@ -263,10 +301,21 @@ fn parse_layout_tail(full: &str, tail: &str) -> Result<oci::LayerLayoutSpec, Lay
                 }
                 layout.prefix = Some(prefix);
             }
+            "from" => {
+                if mount_from.is_some() {
+                    return Err(malformed("duplicate 'from' key".to_string()));
+                }
+                if value.is_empty() {
+                    return Err(malformed("empty 'from' value".to_string()));
+                }
+                validate_mount_from(value)
+                    .map_err(|reason| malformed(format!("invalid 'from' repository '{value}': {reason}")))?;
+                mount_from = Some(value.to_string());
+            }
             other => return Err(malformed(format!("unknown layout key '{other}'"))),
         }
     }
-    Ok(layout)
+    Ok((layout, mount_from))
 }
 
 impl std::str::FromStr for LayerRef {
@@ -291,14 +340,24 @@ impl std::str::FromStr for LayerRef {
     ///    [`LayerRef::File`]. To force file interpretation of a
     ///    pathological filename that happens to match shape 1, prefix
     ///    it with `./` (standard Unix disambiguation).
+    ///
+    /// Either shape may carry an optional `:strip=N,prefix=P,from=REPO` layout
+    /// tail (all three keys optional, comma-separated, order-independent on
+    /// input). `from=REPO` names a source repository to attempt a
+    /// cross-repository blob mount from before falling back to upload
+    /// (populates the `mount_from` field of the returned variant).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Split off an optional `:strip=…,prefix=…` layout tail first. Once a
-        // tail is committed to layout parsing, an invalid value is a hard error
-        // (never a silent fallback to a file ref). A string with no such tail is
-        // the whole ref, preserving today's behaviour (incl. bare-digest S1).
-        let (ref_str, layout) = match split_layout_tail(s) {
-            Some((base, tail)) => (base, parse_layout_tail(s, tail)?),
-            None => (s, oci::LayerLayoutSpec::default()),
+        // Split off an optional `:strip=…,prefix=…,from=…` layout tail first.
+        // Once a tail is committed to layout parsing, an invalid value is a
+        // hard error (never a silent fallback to a file ref). A string with no
+        // such tail is the whole ref, preserving today's behaviour (incl.
+        // bare-digest S1).
+        let (ref_str, layout, mount_from) = match split_layout_tail(s) {
+            Some((base, tail)) => {
+                let (layout, mount_from) = parse_layout_tail(s, tail)?;
+                (base, layout, mount_from)
+            }
+            None => (s, oci::LayerLayoutSpec::default(), None),
         };
 
         // Pathological filename escape: a leading `./` or `/` means
@@ -319,6 +378,7 @@ impl std::str::FromStr for LayerRef {
                             digest,
                             media_type: *media_type,
                             layout,
+                            mount_from,
                         });
                     }
                 }
@@ -332,6 +392,7 @@ impl std::str::FromStr for LayerRef {
         Ok(LayerRef::File {
             path: PathBuf::from(ref_str),
             layout,
+            mount_from,
         })
     }
 }
@@ -502,6 +563,7 @@ mod tests {
         let lr = LayerRef::File {
             path: PathBuf::from("my/archive.tar.xz"),
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         };
         assert_eq!(lr.to_string(), "my/archive.tar.xz");
     }
@@ -513,6 +575,7 @@ mod tests {
             digest: oci::Digest::Sha256(hex.clone()),
             media_type: ArchiveMediaType::TarGz,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         };
         assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.gz"));
     }
@@ -524,6 +587,7 @@ mod tests {
             digest: oci::Digest::Sha256(hex.clone()),
             media_type: ArchiveMediaType::TarXz,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         };
         assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.xz"));
     }
@@ -596,6 +660,7 @@ mod tests {
             digest: oci::Digest::Sha256(hex.clone()),
             media_type: ArchiveMediaType::TarZstd,
             layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
         };
         assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.zst"));
     }
@@ -656,7 +721,7 @@ mod tests {
         // path, and the layout carries both fields.
         let parsed: LayerRef = "layer.tar.gz:strip=1,prefix=share".parse().expect("parses");
         match parsed {
-            LayerRef::File { path, layout } => {
+            LayerRef::File { path, layout, .. } => {
                 assert_eq!(
                     path,
                     std::path::Path::new("layer.tar.gz"),
@@ -729,6 +794,7 @@ mod tests {
                 strip: Some(1),
                 prefix: None,
             },
+            mount_from: None,
         };
         assert_eq!(
             with_layout.to_string(),
@@ -745,5 +811,114 @@ mod tests {
             matches!(err, LayerRefParseError::BareDigest(_)),
             "tail-split bare digest must be BareDigest, got {err:?}"
         );
+    }
+
+    // ── `from=` mount-source grammar ──────────────────────────────────────
+
+    /// A `from=` tail on a file ref populates `mount_from` and round-trips
+    /// through `Display`.
+    #[test]
+    fn from_str_file_with_mount_from_round_trips() {
+        let input = "layer.tar.gz:from=pip-test/pkg";
+        let parsed: LayerRef = input.parse().expect("from= parses");
+        match &parsed {
+            LayerRef::File { mount_from, .. } => {
+                assert_eq!(mount_from.as_deref(), Some("pip-test/pkg"));
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+        assert_eq!(parsed.to_string(), input);
+    }
+
+    /// A `from=` tail on a digest ref populates `mount_from` and round-trips.
+    #[test]
+    fn from_str_digest_with_mount_from_round_trips() {
+        let hex = "a".repeat(64);
+        let input = format!("sha256:{hex}.tar.gz:from=base/image");
+        let parsed: LayerRef = input.parse().expect("from= parses");
+        match &parsed {
+            LayerRef::Digest { mount_from, .. } => {
+                assert_eq!(mount_from.as_deref(), Some("base/image"));
+            }
+            other => panic!("expected Digest, got {other:?}"),
+        }
+        assert_eq!(parsed.to_string(), input);
+    }
+
+    /// `strip`, `prefix`, and `from` combine in a single tail and emit in the
+    /// fixed `strip,prefix,from` order regardless of input order.
+    #[test]
+    fn from_str_all_three_layout_keys_combine_and_normalize_order() {
+        let input = "layer.tar.gz:from=pip-test/pkg,strip=1,prefix=share";
+        let parsed: LayerRef = input.parse().expect("all three keys parse");
+        match &parsed {
+            LayerRef::File { layout, mount_from, .. } => {
+                assert_eq!(layout.strip, Some(1));
+                assert_eq!(
+                    layout.prefix.as_ref().map(|p| p.as_path()),
+                    Some(std::path::Path::new("share"))
+                );
+                assert_eq!(mount_from.as_deref(), Some("pip-test/pkg"));
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+        // Display normalizes to the fixed strip,prefix,from order regardless
+        // of the order the caller supplied them in.
+        assert_eq!(
+            parsed.to_string(),
+            "layer.tar.gz:strip=1,prefix=share,from=pip-test/pkg"
+        );
+    }
+
+    /// An empty `from=` value is `MalformedLayout`, matching `strip`/`prefix`.
+    #[test]
+    fn from_str_empty_from_value_is_malformed() {
+        assert!(matches!(
+            "layer.tar.gz:from=".parse::<LayerRef>(),
+            Err(LayerRefParseError::MalformedLayout { .. })
+        ));
+    }
+
+    /// A duplicate `from` key is `MalformedLayout`, matching `strip`/`prefix`.
+    #[test]
+    fn from_str_duplicate_from_key_is_malformed() {
+        assert!(matches!(
+            "layer.tar.gz:from=a/b,from=c/d".parse::<LayerRef>(),
+            Err(LayerRefParseError::MalformedLayout { .. })
+        ));
+    }
+
+    /// A `from` value with a leading or trailing `/`, or characters outside
+    /// `[a-z0-9._/-]`, is rejected as `MalformedLayout`.
+    #[test]
+    fn from_str_malformed_from_value_is_rejected() {
+        for bad in ["/leading", "trailing/", "Has-Upper", "has space", "has:colon"] {
+            let input = format!("layer.tar.gz:from={bad}");
+            assert!(
+                matches!(
+                    input.parse::<LayerRef>(),
+                    Err(LayerRefParseError::MalformedLayout { .. })
+                ),
+                "expected MalformedLayout for from={bad}"
+            );
+        }
+    }
+
+    /// A ref with no `from=` tail leaves `mount_from` as `None` (default,
+    /// preserving today's behaviour for both variants).
+    #[test]
+    fn from_str_no_from_tail_yields_none_mount_from() {
+        let file: LayerRef = "archive.tar.gz".parse().expect("file parses");
+        match file {
+            LayerRef::File { mount_from, .. } => assert!(mount_from.is_none()),
+            other => panic!("expected File, got {other:?}"),
+        }
+
+        let hex = "a".repeat(64);
+        let digest: LayerRef = format!("sha256:{hex}.tar.gz").parse().expect("digest parses");
+        match digest {
+            LayerRef::Digest { mount_from, .. } => assert!(mount_from.is_none()),
+            other => panic!("expected Digest, got {other:?}"),
+        }
     }
 }

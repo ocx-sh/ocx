@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt as _;
 use super::builder::MAX_UPLOAD_REQUEST_BYTES;
 use super::error::ClientError;
 use super::progress_reader::ProgressReader;
-use super::transport::{OciTransport, ProgressFn, Result};
+use super::transport::{MountOutcome, OciTransport, ProgressFn, Result};
 use crate::{auth, log, oci};
 
 /// Real OCI transport that delegates to the `oci_client` crate.
@@ -347,6 +347,43 @@ impl OciTransport for NativeTransport {
         on_progress: ProgressFn,
     ) -> Result<String> {
         self.do_push_blob(image, data, digest, on_progress).await
+    }
+
+    async fn mount_blob(
+        &self,
+        image: &oci::native::Reference,
+        source_repository: &str,
+        digest: &oci::Digest,
+    ) -> Result<MountOutcome> {
+        let source = oci::identifier::mount_source_reference(image.registry(), source_repository);
+        let digest_str = digest.to_string();
+        log::debug!(
+            "Attempting to mount blob {} from {} into {}",
+            digest_str,
+            source_repository,
+            image
+        );
+        // A 202 mount-miss is spec-legal (registry declined and opened a regular
+        // upload session instead) — that session is deliberately abandoned here;
+        // `push_multi_layer_manifest`'s existing fallback re-uploads through the
+        // normal `push_blob` path. A genuine transport error is likewise mapped
+        // to `UploadRequired` rather than propagated: mounting is purely an
+        // upload-avoidance optimization, so declining is never itself fatal —
+        // what the caller's fallback then finds is the caller's business.
+        match self.client.mount_blob(image, &source, digest_str.as_str()).await {
+            Ok(oci_client::client::BlobMountResponse::Mounted) => Ok(MountOutcome::Mounted),
+            Ok(oci_client::client::BlobMountResponse::UploadSessionOpened(_)) => Ok(MountOutcome::UploadRequired),
+            Err(e) => {
+                log::warn!(
+                    "Mount of blob {} from {} into {} declined, falling back to upload: {}",
+                    digest_str,
+                    source_repository,
+                    image,
+                    e
+                );
+                Ok(MountOutcome::UploadRequired)
+            }
+        }
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {

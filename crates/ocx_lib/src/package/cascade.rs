@@ -204,9 +204,9 @@ pub async fn resolve_cascade_tags(
 /// `annotations` land on the primary tag's index and on every cascade tag's
 /// index alike.
 ///
-/// Returns the pushed index digest, the cascade tags, and the canonical tag
-/// that was written (`None` when `canonical_tag` is `false`, or when the
-/// merged index carries no entry for this platform).
+/// Returns the pushed index digest, the cascade tags, the canonical tag that
+/// was written (`None` when `canonical_tag` is `false`, or when the merged
+/// index carries no entry for this platform), and the layer-push counts.
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
@@ -215,7 +215,7 @@ pub async fn push_with_cascade(
     version: &Version,
     canonical_tag: bool,
     annotations: &BTreeMap<String, String>,
-) -> Result<(oci::Digest, Vec<String>, Option<String>)> {
+) -> Result<(oci::Digest, Vec<String>, Option<String>, oci::LayerCounts)> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
         &package_info.identifier,
@@ -225,7 +225,7 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    let (manifest_digest, index) = client
+    let (manifest_digest, index, layer_counts) = client
         .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags, annotations)
         .await?;
 
@@ -241,7 +241,7 @@ pub async fn push_with_cascade(
         None
     };
 
-    Ok((manifest_digest, cascade_tags, canonical_tag_written))
+    Ok((manifest_digest, cascade_tags, canonical_tag_written, layer_counts))
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.
@@ -968,7 +968,7 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let (_, _, canonical_tag_written) =
+            let (_, _, canonical_tag_written, _) =
                 push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
                     .await
                     .expect("cascade push succeeds");
@@ -996,7 +996,7 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let (_, _, canonical_tag_written) =
+            let (_, _, canonical_tag_written, _) =
                 push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
                     .await
                     .expect("cascade push succeeds");

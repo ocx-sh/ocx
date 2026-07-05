@@ -102,6 +102,7 @@ mod tests {
                 .expect("digest parses"),
             cascade_tags,
             canonical_tags,
+            layer_counts: Default::default(),
         }
     }
 

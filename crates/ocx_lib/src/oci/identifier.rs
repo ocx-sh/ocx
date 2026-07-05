@@ -203,6 +203,23 @@ impl Identifier {
     }
 }
 
+/// Builds the synthetic source reference a cross-repository blob mount needs.
+///
+/// A mount names its source repository in the `from=` query parameter of an
+/// upload POST addressed at the *target* repository, and `oci_client`'s
+/// `mount_blob` reads only `repository()` off this value — the registry and tag
+/// are never sent. `"latest"` is therefore an inert placeholder, and the
+/// registry is carried solely to keep the reference well-formed.
+///
+/// It lives beside [`Identifier::canonical_reference`] because it is push-path
+/// construction: mounting happens during a push, and the push path is
+/// mirror-free by design (remote/proxy mirrors are read-only). Building it here
+/// rather than in the transport keeps `native::Reference` construction inside
+/// the two seam files the mirror-invariant gate allows.
+pub(crate) fn mount_source_reference(registry: &str, source_repository: &str) -> native::Reference {
+    native::Reference::with_tag(registry.to_string(), source_repository.to_string(), "latest".into())
+}
+
 /// Returns the canonical, untagged OCX CLI identifier (`ocx.sh/ocx/cli`).
 ///
 /// This is the single source of truth for the well-known self identifier used
