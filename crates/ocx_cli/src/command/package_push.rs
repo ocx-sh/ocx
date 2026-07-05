@@ -72,16 +72,21 @@ pub struct PackagePush {
     ///     does not expose a layer's media type via blob HEAD, so the suffix
     ///     is required: OCX refuses to guess.
     ///
-    /// Either form may carry an optional layout tail `:strip=N,prefix=P` that
-    /// controls how the layer is placed when the package is installed:
+    /// Either form may carry an optional layout tail
+    /// `:strip=N,prefix=P,from=REPO` that controls how the layer is placed
+    /// when the package is installed and where it uploads from:
     ///   - `strip=N` drops the leading N path components (like
     ///     `tar --strip-components=N`).
     ///   - `prefix=P` relocates the layer under the relative subdirectory `P`
     ///     (must stay inside the package; `..`, absolute, and Windows-style
     ///     paths are rejected).
+    ///   - `from=REPO` attempts a cross-repository blob mount from `REPO`
+    ///     (same registry) before falling back to a normal upload. Use this
+    ///     to reuse a layer already pushed to another repository without
+    ///     re-uploading its bytes.
     ///
-    /// Both keys are optional and comma-separated; omit the tail for the
-    /// default (no strip, package root).
+    /// All three keys are optional and comma-separated; omit the tail for
+    /// the default (no strip, package root, no mount attempt).
     ///
     /// Digest references enable layer reuse: a base layer pushed once can be
     /// referenced by digest from many packages without re-uploading. Zero
@@ -91,6 +96,7 @@ pub struct PackagePush {
     /// Examples:
     ///   ocx package push repo:2.0.0 ./libs.tar.gz:strip=1,prefix=share
     ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst
+    ///   ocx package push app:1.0.0 ./layer.tar.gz:from=base-images/layer
     layers: Vec<LayerRef>,
 }
 
@@ -143,12 +149,13 @@ impl PackagePush {
         };
 
         // Emit the structured push report. Plain output is a one-row table
-        // (identifier, digest, cascade tags); `--format json` serializes the
-        // report consumed by `ocx-mirror pipeline push`.
+        // (identifier, digest, cascade tags, layer counts); `--format json`
+        // serializes the report consumed by `ocx-mirror pipeline push`.
         context.api().report(&crate::api::data::push::PushReport::new(
             identifier.to_string(),
             outcome.manifest_digest.to_string(),
             outcome.cascade_tags,
+            outcome.layer_counts,
         ))?;
 
         Ok(ExitCode::SUCCESS)

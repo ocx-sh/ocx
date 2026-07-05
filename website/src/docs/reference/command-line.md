@@ -2095,13 +2095,13 @@ ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.
 
 #### Layer layout {#package-push-layout}
 
-Any layer argument to [`push`](#package-push) or [`test`](#package-test) accepts an optional `:strip=N,prefix=P` suffix that overrides [`strip_components`][metadata-strip-components] for that one layer:
+Any layer argument to [`push`](#package-push) or [`test`](#package-test) accepts an optional `:strip=N,prefix=P,from=REPO` suffix that overrides [`strip_components`][metadata-strip-components] for that one layer and/or requests cross-repository blob reuse:
 
 ```
-<ref>:strip=<N>,prefix=<P>
+<ref>:strip=<N>,prefix=<P>,from=<REPO>
 ```
 
-Both fields are optional and input order is free — `prefix=share,strip=1` parses the same as `strip=1,prefix=share`. `<N>` is a `u8`. `<P>` is a relative, non-escaping path — no leading `/`, no `..`, no Windows drive or UNC prefix, bounded to 32 components / 4096 bytes total — under which the layer's post-strip tree is placed in the assembled `content/` directory instead of at the package root.
+All three fields are optional, input order is free, and each may appear on its own or combined — `prefix=share,strip=1` parses the same as `strip=1,prefix=share`. `<N>` is a `u8`. `<P>` is a relative, non-escaping path — no leading `/`, no `..`, no Windows drive or UNC prefix, bounded to 32 components / 4096 bytes total — under which the layer's post-strip tree is placed in the assembled `content/` directory instead of at the package root. `<REPO>` names a repository in the same registry (lowercase letters, digits, `.`, `_`, `/`, `-`; no leading or trailing `/`) that `push` attempts a registry-side blob mount from before falling back to a normal upload — useful for reusing a layer already pushed elsewhere without re-uploading its bytes. A mount attempt never fails the push: a declined mount (or any transport error) silently falls back to upload. The JSON push report's `layers` object (`{mounted, uploaded, verified}`) records how each layer was resolved.
 
 ```shell
 # base.tar.gz ships wrapped in a `1.2.3/` directory; strip it and relocate the
@@ -2118,9 +2118,10 @@ The resolved values are carried in the manifest layer descriptor's `annotations`
 - Layers are a flat merge, not an overlay stack. OCI whiteout entries (`.wh.*`, `.wh..wh..opq`) — e.g. inside a foreign layer reused by digest from a Docker/BuildKit build — pass through as ordinary files; OCX never interprets them as deletions.
 - A deep `prefix` combined with a deep layer tree can approach the legacy Windows `MAX_PATH` limit. Keep `prefix` shallow for packages that install on Windows.
 - `<P>` cannot contain a comma — the layout suffix is a comma-separated `key=value` list with no escaping. This constrains the (typically short) prefix value itself, not the file paths inside the layer.
-- A layer filename that literally contains `:strip=` or `:prefix=` cannot be pushed as a plain path — there is no escape hatch, unlike the `./` disambiguation used above for digest-shaped filenames. Avoid such filenames.
+- A layer filename that literally contains `:strip=`, `:prefix=`, or `:from=` cannot be pushed as a plain path — there is no escape hatch, unlike the `./` disambiguation used above for digest-shaped filenames. Avoid such filenames.
+- `from=REPO` is push-only — it is never carried into the manifest or its annotations, unlike `strip`/`prefix`.
 
-Malformed layout syntax at publish (`strip` not a `u8`, an unknown key, a duplicate key, an empty value, or an escaping/oversized `prefix`) is a CLI usage error (exit 64). The same `prefix` bound is re-validated when a layer is read back — manifests are third-party-writable — and a malformed annotation there is a data error (exit 65).
+Malformed layout syntax at publish (`strip` not a `u8`, an unknown key, a duplicate key, an empty value, an escaping/oversized `prefix`, or a `from` value outside `[a-z0-9._/-]` or with a leading/trailing `/`) is a CLI usage error (exit 64). The same `prefix` bound is re-validated when a layer is read back — manifests are third-party-writable — and a malformed annotation there is a data error (exit 65).
 
 #### `test` {#package-test}
 
@@ -2138,7 +2139,7 @@ ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYE
 
 **Arguments**
 
-- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`, including the optional [`:strip=N,prefix=P` layout suffix][cmd-package-push-layout]: a path to a `.tar.gz`/`.tar.xz`/`.tar.zst` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs when a local policy (`--offline` or `--frozen`) is active produce exit code 81 (`PolicyBlocked`).
+- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`, including the optional [`:strip=N,prefix=P,from=REPO` layout suffix][cmd-package-push-layout]: a path to a `.tar.gz`/`.tar.xz`/`.tar.zst` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs when a local policy (`--offline` or `--frozen`) is active produce exit code 81 (`PolicyBlocked`). `from=REPO` is meaningless for `test` (there is no registry push) and is simply ignored if present.
 - `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required unless `--script` is given.
 
 **Options**
