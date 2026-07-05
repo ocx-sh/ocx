@@ -57,6 +57,12 @@ pub struct PushOutcome {
     /// hence one tag. Empty under `--no-canonical-tag`, and empty for any
     /// platform whose entry the merged index did not carry.
     pub canonical_tags: Vec<String>,
+    /// Counts of layer-push outcomes (mounted/uploaded/verified), summed over
+    /// every platform this push fanned out to. Layer blobs only — the config
+    /// blob and manifest are not layers and are excluded. An `uploaded` count
+    /// may still have HEAD-skipped an already-present blob inside
+    /// `push_blob`'s blob-exists short-circuit.
+    pub layer_counts: oci::LayerCounts,
 }
 
 impl Publisher {
@@ -112,6 +118,7 @@ impl Publisher {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
         let mut canonical_tags: Vec<String> = Vec::new();
+        let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (platform {})",
@@ -120,7 +127,8 @@ impl Publisher {
             );
             let identifier = info.identifier.clone();
             let platform = info.platform.clone();
-            let (digest, manifest) = self.client.push_package(info, layers, annotations).await?;
+            let (digest, manifest, counts) = self.client.push_package(info, layers, annotations).await?;
+            layer_counts += counts;
             if canonical_tag
                 && let Some(tag) = self
                     .client
@@ -136,6 +144,7 @@ impl Publisher {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags: Vec::new(),
             canonical_tags,
+            layer_counts,
         })
     }
 
@@ -161,6 +170,7 @@ impl Publisher {
         let mut manifest_digest: Option<oci::Digest> = None;
         let mut cascade_tags: Vec<String> = Vec::new();
         let mut canonical_tags: Vec<String> = Vec::new();
+        let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (cascade, platform {})",
@@ -170,7 +180,7 @@ impl Publisher {
             let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
                 crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string())
             })?;
-            let (digest, tags, canonical) = package::cascade::push_with_cascade(
+            let (digest, tags, canonical, counts) = package::cascade::push_with_cascade(
                 &self.client,
                 info,
                 layers,
@@ -181,6 +191,7 @@ impl Publisher {
             )
             .await?;
             manifest_digest = Some(digest);
+            layer_counts += counts;
             for tag in tags {
                 if !cascade_tags.contains(&tag) {
                     cascade_tags.push(tag);
@@ -196,6 +207,7 @@ impl Publisher {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags,
             canonical_tags,
+            layer_counts,
         })
     }
 
