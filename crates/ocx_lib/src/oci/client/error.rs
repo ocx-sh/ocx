@@ -30,6 +30,25 @@ pub enum ClientError {
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
+    /// A single-layer artifact manifest's `artifactType` did not match what
+    /// the caller expected. Raised by
+    /// [`crate::oci::Client::fetch_single_layer_artifact`].
+    #[error("unexpected artifact type: expected '{expected}', got {actual:?}")]
+    UnexpectedArtifactType { expected: String, actual: Option<String> },
+    /// A single-layer artifact manifest had zero or more than one layer.
+    /// Raised by [`crate::oci::Client::fetch_single_layer_artifact`].
+    #[error("expected exactly one layer, got {count}")]
+    WrongLayerCount { count: usize },
+    /// A single-layer artifact's layer `mediaType` did not match what the
+    /// caller expected. Raised by
+    /// [`crate::oci::Client::fetch_single_layer_artifact`].
+    #[error("unexpected layer media type: expected '{expected}', got '{actual}'")]
+    UnexpectedLayerMediaType { expected: String, actual: String },
+    /// A single-layer artifact's declared layer size exceeded the
+    /// caller-supplied ceiling (CWE-400 pre-check, before any bytes are
+    /// fetched). Raised by [`crate::oci::Client::fetch_single_layer_artifact`].
+    #[error("layer size {declared} exceeds the maximum allowed {maximum} bytes")]
+    LayerSizeExceeded { declared: i64, maximum: u64 },
     /// The requested manifest does not exist in the registry.
     #[error("manifest not found: {0}")]
     ManifestNotFound(String),
@@ -105,6 +124,55 @@ impl ClientError {
     }
 }
 
+// ── Shared artifact-fetch shape classification ──────────────────────────────
+
+/// Intermediate classification of a [`ClientError`] returned by
+/// [`crate::oci::client::Client::fetch_single_layer_artifact`], shared by
+/// every domain that maps the fetch failure onto its own error taxonomy —
+/// `crate::patch::persistence` and `crate::managed_config::persistence` had
+/// byte-identical match arms translating `ClientError`'s shape-validation
+/// variants onto their own (identically-shaped) domain enum. Domains keep
+/// their own error type (one enum per module); this only factors out the
+/// `ClientError` classification itself.
+#[derive(Debug)]
+pub(crate) enum ArtifactFetchError {
+    /// The manifest was not a single-image manifest (image index or
+    /// otherwise unexpected shape).
+    UnexpectedManifest { detail: String },
+    /// The artifact type did not match what the caller expected.
+    UnexpectedArtifactType { actual: Option<String> },
+    /// The manifest had zero or more than one layer.
+    WrongLayerCount { count: usize },
+    /// The layer's `mediaType` did not match what the caller expected.
+    UnexpectedLayerMediaType { expected: String, actual: String },
+    /// The declared layer size exceeded the caller-supplied ceiling.
+    LayerSizeExceeded { declared: i64, maximum: u64 },
+    /// Every other `ClientError` — the caller's own catch-all (network, auth,
+    /// registry failures, etc).
+    Other(ClientError),
+}
+
+impl ArtifactFetchError {
+    /// Classifies `error`. `manifest_kind` is spliced into the
+    /// `UnexpectedManifestType` detail message (e.g. `"__ocx.patch"`,
+    /// `"managed config"`) so each domain's message stays specific.
+    pub(crate) fn classify(error: ClientError, manifest_kind: &str) -> Self {
+        match error {
+            ClientError::UnexpectedManifestType => Self::UnexpectedManifest {
+                detail: format!("expected image manifest for {manifest_kind}, got image index"),
+            },
+            ClientError::UnexpectedArtifactType { actual, .. } => Self::UnexpectedArtifactType { actual },
+            ClientError::WrongLayerCount { count } => Self::WrongLayerCount { count },
+            ClientError::UnexpectedLayerMediaType { expected, actual } => {
+                Self::UnexpectedLayerMediaType { expected, actual }
+            }
+            ClientError::LayerSizeExceeded { declared, maximum } => Self::LayerSizeExceeded { declared, maximum },
+            ClientError::InvalidManifest(detail) => Self::UnexpectedManifest { detail },
+            source => Self::Other(source),
+        }
+    }
+}
+
 impl ClassifyExitCode for ClientError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
@@ -119,6 +187,10 @@ impl ClassifyExitCode for ClientError {
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
             | Self::InvalidManifest(_)
+            | Self::UnexpectedArtifactType { .. }
+            | Self::WrongLayerCount { .. }
+            | Self::UnexpectedLayerMediaType { .. }
+            | Self::LayerSizeExceeded { .. }
             | Self::Serialization(_)
             | Self::InvalidEncoding(_) => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,

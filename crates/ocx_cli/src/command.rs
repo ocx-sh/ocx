@@ -9,6 +9,9 @@ use clap::Subcommand;
 pub mod about;
 pub mod add;
 pub mod clean;
+pub mod config;
+pub mod config_push;
+pub mod config_update;
 pub mod deps;
 pub mod deselect;
 pub mod direnv;
@@ -77,6 +80,9 @@ pub enum Command {
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
+    /// Manage the corporate managed-configuration tier.
+    #[command(subcommand)]
+    Config(config::ConfigGroup),
     /// direnv integration (init writes .envrc; export emits the env block).
     Direnv(direnv::Direnv),
     /// Operations related to the package index
@@ -128,6 +134,7 @@ impl Command {
             Command::Env(env) => env.execute(context).await,
             Command::Add(add) => add.execute(context).await,
             Command::Clean(clean) => clean.execute(context).await,
+            Command::Config(config_group) => config_group.execute(context).await,
             Command::Direnv(direnv) => direnv.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::About(about) => about.execute(context).await,

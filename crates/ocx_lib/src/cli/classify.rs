@@ -80,7 +80,11 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::cli::error::{MetadataResolutionError, UsageError};
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
+    use crate::config::managed::ManagedConfigError;
     use crate::file_structure::error::Error as FileStructureError;
+    use crate::managed_config::{
+        ManagedConfigFetchError, ManagedConfigPersistError, ManagedConfigPublishError, ManagedConfigUpdateError,
+    };
     use crate::oci::client::error::ClientError;
     use crate::oci::digest::error::DigestError;
     use crate::oci::identifier::error::IdentifierError;
@@ -125,6 +129,11 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PackageErrorKind);
     try_downcast!(DependencyError);
     try_downcast!(PatchError);
+    try_downcast!(ManagedConfigError);
+    try_downcast!(ManagedConfigFetchError);
+    try_downcast!(ManagedConfigPersistError);
+    try_downcast!(ManagedConfigUpdateError);
+    try_downcast!(ManagedConfigPublishError);
     try_downcast!(AuthError);
     try_downcast!(FileStructureError);
     try_downcast!(ArchiveError);
@@ -633,6 +642,103 @@ mod tests {
             ExitCode::DataError,
             "a wrapped hostile layout annotation must classify as DataError (65), not IoError (74)"
         );
+    }
+
+    // ── managed-config error classification ──────────────────────────────────
+
+    /// Error taxonomy: `ManagedConfigError::EmptySource` -> `ConfigError` (78).
+    #[test]
+    fn managed_config_empty_source_maps_to_config_error() {
+        let err = crate::config::managed::ManagedConfigError::EmptySource;
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// Error taxonomy: `ManagedConfigError::SnapshotRequired` -> `ConfigError`
+    /// (78) — a required snapshot that never synced, identical online/offline.
+    #[test]
+    fn managed_config_snapshot_required_maps_to_config_error() {
+        let identifier = crate::oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let err = crate::config::managed::ManagedConfigError::SnapshotRequired {
+            effective_source: identifier,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// Error taxonomy: `ManagedConfigFetchError::LayerDigestMismatch` ->
+    /// `DataError` (65) — a tampered/corrupt registry response (digest
+    /// re-verification lives in the fetch leg since managed-config v2).
+    #[test]
+    fn managed_config_fetch_digest_mismatch_maps_to_data_error() {
+        let err = crate::managed_config::ManagedConfigFetchError::LayerDigestMismatch {
+            declared: format!("sha256:{}", "a".repeat(64)),
+            computed: format!("sha256:{}", "b".repeat(64)),
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: `ManagedConfigPersistError::SnapshotWriteFailed` ->
+    /// `IoError` (74).
+    #[test]
+    fn managed_config_persist_snapshot_write_failed_maps_to_io_error() {
+        let err = crate::managed_config::ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::other("disk full"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// Error taxonomy: a package shape mismatch on fetch -> `DataError` (65)
+    /// — malformed registry data, not a network fault.
+    #[test]
+    fn managed_config_fetch_shape_error_maps_to_data_error() {
+        let err = crate::managed_config::ManagedConfigFetchError::NoAnyPlatformEntry;
+        assert_eq!(classify(err), ExitCode::DataError);
+        let err = crate::managed_config::ManagedConfigFetchError::MissingConfigToml;
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: the publish leg's validation rejections -> `ConfigError`
+    /// (78) — an operator payload mistake, caught before any registry write.
+    #[test]
+    fn managed_config_publish_validation_maps_to_config_error() {
+        let err = crate::managed_config::ManagedConfigPublishError::ContainsManagedSection;
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// `ManagedConfigUpdateError` delegates to its inner fetch/persist cause.
+    #[test]
+    fn managed_config_update_error_delegates_to_inner_persist_cause() {
+        let inner = crate::managed_config::ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::other("disk full"),
+        };
+        let err = crate::managed_config::ManagedConfigUpdateError::Persist(inner);
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// `ManagedConfigUpdateError::Fetch` wrapping a `FetchFailed` whose inner
+    /// OCI cause is an authentication failure classifies to `AuthError` (80) —
+    /// the update error delegates to the fetch error, which delegates to the
+    /// `ClientError`. A registry-auth rejection while `ocx config update`
+    /// fetches the managed-config snapshot must exit 80, never a generic
+    /// failure.
+    #[test]
+    fn managed_config_update_error_fetch_auth_maps_to_auth_error() {
+        let client_err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        let fetch_err = crate::managed_config::ManagedConfigFetchError::FetchFailed { source: client_err };
+        let err = crate::managed_config::ManagedConfigUpdateError::Fetch(fetch_err);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    /// Error taxonomy: `ManagedConfigUpdateError::SourceNotFound` -> `NotFound`
+    /// (79) — the resolved source has no manifest in the registry (a genuinely
+    /// absent ref, not a network/auth fault). Amended post-Codex-gate
+    /// 2026-07-05: this used to be a silent `NotConfigured` success.
+    #[test]
+    fn managed_config_update_error_source_not_found_maps_to_not_found() {
+        let identifier = crate::oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let err = crate::managed_config::ManagedConfigUpdateError::SourceNotFound {
+            effective_source: identifier,
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
     }
 
     /// Regression (exit-code 74 -> 64, second instance): the assemble-time D9

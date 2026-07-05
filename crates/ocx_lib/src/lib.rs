@@ -10,6 +10,10 @@ mod media_type;
 /// variant.
 pub use config::error::Error as ConfigError;
 pub use config::loader::{ConfigInputs, ConfigLoader};
+pub use config::managed::{
+    ManagedConfig, ManagedConfigError, RefreshPolicy, ResolvedManagedConfig, check_locked_managed_override,
+    enforce_required_snapshot, parse_interval, resolve_managed_config, resolve_managed_target, snapshot_matches_source,
+};
 pub use config::mirror::{MirrorConfig, MirrorConfigError, ParsedMirror, ResolvedMirrors, resolve_mirror_map};
 pub use config::patch::{
     PatchConfig, PatchConfigError, ResolvedPatchConfig, expand_patch_path, patches_from_env, resolve_patch_config,
@@ -33,6 +37,7 @@ pub mod error;
 pub mod file_structure;
 pub mod hardlink;
 pub mod log;
+pub mod managed_config;
 pub mod oci;
 pub mod package;
 pub mod package_manager;

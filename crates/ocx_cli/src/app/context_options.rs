@@ -171,6 +171,11 @@ impl ContextOptions {
             // from `OCX_PATCH_SNAPSHOT` (or a future `--patch-snapshot` flag)
             // and populated on the returned view; the parser tier starts empty.
             patch_snapshot: None,
+            // The effective managed-config source (flag > env > seed) is not
+            // derivable from `ContextOptions` alone; `Context::try_init` will
+            // populate this field once the managed-config tier is wired in
+            // (managed-config phase 4). The parser tier starts empty.
+            managed_config_source: None,
         }
     }
 }

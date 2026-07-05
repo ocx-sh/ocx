@@ -250,6 +250,12 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
         "mytool": "mytool:1.0.0",
         "corp-ca": "corp-ca:1.0.0",
     },
+    "setup:managed-config-onboard": {
+        "self": "ocx-self:0.0.1",
+    },
+    "setup:managed-config-ci": {
+        "cmake": "cmake:3.28",
+    },
     # ---- scenario family (src.scenarios.SCENARIOS) ----
     "scenario:BasicPackage": {
         "hello": "hello:1.0.0",

@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.helpers import make_package
+from src.registry import push_raw_config_package
 from src.runner import OcxRunner, PackageInfo, current_platform
 
 
@@ -533,6 +534,82 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
     return {"mytool": [mytool], "corp-ca": [companion]}
 
 
+def _alias_managed_config_host(ocx: OcxRunner, path_prefix: str) -> None:
+    """Alias the product-example host ``internal.company.com`` to the local
+    test registry via a ``[mirrors]`` entry.
+
+    Lets the on-screen ``--managed-config`` / ``OCX_MANAGED_CONFIG`` ref stay
+    byte-identical to the corporate example in the ADR while the actual fetch
+    is transparently routed to the local registry — the same ``[mirrors]``
+    host+path-prefix rewrite an operator would use to route traffic through a
+    corporate Artifactory/Nexus remote (see ``adr_managed_config_tier.md``
+    "Mirror posture"). ``path_prefix`` (SP7-derived) namespaces the artifact
+    path per provision call so concurrent xdist workers never collide.
+    """
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        '[mirrors."internal.company.com"]\n'
+        f'url = "http://{ocx.registry}/{path_prefix}"\n'
+    )
+
+
+def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Provision a workstation onboarding onto the ``[managed]`` config tier.
+
+    Publishes a stand-in ``ocx`` release for the ``__OCX_SELF_IMAGE`` bootstrap
+    seam that ``ocx self setup`` always probes (mirrors
+    ``test_managed_config.py::_publish_self_image``), pushes a managed-config
+    artifact, and aliases the corporate host from the product example
+    (``internal.company.com``) to the local test registry so the on-screen
+    ``--managed-config`` ref matches what an operator actually types.
+    """
+    self_pkg = make_package(
+        ocx, f"{prefix}ocx-self", "0.0.1", tmp_path,
+        new=True, cascade=False, bins=["ocx"],
+        outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
+    )
+
+    path_prefix = prefix.rstrip("_")
+    push_raw_config_package(
+        ocx.registry, f"{path_prefix}/ocx-config", "user",
+        b'[mirrors."ghcr.io"]\nurl = "https://ghcr.corp.example.com"\n',
+    )
+    _alias_managed_config_host(ocx, path_prefix)
+
+    return {"self": [self_pkg]}
+
+
+def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Provision a CI recipe onto the ``[managed]`` config tier.
+
+    Publishes ``cmake`` for the install step and pushes a managed-config
+    artifact, aliasing ``internal.company.com`` to the local test registry
+    exactly like ``managed_config_onboard`` — the CI recipe never writes a
+    seed, so no ``self setup`` bootstrap seam is needed here.
+    """
+    cmake_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    cmake = make_package(
+        ocx, f"{prefix}cmake", "3.28", tmp_path, bins=["cmake"], env=cmake_env,
+        outputs={"cmake": {"--version": (
+            "cmake version 3.28.3\n"
+            "\n"
+            "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
+        )}},
+    )
+
+    path_prefix = prefix.rstrip("_")
+    push_raw_config_package(
+        ocx.registry, f"{path_prefix}/ocx-config", "ci",
+        b'[mirrors."ghcr.io"]\nurl = "https://ghcr.corp.example.com"\n',
+    )
+    _alias_managed_config_host(ocx, path_prefix)
+
+    return {"cmake": [cmake]}
+
+
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 
 SETUPS: dict[str, SetupFn] = {
@@ -545,4 +622,6 @@ SETUPS: dict[str, SetupFn] = {
     "publisher": publisher,
     "patches-consumer": patches_consumer,
     "patches-maintainer": patches_maintainer,
+    "managed-config-onboard": managed_config_onboard,
+    "managed-config-ci": managed_config_ci,
 }

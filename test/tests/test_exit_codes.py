@@ -80,12 +80,6 @@ class TestExitCodes:
             f"got {result.returncode}\nstderr: {result.stderr.strip()}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="`index update` swallows per-package errors and exits 0; "
-        "`install` against unroutable host surfaces as AuthError (80), not "
-        "ClientError::Registry → Unavailable (69)",
-    )
     def test_exit_code_69_unavailable_on_unroutable_registry(
         self, ocx: OcxRunner
     ) -> None:

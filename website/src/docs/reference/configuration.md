@@ -38,10 +38,11 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 | 2 | System config — `/etc/ocx/config.toml` | Discovered tier |
 | 3 | User config — [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` (Linux) or `~/Library/Application Support/ocx/config.toml` (macOS) | Discovered tier |
 | 4 | OCX home config — [`$OCX_HOME`][env-ocx-home]`/config.toml` | Discovered tier |
-| 5 | [`OCX_CONFIG`][env-config] | Layered on top of discovered tiers |
-| 6 | [`--config`][arg-config] `FILE` | Layered on top of [`OCX_CONFIG`][env-config] |
-| 7 | Environment variables (`OCX_*`) | Always win over any config file |
-| 8 (highest) | CLI flags | Per-invocation; always win |
+| 5 | [`[managed]`](#keys-managed) snapshot | Local, identity-gated; see [Precedence and snapshot](#keys-managed-precedence) |
+| 6 | [`OCX_CONFIG`][env-config] | Layered on top of the discovered chain and the managed snapshot |
+| 7 | [`--config`][arg-config] `FILE` | Layered on top of [`OCX_CONFIG`][env-config] |
+| 8 | Environment variables (`OCX_*`) | Always win over any config file |
+| 9 (highest) | CLI flags | Per-invocation; always win |
 
 ### Merge rules {#precedence-merge}
 
@@ -51,7 +52,7 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 
 ### Kill switch {#precedence-kill-switch}
 
-[`OCX_NO_CONFIG`][env-no-config]`=1` skips the **discovered chain only** (tiers 2–4). Explicit paths ([`--config`][arg-config], [`OCX_CONFIG`][env-config]) still load.
+[`OCX_NO_CONFIG`][env-no-config]`=1` skips the **discovered chain** (tiers 2–4) and the [`[managed]`](#keys-managed) snapshot (tier 5) — hermetic means hermetic, so the [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] env-override read is suppressed along with the candidate itself. Explicit paths ([`--config`][arg-config], [`OCX_CONFIG`][env-config]) still load.
 
 | Goal | Invocation |
 |------|-----------|
@@ -81,6 +82,10 @@ The value may be either a literal hostname (`"ghcr.io"`) or the name of a [`[reg
 default = "ghcr.io"
 ```
 
+#### System-locked {#keys-registry-system-lock}
+
+When `[registry]` is declared at the system scope (`/etc/ocx/config.toml`), it is locked **unconditionally** — unlike [`[patches]`'s system-required posture](#keys-patches-scopes), there is no `required` field to gate the lock on. A bare `[registry] default = "..."` at system scope is enough: no lower-precedence config-file tier (user, [`$OCX_HOME`][env-ocx-home], [`OCX_CONFIG`][env-config], [`--config`][arg-config], or a [`[managed]`](#keys-managed) payload) can change `default` once the system tier sets it.
+
 ### `[registries.<name>]` {#keys-registries}
 
 Per-registry settings, keyed by a friendly name. Each entry configures one registry; [`[registry] default`](#keys-registry-default) can then reference it by name rather than by hostname.
@@ -107,6 +112,10 @@ url = "ghcr.io"
 ::: info v1 scope
 Only `url` is defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are rejected (typo protection); unknown top-level sections are silently ignored (forward compatibility).
 :::
+
+#### System-locked {#keys-registries-system-lock}
+
+Each `[registries.<name>]` entry declared at the system scope is locked the same way as [`[registry]`](#keys-registry-system-lock) — unconditionally, per entry. This closes an indirection a bare `[registry]` lock would leave open: without it, a lower tier could leave a locked `[registry] default = "company"` alone and instead redirect `[registries.company] url` to a different host, changing where the locked default actually resolves. Locking the named entry itself closes that path.
 
 ### `[mirrors."<host>"]` {#keys-mirrors}
 
@@ -170,6 +179,10 @@ Older Nexus deployments expose each repository on a per-repository port. Those u
 ::: info Typo protection
 `[mirrors."<host>"]` uses `deny_unknown_fields` — a typo such as `urll = "..."` is a TOML parse error, not a silent no-op. This matches the `[registries.<name>]` behavior.
 :::
+
+#### System-locked {#keys-mirrors-system-lock}
+
+A `[mirrors."<host>"]` entry declared at the system scope is locked as non-overridable, per host, unconditionally — the same enforcement as [`[registry]`](#keys-registry-system-lock), and unlike [`[patches]`'s system-required posture](#keys-patches-scopes) there is no `required` field to gate on. A lower-precedence tier cannot add, change, or remove the `url` for a host the system tier already locked; hosts the system tier did not mention are unaffected and still resolve through the ordinary merge behavior below.
 
 #### Merge behavior {#keys-mirrors-merge}
 
@@ -315,6 +328,101 @@ would for the same base.
 
 See [Patch Opt-Out Scope][env-composition-patch-opt-out] for the full forwarding mechanics.
 
+### `[managed]` section {#keys-managed}
+
+The `[managed]` tier is a **seed pointer**, not the settings themselves. It names an
+operator-published OCX package whose content is a plain `config.toml` — typically
+`[mirrors]`, a `[patches]` pointer, and a default `[registry]` — synced into local state
+and merged above the user config on every invocation. Where `[mirrors]` and `[patches]`
+are configured by hand on every machine, `[managed]` lets an operator publish one
+package (via [`ocx config push`][cmd-config-push]) and have every workstation and CI
+runner converge on it.
+
+Unknown fields inside `[managed]` are ignored, matching every other section — fleet
+forward-compatibility: a seed written for a newer ocx must not break older binaries
+reading the same file. The cost is that a typo'd key silently no-ops;
+[`ocx config update --check`][cmd-config-update] surfaces the tier's effective state for
+diagnosis.
+
+```toml
+[managed]
+source   = "internal.company.com/ocx-config:user"
+required = true
+refresh  = "notify"
+interval = "1d"
+```
+
+This block is normally written by [`ocx self setup --managed-config <ref>`][cmd-self-setup]
+rather than hand-edited — the flag re-serializes the same four fields with their
+resolved values. Bootstrapping this way performs a synchronous fetch before the fence is
+written, so a network failure leaves no partial seed. See the
+[managed-configuration walkthrough][user-guide-managed-config] for the full onboarding
+flow.
+
+#### `source` {#keys-managed-source}
+
+**Type**: string  
+**Required**: yes, at resolve time — omitting `source` (or the whole `[managed]` section) leaves the tier inactive. A present-but-empty `source = ""` is a hard error, the same footgun guard as [`[patches]` `registry`](#keys-patches-registry) and [`[mirrors]` `url`](#keys-mirrors-url).  
+**Overridden by**: [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] — invocation-only, never written back to the seed
+
+The OCI reference for the managed-config package: `<registry>/<repository>[:<tag>][@<digest>]`, parsed with the same [`Identifier`](#keys-registry-default) grammar as any other package reference. A registry-less `source` resolves against the **built-in** default registry (`ocx.sh`), never a configured `[registry] default` — the managed tier's trust root can not be redirected by the very config it is about to replace. Use a fully qualified reference in corporate seeds.
+
+A `source` pinned by digest (`…@sha256:<hex>`) binds the tier to that exact content: the [`required` gate](#keys-managed-required) accepts only a snapshot carrying that digest, so a drifted registry (or a `config update <VERSION>` to anything else) fails closed until the seed pin is updated.
+
+#### `required` {#keys-managed-required}
+
+**Type**: boolean  
+**Default**: `true`
+
+Fail posture when no local snapshot matches `source`.
+
+| Value | Behavior |
+|-------|----------|
+| `true` (default) | Every command fails closed with `SnapshotRequired` (exit 78) until [`ocx config update`][cmd-config-update] (or `ocx self setup --managed-config`) syncs a matching snapshot. Identical online and offline — the gate is on local disk state, not network reachability. |
+| `false` | The tier contributes nothing until synced. A throttle-gated stderr hint is printed instead of failing (no per-invocation warning). |
+
+#### `refresh` {#keys-managed-refresh}
+
+**Type**: string (`"apply"` \| `"notify"` \| `"manual"`)  
+**Default**: `"notify"`
+
+Background refresh posture, checked at most once per [`interval`](#keys-managed-interval). [`ocx config update`][cmd-config-update] always bypasses this — it is explicit user intent, mirroring [`ocx self update`][cmd-self-update].
+
+| Value | Behavior |
+|-------|----------|
+| `apply` | Drift against the registry silently triggers a full fetch, persist, and snapshot swap. |
+| `notify` (default) | Drift prints a stderr advisory ("run `ocx config update`"); content is not fetched by the tick. |
+| `manual` | The background tick is skipped entirely; only an explicit [`ocx config update`][cmd-config-update] refreshes the snapshot. |
+
+[`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] kills the background tick regardless of `refresh`; an explicit `ocx config update` still works.
+
+**Activation conditions.** The tick this posture governs only runs when *all* of the following hold: stderr is a terminal, the process is not running inside CI (`CI` unset), the invocation is not offline ([`--offline`][arg-offline]/[`OCX_OFFLINE`][env-offline]), the tier is not paused ([`ocx config update --pause`][cmd-config-update]), and the [`interval`](#keys-managed-interval) throttle window has elapsed. Any one of those failing skips the tick outright — so `refresh = "apply"` never auto-converges a CI runner or another headless host; those hosts converge only through an explicit [`ocx config update`][cmd-config-update].
+
+#### `interval` {#keys-managed-interval}
+
+**Type**: string, `\d+[smhd]?` (bare digits = seconds)  
+**Default**: `"1d"`
+
+Minimum spacing between background refresh probes. Governs only the automatic tick — [`ocx config update`][cmd-config-update] always bypasses it. `interval = "0"` (or `"0s"`) disables the throttle: the tick probes the registry on every eligible invocation instead of waiting out a window.
+
+#### Precedence and snapshot {#keys-managed-precedence}
+
+The managed tier folds in as priority 5 in the [precedence table](#precedence) — after the [`$OCX_HOME` config tier](#file-locations) and below [`OCX_CONFIG`][env-config]/[`--config`][arg-config]. Resolution reads a local snapshot only; no network access happens during ordinary config loading.
+
+The snapshot lives at `$OCX_HOME/state/managed-config/snapshot.json` and is written only by [`ocx config update`][cmd-config-update] or `ocx self setup --managed-config`. It records the source it was fetched from, the tag it tracked at that moment, the package's top-level manifest digest (the tier's drift identity), the fetch timestamp, and the payload text.
+
+Before folding it in, OCX identity-gates the snapshot against the effective `source` (env override, then seed): the snapshot must come from the **same registry and repository**, and — when the seed pins a digest — carry exactly that digest. Tags float within a repository: a snapshot synced with `ocx config update user-1.4.1` still satisfies a seed tracking `:user`, which is what makes per-host version pins and rollbacks safe under a fleet-wide floating tag. A cross-repository or pin-violating snapshot is treated as entirely absent, regardless of `required`; this closes a CI cache-poisoning path where a stale `$OCX_HOME` carries a snapshot fetched for a different `source`.
+
+A content-bearing pause file (`$OCX_HOME/state/managed-config/pause.json`, written by [`ocx config update --pause`][cmd-config-update]) sits beside the snapshot: while in force it short-circuits the background tick — and nothing else. Expired or corrupt pause files read as absent.
+
+#### One-hop rule {#keys-managed-one-hop}
+
+A `[managed]` section inside the fetched payload itself is stripped before merge, with a warning — the tier that fetched a payload can never be redirected or loosened by that same payload. Every other section in the payload (`[mirrors]`, `[patches]`, `[registry]`, …) merges normally.
+
+#### System-lock interaction {#keys-managed-system-lock}
+
+`[managed]` merges through the same [`Config::merge`](#precedence-merge) fold as every other tier, so a system-scope lock on [`[registry]`](#keys-registry-system-lock), [`[registries.<name>]`](#keys-registries-system-lock), or [`[mirrors."<host>"]`](#keys-mirrors-system-lock) is never overridable by a managed payload — the lock applies before the managed tier's content is folded in, the same as it applies to any lower tier. `[managed]` also carries its own lock: a system-scope `[managed]` declaration with `required = true` (the default) is itself non-overridable by any lower tier, mirroring [`[patches]`'s system-required posture](#keys-patches-scopes).
+
 ## Environment Variable Override Table {#env-overrides}
 
 This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
@@ -324,9 +432,11 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
 | [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
 | [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
+| [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] | `[managed] source` | Invocation-only override, never written back; `=""` is treated as unset |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
-| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
+| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read |
+| [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] | None | Kill switch for the [`[managed]`](#keys-managed) background refresh tick only; explicit `ocx config update` still works |
 | [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
@@ -408,12 +518,17 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config
+[arg-offline]: ./command-line.md#arg-offline
 [cmd-lock]: ./command-line.md#lock
 [cmd-run]: ./command-line.md#run
 [cmd-env-root]: ./command-line.md#env-root
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec
 [cmd-package-env]: ./command-line.md#package-env
+[cmd-self-setup]: ./command-line.md#self-setup
+[cmd-self-update]: ./command-line.md#self-update
+[cmd-config-update]: ./command-line.md#config-update
+[cmd-config-push]: ./command-line.md#config-push
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home
@@ -425,6 +540,11 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-mirrors]: ./environment.md#ocx-mirrors
 [env-ocx-patches]: ./environment.md#ocx-patches
+[env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[env-ocx-no-config-refresh]: ./environment.md#ocx-no-config-refresh
+
+<!-- user guide -->
+[user-guide-managed-config]: ../user-guide.md#managed-config
 
 <!-- env composition -->
 [env-composition-patch-opt-out]: ./env-composition.md#patch-opt-out-scope

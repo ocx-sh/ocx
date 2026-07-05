@@ -70,6 +70,19 @@ pub mod keys {
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
     /// not remembered between runs.
     pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
+    /// OCI reference for the managed-config artifact (plain string, like
+    /// [`OCX_CONFIG`]). Overrides `[managed].source` for this invocation only
+    /// — never written back to disk; `ocx self setup --managed-config` is the
+    /// only writer of the seed. Resolution-affecting → forwarded to child ocx
+    /// processes via [`crate::env::Env::apply_ocx_config`]. Runtime
+    /// `OCX_MANAGED_CONFIG=""` is treated as unset (matches [`OCX_CONFIG`]).
+    /// Suppressed (read side) by [`OCX_NO_CONFIG`] — hermetic means hermetic.
+    pub const OCX_MANAGED_CONFIG: &str = "OCX_MANAGED_CONFIG";
+    /// Boolean — kill switch for the managed-config background refresh tick
+    /// (both `notify` and `apply` postures). Distinct from
+    /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
+    /// `ocx config update` still works when this is set.
+    pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -133,6 +146,11 @@ pub struct OcxConfigView {
     /// [`keys::OCX_PATCH_SNAPSHOT`] so launchers resolve the same frozen
     /// companion digests. `None` when no snapshot is active.
     pub patch_snapshot: Option<PathBuf>,
+    /// The effective managed-config source (flag > env > seed), forwarded to
+    /// child ocx processes via [`Env::apply_ocx_config`] as
+    /// [`keys::OCX_MANAGED_CONFIG`] so a launcher re-entry resolves the same
+    /// managed tier. `None` when no managed-config source is in effect.
+    pub managed_config_source: Option<String>,
 }
 
 impl OcxConfigView {
@@ -149,6 +167,7 @@ impl OcxConfigView {
             mirrors: Vec::new(),
             patches: None,
             patch_snapshot: None,
+            managed_config_source: None,
         }
     }
 }
@@ -315,6 +334,10 @@ impl Env {
         match &cfg.patch_snapshot {
             Some(path) => self.set(keys::OCX_PATCH_SNAPSHOT, path.as_os_str()),
             None => self.remove(keys::OCX_PATCH_SNAPSHOT),
+        }
+        match &cfg.managed_config_source {
+            Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
+            None => self.remove(keys::OCX_MANAGED_CONFIG),
         }
     }
 

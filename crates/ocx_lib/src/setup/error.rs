@@ -71,6 +71,24 @@ pub enum Error {
         /// (e.g. `"run \`ocx index update\` to refresh the local index"`).
         hint: Option<String>,
     },
+    /// The `--managed-config` ref could not be re-parsed as a valid OCI
+    /// identifier at write time (defensive re-validation, CWE-74 guard —
+    /// the fence body is real TOML serialization, never `format!`
+    /// interpolation of the raw ref, but the ref itself must still be a
+    /// well-formed identifier before it is adopted at all).
+    #[error("managed config source '{value}' is not a valid OCI identifier")]
+    InvalidManagedConfigSource {
+        /// The rejected `--managed-config` value.
+        value: String,
+        /// The underlying identifier parse failure.
+        #[source]
+        source: oci::identifier::error::IdentifierError,
+    },
+    /// The synchronous fetch+persist step during `--managed-config` adoption
+    /// failed. Per ADR "Setup ordering", no fence is written on failure — the
+    /// caller sees zero partial state.
+    #[error("failed to sync the managed-config snapshot")]
+    ManagedConfigUpdateFailed(#[from] crate::managed_config::ManagedConfigUpdateError),
 }
 
 impl ClassifyExitCode for Error {
@@ -90,6 +108,11 @@ impl ClassifyExitCode for Error {
             // tag@digest mismatch is a found-but-inconsistent error (exit 65),
             // not a "not found" (79). Fail-closed per plan D9.
             Error::PinDigestMismatch { .. } => Some(ExitCode::DataError),
+            Error::InvalidManagedConfigSource { .. } => Some(ExitCode::ConfigError),
+            // Delegate to the inner error so the existing ManagedConfigUpdateError
+            // ladder decides (Unavailable/AuthError/DataError); `#[from]` exposes
+            // it via `source()` for the chain walker, mirroring `Error::Bootstrap`.
+            Error::ManagedConfigUpdateFailed(_) => None,
         }
     }
 }

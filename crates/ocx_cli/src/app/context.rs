@@ -33,10 +33,48 @@ pub struct Context {
     config_view: env::OcxConfigView,
     concurrency: package_manager::Concurrency,
     progress: ocx_lib::cli::progress::ProgressManager,
+    /// The fully merged config (every tier). Exposed so `ocx config update`
+    /// and the background-refresh hook can resolve the `[managed]` tier
+    /// themselves via `resolve_managed_target` (which never enforces the
+    /// required-snapshot gate `try_init` itself applies below).
+    config: ocx_lib::Config,
+    /// The effective `OCX_MANAGED_CONFIG` override, already hermetic-gated by
+    /// `OCX_NO_CONFIG` and empty-string-is-unset — resolved once here so every
+    /// consumer (the required-gate below, `config update`, the refresh hook)
+    /// agrees on the same value.
+    managed_config_env_override: Option<String>,
+    /// The on-disk managed-config snapshot, read once at `try_init` and
+    /// **identity-gated** there (W2): `Some` only when it matches the
+    /// effective source via the shared `snapshot_matches_source` predicate.
+    /// Any I/O/parse failure is treated as absent (benign-state rule).
+    managed_config_snapshot: Option<ocx_lib::managed_config::ManagedConfigSnapshot>,
+}
+
+/// The two `[managed]` tier gates `Context::try_init` needs, wrapped in a named
+/// struct so the two adjacent `bool`s can never be transposed at the call site.
+pub struct ManagedConfigGate {
+    /// Gates the `[managed]` tier's required-snapshot check (ADR Decision E,
+    /// criterion 6): `true` for ordinary commands (fails closed with
+    /// `SnapshotRequired`, exit 78, when `required = true` and no matching
+    /// snapshot exists); `false` for `ocx config update` and the `self`/static
+    /// commands, which must remain reachable to fix (or simply do not touch)
+    /// exactly that missing state. See
+    /// `app::should_enforce_managed_config_required`.
+    pub enforce_required: bool,
+    /// Narrower than `enforce_required`: `true` only for the two commands that
+    /// can adopt a brand-new managed-config source with no seed present (`ocx
+    /// config update`, `ocx self setup`) — they get the managed-fetch client
+    /// even when no source resolves yet. See
+    /// `app::is_managed_config_onboarding_command`.
+    pub onboarding: bool,
 }
 
 impl Context {
-    pub async fn try_init(options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<Context> {
+    pub async fn try_init(
+        options: &ContextOptions,
+        color_config: ColorModeConfig,
+        managed_config_gate: ManagedConfigGate,
+    ) -> anyhow::Result<Context> {
         // Shared span-free progress manager (ADR adr_progress_architecture).
         // Created before the subscriber so its `MultiProgress` backs the
         // fmt log writer (log lines flush inside `suspend`, never tearing
@@ -83,12 +121,21 @@ impl Context {
         let project_path = options.project.clone();
 
         let cwd = env::current_dir()?;
-        let config = ConfigLoader::load(ConfigInputs {
+        let loaded_config = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: options.config.as_deref(),
             explicit_project_path: options.project.as_deref(),
             cwd: Some(&cwd),
         })
         .await?;
+        let config = loaded_config.merged;
+        let local_only_config = loaded_config.local_only;
+        // The loader's own raw read of snapshot.json (pre-identity-gate) —
+        // reused below instead of a second read of the same file.
+        let managed_config_snapshot = loaded_config.managed_config_snapshot;
+        // The loader's single `[managed]` target resolution (from the local-only
+        // view) — reused below for the required gate and the snapshot identity
+        // gate instead of resolving the same target two more times.
+        let resolved_managed_config = loaded_config.resolved_managed_config;
 
         // Resolve the per-host mirror map once via the lib resolver
         // (`ocx_lib::resolve_mirror_map`): `[mirrors]` config merged with the
@@ -216,6 +263,102 @@ impl Context {
             None
         };
 
+        // `OCX_NO_CONFIG=1` is hermetic: it suppresses both the loader's
+        // managed-config candidate AND the env-override read here.
+        let no_config = env::flag("OCX_NO_CONFIG", false);
+        let managed_config_env_override = if no_config {
+            None
+        } else {
+            env::var(env::keys::OCX_MANAGED_CONFIG)
+        };
+
+        // Managed-config tier (ADR "Mirror posture"): the fetch client for the
+        // artifact itself is built from the LOCAL-ONLY mirror view — the
+        // managed payload's own `[mirrors]` is excluded from the route used to
+        // fetch it (no-cycle, no self-brick). `local_only_config` is the
+        // pre-managed-tier merged view `ConfigLoader::load_with_local_view`
+        // returns alongside `merged`. Building the client (and resolving its
+        // local-only mirror map) costs a bundled-CA conversion — gated on a
+        // source actually resolving (env override, else the seed) so the vast
+        // majority of invocations with no managed tier configured pay nothing.
+        // `managed_config_onboarding` also needs the client: it names exactly
+        // `ocx config update` and `ocx self setup` (`app.rs`'s
+        // `is_managed_config_onboarding_command`), the only commands that can
+        // ONBOARD a brand-new source with no seed yet (`ocx self setup
+        // --managed-config <ref>`) — those need the client even though
+        // `has_managed_source` is false. Deliberately NARROWER than the
+        // required-gate exemption: `ocx self activate` runs on every shell
+        // startup and must never pay the client-build cost for an
+        // unconfigured tier.
+        let has_managed_source = managed_config_env_override
+            .as_deref()
+            .is_some_and(|source| !source.is_empty())
+            || config
+                .managed
+                .as_ref()
+                .and_then(|managed| managed.source.as_deref())
+                .is_some_and(|source| !source.is_empty());
+        let needs_managed_config_client = has_managed_source || managed_config_gate.onboarding;
+        let managed_config_client = if options.offline || !needs_managed_config_client {
+            None
+        } else {
+            let (local_mirror_entries, _local_mirror_pairs) =
+                ocx_lib::resolve_mirror_map(&local_only_config, env::mirrors()?, &env::insecure_registries())
+                    .map_err(anyhow::Error::new)?;
+            let local_mirror_map = oci::MirrorMap::new(local_mirror_entries);
+            Some(
+                oci::ClientBuilder::new()
+                    .plain_http_registries(env::insecure_registries())
+                    .mirrors(local_mirror_map)
+                    .progress(progress.clone())
+                    .build(),
+            )
+        };
+
+        // ADR Decision E: the `[managed]` target is resolved ONCE in the loader
+        // (from the local-only view — the payload can never redirect the tier
+        // that fetched it) and threaded here. Reuse it. The loader swallows a
+        // resolution ERROR for its best-effort fold, so a configured-but-
+        // unresolvable seed re-resolves HERE only to surface the authoritative
+        // typed error (malformed seed/env ref, bad interval → exit 78); the
+        // happy path never re-resolves.
+        let resolved_managed_target = match resolved_managed_config {
+            Some(resolved) => Some(resolved),
+            None if has_managed_source => {
+                ocx_lib::resolve_managed_target(&config, managed_config_env_override.as_deref())?
+            }
+            None => None,
+        };
+
+        // W2: identity-gate the raw on-disk snapshot ONCE against the effective
+        // source (shared `snapshot_matches_source` predicate) so no CLI consumer
+        // — `config update --check` included — ever reads an identity-mismatched
+        // snapshot as if it belonged to the current tier. Reused by both the
+        // required gate and the snapshot filter below so they can never drift.
+        let snapshot_identity_matches = match (&managed_config_snapshot, &resolved_managed_target) {
+            (Some(snapshot), Some(resolved)) => ocx_lib::snapshot_matches_source(snapshot, &resolved.source),
+            _ => false,
+        };
+
+        // Required gate: `SnapshotRequired` fails closed (exit 78) for ordinary
+        // commands; `ocx config update` and the `self`/static commands are
+        // exempted here (`enforce_required = false`) because their entire job is
+        // to create or inspect exactly the missing state. Applied via the lib
+        // `enforce_required_snapshot` so the `#[non_exhaustive]`
+        // `ManagedConfigError` is constructed inside `ocx_lib`.
+        let managed_config = match resolved_managed_target {
+            None => None,
+            Some(resolved) => match ocx_lib::enforce_required_snapshot(resolved, snapshot_identity_matches) {
+                Ok(resolved) => Some(resolved),
+                Err(_snapshot_required) if !managed_config_gate.enforce_required => None,
+                Err(source) => return Err(anyhow::Error::new(source)),
+            },
+        };
+
+        // The required gate above already consumed the raw value; from here on
+        // only the identity-matched snapshot is exposed to CLI consumers.
+        let managed_config_snapshot = managed_config_snapshot.filter(|_| snapshot_identity_matches);
+
         let manager = package_manager::PackageManager::new(
             file_structure.clone(),
             selected_index.clone(),
@@ -224,7 +367,8 @@ impl Context {
         )
         .with_progress(progress.clone())
         .with_patches(resolved_patches.clone())
-        .with_patch_snapshot(patch_snapshot);
+        .with_patch_snapshot(patch_snapshot)
+        .with_managed_config_client(managed_config_client);
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -252,6 +396,9 @@ impl Context {
         // above. No `--patch-snapshot` flag exists yet; the env var is the
         // sole selector for now.
         config_view.patch_snapshot = patch_snapshot_path;
+        // Forward the effective managed-config source so a child ocx (launcher
+        // re-entry) resolves the same managed tier via `OCX_MANAGED_CONFIG`.
+        config_view.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
@@ -271,6 +418,9 @@ impl Context {
             config_view,
             concurrency,
             progress,
+            config,
+            managed_config_env_override,
+            managed_config_snapshot,
         })
     }
 
@@ -351,6 +501,29 @@ impl Context {
     /// `OCX_JOBS` (env), or unbounded by default.
     pub fn concurrency(&self) -> package_manager::Concurrency {
         self.concurrency
+    }
+
+    /// The fully merged config (every tier). `ocx config update` and the
+    /// background-refresh hook use this with
+    /// `ocx_lib::resolve_managed_target` to resolve the
+    /// `[managed]` tier WITHOUT the required-snapshot gate `try_init` itself
+    /// enforces for ordinary commands.
+    pub fn config(&self) -> &ocx_lib::Config {
+        &self.config
+    }
+
+    /// The effective `OCX_MANAGED_CONFIG` override — already hermetic-gated
+    /// by `OCX_NO_CONFIG` and with an empty string treated as unset.
+    pub fn managed_config_env_override(&self) -> Option<&str> {
+        self.managed_config_env_override.as_deref()
+    }
+
+    /// The on-disk managed-config snapshot, read once at `try_init` and
+    /// identity-gated against the effective source (W2) — `Some` only when it
+    /// belongs to the current tier. Absent on any I/O or parse failure
+    /// (benign-state rule) or identity mismatch.
+    pub fn managed_config_snapshot(&self) -> Option<&ocx_lib::managed_config::ManagedConfigSnapshot> {
+        self.managed_config_snapshot.as_ref()
     }
 }
 

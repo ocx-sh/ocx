@@ -1272,7 +1272,7 @@ mod tests {
             inner
                 .manifests
                 .insert("patches.corp.com/global:__ocx.patch".to_string(), manifest_pair);
-            // Seed the layer blob so `fetch_patch_layer_blob` can pull it.
+            // Seed the layer blob so `fetch_single_layer_artifact` can pull it.
             inner
                 .blobs
                 .insert(new_layer_digest.to_string(), new_layer_bytes.to_vec());

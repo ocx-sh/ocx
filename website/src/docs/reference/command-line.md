@@ -1539,14 +1539,14 @@ Complete a bare-binary install: bootstrap OCX into the content store, write the 
 
 This is the answer to "I won't pipe `curl` into a shell": download the standalone `ocx` binary from [GitHub Releases][releases], run `ocx self setup`, and reach the same state the install script produces — no shell script involved. The loose binary bootstraps the managed copy, writes the shims, and wires shell profiles in one command.
 
-Setup runs three things in a hard order: **bootstrap first** (install the specified or latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when the same version is already installed), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim or profile is touched.
+Setup runs phases in a hard order: **bootstrap first** (install the specified or latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when the same version is already installed), then **[managed-config][config-managed] adoption** (resolve the ref from `--managed-config`, else [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], else the existing seed; whichever one resolves is synchronously fetched and persisted, then the `[managed]` seed fence is written only on success — a fetch failure leaves no partial state; no source at any of the three levels reports `not_configured` and the phase is a no-op), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim, profile, or managed-config write is touched.
 
 Re-running is safe. The shims and the managed block are diff-gated: an unchanged setup is a no-op. A stale ocx-authored block is rewritten in place (format upgrade); a legacy `# BEGIN ocx` block is migrated to the versioned fence. A block the user edited by hand is reported dirty and left untouched (exit 82) unless `--force` is passed.
 
 **Usage**
 
 ```shell
-ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
+ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--force] [--managed-config REF]
 ```
 
 **Arguments**
@@ -1567,6 +1567,7 @@ ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--f
 | `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
 | `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
+| `--managed-config REF` | — | Adopt (or clear) the corporate [managed-config][config-managed] tier. `REF` is resolved as an OCI reference, synchronously fetched and persisted, then the `[managed]` seed fence in `config.toml` is written only on success — a fetch failure leaves no partial state. Pass `--managed-config ""` to clear an existing seed and delete the snapshot. Omitting the flag does not skip resolution: it falls back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed, and re-syncs (self-heals) whichever one resolves — so a bare re-run repairs a wiped or mismatched snapshot without repeating the full onboarding command. | *(resolved: env, then existing seed)* |
 | `-h`, `--help` | | Print help information. | — |
 
 **Version grammar**
@@ -1611,7 +1612,8 @@ A typical pinned run that pulled a new version:
     {"path": "/home/alice/.bashrc", "outcome": "completed"},
     {"path": "/home/alice/.zshrc", "outcome": "no_op"}
   ],
-  "reload_hint": true
+  "reload_hint": true,
+  "managed_config": {"status": "not_configured"}
 }
 ```
 
@@ -1627,6 +1629,7 @@ The root object is discriminated by `status`:
 | `exec_policy_warning` | string | Windows-only advisory when the execution policy is `Restricted`. Omitted when absent. |
 | `conflicting_ocx` | string | Absolute path to a shadowing `ocx` binary found ahead of the shim directory on `PATH`. Omitted when absent. |
 | `reload_hint` | boolean | `true` when at least one shim or profile was written and the shell must be re-sourced to activate the changes. Omitted when `false`. |
+| `managed_config` | object | Result of adopting or clearing the `--managed-config` tier (see below). Always present, even when the flag was not passed. |
 
 Root-level `status` values:
 
@@ -1634,8 +1637,19 @@ Root-level `status` values:
 |-------|---------|
 | `completed` | At least one shim or profile was written or upgraded. |
 | `no_op` | Everything was already current; nothing changed. |
-| `skipped` | At least one profile carried user edits and was left untouched (no `--force`). Exit 82. |
-| `migrated` | A legacy activation block was migrated to the versioned fence; no dirty profiles. |
+| `skipped` | At least one profile, or the `[managed]` config fence, carried user edits and was left untouched (no `--force`). Exit 82. |
+| `migrated` | A legacy activation block was migrated to the versioned fence; no dirty profiles or fence. |
+
+**`managed_config` object** — result of the [managed-config][config-managed] adoption phase, discriminated by `managed_config.status`:
+
+| Value | Carries `digest`? | Meaning |
+|-------|---|---------|
+| `not_configured` | No | No source resolved from `--managed-config`, [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], or an existing seed. |
+| `already_adopted` | Yes | The resolved ref matches the existing seed AND a matching snapshot is on disk; no re-fetch. The digest is the existing snapshot's verified digest. A wiped or mismatched snapshot self-heals instead: the run re-fetches and reports `adopted`. |
+| `adopted` | Yes | A new or changed ref was fetched, persisted, and the seed fence written. |
+| `cleared` | No | `--managed-config ""` removed the seed fence and deleted the snapshot. |
+| `dirty` | No | The `[managed]` fence carries user edits; left untouched without `--force` — drives root `status: skipped` (exit 82). |
+| `would_adopt` | No | `--dry-run`: an adopt or re-adopt would run, but nothing was fetched or written. |
 
 ::: warning `jq .status` returns the root discriminant, not the bootstrap status
 `jq .status` on a `self setup --format json` result returns `completed`, `no_op`, `skipped`, or `migrated` — the overall run outcome. The bootstrap-specific values (`pulled`, `already_present`, `would_pull`) are nested one level deeper under `bootstrap.status`. Use `jq .bootstrap.status` to inspect the binary install step.
@@ -1672,14 +1686,16 @@ digest=$(echo "$result" | jq -r '.bootstrap.digest // empty')  # sha256:<hex>, o
 
 | Code | Meaning |
 |------|---------|
-| 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile). |
+| 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile or fence). |
 | 64 | Malformed `VERSION` syntax (empty, short or uppercase hex, unknown algorithm, double `@`, trailing `@`). |
-| 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. |
-| 69 | Registry unreachable while bootstrapping. |
-| 74 | I/O error writing a shim or shell profile. |
+| 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. Also returned when a `--managed-config` sync fetch succeeds but the package is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). |
+| 69 | Registry unreachable while bootstrapping, or while syncing a `--managed-config` snapshot. |
+| 74 | I/O error writing a shim, shell profile, or `--managed-config` snapshot. |
+| 78 | The `--managed-config` value is not a valid OCI identifier. |
 | 79 | The pinned tag or digest was not found in the registry. |
+| 80 | Authentication failed while syncing a `--managed-config` snapshot. |
 | 81 | A policy (`--offline` or `--frozen`) blocked resolution and the version was not cached locally. |
-| 82 | A managed activation block carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
+| 82 | A managed activation block — a shell profile fence or the `[managed]` config fence — carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
 
 **Examples**
 
@@ -1699,6 +1715,12 @@ ocx self setup sha256:ab12cd34ef56...
 # Repeat a prior run's pin using the JSON output's digest field:
 digest=$(ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
 ocx self setup "0.9.2@$digest"   # round-trip: asserts the same content
+
+# Adopt the corporate managed-config tier (sync fetch, then seed the fence):
+ocx self setup --managed-config internal.company.com/ocx-config:user
+
+# Clear a previously adopted managed-config tier:
+ocx self setup --managed-config ""
 ```
 
 #### `self activate` {#self-activate}
@@ -2786,6 +2808,184 @@ ocx --format json patch why java:21
 | 69 | Registry unreachable while resolving the base. |
 | 79 | Base identifier not found in the registry. |
 
+### `config` {#config}
+
+Manage the corporate [managed-configuration][config-managed] tier (`[managed]`) — an
+operator-published `config.toml` payload synced from an OCI registry and merged above the
+user config on every invocation. The payload travels as an ordinary OCX package (its
+content is one `config.toml`), so publishing, versioning, cascade tags, and rollbacks all
+behave exactly like packages. Decoupled from [`ocx self update`][cmd-self-update]: this
+tier tracks an operator's config package, not the ocx binary itself.
+
+**Usage**
+
+```shell
+ocx config <SUBCOMMAND>
+```
+
+**Sub-commands**
+
+| Sub-command | Purpose |
+|-------------|---------|
+| `push` | Validate and publish a config file as a managed-config package (operator side). |
+| `update` | Fetch and persist the managed-config snapshot — optionally pinned to a VERSION — or pause/resume the background tick, or report status with `--check`. |
+
+#### `config push` {#config-push}
+
+Publishes a config file as a managed-config package. Validates the payload first — it
+must parse as an ocx config, must not contain a `[managed]` section (a published payload
+can never redirect the tier that fetches it), and must stay within 64 KiB — then stages
+it under the canonical entry name `config.toml` (whatever the input file is called),
+bundles it as a tar+gzip layer, and pushes it with the same machinery as
+[`ocx package push`][cmd-package-push].
+
+With `--cascade`, pushing `user-1.4.2` also advances the rolling tags `user-1.4`,
+`user-1`, and `user` — the same [cascade algebra][in-depth-versioning-cascades] packages
+use, so fleets track a floating tag while individual hosts can pin any published version.
+
+**Usage**
+
+```shell
+ocx config push -i <IDENTIFIER> [--cascade] [--new] [--platform PLATFORM] <CONFIG>
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--identifier ID` | `-i` | Identifier to publish under (e.g. `corp/ocx-config:user-1.4.2`). Required. | — |
+| `--cascade` | `-c` | Update rolling variant tags derived from the version tag. | off |
+| `--new` | `-n` | The repository does not exist yet; tolerate a failing tag listing during `--cascade`. | off |
+| `--platform` | `-p` | Platform entry written into the package index. `ocx config update` only consumes the platform-independent `any/any` entry — keep the default. | `any/any` |
+| `-h`, `--help` | | Print help information. | — |
+
+**Output** — the same push report as [`ocx package push`][cmd-package-push]
+(`identifier`, `status`, `manifest_digest`, `cascade_tags_written`). The reported digest
+is the operator's trust-on-first-use signal: it is the value a digest-pinned seed and
+every consumer's [`config update --check`](#config-update) compare against.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Pushed. |
+| 69 | Registry unreachable. |
+| 74 | I/O error reading the payload file (other than not found or permission denied), or staging it for the push. |
+| 77 | The payload file could not be read — permission denied. |
+| 78 | Payload rejected — not valid config TOML, contains a `[managed]` section, or exceeds 64 KiB. Nothing was pushed. |
+| 79 | The payload file does not exist. |
+| 80 | Authentication failed. |
+
+#### `config update` {#config-update}
+
+Fetches the configured managed-config package, persists a new snapshot, and reports what
+changed. Always bypasses the background-refresh throttle — explicit user intent, mirroring
+[`ocx self update`][cmd-self-update].
+
+An optional `VERSION` positional pins the sync to a specific tag, digest, or
+`tag@digest` combination — rollback is `ocx config update <older-version>`. The snapshot
+identity is the repository, not the tag, so a pinned snapshot still satisfies the
+[`required` gate][config-managed-required] of a seed tracking a floating tag.
+
+`--pause <duration>` holds the background tick for up to 7 days (a temporary hold — set
+`refresh = "manual"` in the seed for a permanent opt-out). Without a VERSION it freezes
+the on-disk state as-is (no fetch); with a VERSION it syncs the pin first and records the
+pause only after the persist succeeded. `--resume` clears the pause and syncs. Any
+explicit update without `--pause` clears an active pause. A pause affects only the
+background tick — never the `required` gate, never an explicit update.
+
+With `--check`, only reports the tier's current status — effective source, snapshot
+digest and tag, last-fetch timestamp, refresh policy, pause state, active kill switches,
+and live drift against the registry when reachable — without fetching or swapping
+anything. Offline (or any fetch failure) degrades to a local-state-only report. `--check`
+never modifies the pause file.
+
+The tier is adopted by [`ocx self setup --managed-config <ref>`][cmd-self-setup] or by
+setting [`OCX_MANAGED_CONFIG`][env-ocx-managed-config]; `ocx config update` is the only
+command that fetches the package after that first adoption. See
+[`[managed]`][config-managed] for the full tier schema and the
+[managed-configuration walkthrough][user-guide-managed-config] for onboarding, rollout,
+and CI recipes.
+
+**Usage**
+
+```shell
+ocx config update [VERSION] [--pause DURATION] [--resume] [--check]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `VERSION` | — | Version to sync: tag, `sha256:<hex>`, or `tag@sha256:<hex>` (the latter verifies the tag resolves to the given digest before persisting). Conflicts with `--check` and `--resume`. | *(seed source)* |
+| `--pause DURATION` | — | Pause the background tick for `\d+[smhd]` (max `7d`). Conflicts with `--check` and `--resume`. | — |
+| `--resume` | — | Clear an active pause and sync. | off |
+| `--check` | — | Report the tier's status without fetching or swapping. | off |
+| `-h`, `--help` | | Print help information. | — |
+
+**Invocation matrix**
+
+| Invocation | Fetches? | Pause file |
+|---|---|---|
+| `config update` | yes, seed source | cleared |
+| `config update 1.4.2` | yes, pinned | cleared |
+| `config update --pause 3d` | no (state frozen as-is) | written |
+| `config update --pause 3d 1.4.2` | yes, pin first | written after the persist succeeds |
+| `config update --resume` | yes, seed source | cleared |
+| `config update --check` | probe only | untouched |
+
+**Behavior without `--check`**
+
+Reports one of:
+
+- **`not_configured`** — no `[managed]` source is resolved (no seed, no `OCX_MANAGED_CONFIG`).
+- **`already_current`** — the local snapshot's digest already matches the registry.
+- **`updated`** — a new snapshot was fetched and persisted.
+- **`check_unavailable`** — `--pause` without a VERSION: nothing was fetched or verified; the report is the local state plus the fresh pause window.
+
+**Behavior with `--check`**
+
+Probes the registry for the current top-level manifest digest (never the full payload,
+never a swap) and reports one of three outcomes: **`checked`** when the probe succeeds and
+the digest differs from the local snapshot, **`already_current`** when the probe succeeds
+and the digest matches, or **`check_unavailable`** when the probe could not run at all
+(offline, no managed-config client, source absent in the registry, authentication failure,
+or a registry error) — the report then degrades to a local-state-only summary
+(source/digest/tag/fetched-at/pause) instead of falsely claiming the tier is current.
+
+**JSON output** (`--format json`)
+
+```json
+{"status": "updated", "source": "internal.company.com/ocx-config:user-1.4.1", "digest": "sha256:ab12cd...", "policy": "notify", "tag": "user-1.4.1"}
+{"status": "checked", "source": "internal.company.com/ocx-config:user", "digest": "sha256:ab12cd...", "fetched_at": "2026-07-04T00:00:00Z", "policy": "notify", "kill_switches": ["OCX_NO_CONFIG_REFRESH"], "drift": true, "tag": "user-1.4.1", "paused_until": "2026-07-08T12:00:00+00:00", "pinned": "user-1.4.1"}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | `not_configured`, `already_current` (probe ran and matched), `updated` (full-update path), `checked` (probe ran and detected drift), or `check_unavailable` (probe could not run — offline, source absent, auth, or registry error — or a fetch-free `--pause`). |
+| `source` | string | The effective managed-config source (flag > env > seed), with any VERSION pin applied. Omitted when `not_configured`. |
+| `digest` | string | The local snapshot's top-level manifest digest, `sha256:<hex>`. Omitted when no snapshot exists yet. |
+| `fetched_at` | string | ISO-8601 UTC timestamp of the snapshot's last fetch. Status reports only. |
+| `policy` | string | The tier's `refresh` posture — `apply`, `notify`, or `manual`. |
+| `kill_switches` | array of strings | Active kill-switch env-var names (`OCX_NO_CONFIG_REFRESH`, `OCX_NO_CONFIG`) affecting this tier. Empty array when none are set. |
+| `drift` | boolean | `--check` only: whether the registry's current digest differs from the local snapshot. Present only when the registry was reachable. |
+| `tag` | string | The tag the snapshot was fetched under (the floating or pinned version this host tracks). Omitted for pre-v2 snapshots until their next sync. |
+| `paused_until` | string | ISO-8601 UTC end of an in-force pause. Omitted when no pause is active. |
+| `pinned` | string | The VERSION pinned alongside the pause (`--pause <d> <VERSION>`). Omitted when the pause carries no pin. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Report printed — `not_configured`, `already_current`, `updated`, `checked`, or `check_unavailable` (an offline or otherwise unreachable `--check` degrades to a local-state report). |
+| 64 | Conflicting flags (`--check` with `--pause`/`--resume`/VERSION, `--resume` with `--pause`/VERSION), a malformed VERSION, or a `--pause` duration that is malformed or exceeds `7d`. |
+| 65 | `tag@digest` immutability assertion failed (the tag resolved to a different digest — snapshot untouched), or the fetched payload is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). |
+| 69 | Registry unreachable (full-update path — `--check` degrades to a local-state report instead of failing). |
+| 74 | I/O error writing the snapshot file. |
+| 78 | The effective managed-config source or interval is invalid (bad seed or `OCX_MANAGED_CONFIG` value). |
+| 79 | The resolved managed-config source has no package in the registry (full-update path). |
+| 80 | Authentication failed against the registry (full-update path only). |
+
 <!-- external -->
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
 [cargo]: https://doc.rust-lang.org/cargo/
@@ -2840,6 +3040,11 @@ ocx --format json patch why java:21
 <!-- reference -->
 [config-ref]: ./configuration.md
 [config-patches]: ./configuration.md#keys-patches
+[config-managed]: ./configuration.md#keys-managed
+[config-managed-required]: ./configuration.md#keys-managed-required
+[in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
+[env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[user-guide-managed-config]: ../user-guide.md#managed-config
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/
@@ -2886,6 +3091,10 @@ ocx --format json patch why java:21
 <!-- commands (root env) -->
 [cmd-env-root]: #env-root
 [version-json-schema]: #version
+
+<!-- commands (self group) -->
+[cmd-self-setup]: #self-setup
+[cmd-self-update]: #self-update
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md

@@ -129,94 +129,52 @@ pub async fn fetch_patch_descriptor_blobs(
     // Build the tag identifier: clone with the `__ocx.patch` well-known tag.
     let tag_identifier = patch_identifier.clone_with_tag(InternalTag::PATCH_TAG);
 
-    // Step 1: Fetch the raw manifest bytes; `Ok(None)` → "looked, no patch".
-    let (manifest_bytes, manifest_digest, manifest) = match client
-        .fetch_patch_manifest_raw(&tag_identifier)
+    // Steps 1-8 (auth, manifest fetch, shape/artifact-type/layer-count/
+    // media-type/size validation, capped layer blob fetch) all live in the
+    // shared `Client::fetch_single_layer_artifact` primitive.
+    let artifact = match client
+        .fetch_single_layer_artifact(
+            &tag_identifier,
+            PATCH_MANIFEST_ARTIFACT_TYPE,
+            PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE,
+            MAX_DESCRIPTOR_LAYER_BYTES,
+        )
         .await
-        .map_err(|source| PatchError::FetchFailed { source })?
+        .map_err(map_fetch_error)?
     {
-        Some(triple) => triple,
+        Some(artifact) => artifact,
         None => return Ok(None),
     };
 
-    // Step 2: Validate the manifest shape (must be a single-image manifest).
-    let image_manifest = match manifest {
-        crate::oci::Manifest::Image(m) => m,
-        crate::oci::Manifest::ImageIndex(_) => {
-            return Err(PatchError::UnexpectedManifest {
-                detail: "expected image manifest for __ocx.patch, got image index".to_string(),
-            });
-        }
-    };
-
-    // Step 3: Validate the artifact type.
-    match &image_manifest.artifact_type {
-        Some(at) if at == PATCH_MANIFEST_ARTIFACT_TYPE => {}
-        other => {
-            return Err(PatchError::UnexpectedArtifactType { actual: other.clone() });
-        }
-    }
-
-    // Step 4: Validate exactly one layer.
-    if image_manifest.layers.len() != 1 {
-        return Err(PatchError::WrongLayerCount {
-            count: image_manifest.layers.len(),
-        });
-    }
-    let layer_descriptor = &image_manifest.layers[0];
-
-    // Step 5: Validate the layer media type. A manifest with the wrong layer
-    // media type (e.g. a tar+gzip layer) would parse successfully if the bytes
-    // happened to be valid JSON — rejecting here closes that ambiguity window.
-    if layer_descriptor.media_type != PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE {
-        return Err(PatchError::UnexpectedLayerMediaType {
-            expected: PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE.to_string(),
-            actual: layer_descriptor.media_type.clone(),
-        });
-    }
-
-    // Step 6: Size cap (CWE-400). Reject manifests that declare a layer larger
-    // than MAX_DESCRIPTOR_LAYER_BYTES before issuing the blob fetch. A negative
-    // or zero declared size is also rejected as a malformed manifest.
-    let declared_size = layer_descriptor.size;
-    match u64::try_from(declared_size) {
-        Ok(size) if size <= MAX_DESCRIPTOR_LAYER_BYTES => {}
-        Ok(_) => {
-            return Err(PatchError::LayerSizeExceeded {
-                declared: declared_size,
-                maximum: MAX_DESCRIPTOR_LAYER_BYTES,
-            });
-        }
-        Err(_) => {
-            return Err(PatchError::UnexpectedManifest {
-                detail: format!("layer descriptor size '{declared_size}' is not a valid byte count"),
-            });
-        }
-    }
-
-    let layer_digest =
-        Digest::try_from(layer_descriptor.digest.as_str()).map_err(|_| PatchError::UnexpectedManifest {
-            detail: format!("layer digest '{}' is malformed", layer_descriptor.digest),
-        })?;
-
-    // Step 7: Fetch the descriptor layer blob into memory.
-    // The declared-size guard above (step 6) ensures we do not *request* a
-    // blob larger than MAX_DESCRIPTOR_LAYER_BYTES. The `max_bytes` argument to
-    // `fetch_patch_layer_blob` closes the gap where a malicious registry
-    // ignores its own declared size and streams more bytes: the function caps
-    // the stream at `max_bytes + 1` bytes and returns
-    // `ClientError::DecompressionCapExceeded` if the cap is hit.
-    let layer_bytes = client
-        .fetch_patch_layer_blob(&tag_identifier, &layer_digest, MAX_DESCRIPTOR_LAYER_BYTES)
-        .await
-        .map_err(|source| PatchError::FetchFailed { source })?;
-
     Ok(Some(FetchedDescriptorBlobs {
-        manifest_bytes,
-        layer_bytes,
-        manifest_digest,
-        layer_digest,
+        manifest_bytes: artifact.manifest_bytes,
+        layer_bytes: artifact.layer_bytes,
+        manifest_digest: artifact.manifest_digest,
+        layer_digest: artifact.layer_digest,
     }))
+}
+
+/// Maps a [`crate::oci::client::ClientError`] from
+/// [`crate::oci::client::Client::fetch_single_layer_artifact`] onto the patch
+/// domain's [`PatchError`] taxonomy, preserving the granular variants callers
+/// relied on before the fetch + shape-validation logic moved onto `Client`.
+/// The `ClientError` classification itself is shared with the managed-config
+/// domain's `map_fetch_error` via
+/// [`crate::oci::client::error::ArtifactFetchError::classify`].
+fn map_fetch_error(error: crate::oci::client::error::ClientError) -> PatchError {
+    use crate::oci::client::error::ArtifactFetchError;
+    match ArtifactFetchError::classify(error, "__ocx.patch") {
+        ArtifactFetchError::UnexpectedManifest { detail } => PatchError::UnexpectedManifest { detail },
+        ArtifactFetchError::UnexpectedArtifactType { actual } => PatchError::UnexpectedArtifactType { actual },
+        ArtifactFetchError::WrongLayerCount { count } => PatchError::WrongLayerCount { count },
+        ArtifactFetchError::UnexpectedLayerMediaType { expected, actual } => {
+            PatchError::UnexpectedLayerMediaType { expected, actual }
+        }
+        ArtifactFetchError::LayerSizeExceeded { declared, maximum } => {
+            PatchError::LayerSizeExceeded { declared, maximum }
+        }
+        ArtifactFetchError::Other(source) => PatchError::FetchFailed { source },
+    }
 }
 
 // ── Pure persistence primitive ────────────────────────────────────────────────

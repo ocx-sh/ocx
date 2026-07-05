@@ -9,6 +9,17 @@ use tempfile::TempDir;
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Locks [`OVERRIDES`], recovering from a poisoned mutex.
+///
+/// A test that panics while holding this lock (e.g. a Specify-phase test
+/// exercising an `unimplemented!()`/`todo!()` stub) must not poison the map
+/// for every other env-touching test still to run in the same process —
+/// overrides are always fully cleared on both acquire and drop, so the
+/// poisoned data itself is never load-bearing.
+fn overrides() -> std::sync::MutexGuard<'static, HashMap<String, Option<String>>> {
+    OVERRIDES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Called by [`crate::env::var`] in `#[cfg(test)]`.
 ///
 /// Returns:
@@ -16,7 +27,7 @@ static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::n
 /// - `Some(None)` — key is explicitly removed (treat as not present)
 /// - `None` — key has no override (fall through to `std::env::var`)
 pub(crate) fn get_override(key: &str) -> Option<Option<String>> {
-    OVERRIDES.lock().unwrap().get(key).cloned()
+    overrides().get(key).cloned()
 }
 
 /// A guard that serialises environment-touching tests and provides safe
@@ -32,20 +43,26 @@ pub struct EnvLock {
 
 impl EnvLock {
     fn acquire() -> Self {
-        let guard = TEST_LOCK.lock().unwrap();
+        // Recover from a poisoned mutex: a prior test that panicked while
+        // holding this lock (e.g. a Specify-phase test exercising an
+        // `unimplemented!()`/`todo!()` stub) must not cascade into every
+        // subsequent env-touching test run concurrently in the same process.
+        // The guarded state (`OVERRIDES`) is unconditionally cleared right
+        // below, so recovering the poisoned data is safe.
+        let guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Clear any stale overrides left by a previously panicked test.
-        OVERRIDES.lock().unwrap().clear();
+        overrides().clear();
         Self { _guard: guard }
     }
 
     /// Injects `value` for `key`.  Visible to [`crate::env::var`].
     pub fn set(&self, key: impl Into<String>, value: impl Into<String>) {
-        OVERRIDES.lock().unwrap().insert(key.into(), Some(value.into()));
+        overrides().insert(key.into(), Some(value.into()));
     }
 
     /// Marks `key` as removed.  [`crate::env::var`] will return `None` for it.
     pub fn remove(&self, key: impl Into<String>) {
-        OVERRIDES.lock().unwrap().insert(key.into(), None);
+        overrides().insert(key.into(), None);
     }
 
     /// Points `OCX_HOME` at a fresh empty directory and returns its
@@ -65,7 +82,7 @@ impl EnvLock {
 
 impl Drop for EnvLock {
     fn drop(&mut self) {
-        OVERRIDES.lock().unwrap().clear();
+        overrides().clear();
     }
 }
 

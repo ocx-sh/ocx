@@ -19,6 +19,7 @@ pub(crate) mod hook;
 pub(crate) mod inspect;
 pub(crate) mod install;
 pub(crate) mod layer_staging;
+pub(crate) mod managed_config;
 pub mod patch_discovery;
 pub(crate) mod patch_publish;
 pub(crate) mod patch_sync;

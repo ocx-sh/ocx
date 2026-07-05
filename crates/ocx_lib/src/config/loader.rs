@@ -35,6 +35,44 @@ pub struct ConfigInputs<'a> {
     pub cwd: Option<&'a Path>,
 }
 
+/// Result of [`ConfigLoader::load_with_local_view`]: the fully merged config
+/// alongside the local-only merged config.
+///
+/// "Local-only" means every discovered/explicit tier that requires no
+/// network access (system, user, `$OCX_HOME`, `OCX_CONFIG`, `--config`). The
+/// managed-config tier (a network-fetched artifact, folded in by
+/// [`ConfigLoader::fold_managed_tier`]) is the one exception layered on top of
+/// `local_only` to produce `merged` — the seam exists so the managed-config
+/// fetch can build its client from `local_only`'s mirror map (its own payload
+/// must not be able to redirect the route used to fetch itself).
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    /// The fully merged config (every tier, including any future
+    /// network-fetched tier layered on top of `local_only`).
+    pub merged: Config,
+    /// The merged config from local-only tiers.
+    pub local_only: Config,
+    /// The raw managed-config snapshot [`ConfigLoader::fold_managed_tier`]
+    /// read from disk, if any — BEFORE the identity gate (present even when
+    /// the snapshot's provenance does not match the effective source, so a
+    /// consumer's own identity check, e.g.
+    /// [`crate::resolve_managed_config`]'s `required` enforcement, still sees
+    /// a mismatched snapshot rather than a silently-absent one). `None` when
+    /// no candidate exists (including `OCX_NO_CONFIG=1`, which prunes the
+    /// candidate entirely) or the on-disk file is absent/unreadable/malformed.
+    /// Exposed so callers (`Context::try_init`) reuse this read instead of
+    /// re-reading the same file from disk.
+    pub managed_config_snapshot: Option<crate::config::managed::ManagedConfigSnapshot>,
+    /// The effective managed-config target [`ConfigLoader::fold_managed_tier`]
+    /// resolved (from the local-only view, so the payload cannot redirect the
+    /// tier that fetched it), or `None` when no source is configured OR the
+    /// resolution errored (the fold swallows resolution errors — the caller
+    /// re-resolves to surface a malformed seed). Threaded so `Context::try_init`
+    /// reuses this single resolution for the required gate and the snapshot
+    /// identity gate instead of resolving the same target two more times.
+    pub resolved_managed_config: Option<crate::config::managed::ResolvedManagedConfig>,
+}
+
 /// Configuration loader. Stateless namespace for the discovery and loading
 /// pipeline.
 pub struct ConfigLoader;
@@ -44,8 +82,10 @@ impl ConfigLoader {
     ///
     /// Layering (lowest → highest precedence):
     /// 1. system / user / `$OCX_HOME` tiers — skipped when `OCX_NO_CONFIG=1`
-    /// 2. `OCX_CONFIG` — if set and non-empty
-    /// 3. `--config FILE` (via [`ConfigInputs::explicit_path`])
+    /// 2. managed-config snapshot (identity-gated; also suppressed by
+    ///    `OCX_NO_CONFIG=1`)
+    /// 3. `OCX_CONFIG` — if set and non-empty
+    /// 4. `--config FILE` (via [`ConfigInputs::explicit_path`])
     ///
     /// Explicit paths (both env-var and CLI) always load if set; they layer
     /// on top of the discovered chain (or on top of nothing, if
@@ -60,6 +100,15 @@ impl ConfigLoader {
     /// Returns an error on missing explicit files, I/O failure, or TOML
     /// parse failure.
     pub async fn load(inputs: ConfigInputs<'_>) -> Result<Config> {
+        Ok(Self::load_with_local_view(inputs).await?.merged)
+    }
+
+    /// Like [`Self::load`], but also returns the local-only merged view
+    /// alongside the fully merged config — see [`LoadedConfig`].
+    ///
+    /// # Errors
+    /// Same as [`Self::load`].
+    pub async fn load_with_local_view(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
         let no_config = crate::env::flag("OCX_NO_CONFIG", false);
         let raw_env_config_file = crate::env::var("OCX_CONFIG");
         if raw_env_config_file.as_deref() == Some("") {
@@ -74,18 +123,193 @@ impl ConfigLoader {
         // project-config schema lands.
         let _project_path = Self::project_path(inputs.cwd, inputs.explicit_project_path).await?;
 
-        let mut paths: Vec<PathBuf> = if no_config {
+        let discovered: Vec<PathBuf> = if no_config {
             Vec::new()
         } else {
             Self::discover_paths().await
         };
+        let mut explicit_paths: Vec<PathBuf> = Vec::new();
         if let Some(env_path) = env_config_file {
-            paths.push(PathBuf::from(env_path));
+            explicit_paths.push(PathBuf::from(env_path));
         }
         if let Some(explicit) = inputs.explicit_path {
-            paths.push(explicit.to_path_buf());
+            explicit_paths.push(explicit.to_path_buf());
         }
-        Self::load_and_merge(&paths).await
+
+        // Precedence (ADR Decision A): the managed tier folds in AFTER the
+        // discovered chain (system → user → home) but BELOW `OCX_CONFIG` and
+        // `--config`, so the explicit tiers must merge on top of the managed
+        // fold — never underneath it. The explicit overlay is loaded once and
+        // applied to both views; merging is per-section last-wins, so folding
+        // the overlay as one pre-merged `Config` is equivalent to folding its
+        // files individually.
+        let base = Self::load_and_merge(&discovered).await?;
+        let overlay = Self::load_and_merge(&explicit_paths).await?;
+
+        let mut local_only = base.clone();
+        local_only.merge(overlay.clone());
+
+        // The fold resolves its effective source from `local_only` (base +
+        // overlay) so a `[managed].source` declared ONLY in `OCX_CONFIG`/
+        // `--config` still activates the payload merge — see
+        // `fold_managed_tier`'s doc comment. Merge order is unchanged: the
+        // payload folds onto `base`, and `overlay` is applied on top of that
+        // afterward, so explicit tiers still beat payload values.
+        let (mut merged, managed_config_snapshot, resolved_managed_config) =
+            Self::fold_managed_tier(base, &local_only).await?;
+        merged.merge(overlay);
+
+        Ok(LoadedConfig {
+            merged,
+            local_only,
+            managed_config_snapshot,
+            resolved_managed_config,
+        })
+    }
+
+    /// 4th discovery candidate (ADR Decision A): the managed-config snapshot,
+    /// folded in after the `home_path()` tier and below `OCX_CONFIG`/
+    /// `--config`. Zero network here — the snapshot is read from local state
+    /// only.
+    ///
+    /// `OCX_NO_CONFIG=1` suppresses this candidate entirely (hermetic means
+    /// hermetic).
+    ///
+    /// Path duplication is avoided via the pure associated fn
+    /// [`crate::file_structure::StateStore::managed_config_snapshot_path`],
+    /// shared by the loader and the store accessor — this never constructs a
+    /// [`crate::file_structure::StateStore`].
+    fn managed_snapshot_candidate() -> Option<PathBuf> {
+        if crate::env::flag("OCX_NO_CONFIG", false) {
+            return None;
+        }
+        let ocx_home = Self::home_dir()?;
+        Some(crate::file_structure::StateStore::managed_config_snapshot_path(
+            &ocx_home,
+        ))
+    }
+
+    /// Identity-gated one-hop-strip merge of the managed-config snapshot onto
+    /// `accumulator` (ADR Decision A).
+    ///
+    /// Resolves the effective source locally (`OCX_MANAGED_CONFIG` env
+    /// override, else the `[managed].source` seed already folded into
+    /// `local_only` — base tiers PLUS the `OCX_CONFIG`/`--config` overlay;
+    /// amended post-Codex-gate 2026-07-05, see the ADR "Loader integration"
+    /// decision — resolving from the base tiers alone let an overlay-only
+    /// seed activate `Context::try_init`'s required-gate without ever folding
+    /// its payload here), then merges the snapshot ONLY when its embedded
+    /// provenance `source` equals that effective source under canonical
+    /// [`crate::oci::Identifier`] equality (tag and digest significant). The
+    /// snapshot's embedded TOML is parsed as a [`Config`], its `[managed]`
+    /// table is stripped before the merge (one hop — a payload can never
+    /// redirect the tier that fetched it; a present `[managed]` is WARNed,
+    /// Decision I). Merge order is unaffected: `accumulator` (base only) is
+    /// what the payload actually folds onto — the overlay is layered on top
+    /// by the caller afterward, so explicit tiers still beat payload values.
+    ///
+    /// Every absence path — no candidate, missing/unreadable/malformed
+    /// snapshot, identity mismatch — is a silent no-op (`accumulator`
+    /// returned unchanged, debug log only): a wrong-identity snapshot must
+    /// never reach [`Config`], and a benign absent state must not WARN.
+    /// Zero network here, ever.
+    ///
+    /// Also returns the RAW snapshot this call read from disk (before the
+    /// identity gate below), so [`Self::load_with_local_view`] can expose it
+    /// via [`LoadedConfig::managed_config_snapshot`] and callers avoid a
+    /// second read of the same file. The raw value is `Some` even on an
+    /// identity mismatch — only a missing candidate or an
+    /// absent/unreadable/malformed on-disk file yields `None`.
+    ///
+    /// The effective [`ResolvedManagedConfig`](crate::config::managed::ResolvedManagedConfig)
+    /// target is returned as the third tuple element so `Context::try_init`
+    /// reuses this single resolution instead of resolving the same target two
+    /// more times. It is `None` when no source is configured OR the resolution
+    /// errored (swallowed here — the fold is best-effort; the caller re-resolves
+    /// to surface a malformed seed as the authoritative error).
+    ///
+    /// The target is resolved FIRST so a non-managed user never pays the
+    /// `snapshot.json` stat: the file is read only once a source resolves.
+    async fn fold_managed_tier(
+        accumulator: Config,
+        local_only: &Config,
+    ) -> Result<(
+        Config,
+        Option<crate::config::managed::ManagedConfigSnapshot>,
+        Option<crate::config::managed::ResolvedManagedConfig>,
+    )> {
+        // Resolve the effective source LOCALLY: env `OCX_MANAGED_CONFIG`
+        // (suppressed by `OCX_NO_CONFIG` — hermetic) over `local_only`'s
+        // already-folded `managed.source` (base tiers — system/user/home — PLUS
+        // the `OCX_CONFIG`/`--config` overlay).
+        //
+        // Uses `resolve_managed_target` — the SAME lock-aware resolution
+        // `resolve_managed_config`'s `required` gate uses — instead of a raw
+        // env-over-seed computation. Regression (Codex-flagged 2026-07-05): a
+        // raw resolution here disagreed with the lock-aware one once the
+        // system-lock env-override guard landed: a system-locked source A
+        // plus a mismatched `OCX_MANAGED_CONFIG=B` made this gate compare the
+        // snapshot against B (mismatch, fold skipped) while the required gate
+        // separately re-resolved back to A and found the SAME snapshot
+        // satisfying — required reported satisfied with the payload silently
+        // never folded. Sharing the resolution closes the drift permanently.
+        let env_override = if crate::env::flag(crate::env::keys::OCX_NO_CONFIG, false) {
+            None
+        } else {
+            crate::env::var(crate::env::keys::OCX_MANAGED_CONFIG).filter(|value| !value.is_empty())
+        };
+        let Some(resolved) = crate::config::managed::resolve_managed_target(local_only, env_override.as_deref())
+            .ok()
+            .flatten()
+        else {
+            return Ok((accumulator, None, None));
+        };
+
+        // A source resolved — read the snapshot from local state only now, so a
+        // non-managed user never pays the stat above.
+        let Some(candidate) = Self::managed_snapshot_candidate() else {
+            return Ok((accumulator, None, Some(resolved)));
+        };
+        let Some(snapshot) = crate::managed_config::read_managed_config_snapshot_at(&candidate).await else {
+            // Absent, unreadable, or malformed JSON — treated as absent
+            // (benign-state rule, no per-invocation WARN).
+            return Ok((accumulator, None, Some(resolved)));
+        };
+
+        // Canonical `oci::Identifier` equality (tag/digest significant) —
+        // never applies a snapshot fetched under a different identity, even
+        // for `required = false` tiers (CI cache-poison defense). Uses the
+        // shared `snapshot_matches_source` predicate so this gate and
+        // `resolve_managed_config`'s `required` gate can never drift.
+        let identity_matches = crate::config::managed::snapshot_matches_source(&snapshot, &resolved.source);
+        if !identity_matches {
+            log::debug!(
+                "managed-config snapshot source does not match the effective source '{}'; treating as absent",
+                resolved.source
+            );
+            return Ok((accumulator, Some(snapshot), Some(resolved)));
+        }
+
+        let mut parsed: Config = match toml::from_str(&snapshot.config) {
+            Ok(parsed) => parsed,
+            Err(source) => {
+                log::debug!("managed-config snapshot payload is not valid TOML, treating as absent: {source}");
+                return Ok((accumulator, Some(snapshot), Some(resolved)));
+            }
+        };
+        // ADR Decision I (one-hop): a remote payload can never redirect or
+        // loosen the tier that fetched it.
+        if parsed.managed.take().is_some() {
+            log::warn!(
+                "managed-config payload for '{}' contained a [managed] section; stripped before merge (a remote \
+                 payload can never redirect the tier that fetched it)",
+                resolved.source
+            );
+        }
+
+        let mut accumulator = accumulator;
+        accumulator.merge(parsed);
+        Ok((accumulator, Some(snapshot), Some(resolved)))
     }
 
     /// Discover the ordered list of config files to load (lowest precedence
@@ -439,19 +663,53 @@ impl ConfigLoader {
                 path: path.to_path_buf(),
                 source,
             })?;
-            // C7 enforcement: lock a system-scope `[patches]` tier that declares
-            // `required = true` as non-overridable BEFORE merging it into the
-            // accumulator. Only the system file (`/etc/ocx/config.toml`) is
-            // locked; the system tier folds in first as the accumulator base, so
-            // a locked `self.patches` then ignores all lower-tier overrides.
-            if path == Self::system_path().as_path()
-                && let Some(patches) = parsed.patches.as_mut()
-            {
-                patches.lock_as_system();
+            // C7 enforcement — see [`Self::apply_system_locks`] for the full
+            // per-section rationale. Only the system file is locked; it folds
+            // in first, so locked sections ignore all lower-tier overrides.
+            if path == Self::system_path().as_path() {
+                Self::apply_system_locks(&mut parsed);
             }
             config.merge(parsed);
         }
         Ok(config)
+    }
+
+    /// C7 enforcement: lock every lockable section of a system-scope config
+    /// (`/etc/ocx/config.toml`) as non-overridable BEFORE it merges into the
+    /// accumulator. The system tier folds in first, so a locked section then
+    /// ignores all lower-tier overrides (including an untrusted
+    /// managed-config payload).
+    ///
+    /// Covers all five lockable sections: `[patches]` (lock is conditional
+    /// inside `PatchConfig::lock_as_system`), `[registry]` (unconditional),
+    /// each `[registries.<name>]` entry (unconditional, per name — closes
+    /// the indirection `resolved_default_registry` resolves through), each
+    /// `[mirrors."<host>"]` entry (unconditional, per host), and `[managed]`
+    /// (required-gated inside `ManagedConfig::lock_as_system`, like
+    /// `[patches]` — a system-scope `required = true` seed must not be
+    /// loosenable/clearable by the home tier's fence; ADR Decision G,
+    /// criterion 13). Extracted so the section coverage is unit-testable
+    /// without writing to `/etc`.
+    fn apply_system_locks(parsed: &mut Config) {
+        if let Some(patches) = parsed.patches.as_mut() {
+            patches.lock_as_system();
+        }
+        if let Some(registry) = parsed.registry.as_mut() {
+            registry.lock_as_system();
+        }
+        if let Some(registries) = parsed.registries.as_mut() {
+            for entry in registries.values_mut() {
+                entry.lock_as_system();
+            }
+        }
+        if let Some(mirrors) = parsed.mirrors.as_mut() {
+            for mirror in mirrors.values_mut() {
+                mirror.lock_as_system();
+            }
+        }
+        if let Some(managed) = parsed.managed.as_mut() {
+            managed.lock_as_system();
+        }
     }
 
     /// System config: `/etc/ocx/config.toml`.
@@ -810,6 +1068,35 @@ mod tests {
         assert_eq!(
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("ci.example")
+        );
+    }
+
+    /// No managed-config tier exists yet, so `load_with_local_view`'s
+    /// `merged` and `local_only` views must carry identical content — both
+    /// equal to what `load` returns.
+    #[tokio::test]
+    async fn load_with_local_view_merged_and_local_only_are_identical() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
+        env.set("OCX_NO_CONFIG", "1");
+        env.set("OCX_CONFIG", path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load_with_local_view should succeed");
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("ci.example")
+        );
+        assert_eq!(
+            loaded.local_only.registry.as_ref().and_then(|r| r.default.as_deref()),
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            "merged and local_only must be identical until a managed-config tier exists"
         );
     }
 
@@ -1583,6 +1870,636 @@ mod tests {
             resolved,
             Some(project),
             "walk must traverse multiple parent levels to find ocx.toml"
+        );
+    }
+
+    // ── managed-config tier: identity-gated fold (ADR Decision A) ────────────
+    //
+    // `fold_managed_tier` folds a matching snapshot's payload above the home
+    // tier and below `--config`/`OCX_CONFIG`, stripping any embedded
+    // `[managed]` section first (see its doc comment for the full contract).
+    // Tests below cover both the merge path and the ignore paths (mismatch /
+    // hermetic / malformed snapshot).
+
+    /// Writes a single-file managed-config snapshot at the well-known path
+    /// under `ocx_home`, mirroring `ManagedConfigSnapshot`'s wire shape.
+    fn write_managed_snapshot(ocx_home: &Path, source: &str, config_toml: &str) {
+        let path = crate::file_structure::StateStore::managed_config_snapshot_path(ocx_home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let snapshot = serde_json::json!({
+            "source": source,
+            "digest": format!("sha256:{}", "a".repeat(64)),
+            "fetched_at": "2026-07-04T00:00:00Z",
+            "config": config_toml,
+        });
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    }
+
+    /// Precedence + one-hop-strip (criteria 11): the managed snapshot folds
+    /// ABOVE the home tier but BELOW `--config`/`OCX_CONFIG`; its embedded
+    /// `[managed]` section (a redirect attempt) is stripped and never
+    /// overrides the seed's own `[managed]` values.
+    #[tokio::test]
+    async fn managed_snapshot_merges_above_home_below_config_and_strips_managed_section() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+
+        // The payload embeds a hostile [managed] section attempting a redirect
+        // (ADR Decision I, one-hop) — it must never override the seed's source.
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[registry]\ndefault = \"managed-registry\"\n[managed]\nsource = \"hostile.test/other:v1\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("managed-registry"),
+            "managed snapshot payload must fold above the home tier"
+        );
+        assert_eq!(
+            loaded.merged.managed.as_ref().and_then(|m| m.source.as_deref()),
+            Some("registry.test/managed-config:v1"),
+            "the payload's embedded [managed] section must be stripped and never override \
+             the seed source (one-hop, ADR Decision I)"
+        );
+        assert!(
+            loaded.local_only.registry.is_none(),
+            "the local-only view must exclude the network-sourced managed tier"
+        );
+
+        // --config overlay (highest precedence) must still beat the managed tier.
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(
+            &overlay_dir,
+            "overlay.toml",
+            "[registry]\ndefault = \"overlay-registry\"\n",
+        );
+        let inputs = ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("overlay-registry"),
+            "--config overlay must beat the managed snapshot"
+        );
+    }
+
+    /// Criterion 7 (loader-level): a snapshot whose embedded provenance does
+    /// not match the effective source must be treated as absent — content
+    /// never reaches `Config`, mirrors/registry/patches included.
+    #[tokio::test]
+    async fn managed_snapshot_source_mismatch_is_never_merged() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "other.test/managed-config:v1",
+            "[registry]\ndefault = \"poisoned-registry\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("load must succeed despite the mismatch");
+        assert!(
+            config.registry.is_none(),
+            "a source-mismatched snapshot must never merge its payload, got: {config:?}"
+        );
+    }
+
+    /// W6: a snapshot whose embedded `config` payload is corrupt TOML must be
+    /// treated as absent by the loader fold (debug-logged, never a hard error,
+    /// never a partial merge) — same benign-state posture as a corrupt
+    /// snapshot file.
+    #[tokio::test]
+    async fn managed_snapshot_corrupt_embedded_toml_treated_as_absent() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+        // Identity matches, but the embedded payload is not valid TOML.
+        write_managed_snapshot(dir.path(), "registry.test/managed-config:v1", "not = [valid");
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("load must succeed despite the corrupt embedded payload");
+        assert!(
+            config.registry.is_none(),
+            "a corrupt embedded payload must never partially merge, got: {config:?}"
+        );
+        assert_eq!(
+            config.managed.as_ref().and_then(|managed| managed.source.as_deref()),
+            Some("registry.test/managed-config:v1"),
+            "the seed itself stays intact when the snapshot payload is corrupt"
+        );
+    }
+
+    /// ADR Decision A: the effective source for the identity gate is env
+    /// `OCX_MANAGED_CONFIG` (when set) over the seed's `managed.source`.
+    #[tokio::test]
+    async fn managed_snapshot_identity_gate_uses_env_override_when_set() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"seed.test/managed-config:v1\"\n",
+        )
+        .unwrap();
+        // The snapshot's provenance matches the ENV override, not the seed.
+        env.set("OCX_MANAGED_CONFIG", "override.test/managed-config:v1");
+        write_managed_snapshot(
+            dir.path(),
+            "override.test/managed-config:v1",
+            "[registry]\ndefault = \"env-override-registry\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("env-override-registry"),
+            "the identity gate must use the env-overridden source, matching the snapshot fetched under it"
+        );
+    }
+
+    /// Amended post-Codex-gate 2026-07-05 (ADR "Loader integration"): a
+    /// `[managed].source` seed declared ONLY in the `--config`/`OCX_CONFIG`
+    /// overlay (no home/system/user tier at all) must still activate the
+    /// fold — the payload's non-conflicting values become visible in
+    /// `merged`, while the overlay's own conflicting value still wins.
+    #[tokio::test]
+    async fn managed_snapshot_seed_only_in_overlay_still_folds_payload() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        // Deliberately no home-tier config.toml — the seed exists ONLY in
+        // the --config overlay below.
+
+        write_managed_snapshot(
+            dir.path(),
+            "overlay-only.test/managed-config:v1",
+            "[registry]\ndefault = \"payload-registry\"\n[patches]\nregistry = \"payload-patches.example\"\n",
+        );
+
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(
+            &overlay_dir,
+            "overlay.toml",
+            "[managed]\nsource = \"overlay-only.test/managed-config:v1\"\n[registry]\ndefault = \"overlay-registry\"\n",
+        );
+        let inputs = ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("overlay-registry"),
+            "the overlay's own [registry] must still beat the payload's on a conflicting key"
+        );
+        assert_eq!(
+            loaded.merged.patches.as_ref().and_then(|p| p.registry.as_deref()),
+            Some("payload-patches.example"),
+            "an overlay-only [managed].source must still activate the fold, making the \
+             payload's non-conflicting values visible in merged"
+        );
+    }
+
+    /// A snapshot fetched under the `--config` OVERLAY's source merges even
+    /// though the home tier declares a DIFFERENT `[managed].source` — the
+    /// fold's identity gate must resolve from `local_only` (base + overlay),
+    /// not the base tiers alone.
+    #[tokio::test]
+    async fn managed_snapshot_overlay_source_overrides_home_seed_for_identity_gate() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"home-seed.test/managed-config:v1\"\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "overlay-seed.test/managed-config:v1",
+            "[registry]\ndefault = \"overlay-seed-registry\"\n",
+        );
+
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(
+            &overlay_dir,
+            "overlay.toml",
+            "[managed]\nsource = \"overlay-seed.test/managed-config:v1\"\n",
+        );
+        let inputs = ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("overlay-seed-registry"),
+            "a snapshot provisioned for the OVERLAY's source must merge when the overlay \
+             declares a different [managed].source than the home tier"
+        );
+    }
+
+    /// Sibling to the above: a snapshot fetched under the HOME tier's source
+    /// is treated as absent once the overlay declares a DIFFERENT source —
+    /// the fold and `resolve_managed_config`'s `required` gate must agree on
+    /// which source is effective, or a stale snapshot could silently satisfy
+    /// the wrong identity.
+    #[tokio::test]
+    async fn managed_snapshot_home_seed_source_is_absent_once_overlay_overrides_it() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"home-seed.test/managed-config:v1\"\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "home-seed.test/managed-config:v1",
+            "[registry]\ndefault = \"stale-home-registry\"\n",
+        );
+
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(
+            &overlay_dir,
+            "overlay.toml",
+            "[managed]\nsource = \"overlay-seed.test/managed-config:v1\"\n",
+        );
+        let inputs = ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed despite the mismatch");
+
+        assert!(
+            loaded.merged.registry.is_none(),
+            "a snapshot fetched under the HOME tier's source must be treated as absent once \
+             the overlay declares a different source, got: {:?}",
+            loaded.merged.registry
+        );
+    }
+
+    /// A malformed `snapshot.json` (not valid JSON) must be treated as absent
+    /// — the loader never fails the whole config load because of a corrupt
+    /// managed-config snapshot (no new loader error variant, ADR Decision A).
+    #[tokio::test]
+    async fn managed_snapshot_malformed_json_is_treated_as_absent() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\n",
+        )
+        .unwrap();
+        let snapshot_path = crate::file_structure::StateStore::managed_config_snapshot_path(dir.path());
+        std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot_path, b"not valid json {{{").unwrap();
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("a corrupt managed-config snapshot must not fail the whole config load");
+        assert!(config.registry.is_none(), "corrupt snapshot must be treated as absent");
+    }
+
+    /// Criterion 26: `OCX_NO_CONFIG=1` suppresses the managed-config candidate
+    /// AND disables the `OCX_MANAGED_CONFIG` env-override read entirely
+    /// (hermetic means hermetic).
+    #[tokio::test]
+    async fn no_config_suppresses_managed_snapshot_even_with_matching_env_override() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        env.set("OCX_MANAGED_CONFIG", "registry.test/managed-config:v1");
+
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[registry]\ndefault = \"should-never-appear\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("OCX_NO_CONFIG=1 must still succeed");
+        assert!(
+            config.registry.is_none(),
+            "OCX_NO_CONFIG=1 must suppress the managed-config candidate even with a matching snapshot"
+        );
+    }
+
+    /// Criterion 28 (unit-level substitute — mirrors the sanctioned pattern in
+    /// `test/tests/test_patches.py::test_launcher_digest_matched_opt_out_respects_system_required`:
+    /// `system_locked` is only ever set by the loader after parsing the
+    /// SYSTEM-scope `/etc/ocx/config.toml`, which acceptance tests cannot
+    /// write without root). A system-locked `[registry]` on the accumulator
+    /// must survive a managed-payload redirection attempt: `fold_managed_tier`
+    /// reuses `Config::merge`, which already respects `system_locked`.
+    #[tokio::test]
+    async fn managed_snapshot_cannot_override_system_locked_registry() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[registry]\ndefault = \"malicious-registry.example\"\n",
+        );
+
+        // Simulate an accumulator that already folded a locked SYSTEM tier
+        // (in production this comes from `/etc/ocx/config.toml` via
+        // `load_and_merge`'s `lock_as_system` branch) plus a home tier whose
+        // `[managed].source` matches the snapshot above.
+        let mut registry = crate::config::RegistryDefaults {
+            default: Some("system-locked-registry.example".to_string()),
+            system_locked: false,
+        };
+        registry.lock_as_system();
+        let accumulator = crate::config::Config {
+            registry: Some(registry),
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("registry.test/managed-config:v1".to_string()),
+                required: Some(false),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed even against a locked accumulator");
+        assert_eq!(
+            folded.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("system-locked-registry.example"),
+            "a system-locked [registry] must survive a managed-payload redirection attempt"
+        );
+    }
+
+    /// Regression (Codex-flagged 2026-07-05): the identity gate here must use
+    /// the SAME lock-aware source resolution as `resolve_managed_config`'s
+    /// `required` gate. Before the fix, this gate resolved a mismatched
+    /// `OCX_MANAGED_CONFIG` override directly (ignoring the system lock),
+    /// while the required gate (via `resolve_managed_target`) correctly
+    /// ignored the override and fell back to the locked seed — so the two
+    /// gates disagreed on the effective source. Net effect: the snapshot for
+    /// the LOCKED source was compared against the mismatched override,
+    /// silently NOT folded, while required-enforcement separately resolved
+    /// back to the locked source and reported the same snapshot as
+    /// satisfying — a required corporate config tier silently vanished with
+    /// no error. This test locks the two gates together: a system-locked
+    /// `[managed]` source must still fold its own snapshot even when
+    /// `OCX_MANAGED_CONFIG` names a different (mismatched) source.
+    #[tokio::test]
+    async fn managed_snapshot_system_locked_source_folds_despite_mismatched_env_override() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.set("OCX_MANAGED_CONFIG", "hostile.test/evil-config:latest");
+
+        write_managed_snapshot(
+            dir.path(),
+            "system.corp/ocx-config:user",
+            "[registry]\ndefault = \"corp-registry.example\"\n",
+        );
+
+        // Simulate an accumulator/local-only view that already folded a
+        // locked SYSTEM tier (in production: `/etc/ocx/config.toml` via
+        // `load_and_merge`'s `lock_as_system` branch).
+        let mut managed = crate::config::managed::ManagedConfig {
+            source: Some("system.corp/ocx-config:user".to_string()),
+            required: Some(true),
+            ..Default::default()
+        };
+        managed.lock_as_system();
+        let accumulator = crate::config::Config {
+            managed: Some(managed),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed");
+        assert!(
+            snapshot.is_some(),
+            "the on-disk snapshot must still be read and returned"
+        );
+        assert_eq!(
+            folded.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("corp-registry.example"),
+            "a system-locked [managed] source must fold its own snapshot even when OCX_MANAGED_CONFIG names a \
+             mismatched source — the identity gate must ignore the same override resolve_managed_target ignores"
+        );
+    }
+
+    /// Same contract as `managed_snapshot_cannot_override_system_locked_registry`,
+    /// but through the `[registries.<name>].url` indirection:
+    /// `Config::resolved_default_registry` resolves `[registry] default`
+    /// through the NAMED `[registries.<name>]` entry's `url`, so a lock on
+    /// Regression (review round 2): the `[managed]` lock call was missing
+    /// from the system-scope wiring — `ManagedConfig::lock_as_system` existed
+    /// but was never invoked, so criterion 13 was unenforced dead code. Pins
+    /// that `apply_system_locks` covers every lockable section, so a newly
+    /// added lockable section that misses the wiring fails here.
+    #[test]
+    fn apply_system_locks_covers_every_lockable_section() {
+        let mut config: crate::config::Config = toml::from_str(concat!(
+            "[patches]\nregistry = \"patches.corp.example\"\nrequired = true\n",
+            "[registry]\ndefault = \"corp\"\n",
+            "[registries.corp]\nurl = \"registry.corp.example\"\n",
+            "[mirrors.\"docker.io\"]\nurl = \"https://mirror.corp.example\"\n",
+            "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
+        ))
+        .unwrap();
+
+        ConfigLoader::apply_system_locks(&mut config);
+
+        assert!(
+            config.patches.unwrap().system_locked,
+            "[patches] (required=true) must lock"
+        );
+        assert!(config.registry.unwrap().system_locked, "[registry] must lock");
+        assert!(
+            config.registries.unwrap().values().all(|entry| entry.system_locked),
+            "every [registries.<name>] entry must lock"
+        );
+        assert!(
+            config.mirrors.unwrap().values().all(|mirror| mirror.system_locked),
+            "every [mirrors.\"<host>\"] entry must lock"
+        );
+        assert!(
+            config.managed.unwrap().system_locked,
+            "[managed] must lock (criterion 13)"
+        );
+    }
+
+    /// `RegistryDefaults` alone leaves that indirection open — a managed
+    /// payload could redirect the entry instead of the default name. This
+    /// pins that the entry-level lock (`RegistryConfig::system_locked`)
+    /// closes it too.
+    #[tokio::test]
+    async fn managed_snapshot_cannot_override_system_locked_registries_entry() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[registries.corp]\nurl = \"malicious-registry.example\"\n",
+        );
+
+        // Simulate an accumulator that already folded a locked SYSTEM tier:
+        // both `[registry] default = "corp"` and `[registries.corp].url` are
+        // system-locked (in production via `/etc/ocx/config.toml`'s
+        // `lock_as_system` branch).
+        let mut registry = crate::config::RegistryDefaults {
+            default: Some("corp".to_string()),
+            system_locked: false,
+        };
+        registry.lock_as_system();
+        let mut corp_entry = crate::config::RegistryConfig {
+            url: Some("system-locked-registry.example".to_string()),
+            system_locked: false,
+        };
+        corp_entry.lock_as_system();
+        let mut registries = std::collections::HashMap::new();
+        registries.insert("corp".to_string(), corp_entry);
+        let accumulator = crate::config::Config {
+            registry: Some(registry),
+            registries: Some(registries),
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("registry.test/managed-config:v1".to_string()),
+                required: Some(false),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed even against a locked accumulator");
+
+        assert_eq!(
+            folded.resolved_default_registry(),
+            Some("system-locked-registry.example"),
+            "a system-locked [registries.<name>] entry must survive a managed-payload redirection attempt"
         );
     }
 }

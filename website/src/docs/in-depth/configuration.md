@@ -59,6 +59,48 @@ OCX_CONFIG= ocx install cmake:3.28
 
 Empty is the escape hatch — `OCX_CONFIG` set to empty string is treated as unset, not as an error.
 
+## The Managed-Configuration Tier {#managed}
+
+The three discovery tiers above are files a human, or a provisioning script, writes once when a machine is set up. That works until a setting needs to change *after* the fleet is already provisioned — rotating the corporate mirror, redirecting the patch registry to a new host, retiring an old default registry. Re-running a Dockerfile or a config-management playbook against every already-running CI runner and laptop is exactly the fleet-wide chore OCX is trying to spare you from doing by hand.
+
+The `[managed]` tier solves this by turning the corporate config itself into an ordinary OCX package (its content is one `config.toml`) — the same distribution channel [`[mirrors]`][config-mirrors] and [`[patches]`][config-patches] already use, published with [`ocx config push`][cmd-config-push]. A small pointer (`source`, `required`, `refresh`, `interval`) lives in `$OCX_HOME/config.toml`; it resolves to that payload in the operator's registry, synced into local state, and merged above the user config on every invocation. Push a new version once, and every host that already adopted the pointer converges to it on its own schedule — no re-provisioning; versioned tags, cascades, and rollbacks come along for free because the config travels the package machinery.
+
+:::info Pull-based convergence
+This is a small-scale version of the pull-based configuration-management model [Puppet][puppet] and [Chef][chef] popularized for server fleets: an agent periodically checks a central manifest and converges local state to it, instead of an operator pushing changes to every host by hand. OCX's version is intentionally much smaller — one OCI package, one config file, no daemon, no console — but the shape (pull, converge, never block ordinary use) is the same idea. Fleet visibility is the pull-based complement: `ocx config update --check --format json` on any host reports source, digest, tracked tag, drift, and pause state for your existing inventory tooling.
+:::
+
+### Where it sits in the chain {#managed-position}
+
+The seed pointer is itself part of the ordinary `$OCX_HOME/config.toml` file — the [OCX home tier](#tier-ocx-home) above. But the package it resolves to is a **synthetic fifth tier**: a locally cached snapshot, folded in after the three static-file tiers and below [`OCX_CONFIG`][env-config]/[`--config`][arg-config]. See the [full precedence table][config-precedence] for exactly where it sits among every other source.
+
+Before that snapshot is merged, OCX checks that its embedded provenance — which `source` it was actually fetched from — matches the currently effective `source` (an [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] override, or else the seed): same registry and repository, and — when the seed pins a digest — exactly that digest. Tags float within the repository, so a host pinned to an older version with `ocx config update <version>` still passes. A cross-repository mismatch is treated as if no snapshot exists at all, even when `required = false`. This closes a real failure mode: a CI job that reuses a cached `$OCX_HOME` from a *different* pipeline (pointed at a different managed-config source) must never silently inherit that other pipeline's mirrors, patch registry, or default registry.
+
+The client that fetches the package is itself built only from **local-only** config tiers — the payload's own `[mirrors]` never contributes to the route used to fetch it. This is deliberate defense-in-depth alongside the [one-hop `[managed]` strip][config-managed-one-hop] that already keeps a fetched payload from redirecting the tier that fetched it: a compromised or misconfigured payload cannot also redirect the *transport* used to fetch its own next refresh.
+
+::: warning Trust boundary
+The identity gate above defends against the wrong content being merged — a cross-repository or pin-violating snapshot, most often a stale `$OCX_HOME` reused across CI pipelines. It does not defend against an attacker who already has write access to `$OCX_HOME`. `config.toml`, the snapshot (`state/managed-config/snapshot.json`), and the pause file are ordinary local state, at the same trust level as any other file such an attacker could edit directly. The tier's digest pins bind what was fetched from the registry at sync time; they are not a tamper-evidence check against what is sitting on disk afterward.
+:::
+
+### Why refresh never blocks a command {#managed-refresh}
+
+Some corporate policy-sync tools contact a central server on every invocation — reasonable for an always-connected device, disastrous for a build tool that needs to run identically on a laptop on a plane and a CI runner behind a firewall. Config resolution in OCX never does that: every ordinary command reads whatever snapshot is already on disk, with zero network access.
+
+The only things that ever touch the network are an explicit [`ocx config update`][cmd-config-update] and an optional background tick. The tick itself never blocks the command it rides along with — it is a throttled, best-effort probe (governed by [`interval`][config-managed-refresh]) that either applies a new snapshot silently (`refresh = "apply"`), prints a one-line stderr advisory (`refresh = "notify"`, the default), or does nothing (`refresh = "manual"`). A registry that is down, or a network that is unreachable, degrades the tick to a no-op — it never turns into a command failure.
+
+The tick also skips itself before ever contacting the registry in the same three situations OCX's own [update check][env-ocx-no-update-check] silences itself: inside CI (`CI` set), under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), and whenever stderr is not a terminal. Two more conditions gate it further: an active [pause][cmd-config-update] and the [`interval`][config-managed-interval] throttle window not yet having elapsed. [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] is the explicit kill switch layered on top of all five. The practical consequence is worth calling out: `refresh = "apply"` never auto-converges a CI runner or another headless host, no matter how the tier is configured — those hosts converge only through an explicit [`ocx config update`][cmd-config-update].
+
+### Offline and `required` {#managed-offline}
+
+[`required`][config-managed-required] decides whether an absent-or-mismatched snapshot is fatal, and that decision is made against **local disk state**, not network reachability. `required = true` (the default) fails closed identically online and offline — `SnapshotRequired`, exit 78, until [`ocx config update`][cmd-config-update] syncs one. `required = false` lets the command proceed with the tier contributing nothing, whether or not the registry happens to be reachable at that moment.
+
+This means a machine that adopted the tier once, then goes fully offline — a laptop on a plane, an air-gapped runner reusing a warm `$OCX_HOME` — resolves configuration identically to when it was last online. The snapshot is the tier's entire runtime state.
+
+::: tip Learn more
+[Managed-configuration walkthrough][user-guide-managed-config] — corporate onboarding, CI recipe, publisher recipe, staged rollout.
+[`[managed]` reference][config-managed] — every field, type, default, error condition.
+[`ocx config update` reference][cmd-config-update] — exit codes, JSON shape, `--check`.
+:::
+
 ## Discovery and Merge Precedence {#precedence}
 
 Settings are resolved lowest-to-highest. Higher-precedence sources override lower ones. This is the same shape as [Cargo's config][cargo-config] and [uv's config][uv-config] — start with conservative defaults, layer the user's intent on top.
@@ -79,7 +121,7 @@ This means a `[registries.company]` entry defined in `/etc/ocx/config.toml` and 
 
 ## The Kill Switch {#kill-switch}
 
-`OCX_NO_CONFIG=1` skips the **discovered chain only** — the system, user, and `$OCX_HOME` tiers. Explicit paths (`--config` and `OCX_CONFIG`) still load, because they represent deliberate intent rather than ambient environment.
+`OCX_NO_CONFIG=1` skips the **discovered chain** — the system, user, and `$OCX_HOME` tiers — and the [managed-configuration snapshot](#managed) candidate, including the `OCX_MANAGED_CONFIG` env-override read: hermetic means hermetic. Explicit paths (`--config` and `OCX_CONFIG`) still load, because they represent deliberate intent rather than ambient environment.
 
 This separation gives you all four common modes from two orthogonal primitives:
 
@@ -161,15 +203,35 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 - [Configuration reference][config-ref] — every key, type, default, error string
 - [Environment variable reference][env-ref] — the `OCX_*` variables that override config keys
 - [Command-line `--config` flag][arg-config] — invocation-level explicit config
+- [Managed-configuration walkthrough][user-guide-managed-config] — corporate onboarding, CI recipe, publisher recipe
+- [`ocx config update` reference][cmd-config-update] — exit codes, JSON shape, `--check`
 
 <!-- external -->
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
 [apple-dirs]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
 [cargo-config]: https://doc.rust-lang.org/cargo/reference/config.html
 [uv-config]: https://docs.astral.sh/uv/configuration/files/
+[puppet]: https://www.puppet.com/
+[chef]: https://www.chef.io/
 
 <!-- reference -->
 [config-ref]: ../reference/configuration.md
 [config-precedence]: ../reference/configuration.md#precedence
+[config-mirrors]: ../reference/configuration.md#keys-mirrors
+[config-patches]: ../reference/configuration.md#keys-patches
+[config-managed]: ../reference/configuration.md#keys-managed
+[config-managed-required]: ../reference/configuration.md#keys-managed-required
+[config-managed-refresh]: ../reference/configuration.md#keys-managed-refresh
+[config-managed-interval]: ../reference/configuration.md#keys-managed-interval
+[config-managed-one-hop]: ../reference/configuration.md#keys-managed-one-hop
 [env-ref]: ../reference/environment.md
+[env-config]: ../reference/environment.md#ocx-config
+[env-offline]: ../reference/environment.md#ocx-offline
+[env-ocx-managed-config]: ../reference/environment.md#ocx-managed-config
+[env-ocx-no-config-refresh]: ../reference/environment.md#ocx-no-config-refresh
+[env-ocx-no-update-check]: ../reference/environment.md#ocx-no-update-check
 [arg-config]: ../reference/command-line.md#arg-config
+[arg-offline]: ../reference/command-line.md#arg-offline
+[cmd-config-update]: ../reference/command-line.md#config-update
+[cmd-config-push]: ../reference/command-line.md#config-push
+[user-guide-managed-config]: ../user-guide.md#managed-config

@@ -276,6 +276,47 @@ For the full patch semantics (descriptor format, companion installation, per-pac
 opt-out), see the [`[patches]`][config-patches] configuration reference and the
 [Patching packages guide][patches-user-guide].
 
+### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
+
+The OCI reference for the [`[managed]`][config-managed] corporate-configuration artifact. Overrides `[managed] source` for this invocation only — never written back to the seed. The only writer of the persistent seed is [`ocx self setup --managed-config`][cmd-self-setup].
+
+```sh
+export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
+```
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — resolve the same managed tier.
+
+Runtime `OCX_MANAGED_CONFIG=""` is treated as unset, matching the [`OCX_CONFIG`](#ocx-config) precedent — useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
+
+Suppressed entirely (read side) by [`OCX_NO_CONFIG`](#ocx-no-config) — hermetic means hermetic.
+
+For CI, pair the env var with an explicit sync step — resolving the tier never triggers a fetch on its own:
+
+```sh
+export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
+ocx config update
+ocx package install cmake:3.28
+```
+
+See [`[managed]`][config-managed] for the full tier semantics and [`ocx config update`][cmd-config-update] for the sync command.
+
+### `OCX_NO_CONFIG_REFRESH` {#ocx-no-config-refresh}
+
+When set to a [truthy value](#truthy-values), disables the background refresh tick for the [`[managed]`][config-managed] configuration tier — both the `apply` and `notify` [`refresh`][config-managed-refresh] postures are silenced. An explicit [`ocx config update`][cmd-config-update] still runs and still updates the snapshot; only the automatic per-command probe is suppressed.
+
+```sh
+export OCX_NO_CONFIG_REFRESH=1
+```
+
+The background refresh tick is also automatically suppressed — independent of this variable, with no snapshot fetch even attempted — when:
+- `CI` is set to a truthy value
+- [`OCX_OFFLINE`](#ocx-offline) is set to a truthy value (or `--offline` flag)
+- stderr is not a terminal (e.g., piped or redirected)
+
+This mirrors the [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check) auto-check gate exactly. `OCX_NO_CONFIG_REFRESH` is the explicit kill switch; the three conditions above suppress the tick even when the variable is unset.
+
+Distinct from [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check): that variable silences the ocx-binary self-update notice, an unrelated concern independently silenceable from the managed-config tick.
+
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
@@ -290,7 +331,7 @@ If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) 
 
 ### `OCX_NO_CONFIG` {#ocx-no-config}
 
-When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
+When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. It also suppresses the [`[managed]`][config-managed] snapshot candidate entirely and disables the [`OCX_MANAGED_CONFIG`](#ocx-managed-config) env-override read — hermetic means hermetic, so a managed tier cannot slip in through either the local snapshot or the env override while this variable is set. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
 
 Use this for CI reproducibility: locked workflows should ignore any ambient config that might leak in from the runner image or a mounted home directory.
 
@@ -589,6 +630,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-self-activate]: command-line.md#self-activate
 [cmd-self-setup]: command-line.md#self-setup
 [cmd-self-update]: command-line.md#self-update
+[cmd-config-update]: command-line.md#config-update
 [cmd-shell-completion]: command-line.md#shell-completion
 [indices-routing]: ../user-guide.md#indices-routing
 
@@ -602,6 +644,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-patches]: ./configuration.md#keys-patches
+[config-managed]: ./configuration.md#keys-managed
+[config-managed-refresh]: ./configuration.md#keys-managed-refresh
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md
 

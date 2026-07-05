@@ -52,8 +52,26 @@ impl NativeTransport {
         self.client
             .auth(image, &auth, operation)
             .await
-            .map_err(|e| ClientError::Authentication(Box::new(e)))?;
+            .map_err(auth_or_availability_error)?;
         Ok(())
+    }
+}
+
+/// Classifies a failed auth ping. Only a registry that actually answered with a
+/// 401/403 (surfaced by `oci_client` as `AuthenticationFailure` /
+/// `UnauthorizedError`) is a genuine credentials failure
+/// ([`ClientError::Authentication`] → exit 80). Everything else is an
+/// availability problem ([`ClientError::Registry`] → exit 69):
+/// - connect / timeout (`RequestError`) — never reached the registry;
+/// - token-endpoint 5xx / 429 (`ServerError`, tagged in the patched
+///   `oci_client` `authenticate`) — the registry is unhealthy or rate-limiting;
+/// - an unparseable token body (`RegistryTokenDecodeError`).
+fn auth_or_availability_error(e: oci_client::errors::OciDistributionError) -> ClientError {
+    use oci_client::errors::OciDistributionError::{RegistryTokenDecodeError, RequestError, ServerError};
+    match &e {
+        RequestError(request) if request.is_connect() || request.is_timeout() => ClientError::Registry(Box::new(e)),
+        ServerError { .. } | RegistryTokenDecodeError(_) => ClientError::Registry(Box::new(e)),
+        _ => ClientError::Authentication(Box::new(e)),
     }
 }
 
@@ -170,7 +188,7 @@ impl OciTransport for NativeTransport {
         self.client
             .fetch_manifest_digest(image, &auth)
             .await
-            .map_err(registry_error)
+            .map_err(|e| manifest_not_found_or_registry_error(e, image))
     }
 
     async fn pull_manifest_raw(
@@ -539,6 +557,68 @@ mod tests {
                 repository_not_found_or_registry_error(envelope_error(OciErrorCode::Toomanyrequests), &reference());
             assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
         }
+    }
+
+    /// Bug 12: a genuine 401/403 (surfaced by `oci_client` as
+    /// `AuthenticationFailure` / `UnauthorizedError`, never `RequestError`) is a
+    /// credentials failure — stays `Authentication` (exit 80).
+    #[test]
+    fn genuine_auth_rejection_stays_authentication() {
+        use oci_client::errors::OciDistributionError;
+        let failure = OciDistributionError::AuthenticationFailure("bad token".to_string());
+        assert!(
+            matches!(auth_or_availability_error(failure), ClientError::Authentication(_)),
+            "AuthenticationFailure must classify as Authentication"
+        );
+        let unauthorized = OciDistributionError::UnauthorizedError {
+            url: "https://registry.test/v2/".to_string(),
+        };
+        assert!(
+            matches!(auth_or_availability_error(unauthorized), ClientError::Authentication(_)),
+            "UnauthorizedError must classify as Authentication"
+        );
+    }
+
+    /// Bug 15: a token-endpoint 5xx / 429 (tagged `ServerError` in the patched
+    /// `authenticate`) or an unparseable token body is an availability failure —
+    /// `Registry` (69), not `Authentication` (80).
+    #[test]
+    fn token_service_unavailable_is_registry_not_authentication() {
+        use oci_client::errors::OciDistributionError;
+        for code in [503u16, 429] {
+            let server = OciDistributionError::ServerError {
+                code,
+                url: "https://registry.test/token".to_string(),
+                message: "down".to_string(),
+            };
+            assert!(
+                matches!(auth_or_availability_error(server), ClientError::Registry(_)),
+                "token-service {code} must classify as Registry"
+            );
+        }
+        let decode = OciDistributionError::RegistryTokenDecodeError("bad json".to_string());
+        assert!(
+            matches!(auth_or_availability_error(decode), ClientError::Registry(_)),
+            "an unparseable token body must classify as Registry"
+        );
+    }
+
+    /// Bug 12 root cause: a connection-refused auth ping (the registry never
+    /// answered) must classify `Registry` (→ Unavailable, exit 69), NOT
+    /// `Authentication` (80). Port 1 on loopback is closed, so the connect fails
+    /// immediately and deterministically.
+    #[tokio::test]
+    async fn connect_refused_auth_ping_is_registry_not_authentication() {
+        let transport = NativeTransport::new(
+            oci::native::Client::new(oci::native::ClientConfig::default()),
+            crate::auth::Auth::new(),
+        );
+        let reference = oci::native::Reference::try_from("127.0.0.1:1/ocx/probe:latest").expect("valid reference");
+        let result = transport.authenticate(&reference, oci::RegistryOperation::Pull).await;
+        assert!(
+            matches!(result, Err(ClientError::Registry(_))),
+            "a refused connection must be Registry (Unavailable/69), got {result:?}"
+        );
     }
 
     /// Drives `progress_body_stream` to completion, returning the yielded frames
