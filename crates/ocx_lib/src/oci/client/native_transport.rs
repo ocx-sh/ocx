@@ -333,19 +333,15 @@ impl OciTransport for NativeTransport {
             source_repository,
             image
         );
-        // ponytail: the pinned fork commit still conflates a spec-legal 202
-        // mount-miss with a hard `SpecViolationError` (the typed
-        // `BlobMountResponse::{Mounted,UploadSessionOpened}` split lives on the
-        // fork's `ocx/integration` branch but hasn't been bumped into this
-        // submodule pin yet). Every mount failure is swallowed here rather than
-        // propagated, because mounting is purely an upload-avoidance
-        // optimization — a 202 miss and a genuine registry error both mean
-        // "fall back to a normal push_blob" to this caller. When the fork bump
-        // lands, replace this `match` with a `?`-propagating call against the
-        // typed response and let `push_multi_layer_manifest`'s own
-        // `log::warn` + fallback (mount must never fail the push) take over.
+        // A 202 mount-miss is spec-legal (registry declined and opened a regular
+        // upload session instead) — that session is deliberately abandoned here;
+        // `push_multi_layer_manifest`'s existing fallback re-uploads through the
+        // normal `push_blob` path. A genuine transport error is likewise mapped
+        // to `UploadRequired` rather than propagated: mounting is purely an
+        // upload-avoidance optimization and must never fail the push.
         match self.client.mount_blob(image, &source, digest_str.as_str()).await {
-            Ok(()) => Ok(MountOutcome::Mounted),
+            Ok(oci_client::client::BlobMountResponse::Mounted) => Ok(MountOutcome::Mounted),
+            Ok(oci_client::client::BlobMountResponse::UploadSessionOpened(_)) => Ok(MountOutcome::UploadRequired),
             Err(e) => {
                 log::warn!(
                     "Mount of blob {} from {} into {} declined, falling back to upload: {}",
