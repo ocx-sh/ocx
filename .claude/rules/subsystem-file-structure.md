@@ -137,7 +137,7 @@ Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identif
 Layout: `{root}/state/` — see "Root-level state files under `$OCX_HOME`" above for the full
 path table (`state/update-check/<slug>` etc.).
 
-Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`.
+Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (single-file snapshot, atomic temp+rename), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic.
 
 ### TempStore — Download staging
 

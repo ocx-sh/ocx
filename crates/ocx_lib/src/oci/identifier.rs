@@ -422,6 +422,21 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
             kind: IdentifierErrorKind::RepositoryTooLong,
         });
     }
+    // Character-class guard (OCI distribution spec repository grammar,
+    // narrowed to what the uppercase check above doesn't already cover): each
+    // `/`-segment must be non-empty and contain only lowercase alphanumerics,
+    // `.`, `_`, or `-`. Catches garbage input (spaces, punctuation) that would
+    // otherwise silently parse into a syntactically well-formed but
+    // registry-illegal identifier.
+    if repository
+        .split('/')
+        .any(|segment| segment.is_empty() || !segment.bytes().all(is_repository_segment_byte))
+    {
+        return Err(IdentifierError {
+            input: input.to_string(),
+            kind: IdentifierErrorKind::InvalidFormat,
+        });
+    }
 
     Ok(Identifier {
         registry,
@@ -429,6 +444,11 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
         tag,
         digest,
     })
+}
+
+/// Whether `byte` is a legal character inside one `/`-separated repository segment.
+fn is_repository_segment_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 /// Parses a digest string like `sha256:abcdef...` into a `Digest`.
@@ -658,6 +678,52 @@ mod tests {
     fn uppercase_repo_errors() {
         let err = "test.com/Foo".parse::<Identifier>().unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::UppercaseRepository));
+    }
+
+    /// Finding #5: direct coverage for the repository character-class guard
+    /// (`is_repository_segment_byte`). The accept side must allow lowercase
+    /// alphanumerics plus `.`, `_`, `-` in every `/`-segment; the reject side
+    /// must refuse spaces, disallowed punctuation, and empty segments as
+    /// `InvalidFormat` (rather than silently parsing registry-illegal input).
+    #[test]
+    fn repository_char_class_accepts_allowed_boundary() {
+        // All allowed special characters across nested segments.
+        let id: Identifier = "test.com/foo.bar_baz-qux/a1b2"
+            .parse()
+            .expect("allowed char classes must parse");
+        assert_eq!(id.repository(), "foo.bar_baz-qux/a1b2");
+    }
+
+    #[test]
+    fn repository_char_class_rejects_space() {
+        let err = "test.com/foo bar".parse::<Identifier>().unwrap_err();
+        assert!(
+            matches!(err.kind, IdentifierErrorKind::InvalidFormat),
+            "a space in a repository segment must be rejected as InvalidFormat, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn repository_char_class_rejects_disallowed_punctuation() {
+        for input in ["test.com/foo!bar", "test.com/foo~bar", "test.com/foo%bar"] {
+            let err = input.parse::<Identifier>().unwrap_err();
+            assert!(
+                matches!(err.kind, IdentifierErrorKind::InvalidFormat),
+                "disallowed punctuation in '{input}' must be rejected as InvalidFormat, got {:?}",
+                err.kind
+            );
+        }
+    }
+
+    #[test]
+    fn repository_char_class_rejects_empty_segment() {
+        let err = "test.com/foo//bar".parse::<Identifier>().unwrap_err();
+        assert!(
+            matches!(err.kind, IdentifierErrorKind::InvalidFormat),
+            "an empty repository segment must be rejected as InvalidFormat, got {:?}",
+            err.kind
+        );
     }
 
     #[test]

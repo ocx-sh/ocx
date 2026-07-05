@@ -857,6 +857,10 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::DigestMismatch { .. }
         | ClientError::DecompressionCapExceeded { .. }
         | ClientError::UnexpectedManifestType
+        | ClientError::UnexpectedArtifactType { .. }
+        | ClientError::WrongLayerCount { .. }
+        | ClientError::UnexpectedLayerMediaType { .. }
+        | ClientError::LayerSizeExceeded { .. }
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
         | ClientError::Internal(_) => ClientFailure::Other,

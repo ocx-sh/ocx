@@ -88,19 +88,25 @@ class OcxRunner:
         format: str | None = "json",
         check: bool = True,
         log_level: str | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run ocx with the given arguments."""
+        """Run ocx with the given arguments.
+
+        ``env_overrides`` adds/overrides environment variables for this single
+        invocation without mutating ``self.env``.
+        """
         cmd: list[str] = [str(self.binary)]
         if format:
             cmd += ["--format", format]
         if log_level:
             cmd += ["--log-level", log_level]
         cmd += list(args)
+        env = self.env if not env_overrides else {**self.env, **env_overrides}
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            env=self.env,
+            env=env,
         )
         if check and result.returncode != 0:
             raise AssertionError(

@@ -720,6 +720,70 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 [Configuration In Depth][in-depth-configuration] — discovery tier rationale, merge semantics, worked examples (Docker base image, hermetic CI, portable install).
 :::
 
+## Centrally managing ocx configuration {#managed-config}
+
+Corporate onboarding for a package manager usually means baking a config file into a base image, or dropping one via device management, then re-imaging every workstation and CI runner whenever the mirror map or patch registry needs to change. The [`[managed]`][config-managed] tier gives you a third option: publish the corporate config itself as an ordinary OCX package (its content is one `config.toml`), and let every host converge to it on its own schedule. Your config file gets exactly what your packages already have — versioned tags, rolling cascades, digest pins, rollbacks — because it travels the same machinery.
+
+On a fresh machine, adoption is this one line right after the [binary download][install-bare-binary] — a workstation that already has `ocx` on its `PATH` uses the same command (`--no-modify-path` here only skips the unrelated shell-profile step):
+
+<<< @/_scripts/user-guide/managed-config-setup.sh{sh}
+
+This resolves the reference, synchronously fetches and verifies the package, and only then writes the `[managed]` seed into `$OCX_HOME/config.toml`. A network failure during onboarding leaves no partial state — the seed is written only once the first snapshot is safely on disk. The reported `digest` is the adopted content's identity: record it once at onboarding (trust-on-first-use) and any later `ocx config update --check` can be compared against what the operator says they published.
+
+A bare `ocx self setup` re-run — no `--managed-config` flag at all — re-resolves and re-syncs whatever source is already active (the env override if one is set, otherwise the existing seed), so it also repairs a wiped or mismatched snapshot without repeating the onboarding command above.
+
+CI runners skip the seed entirely — set the org-level environment variable and sync once at the top of the job:
+
+<<< @/_scripts/user-guide/managed-config-ci.sh{sh}
+
+[`OCX_MANAGED_CONFIG`][env-ocx-managed-config] is invocation-only: it overrides `[managed] source` for that process and everything it spawns, but is never written back to disk — the right shape for an ephemeral runner that starts from a clean `$OCX_HOME` every run.
+
+From then on, every ordinary command merges the last-synced snapshot above the user config, with zero network access. See [how managed config fits into the tier chain][in-depth-configuration-managed] for the precedence details and the identity check that protects a shared `$OCX_HOME` from adopting a snapshot fetched for a different source.
+
+### Publishing an update {#managed-config-publish}
+
+The operator publishes with [`ocx config push`][cmd-config-push]. It validates the payload first — it must parse as an ocx config (write it against the [config schema][config-schema]), must not contain a `[managed]` section, and must stay within 64 KiB — then pushes it as an ordinary package:
+
+<<< @/_scripts/user-guide/managed-config-publish.sh{sh}
+
+`--cascade` gives your config the same rolling-tag algebra your packages already use: pushing `user-1.4.2` also advances `user-1.4`, `user-1`, and `user`, so a fleet tracking `:user` picks up the new content on its next [`ocx config update`][cmd-config-update] or background tick (subject to `refresh` and `interval` — see [`[managed]`][config-managed]), while a host that needs yesterday's exact content can track `user-1.4.1`. The reported digest is what every consumer's `--check` will show once converged.
+
+Fleet operators relying on `refresh = "apply"` should plan for its scope: the background tick only runs on an interactive terminal outside CI, online, unpaused, and past the throttle window, so CI runners and other headless hosts never auto-converge — they need the explicit `ocx config update` step from the CI recipe above.
+
+### Staged rollout, rollback, pause {#managed-config-rollout}
+
+Variant tags stage a rollout: publish to a `canary-…` version first, verify on a handful of machines tracking `:canary`, then publish the same payload under the `user-…` variant. Both are just cascade families in one repository — the same rolling-tag idiom OCX uses for [package cascades][in-depth-versioning-cascades].
+
+The cascade algebra gives you a ring within a single family too, with no second variant to maintain: push `user-1.4.2` without `--cascade` first — only that exact tag moves — and point a handful of canary hosts at `user-1.4.2` directly. Once they check out, push the same content again with `--cascade` to advance `user-1.4`, `user-1`, and `user` together; the rest of the fleet, tracking the floating `:user` tag, picks it up on its next sync or [`ocx config update`][cmd-config-update].
+
+A host that needs to step off the fleet's floating tag temporarily has two levers, both local:
+
+<<< @/_scripts/user-guide/managed-config-rollout.sh{sh}
+
+A pause affects only the background tick — required-gate enforcement and explicit updates keep working — and any explicit `ocx config update` without `--pause` clears it. `ocx config update --check --format json` reports the full local state (source, digest, tag, drift, pause window, pin), which is the fleet-visibility story: OCX is deliberately pull-based and console-free, so "what is this host running?" is answered by that one command in your existing inventory tooling.
+
+::: warning No downgrade monotonicity
+A managed-config snapshot accepts any digest change the registry reports, including a rollback to older content — the same as any tag-based OCI pull. There is no built-in check that a new digest is "newer" than the one already cached. For byte-exact reproducibility, or to rule out an accidental rollback entirely, pin `source` to a digest instead of a tag: `internal.company.com/ocx-config@sha256:…`.
+:::
+
+::: warning CI caches must not skip the sync
+If your CI caches `$OCX_HOME` across jobs, the cached snapshot is whatever some earlier job synced — keep the explicit `ocx config update` step in the job so a poisoned or stale cache entry is always reconciled against the registry before any tool resolution happens. The identity gate refuses a snapshot recorded for a different source outright, but only a sync brings a stale same-source snapshot forward.
+:::
+
+### Trust scope {#managed-config-trust}
+
+The trust root for a managed-config package is the operator's own registry — the same trust boundary [`[mirrors]`][config-mirrors] and [`[patches]`][config-patches] already rely on. The payload is verified by content digest, so a tampered or truncated fetch is rejected, but v1 does not verify a publisher signature. Signature verification is deferred to the forthcoming trust-policy work (identity-pinned verify via [`[trust.policy]`][gh-trust-policy] and policy-gated auto-verify, [GitHub #98][gh-trust-policy] / [#99][gh-auto-verify]) — both `[managed]` and `[patches]` become consumers once that lands. Until then, treat write access to the managed-config registry the same way you would treat write access to your `[mirrors]`/`[patches]` registries: a compromise there can redirect any of the three tiers fleet-wide.
+
+One redirection path is closed by construction rather than left to trust-policy work: the package fetch itself is routed only through mirrors configured in local tiers (system, user, `$OCX_HOME`, `OCX_CONFIG`, `--config`). A payload's own `[mirrors]` entry can never redirect the connection used to fetch its next refresh — a self-hijack that the [one-hop `[managed]` strip][config-managed-one-hop] already prevents for the config content itself, applied here to the transport too.
+
+::: tip Learn more
+[Configuration in-depth → managed-configuration tier][in-depth-configuration-managed] — where it sits in the precedence chain, why refresh never blocks a command, offline behavior.
+[`[managed]` reference][config-managed] — every field, type, default.
+[`ocx config push` reference][cmd-config-push] — payload validation, cascade tags, exit codes.
+[`ocx config update` reference][cmd-config-update] — VERSION pins, `--pause`/`--resume`, `--check`, exit codes, JSON shape.
+[`ocx self setup --managed-config` reference][cmd-self-setup-managed-config] — onboarding flag, exit codes.
+:::
+
 ## Update OCX {#update-ocx}
 
 OCX is itself an OCX-managed package. The binary lives at `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx`. Unlike other packages, `ocx self update` only swaps the `current` symlink — no candidate symlink is created for the new version.
@@ -856,12 +920,20 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [direnv]: https://direnv.net/
 [gitattributes]: https://git-scm.com/docs/gitattributes
 [schema-project]: https://ocx.sh/schemas/project/v1.json
+[oras]: https://oras.land/
+
+<!-- github issues -->
+[gh-trust-policy]: https://github.com/ocx-sh/ocx/issues/98
+[gh-auto-verify]: https://github.com/ocx-sh/ocx/issues/99
 
 <!-- commands -->
 [cmd-add-global]: ./reference/command-line.md#global-flag
 [cmd-self-activate]: ./reference/command-line.md#self-activate
 [cmd-self-setup]: ./reference/command-line.md#self-setup
+[cmd-self-setup-managed-config]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
+[cmd-config-update]: ./reference/command-line.md#config-update
+[cmd-config-push]: ./reference/command-line.md#config-push
 [cmd-version]: ./reference/command-line.md#version
 [cmd-logout]: ./reference/command-line.md#logout
 [cmd-login]: ./reference/command-line.md#login
@@ -921,12 +993,20 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-ref]: ./reference/configuration.md
 [config-registry-default]: ./reference/configuration.md#keys-registry-default
 [config-mirrors]: ./reference/configuration.md#keys-mirrors
+[config-patches]: ./reference/configuration.md#keys-patches
+[config-managed]: ./reference/configuration.md#keys-managed
+[config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
+[env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
 [getting-started]: ./getting-started.md
+[install-bare-binary]: #install-bare-binary
+[config-schema]: https://ocx.sh/schemas/config/v1.json
 
 <!-- in-depth -->
 [in-depth]: ./in-depth/storage.md
+[in-depth-configuration-managed]: ./in-depth/configuration.md#managed
+[in-depth-versioning-cascades]: ./in-depth/versioning.md#cascades
 [in-depth-storage]: ./in-depth/storage.md
 [in-depth-storage-stores]: ./in-depth/storage.md#stores
 [in-depth-storage-packages]: ./in-depth/storage.md#packages

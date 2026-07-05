@@ -34,6 +34,20 @@ pub use transport::OciTransport;
 
 use error::ClientError;
 
+/// Bytes and digests of a single-layer OCI artifact, returned by
+/// [`Client::fetch_single_layer_artifact`].
+#[derive(Debug)]
+pub(crate) struct SingleLayerArtifact {
+    /// Raw manifest JSON bytes (byte-identical to what the registry served).
+    pub manifest_bytes: Vec<u8>,
+    /// Digest of the manifest blob.
+    pub manifest_digest: Digest,
+    /// Raw bytes of the artifact's single layer.
+    pub layer_bytes: Vec<u8>,
+    /// Digest of the layer blob as declared in the manifest.
+    pub layer_digest: Digest,
+}
+
 pub struct Client {
     transport: Box<dyn OciTransport>,
     pub(super) lock_timeout: std::time::Duration,
@@ -1216,21 +1230,169 @@ impl Client {
         }))
     }
 
-    // ── Patch descriptor fetch ───────────────────────────────────────
+    // ── Single-layer artifact fetch ───────────────────────────────────────
+
+    /// Fetches a single-layer OCI artifact for `identifier`: an image
+    /// manifest carrying a declared `artifactType`, exactly one layer of a
+    /// declared media type, and a declared layer size within `max_bytes`.
+    ///
+    /// This is the shared shape behind the OCX single-layer artifact pattern
+    /// (image manifest + empty config + one layer, no index, no subject): the
+    /// patch descriptor (`__ocx.patch`) fetch is the caller.
+    ///
+    /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound` —
+    /// "looked, absent", not an error). The read goes through the
+    /// mirror-aware [`Self::transport_reference`] seam, matching every other
+    /// artifact fetch on `Client`.
+    ///
+    /// # Steps
+    ///
+    /// 1. Authenticate against the registry (mirror-aware reference).
+    /// 2. Fetch the raw manifest bytes; `Ok(None)` if the tag does not exist.
+    /// 3. Validate the manifest is a single-image manifest, not an image index.
+    /// 4. Validate the manifest's `artifactType` matches `artifact_type`.
+    /// 5. Validate the manifest has exactly one layer.
+    /// 6. Validate the layer's `mediaType` matches `layer_media_type`.
+    /// 7. Validate the declared layer size against `max_bytes` (CWE-400
+    ///    pre-check — reject an oversized declared size before fetching).
+    /// 8. Fetch the layer blob bytes with a stream-level byte cap of
+    ///    `max_bytes`: a malicious registry that ignores its own declared
+    ///    size cannot stream more than `max_bytes` bytes into memory (closes
+    ///    the gap the declared-size pre-check alone leaves open).
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::UnexpectedManifestType`] — manifest was an image index.
+    /// - [`ClientError::UnexpectedArtifactType`] — `artifactType` did not match.
+    /// - [`ClientError::WrongLayerCount`] — manifest had zero or more than one layer.
+    /// - [`ClientError::UnexpectedLayerMediaType`] — layer media type did not match.
+    /// - [`ClientError::LayerSizeExceeded`] — declared layer size exceeds `max_bytes`.
+    /// - [`ClientError::InvalidManifest`] — the layer digest is malformed.
+    /// - [`ClientError::DecompressionCapExceeded`] — the registry streamed
+    ///   more bytes than `max_bytes` regardless of its declared size.
+    /// - Any network/auth error from the underlying manifest or blob fetch.
+    pub(crate) async fn fetch_single_layer_artifact(
+        &self,
+        identifier: &Identifier,
+        artifact_type: &str,
+        layer_media_type: &str,
+        max_bytes: u64,
+    ) -> std::result::Result<Option<SingleLayerArtifact>, ClientError> {
+        let (manifest_bytes, manifest_digest, manifest) = match self.fetch_manifest_raw_bytes(identifier).await? {
+            Some(triple) => triple,
+            None => return Ok(None),
+        };
+
+        let image_manifest = match manifest {
+            oci::Manifest::Image(m) => m,
+            oci::Manifest::ImageIndex(_) => return Err(ClientError::UnexpectedManifestType),
+        };
+
+        match &image_manifest.artifact_type {
+            Some(at) if at == artifact_type => {}
+            other => {
+                return Err(ClientError::UnexpectedArtifactType {
+                    expected: artifact_type.to_string(),
+                    actual: other.clone(),
+                });
+            }
+        }
+
+        if image_manifest.layers.len() != 1 {
+            return Err(ClientError::WrongLayerCount {
+                count: image_manifest.layers.len(),
+            });
+        }
+        let layer_descriptor = &image_manifest.layers[0];
+
+        if layer_descriptor.media_type != layer_media_type {
+            return Err(ClientError::UnexpectedLayerMediaType {
+                expected: layer_media_type.to_string(),
+                actual: layer_descriptor.media_type.clone(),
+            });
+        }
+
+        // Size cap (CWE-400). Reject manifests that declare a layer larger
+        // than max_bytes before issuing the blob fetch. A negative or zero
+        // declared size is also rejected as a malformed manifest.
+        let declared_size = layer_descriptor.size;
+        match u64::try_from(declared_size) {
+            Ok(size) if size <= max_bytes => {}
+            Ok(_) => {
+                return Err(ClientError::LayerSizeExceeded {
+                    declared: declared_size,
+                    maximum: max_bytes,
+                });
+            }
+            Err(_) => {
+                return Err(ClientError::InvalidManifest(format!(
+                    "layer descriptor size '{declared_size}' is not a valid byte count"
+                )));
+            }
+        }
+
+        let layer_digest = Digest::try_from(layer_descriptor.digest.as_str()).map_err(|_| {
+            ClientError::InvalidManifest(format!("layer digest '{}' is malformed", layer_descriptor.digest))
+        })?;
+
+        let layer_bytes = self
+            .fetch_layer_blob_capped(identifier, &layer_digest, max_bytes)
+            .await?;
+
+        Ok(Some(SingleLayerArtifact {
+            manifest_bytes,
+            manifest_digest,
+            layer_bytes,
+            layer_digest,
+        }))
+    }
+
+    /// Probes only the manifest digest for `identifier` WITHOUT downloading
+    /// the manifest body or any layer blob.
+    ///
+    /// Implemented over the transport's HEAD-based digest fetch, so it works
+    /// for image indexes and single-image manifests alike and never transfers
+    /// the manifest body. The registry's `Docker-Content-Digest` for a tag is
+    /// the digest of the top-level (index) manifest — the same value
+    /// `fetch_manifest`/`fetch_manifest_raw_bytes` compute — so a drift check
+    /// against a persisted snapshot digest never mismatches on digest source.
+    /// Returns `Ok(None)` when the reference does not exist.
+    ///
+    /// Used by the managed-config background-refresh probe (`notify`/`manual`)
+    /// and `ocx config update --check`, which only need to detect drift and
+    /// must not pull the (up to 64 KiB) config layer on every command.
+    ///
+    /// # Errors
+    ///
+    /// Any network/auth error from the underlying digest fetch.
+    pub(crate) async fn probe_manifest_digest(
+        &self,
+        identifier: &Identifier,
+    ) -> std::result::Result<Option<Digest>, ClientError> {
+        let image = self.transport_reference(identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        match self.transport.fetch_manifest_digest(&image).await {
+            Ok(digest_str) => Ok(Some(Digest::try_from(digest_str.as_str()).map_err(|e| {
+                ClientError::InvalidManifest(format!("digest '{digest_str}' from registry HEAD is malformed: {e}"))
+            })?)),
+            Err(ClientError::ManifestNotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
 
     /// Fetches the raw manifest bytes and the parsed [`oci::Manifest`] for
-    /// `patch_identifier`.
+    /// `identifier`.
     ///
     /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
     /// Unlike [`Self::fetch_manifest`], this method also returns the raw
     /// manifest bytes so callers can persist them to the CAS blob store
     /// without re-serialisation — the round-trip bytes must be byte-identical
     /// to what the registry served to ensure the stored digest is consistent.
-    pub(crate) async fn fetch_patch_manifest_raw(
+    pub(crate) async fn fetch_manifest_raw_bytes(
         &self,
-        patch_identifier: &Identifier,
+        identifier: &Identifier,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
-        let image = self.transport_reference(patch_identifier);
+        let image = self.transport_reference(identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let (raw_bytes, digest_str) = match self
@@ -1249,7 +1411,7 @@ impl Client {
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
-    /// Fetches the raw bytes of a single blob for the patch descriptor layer.
+    /// Fetches the raw bytes of a single blob for a single-layer artifact.
     ///
     /// The blob is identified by `(identifier_for_auth, layer_digest)`. Auth is
     /// established against the registry of `identifier_for_auth` before the
@@ -1264,18 +1426,18 @@ impl Client {
     /// [`ClientError::DecompressionCapExceeded`] (repurposed for stream-level
     /// oversized blobs) and no allocation beyond `max_bytes + 1` occurs.
     ///
-    /// The caller in `patch::persistence::fetch_patch_descriptor_blobs` already
-    /// rejects manifests whose *declared* layer size exceeds the ceiling; this
-    /// cap closes the gap where a malicious registry ignores its own declaration
+    /// The caller in [`Self::fetch_single_layer_artifact`] already rejects
+    /// manifests whose *declared* layer size exceeds the ceiling; this cap
+    /// closes the gap where a malicious registry ignores its own declaration
     /// and streams more bytes than it declared.
-    pub(crate) async fn fetch_patch_layer_blob(
+    pub(crate) async fn fetch_layer_blob_capped(
         &self,
         identifier_for_auth: &Identifier,
         layer_digest: &Digest,
         max_bytes: u64,
     ) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(identifier_for_auth);
-        // Auth was already established by the caller in fetch_patch_manifest_raw,
+        // Auth was already established by the caller in fetch_manifest_raw_bytes,
         // but call ensure_auth again for robustness (it is a no-op on cache hit).
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
@@ -1293,7 +1455,7 @@ impl Client {
             .read_to_end(&mut buf)
             .await
             .map_err(|e| ClientError::Io {
-                path: std::path::PathBuf::from("<patch layer blob>"),
+                path: std::path::PathBuf::from("<single-layer artifact blob>"),
                 source: e,
             })?;
         if buf.len() as u64 > max_bytes {
@@ -1614,6 +1776,271 @@ mod tests {
         // Round-trip parse confirms the bytes are intact.
         let parsed: metadata::Metadata = serde_json::from_slice(&bytes).expect("returned bytes must parse as Metadata");
         let _ = parsed;
+    }
+
+    // ── fetch_single_layer_artifact tests ────────────────────────
+
+    const TEST_ARTIFACT_TYPE: &str = "application/vnd.ocx.test-artifact.v1";
+    const TEST_LAYER_MEDIA_TYPE: &str = "application/vnd.ocx.test-layer.v1+toml";
+
+    /// Build a single-layer artifact manifest (image manifest + empty config +
+    /// one layer) with every shape-relevant field caller-controlled, so each
+    /// test below can violate exactly one [`Client::fetch_single_layer_artifact`]
+    /// invariant. Structural twin of [`make_image_manifest`].
+    fn make_single_layer_manifest(
+        artifact_type: &str,
+        layer_media_type: &str,
+        layer_digest: &str,
+        layer_size: i64,
+    ) -> oci::ImageManifest {
+        oci::ImageManifest {
+            media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
+            artifact_type: Some(artifact_type.to_string()),
+            config: oci::Descriptor {
+                media_type: MEDIA_TYPE_OCI_EMPTY_CONFIG.to_string(),
+                digest: format!("sha256:{}", "0".repeat(64)),
+                size: 2,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            layers: vec![oci::Descriptor {
+                media_type: layer_media_type.to_string(),
+                digest: layer_digest.to_string(),
+                size: layer_size,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// (a) manifest is an image index -> `UnexpectedManifestType`.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_image_index_errors_unexpected_manifest_type() {
+        let index = oci::ImageIndex {
+            schema_version: 2,
+            media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+            artifact_type: None,
+            manifests: vec![],
+            annotations: None,
+        };
+        let manifest = oci::Manifest::ImageIndex(index);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await;
+        assert!(
+            matches!(result, Err(ClientError::UnexpectedManifestType)),
+            "got: {result:?}"
+        );
+    }
+
+    /// (b) `artifactType` does not match the caller's expectation ->
+    /// `UnexpectedArtifactType`.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_wrong_artifact_type_errors() {
+        let layer_bytes = b"payload".to_vec();
+        let layer_digest = Algorithm::Sha256.hash(&layer_bytes).to_string();
+        let manifest_struct = make_single_layer_manifest(
+            "application/vnd.other.artifact",
+            TEST_LAYER_MEDIA_TYPE,
+            &layer_digest,
+            layer_bytes.len() as i64,
+        );
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await;
+        match result {
+            Err(ClientError::UnexpectedArtifactType { expected, actual }) => {
+                assert_eq!(expected, TEST_ARTIFACT_TYPE);
+                assert_eq!(actual.as_deref(), Some("application/vnd.other.artifact"));
+            }
+            other => panic!("expected UnexpectedArtifactType, got {other:?}"),
+        }
+    }
+
+    /// (c) manifest has zero layers -> `WrongLayerCount`.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_wrong_layer_count_errors() {
+        let mut manifest_struct = make_single_layer_manifest(
+            TEST_ARTIFACT_TYPE,
+            TEST_LAYER_MEDIA_TYPE,
+            &format!("sha256:{}", "1".repeat(64)),
+            10,
+        );
+        manifest_struct.layers.clear();
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await;
+        assert!(
+            matches!(result, Err(ClientError::WrongLayerCount { count: 0 })),
+            "got: {result:?}"
+        );
+    }
+
+    /// (d) layer `mediaType` does not match the caller's expectation ->
+    /// `UnexpectedLayerMediaType`.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_wrong_layer_media_type_errors() {
+        let layer_bytes = b"payload".to_vec();
+        let layer_digest = Algorithm::Sha256.hash(&layer_bytes).to_string();
+        let manifest_struct = make_single_layer_manifest(
+            TEST_ARTIFACT_TYPE,
+            "application/vnd.other.layer",
+            &layer_digest,
+            layer_bytes.len() as i64,
+        );
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await;
+        match result {
+            Err(ClientError::UnexpectedLayerMediaType { expected, actual }) => {
+                assert_eq!(expected, TEST_LAYER_MEDIA_TYPE);
+                assert_eq!(actual, "application/vnd.other.layer");
+            }
+            other => panic!("expected UnexpectedLayerMediaType, got {other:?}"),
+        }
+    }
+
+    /// (e) declared layer size exceeds `max_bytes` -> `LayerSizeExceeded`
+    /// (CWE-400 pre-check, rejected before any blob fetch).
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_declared_size_exceeds_max_errors() {
+        let layer_digest = format!("sha256:{}", "2".repeat(64));
+        let manifest_struct =
+            make_single_layer_manifest(TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, &layer_digest, 2048);
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await;
+        match result {
+            Err(ClientError::LayerSizeExceeded { declared, maximum }) => {
+                assert_eq!(declared, 2048);
+                assert_eq!(maximum, 1024);
+            }
+            other => panic!("expected LayerSizeExceeded, got {other:?}"),
+        }
+    }
+
+    /// (f) happy path: shape-valid manifest + matching layer blob -> the
+    /// manifest and layer bytes/digests are returned unchanged.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_happy_path_returns_bytes() {
+        let layer_bytes = b"toml payload bytes".to_vec();
+        let layer_digest = Algorithm::Sha256.hash(&layer_bytes).to_string();
+        let manifest_struct = make_single_layer_manifest(
+            TEST_ARTIFACT_TYPE,
+            TEST_LAYER_MEDIA_TYPE,
+            &layer_digest,
+            layer_bytes.len() as i64,
+        );
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, manifest_digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data.clone(), manifest_digest_str.clone()));
+        data.write().blobs.insert(layer_digest.clone(), layer_bytes.clone());
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, 1024)
+            .await
+            .expect("shape-valid manifest must fetch successfully")
+            .expect("manifest exists in the stub, must return Some");
+
+        assert_eq!(result.manifest_bytes, manifest_data);
+        assert_eq!(result.manifest_digest.to_string(), manifest_digest_str);
+        assert_eq!(result.layer_bytes, layer_bytes);
+        assert_eq!(result.layer_digest.to_string(), layer_digest);
+    }
+
+    /// Stream-level cap: a registry that streams more bytes than declared (but
+    /// with a declared size that itself passes the pre-check) is caught by the
+    /// `.take(max_bytes + 1)` ceiling in `fetch_layer_blob_capped`, not by the
+    /// declared-size check. Reachable via `StubTransport` because the stub's
+    /// `blobs` map is not required to agree with the manifest's declared size.
+    #[tokio::test]
+    async fn fetch_single_layer_artifact_stream_exceeds_declared_size_errors_decompression_cap() {
+        let max_bytes = 10u64;
+        let layer_digest = format!("sha256:{}", "3".repeat(64));
+        let manifest_struct = make_single_layer_manifest(
+            TEST_ARTIFACT_TYPE,
+            TEST_LAYER_MEDIA_TYPE,
+            &layer_digest,
+            max_bytes as i64,
+        );
+        let manifest = oci::Manifest::Image(manifest_struct);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        // The registry actually serves more bytes than both the declared size
+        // and max_bytes, ignoring its own declaration.
+        data.write().blobs.insert(layer_digest, vec![0u8; 50]);
+        let client = stub(&data);
+
+        let result = client
+            .fetch_single_layer_artifact(&id, TEST_ARTIFACT_TYPE, TEST_LAYER_MEDIA_TYPE, max_bytes)
+            .await;
+        match result {
+            Err(ClientError::DecompressionCapExceeded { cap }) => assert_eq!(cap, max_bytes),
+            other => panic!("expected DecompressionCapExceeded, got {other:?}"),
+        }
     }
 
     // ── pull_layer tests ────────────────────────────────────────

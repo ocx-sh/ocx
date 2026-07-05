@@ -148,13 +148,21 @@ impl OciTransport for StubTransport {
         }
     }
 
-    async fn fetch_manifest_digest(&self, _image: &oci::native::Reference) -> Result<String> {
+    async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> Result<String> {
         self.record("fetch_manifest_digest");
-        self.data
-            .read()
-            .digest
-            .clone()
-            .ok_or_else(|| ClientError::Registry("no digest configured".to_string().into()))
+        let key = image.to_string();
+        let inner = self.data.read();
+        // Explicit `digest` override wins; otherwise mirror a real registry's
+        // HEAD semantics: the digest of the manifest stored at the reference,
+        // or 404 (`ManifestNotFound`) when nothing is stored there.
+        if let Some(digest) = inner.digest.clone() {
+            return Ok(digest);
+        }
+        inner
+            .manifests
+            .get(&key)
+            .map(|(_, digest)| digest.clone())
+            .ok_or(ClientError::ManifestNotFound(key))
     }
 
     async fn pull_manifest_raw(

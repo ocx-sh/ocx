@@ -254,6 +254,7 @@ pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::InspectResult;
+pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{ChainBlob, ChainRole, PatchProvenance, PatchScope, ResolvedChain, SitePatchRoots};
@@ -296,6 +297,16 @@ pub struct PackageManager {
     /// companion digests over live tag lookups.  `None` = live lookups only.
     /// Set via `OCX_PATCH_SNAPSHOT` / `ocx patch freeze`.
     patch_snapshot: Option<PatchSnapshot>,
+    /// Dedicated OCI client for fetching the managed-config artifact itself.
+    ///
+    /// Built from the **local-only** mirror view (system/user/home/
+    /// `OCX_CONFIG`/`--config`/`OCX_MIRRORS` — the managed payload's OWN
+    /// `[mirrors]` excluded), so the tier can never redirect or hijack the
+    /// route used to fetch itself (ADR "Mirror posture"). Deliberately
+    /// separate from `client` (which routes through the FULL merged mirror
+    /// map, managed payload included, for every other OCI operation).
+    /// `None` when offline.
+    managed_config_client: Option<oci::Client>,
 }
 
 impl PackageManager {
@@ -319,7 +330,16 @@ impl PackageManager {
             progress: crate::cli::progress::ProgressManager::disabled(),
             patches: None,
             patch_snapshot: None,
+            managed_config_client: None,
         }
+    }
+
+    /// Injects the dedicated managed-config-fetch client (built from the
+    /// local-only mirror view). Called from `Context::try_init`. Returns
+    /// `self` for builder-style chaining alongside `with_patches`.
+    pub fn with_managed_config_client(mut self, client: Option<oci::Client>) -> Self {
+        self.managed_config_client = client;
+        self
     }
 
     /// Inject the resolved patch configuration into this manager.
@@ -528,6 +548,9 @@ impl PackageManager {
             // global toolchain) still resolve frozen companion digests when a
             // snapshot is active.
             patch_snapshot: self.patch_snapshot.clone(),
+            // An offline view has no network route at all — the managed-config
+            // fetch client is dropped along with the main client.
+            managed_config_client: None,
         }
     }
 }

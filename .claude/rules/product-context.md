@@ -77,6 +77,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 7 | Private distribution first-class | Internal tools simple as `docker push` |
 | 8 | Declarative env metadata | Multi-package env composition without shell scripts |
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
+| 10 | Centrally managed corporate config as ordinary OCX package | `[managed]` config tier syncs mirrors/patches-pointer/default-registry settings from one operator-published `config.toml` package per fleet (`ocx config push` — versioned tags, cascades, per-host pins/rollbacks/pause reuse the package machinery); identity-gated local snapshot means config resolution stays network-free on every ordinary command, refresh never blocks, required-but-absent snapshot fails closed. Deliberately pull-based and console-free: fleet visibility is `ocx config update --check --format json` in existing inventory tooling. Rolls out a fleet-wide config change without re-provisioning every host — a gap mise/asdf/ORAS do not close either. Reinforces Principle #7 (Private-first). |
 
 ## Competitive Positioning
 

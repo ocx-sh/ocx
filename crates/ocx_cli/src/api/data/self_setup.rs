@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::cli::Cell;
-use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ProfileOutcome, SetupOutcome};
+use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -139,6 +139,75 @@ impl BootstrapEntry {
     }
 }
 
+// ── managed-config adoption outcome (phase 1.5) ──────────────────────────────
+
+/// JSON-serialized managed-config adoption outcome:
+/// `{"status":"…"}` or, for `Adopted`/`AlreadyAdopted`,
+/// `{"status":"…","digest":"sha256:<hex>"}` (the digest is the operator's
+/// TOFU signal — always visible on adopt paths).
+#[derive(Serialize)]
+struct ManagedConfigEntry {
+    status: ManagedConfigStatusKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+}
+
+/// Serde-facing mirror of [`ManagedConfigSetupOutcome`] (`snake_case` discriminant).
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ManagedConfigStatusKind {
+    NotConfigured,
+    AlreadyAdopted,
+    Adopted,
+    Cleared,
+    Dirty,
+    WouldAdopt,
+}
+
+impl ManagedConfigEntry {
+    fn from_outcome(outcome: &ManagedConfigSetupOutcome) -> Self {
+        match outcome {
+            ManagedConfigSetupOutcome::NotConfigured => Self {
+                status: ManagedConfigStatusKind::NotConfigured,
+                digest: None,
+            },
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => Self {
+                status: ManagedConfigStatusKind::AlreadyAdopted,
+                digest: Some(digest.to_string()),
+            },
+            ManagedConfigSetupOutcome::Adopted { digest } => Self {
+                status: ManagedConfigStatusKind::Adopted,
+                digest: Some(digest.to_string()),
+            },
+            ManagedConfigSetupOutcome::Cleared => Self {
+                status: ManagedConfigStatusKind::Cleared,
+                digest: None,
+            },
+            ManagedConfigSetupOutcome::Dirty => Self {
+                status: ManagedConfigStatusKind::Dirty,
+                digest: None,
+            },
+            ManagedConfigSetupOutcome::WouldAdopt => Self {
+                status: ManagedConfigStatusKind::WouldAdopt,
+                digest: None,
+            },
+        }
+    }
+
+    fn summary(&self) -> String {
+        match (&self.status, &self.digest) {
+            (ManagedConfigStatusKind::NotConfigured, _) => "not configured".to_string(),
+            (ManagedConfigStatusKind::AlreadyAdopted, Some(digest)) => format!("already adopted ({digest})"),
+            (ManagedConfigStatusKind::AlreadyAdopted, None) => "already adopted".to_string(),
+            (ManagedConfigStatusKind::Adopted, Some(digest)) => format!("adopted ({digest})"),
+            (ManagedConfigStatusKind::Adopted, None) => "adopted".to_string(),
+            (ManagedConfigStatusKind::Cleared, _) => "cleared".to_string(),
+            (ManagedConfigStatusKind::Dirty, _) => "dirty (edited by hand)".to_string(),
+            (ManagedConfigStatusKind::WouldAdopt, _) => "would adopt".to_string(),
+        }
+    }
+}
+
 // ── SelfSetupData ─────────────────────────────────────────────────────────────
 
 /// CLI wrapper around [`SetupOutcome`] for API reporting.
@@ -148,8 +217,10 @@ impl BootstrapEntry {
 /// reload hint) — with empty rows suppressed.
 ///
 /// JSON format (discriminated by `status`):
-/// - `{"status":"completed","bootstrap":{…},"shims":[…],"profiles":[{"path":"…","outcome":"completed"}]}`
+/// - `{"status":"completed","bootstrap":{…},"shims":[…],"profiles":[{"path":"…","outcome":"completed"}],"managed_config":{"status":"not_configured"}}`
 /// - dirty → `{"status":"skipped",…,"dirty_profiles":["…"]}`
+/// - `managed_config` is always present: `{"status":"…"}`, plus `"digest"` on
+///   the adopt paths (`adopted` / `already_adopted`).
 /// - `exec_policy_warning`, `conflicting_ocx`, and `reload_hint` appear only
 ///   when present.
 #[derive(Serialize)]
@@ -172,6 +243,8 @@ pub struct SelfSetupData {
     /// Whether the user should re-source their profile to activate ocx now.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     reload_hint: bool,
+    /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
+    managed_config: ManagedConfigEntry,
 }
 
 impl SelfSetupData {
@@ -205,6 +278,7 @@ impl SelfSetupData {
             exec_policy_warning: outcome.exec_policy_warning.clone(),
             conflicting_ocx: outcome.conflicting_ocx.as_ref().map(|path| path.display().to_string()),
             reload_hint: outcome.reload_hint,
+            managed_config: ManagedConfigEntry::from_outcome(&outcome.managed_config),
         }
     }
 }
@@ -217,7 +291,9 @@ impl SelfSetupData {
 fn derive_status(outcome: &SetupOutcome) -> StatusKind {
     let profile_outcomes = || outcome.profiles.iter().map(|(_, profile_outcome)| *profile_outcome);
 
-    if profile_outcomes().any(|p| p == ProfileOutcome::SkippedDirty) {
+    if profile_outcomes().any(|p| p == ProfileOutcome::SkippedDirty)
+        || matches!(outcome.managed_config, ManagedConfigSetupOutcome::Dirty)
+    {
         return StatusKind::Skipped;
     }
     if profile_outcomes().any(|p| p == ProfileOutcome::Migrated) {
@@ -261,6 +337,11 @@ impl Printable for SelfSetupData {
             values.push(Cell::from(format!("{} ({})", profile.path, profile.outcome)));
         }
 
+        if !matches!(self.managed_config.status, ManagedConfigStatusKind::NotConfigured) {
+            fields.push("Managed config".into());
+            values.push(Cell::from(self.managed_config.summary()));
+        }
+
         printer.print_table(&["Field".into(), "Value".into()], &[fields, values]);
     }
 }
@@ -269,7 +350,7 @@ impl Printable for SelfSetupData {
 mod tests {
     use std::path::PathBuf;
 
-    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ProfileOutcome, SetupOutcome};
+    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
     use serde_json::json;
 
     use super::SelfSetupData;
@@ -286,6 +367,7 @@ mod tests {
             exec_policy_warning: None,
             conflicting_ocx: None,
             reload_hint: false,
+            managed_config: ManagedConfigSetupOutcome::NotConfigured,
         }
     }
 

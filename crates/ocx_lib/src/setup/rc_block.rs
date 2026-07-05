@@ -45,7 +45,21 @@ use crate::setup::error::Error;
 /// The version this binary writes into the opener (`# >>> ocx v1 … >>>`).
 const CURRENT_VERSION: u32 = 1;
 
-/// Closer line shared by every ocx-versioned fence, regardless of version.
+/// Fence label used by the original `ocx self setup` shell-activation block.
+/// Passed as the `label` argument by every existing caller so output stays
+/// byte-identical; a second caller (e.g. managed config) passes its own
+/// label (e.g. `"ocx managed"`) to get a distinctly fenced block.
+pub const OCX_LABEL: &str = "ocx";
+
+/// Fence label used by `ocx self setup --managed-config` (the second caller of
+/// this fence machine) so its `[managed]` seed block is distinctly fenced from
+/// the shell-activation block above.
+pub const MANAGED_LABEL: &str = "ocx managed";
+
+/// Closer line for the legacy (pre-v1) `# BEGIN ocx` / `# END ocx` migration
+/// path — [`strip_block`] and [`has_legacy_artifacts`] are ocx-specific (no
+/// second caller has a legacy footprint to migrate from), so they stay
+/// hardcoded to the original label rather than taking a `label` parameter.
 const CLOSER: &str = "# <<< ocx <<<";
 
 /// A managed block as it appears on disk, with the spans needed to splice it.
@@ -84,26 +98,40 @@ pub struct RcBlock {
 }
 
 impl RcBlock {
-    /// Build the full fenced block text (LF-terminated, opener + body + closer).
-    fn render(&self) -> String {
+    /// Build the full fenced block text (LF-terminated, opener + body + closer)
+    /// for the given fence `label` (e.g. [`OCX_LABEL`] or a second caller's own
+    /// label).
+    fn render(&self, label: &str) -> String {
         format!(
-            "# >>> ocx v{CURRENT_VERSION} {hash} >>>\n{body}\n{CLOSER}\n",
+            "# >>> {label} v{CURRENT_VERSION} {hash} >>>\n{body}\n{closer}\n",
             hash = canonical_hash(&self.body),
             body = self.body,
+            closer = closer_text(label),
         )
     }
 }
 
-/// Version-agnostic opener: matches any `# >>> ocx v<N> [<hash8>] >>>` line so
-/// a future v2 fence (or a malformed-hash opener) is recognized and collapsed.
-fn opener_regex() -> &'static Regex {
-    static OPENER: OnceLock<Regex> = OnceLock::new();
-    OPENER.get_or_init(|| {
-        // Tolerate leading whitespace and an optional hash group. The `regex`
-        // crate has no syntax errors here, so the construction cannot fail.
-        Regex::new(r"^\s*# >>> ocx v(\d+)(?: ([0-9a-f]{8}))? >>>\s*$")
-            .expect("opener regex is a compile-time-valid pattern")
-    })
+/// Closer line for a v1-versioned fence with the given `label`.
+fn closer_text(label: &str) -> String {
+    format!("# <<< {label} <<<")
+}
+
+/// Version-agnostic opener for `label`: matches any `# >>> {label} v<N>
+/// [<hash8>] >>>` line so a future v2 fence (or a malformed-hash opener) is
+/// recognized and collapsed.
+///
+/// Rebuilt per call rather than cached — only a handful of distinct labels
+/// exist (one per caller) and this runs at most a few times per CLI
+/// invocation, so a `OnceLock`-per-label cache would be premature.
+// ponytail: rebuilt per call; cache-by-label if this becomes a hot path.
+fn opener_regex(label: &str) -> Regex {
+    let escaped_label = regex::escape(label);
+    // Tolerate leading whitespace and an optional hash group. `label` is
+    // always a compile-time-constant caller label, so this never fails.
+    Regex::new(&format!(
+        r"^\s*# >>> {escaped_label} v(\d+)(?: ([0-9a-f]{{8}}))? >>>\s*$"
+    ))
+    .expect("opener regex is a valid pattern for any label")
 }
 
 /// Normalize a body for hashing/matching: CRLF/CR → LF, strip a single trailing
@@ -135,19 +163,21 @@ fn dominant_is_crlf(content: &str) -> bool {
     crlf > bare_lf
 }
 
-/// Find the (first) ocx-versioned fence in `content`.
+/// Find the (first) versioned fence carrying `label` in `content`.
 ///
 /// Matching is performed on a CRLF-normalized copy; the returned `body` is
 /// normalized to `\n`. Returns `None` when no opener line parses.
-pub fn find_block(content: &str) -> Option<ParsedBlock> {
-    find_all_blocks(content).into_iter().next()
+pub fn find_block(content: &str, label: &str) -> Option<ParsedBlock> {
+    find_all_blocks(content, label).into_iter().next()
 }
 
-/// Find every ocx-versioned fence (used to collapse duplicates / forward versions).
-fn find_all_blocks(content: &str) -> Vec<ParsedBlock> {
+/// Find every versioned fence carrying `label` (used to collapse duplicates /
+/// forward versions).
+fn find_all_blocks(content: &str, label: &str) -> Vec<ParsedBlock> {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalized.lines().collect();
-    let regex = opener_regex();
+    let regex = opener_regex(label);
+    let closer = closer_text(label);
 
     let mut blocks = Vec::new();
     let mut index = 0;
@@ -168,7 +198,7 @@ fn find_all_blocks(content: &str) -> Vec<ParsedBlock> {
         let mut closer_line = None;
         let mut scan = opener_line + 1;
         while scan < lines.len() {
-            if lines[scan].trim() == CLOSER {
+            if lines[scan].trim() == closer {
                 closer_line = Some(scan);
                 break;
             }
@@ -192,9 +222,9 @@ fn find_all_blocks(content: &str) -> Vec<ParsedBlock> {
     blocks
 }
 
-/// Classify `content` against the block body this binary would write.
-pub fn classify(content: &str, body: &str) -> BlockState {
-    let Some(block) = find_block(content) else {
+/// Classify `content` against the block body this binary would write for `label`.
+pub fn classify(content: &str, body: &str, label: &str) -> BlockState {
+    let Some(block) = find_block(content, label) else {
         return BlockState::Fresh;
     };
     let actual = canonical_hash(&block.body);
@@ -222,23 +252,23 @@ pub fn classify(content: &str, body: &str) -> BlockState {
 ///
 /// Currently infallible, but returns [`Error`] so future write-side validation
 /// can surface without changing the signature.
-pub fn apply(content: &str, body: &str, force: bool) -> Result<Option<String>, Error> {
-    let state = classify(content, body);
-    let blocks = find_all_blocks(content);
+pub fn apply(content: &str, body: &str, force: bool, label: &str) -> Result<Option<String>, Error> {
+    let state = classify(content, body, label);
+    let blocks = find_all_blocks(content, label);
 
     match state {
         BlockState::Current => Ok(None),
         BlockState::Dirty if !force => Ok(None),
-        BlockState::Fresh => Ok(Some(append_block(content, body))),
+        BlockState::Fresh => Ok(Some(append_block(content, body, label))),
         // FormatUpgraded, or Dirty + force: collapse every fence to one v1 block.
-        _ => Ok(Some(rewrite_blocks(content, body, &blocks))),
+        _ => Ok(Some(rewrite_blocks(content, body, &blocks, label))),
     }
 }
 
-/// Append a fresh fenced block to a file that has no ocx fence.
-fn append_block(content: &str, body: &str) -> String {
+/// Append a fresh fenced block to a file that has no fence carrying `label`.
+fn append_block(content: &str, body: &str, label: &str) -> String {
     let crlf = dominant_is_crlf(content);
-    let block = RcBlock { body: body.to_string() }.render();
+    let block = RcBlock { body: body.to_string() }.render(label);
 
     let mut normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     // Separate the appended block with one blank line, matching install.sh's
@@ -255,15 +285,15 @@ fn append_block(content: &str, body: &str) -> String {
     apply_line_ending(&normalized, crlf)
 }
 
-/// Collapse all ocx-versioned fences to a single canonical v1 block written in
-/// place of the first fence; later fences are removed entirely.
-fn rewrite_blocks(content: &str, body: &str, blocks: &[ParsedBlock]) -> String {
+/// Collapse all fences carrying `label` to a single canonical v1 block written
+/// in place of the first fence; later fences are removed entirely.
+fn rewrite_blocks(content: &str, body: &str, blocks: &[ParsedBlock], label: &str) -> String {
     let crlf = dominant_is_crlf(content);
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalized.lines().collect();
     let trailing_newline = normalized.ends_with('\n');
 
-    let block_text = RcBlock { body: body.to_string() }.render();
+    let block_text = RcBlock { body: body.to_string() }.render(label);
     // `render()` always ends in `\n`; split into lines for re-interleaving.
     let block_lines: Vec<&str> = block_text.trim_end_matches('\n').lines().collect();
 
@@ -310,7 +340,7 @@ pub fn strip_block(content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let trailing_newline = normalized.ends_with('\n');
     let lines: Vec<&str> = normalized.lines().collect();
-    let regex = opener_regex();
+    let regex = opener_regex(OCX_LABEL);
 
     let mut output: Vec<&str> = Vec::with_capacity(lines.len());
     let mut index = 0;
@@ -360,6 +390,43 @@ pub fn strip_block(content: &str) -> String {
         }
 
         output.push(line);
+        index += 1;
+    }
+
+    let mut joined = output.join("\n");
+    if trailing_newline && !joined.is_empty() {
+        joined.push('\n');
+    }
+    apply_line_ending(&joined, crlf)
+}
+
+/// Removes the fence carrying `label` (if present) from `content`, leaving
+/// everything else untouched. Returns `content` unchanged (byte-identical)
+/// when no fence carrying `label` is found.
+///
+/// Unlike [`strip_block`] (hardcoded to [`OCX_LABEL`]'s legacy footprint),
+/// this targets an arbitrary label's v1 (or forward-version) fence only.
+/// Used by a second caller's clear/unadopt path (`ocx self setup
+/// --managed-config ""`).
+pub fn remove_block(content: &str, label: &str) -> String {
+    let blocks = find_all_blocks(content, label);
+    if blocks.is_empty() {
+        return content.to_string();
+    }
+
+    let crlf = dominant_is_crlf(content);
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let trailing_newline = normalized.ends_with('\n');
+    let lines: Vec<&str> = normalized.lines().collect();
+
+    let mut output: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some(block) = blocks.iter().find(|block| block.opener_line == index) {
+            index = block.closer_line + 1;
+            continue;
+        }
+        output.push(lines[index]);
         index += 1;
     }
 
@@ -453,8 +520,8 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
     #[test]
     fn canonical_hash_round_trips_through_apply() {
         // canonical_hash(body) == the marker emitted by apply on an empty file.
-        let content = apply("", POSIX_BODY, false).unwrap().expect("fresh append");
-        let parsed = find_block(&content).expect("block present after append");
+        let content = apply("", POSIX_BODY, false, OCX_LABEL).unwrap().expect("fresh append");
+        let parsed = find_block(&content, OCX_LABEL).expect("block present after append");
         assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
         assert_eq!(parsed.body, POSIX_BODY);
         assert_eq!(parsed.version, CURRENT_VERSION);
@@ -464,8 +531,8 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     #[test]
     fn fresh_when_no_fence() {
-        assert_eq!(classify("export PATH=/bin\n", POSIX_BODY), BlockState::Fresh);
-        let result = apply("export PATH=/bin\n", POSIX_BODY, false).unwrap();
+        assert_eq!(classify("export PATH=/bin\n", POSIX_BODY, OCX_LABEL), BlockState::Fresh);
+        let result = apply("export PATH=/bin\n", POSIX_BODY, false, OCX_LABEL).unwrap();
         let content = result.expect("fresh append");
         assert!(content.contains("# >>> ocx v1"));
         assert!(content.contains(POSIX_BODY));
@@ -475,9 +542,9 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     #[test]
     fn current_when_body_matches_canonical() {
-        let content = apply("", POSIX_BODY, false).unwrap().unwrap();
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::Current);
-        assert_eq!(apply(&content, POSIX_BODY, false).unwrap(), None);
+        let content = apply("", POSIX_BODY, false, OCX_LABEL).unwrap().unwrap();
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::Current);
+        assert_eq!(apply(&content, POSIX_BODY, false, OCX_LABEL).unwrap(), None);
     }
 
     #[test]
@@ -485,9 +552,11 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         // A v2 fence authored by a newer binary; body hash matches its marker.
         let hash = canonical_hash(POSIX_BODY);
         let content = format!("# >>> ocx v2 {hash} >>>\n{POSIX_BODY}\n{CLOSER}\n");
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::FormatUpgraded);
-        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("downgrade rewrite");
-        let parsed = find_block(&rewritten).expect("rewritten block");
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::FormatUpgraded);
+        let rewritten = apply(&content, POSIX_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("downgrade rewrite");
+        let parsed = find_block(&rewritten, OCX_LABEL).expect("rewritten block");
         assert_eq!(parsed.version, CURRENT_VERSION);
         assert_eq!(parsed.marker.as_deref(), Some(hash.as_str()));
     }
@@ -499,9 +568,11 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let old_body = ". \"$OCX_HOME/old-env.sh\"";
         let hash = canonical_hash(old_body);
         let content = format!("# >>> ocx v1 {hash} >>>\n{old_body}\n{CLOSER}\n");
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::FormatUpgraded);
-        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("upgrade rewrite");
-        let parsed = find_block(&rewritten).unwrap();
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::FormatUpgraded);
+        let rewritten = apply(&content, POSIX_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("upgrade rewrite");
+        let parsed = find_block(&rewritten, OCX_LABEL).unwrap();
         assert_eq!(parsed.body, POSIX_BODY);
         assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
     }
@@ -512,12 +583,14 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let marker = canonical_hash(POSIX_BODY);
         let edited_body = ". \"$OCX_HOME/env.sh\"\nexport HACKED=1";
         let content = format!("# >>> ocx v1 {marker} >>>\n{edited_body}\n{CLOSER}\n");
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::Dirty);
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::Dirty);
         // Without force: no change.
-        assert_eq!(apply(&content, POSIX_BODY, false).unwrap(), None);
+        assert_eq!(apply(&content, POSIX_BODY, false, OCX_LABEL).unwrap(), None);
         // With force: rewrite to canonical.
-        let forced = apply(&content, POSIX_BODY, true).unwrap().expect("force rewrite");
-        let parsed = find_block(&forced).unwrap();
+        let forced = apply(&content, POSIX_BODY, true, OCX_LABEL)
+            .unwrap()
+            .expect("force rewrite");
+        let parsed = find_block(&forced, OCX_LABEL).unwrap();
         assert_eq!(parsed.body, POSIX_BODY);
         assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
     }
@@ -528,9 +601,9 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         // whose body already matches what this binary writes → Current (no-op).
         // Corresponds to truth-table row: canonical=  marker=absent  actual= → Current.
         let content = format!("# >>> ocx v1 >>>\n{POSIX_BODY}\n{CLOSER}\n");
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::Current);
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::Current);
         // No write needed.
-        assert_eq!(apply(&content, POSIX_BODY, false).unwrap(), None);
+        assert_eq!(apply(&content, POSIX_BODY, false, OCX_LABEL).unwrap(), None);
     }
 
     #[test]
@@ -541,9 +614,11 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         // Corresponds to truth-table row: canonical≠  marker=absent  actual≠canonical → FormatUpgraded.
         let old_body = r#". "$OCX_HOME/old-env.sh""#;
         let content = format!("# >>> ocx v1 >>>\n{old_body}\n{CLOSER}\n");
-        assert_eq!(classify(&content, POSIX_BODY), BlockState::FormatUpgraded);
-        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("upgrade rewrite");
-        let parsed = find_block(&rewritten).unwrap();
+        assert_eq!(classify(&content, POSIX_BODY, OCX_LABEL), BlockState::FormatUpgraded);
+        let rewritten = apply(&content, POSIX_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("upgrade rewrite");
+        let parsed = find_block(&rewritten, OCX_LABEL).unwrap();
         assert_eq!(parsed.body, POSIX_BODY);
         // After rewrite the opener carries the canonical hash.
         assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
@@ -554,7 +629,9 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
     #[test]
     fn crlf_file_stays_crlf_after_append() {
         let content = "Set-Item env:FOO bar\r\nWrite-Host hi\r\n";
-        let result = apply(content, POWERSHELL_BODY, false).unwrap().expect("append");
+        let result = apply(content, POWERSHELL_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("append");
         assert!(result.contains("\r\n"), "CRLF must be preserved");
         assert!(!result.contains("\n\n\n"), "no triple newline collapse artifacts");
         // No bare LF should remain (every newline is part of a CRLF).
@@ -565,7 +642,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
     #[test]
     fn lf_file_stays_lf_after_append() {
         let content = "export PATH=/bin\n";
-        let result = apply(content, POSIX_BODY, false).unwrap().expect("append");
+        let result = apply(content, POSIX_BODY, false, OCX_LABEL).unwrap().expect("append");
         assert!(!result.contains('\r'), "LF file must not gain CR");
     }
 
@@ -596,7 +673,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
     fn crlf_preserved_on_rewrite() {
         let hash = canonical_hash("old");
         let content = format!("a\r\n# >>> ocx v1 {hash} >>>\r\nold\r\n{CLOSER}\r\nb\r\n");
-        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("rewrite");
+        let rewritten = apply(&content, POSIX_BODY, false, OCX_LABEL).unwrap().expect("rewrite");
         assert!(rewritten.contains("\r\n"));
         assert_eq!(rewritten.matches('\n').count(), rewritten.matches("\r\n").count());
         // The multi-line body is re-emitted with the file's dominant CRLF endings,
@@ -614,8 +691,14 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         );
         // A different body forces a rewrite path so the collapse is exercised.
         let new_body = ". \"$OCX_HOME/env.sh\" # changed";
-        let rewritten = apply(&content, new_body, false).unwrap().expect("collapse rewrite");
-        assert_eq!(find_all_blocks(&rewritten).len(), 1, "must collapse to a single block");
+        let rewritten = apply(&content, new_body, false, OCX_LABEL)
+            .unwrap()
+            .expect("collapse rewrite");
+        assert_eq!(
+            find_all_blocks(&rewritten, OCX_LABEL).len(),
+            1,
+            "must collapse to a single block"
+        );
         assert!(rewritten.contains("header"));
         assert!(rewritten.contains("middle"));
         assert!(rewritten.contains("footer"));
@@ -626,8 +709,10 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let v1_hash = canonical_hash("a");
         let v2_hash = canonical_hash("b");
         let content = format!("# >>> ocx v1 {v1_hash} >>>\na\n{CLOSER}\n# >>> ocx v2 {v2_hash} >>>\nb\n{CLOSER}\n");
-        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("collapse");
-        let blocks = find_all_blocks(&rewritten);
+        let rewritten = apply(&content, POSIX_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("collapse");
+        let blocks = find_all_blocks(&rewritten, OCX_LABEL);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].version, CURRENT_VERSION);
         assert_eq!(blocks[0].body, POSIX_BODY);
@@ -666,7 +751,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     #[test]
     fn strip_removes_v1_fence() {
-        let content = apply("keep\n", POSIX_BODY, false).unwrap().unwrap();
+        let content = apply("keep\n", POSIX_BODY, false, OCX_LABEL).unwrap().unwrap();
         let stripped = strip_block(&content);
         assert!(!stripped.contains("# >>> ocx"));
         assert!(!stripped.contains(CLOSER));
@@ -713,7 +798,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
     fn has_legacy_ignores_a_clean_v1_fence() {
         // A v1 fence is a format-upgrade surface, not a legacy artifact: it must
         // NOT trigger migration.
-        let content = apply("", POSIX_BODY, false).unwrap().unwrap();
+        let content = apply("", POSIX_BODY, false, OCX_LABEL).unwrap().unwrap();
         assert!(!has_legacy_artifacts(&content));
     }
 
@@ -741,7 +826,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
             );
         }
         // A profile carrying the freshly written guarded fence is not legacy.
-        let content = apply("", POSIX_BODY, false).unwrap().unwrap();
+        let content = apply("", POSIX_BODY, false, OCX_LABEL).unwrap().unwrap();
         assert!(
             !has_legacy_artifacts(&content),
             "the guarded v1 fence must not trigger legacy migration"
@@ -755,8 +840,10 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         // A user-mangled opener that the regex cannot parse → no block found →
         // classify Fresh → apply appends a fresh block (documented degradation).
         let content = "# >>> ocx (v1) a1b2c3d4 >>>\n. \"$OCX_HOME/env.sh\"\n# <<< ocx <<<\n";
-        assert_eq!(classify(content, POSIX_BODY), BlockState::Fresh);
-        let result = apply(content, POSIX_BODY, false).unwrap().expect("fresh append");
+        assert_eq!(classify(content, POSIX_BODY, OCX_LABEL), BlockState::Fresh);
+        let result = apply(content, POSIX_BODY, false, OCX_LABEL)
+            .unwrap()
+            .expect("fresh append");
         // The original (unparsed) lines survive; a new fence is appended.
         assert!(result.contains("# >>> ocx (v1) a1b2c3d4 >>>"));
         assert!(result.contains("# >>> ocx v1 "));
@@ -766,31 +853,205 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     #[test]
     fn elvish_body_round_trips() {
-        let content = apply("", ELVISH_BODY, false).unwrap().unwrap();
-        let parsed = find_block(&content).unwrap();
+        let content = apply("", ELVISH_BODY, false, OCX_LABEL).unwrap().unwrap();
+        let parsed = find_block(&content, OCX_LABEL).unwrap();
         assert_eq!(parsed.body, ELVISH_BODY);
         assert!(content.contains("eval (slurp < $_ocx_home/env.elv)"));
         assert!(content.contains("has-env OCX_HOME"));
-        assert_eq!(classify(&content, ELVISH_BODY), BlockState::Current);
+        assert_eq!(classify(&content, ELVISH_BODY, OCX_LABEL), BlockState::Current);
     }
 
     #[test]
     fn powershell_body_multiline_round_trips() {
-        let content = apply("", POWERSHELL_BODY, false).unwrap().unwrap();
-        let parsed = find_block(&content).unwrap();
+        let content = apply("", POWERSHELL_BODY, false, OCX_LABEL).unwrap().unwrap();
+        let parsed = find_block(&content, OCX_LABEL).unwrap();
         assert_eq!(parsed.body, POWERSHELL_BODY);
         // Honors $env:OCX_HOME with a USERPROFILE fallback (no hardcoded path).
         assert!(parsed.body.contains("$env:OCX_HOME"));
         assert!(parsed.body.contains("$env:USERPROFILE"));
-        assert_eq!(classify(&content, POWERSHELL_BODY), BlockState::Current);
+        assert_eq!(classify(&content, POWERSHELL_BODY, OCX_LABEL), BlockState::Current);
     }
 
     #[test]
     fn powershell_body_dirty_detection_survives_multiline() {
-        let content = apply("", POWERSHELL_BODY, false).unwrap().unwrap();
+        let content = apply("", POWERSHELL_BODY, false, OCX_LABEL).unwrap().unwrap();
         // Append a user edit inside the fence.
-        let parsed = find_block(&content).unwrap();
+        let parsed = find_block(&content, OCX_LABEL).unwrap();
         let tampered = content.replace(&parsed.body, &format!("{POWERSHELL_BODY}\nWrite-Host injected"));
-        assert_eq!(classify(&tampered, POWERSHELL_BODY), BlockState::Dirty);
+        assert_eq!(classify(&tampered, POWERSHELL_BODY, OCX_LABEL), BlockState::Dirty);
+    }
+
+    // ── Managed-config second caller (generalized fence label) ──────────────
+    //
+    // The Implement phase wires `ocx self setup --managed-config` onto this
+    // same fence machine with its own label (e.g. "ocx managed"). These tests
+    // exercise the ALREADY-implemented, label-parameterized primitives
+    // (`apply`/`classify`/`find_block`) plus `ManagedConfig`'s already-derived
+    // `Serialize` with a rendered body, proving the mechanism the Implement
+    // phase's `apply_managed_config` will rely on. They pass today — they are
+    // regression guards for the wiring, not stub probes.
+
+    /// Criterion 24 (Block-tier CWE-74 fix): a hostile `[managed].source`
+    /// value must never escape its quoted TOML string context when the fence
+    /// body is produced by REAL TOML serialization of the typed
+    /// `ManagedConfig` struct — never `format!` interpolation of the raw ref
+    /// (ADR Decision C).
+    #[test]
+    fn managed_config_fence_body_is_toml_injection_safe() {
+        use crate::config::managed::ManagedConfig;
+
+        let hostile = "evil\"\n[patches]\nregistry = \"hijacked.example.com\"\n# ";
+        let managed = ManagedConfig {
+            source: Some(hostile.to_string()),
+            required: Some(true),
+            refresh: Some(crate::config::managed::RefreshPolicy::Notify),
+            interval: Some("1d".to_string()),
+            system_locked: false,
+        };
+        // Real TOML serialization, never `format!` interpolation of the ref.
+        let body = format!(
+            "[managed]\n{}",
+            toml::to_string(&managed).expect("ManagedConfig must serialize to TOML")
+        );
+
+        let content = apply("", &body, false, MANAGED_LABEL)
+            .expect("apply must not error")
+            .expect("fresh append produces content");
+
+        let parsed = find_block(&content, MANAGED_LABEL).expect("fenced block must be found");
+        // Re-parse the fenced body as a Config: the hostile string must
+        // round-trip EXACTLY as the `source` value, never break out into a
+        // sibling `[patches]` section or a stray repeated `[managed]` table.
+        let reparsed: crate::config::Config =
+            toml::from_str(&parsed.body).expect("the fence body must remain valid, well-formed TOML");
+        let reparsed_managed = reparsed.managed.expect("[managed] section must survive re-parse");
+        assert_eq!(
+            reparsed_managed.source.as_deref(),
+            Some(hostile),
+            "the hostile ref must round-trip byte-for-byte as an inert string value"
+        );
+        assert!(
+            reparsed.patches.is_none(),
+            "the embedded '[patches]' text must stay inert inside the quoted source string, \
+             never parse as a live sibling section"
+        );
+    }
+
+    /// Criterion 3 shape: re-running `self setup --managed-config <same-ref>`
+    /// renders the identical body — the fence classifies Current and is not
+    /// rewritten (no re-fetch, no-op).
+    #[test]
+    fn managed_config_fence_reapply_same_source_is_current_noop() {
+        use crate::config::managed::ManagedConfig;
+
+        let managed = ManagedConfig {
+            source: Some("corp.example.com/ocx-config:user".to_string()),
+            required: Some(true),
+            refresh: Some(crate::config::managed::RefreshPolicy::Notify),
+            interval: Some("1d".to_string()),
+            system_locked: false,
+        };
+        let body = format!("[managed]\n{}", toml::to_string(&managed).unwrap());
+
+        let first = apply("", &body, false, MANAGED_LABEL).unwrap().unwrap();
+        assert_eq!(
+            classify(&first, &body, MANAGED_LABEL),
+            BlockState::Current,
+            "re-applying the identical rendered body must classify Current"
+        );
+        assert_eq!(
+            apply(&first, &body, false, MANAGED_LABEL).unwrap(),
+            None,
+            "a Current fence must not be rewritten"
+        );
+    }
+
+    /// Criterion 4 shape: a different `--managed-config` ref re-adopts —
+    /// the fence is rewritten to the new rendered body.
+    #[test]
+    fn managed_config_fence_reapply_different_source_is_re_adopted() {
+        use crate::config::managed::ManagedConfig;
+
+        let old = ManagedConfig {
+            source: Some("old.example.com/ocx-config:user".to_string()),
+            required: Some(true),
+            refresh: Some(crate::config::managed::RefreshPolicy::Notify),
+            interval: Some("1d".to_string()),
+            system_locked: false,
+        };
+        let new = ManagedConfig {
+            source: Some("new.example.com/ocx-config:user".to_string()),
+            required: Some(true),
+            refresh: Some(crate::config::managed::RefreshPolicy::Notify),
+            interval: Some("1d".to_string()),
+            system_locked: false,
+        };
+        let old_body = format!("[managed]\n{}", toml::to_string(&old).unwrap());
+        let new_body = format!("[managed]\n{}", toml::to_string(&new).unwrap());
+
+        let first = apply("", &old_body, false, MANAGED_LABEL).unwrap().unwrap();
+        let rewritten = apply(&first, &new_body, false, MANAGED_LABEL)
+            .unwrap()
+            .expect("a different source must rewrite the fence (re-adopt)");
+        let parsed = find_block(&rewritten, MANAGED_LABEL).unwrap();
+        assert!(parsed.body.contains("new.example.com"));
+        assert!(!parsed.body.contains("old.example.com"));
+    }
+
+    /// Criterion 5 shape: a dirty fence (user-edited body) is left untouched
+    /// without `--force`; `--force` overwrites to the canonical body. The CLI
+    /// layer maps `SkippedDirty` to exit 82 — this test proves the underlying
+    /// mechanism only.
+    #[test]
+    fn managed_config_fence_dirty_edit_is_skipped_unless_forced() {
+        use crate::config::managed::ManagedConfig;
+
+        let managed = ManagedConfig {
+            source: Some("corp.example.com/ocx-config:user".to_string()),
+            ..ManagedConfig::default()
+        };
+        let body = format!("[managed]\n{}", toml::to_string(&managed).unwrap());
+        let marker = canonical_hash(&body);
+        let dirty =
+            format!("# >>> {MANAGED_LABEL} v1 {marker} >>>\nsource = \"tampered\"\n# <<< {MANAGED_LABEL} <<<\n");
+
+        assert_eq!(classify(&dirty, &body, MANAGED_LABEL), BlockState::Dirty);
+        assert_eq!(apply(&dirty, &body, false, MANAGED_LABEL).unwrap(), None);
+        let forced = apply(&dirty, &body, true, MANAGED_LABEL)
+            .unwrap()
+            .expect("--force rewrites a dirty fence");
+        assert!(forced.contains("corp.example.com"));
+        assert!(!forced.contains("tampered"));
+    }
+
+    /// `remove_block` (the `--managed-config ""` clear path) deletes the
+    /// fence carrying `label` and leaves the rest of the file untouched.
+    #[test]
+    fn remove_block_deletes_labeled_fence_leaves_rest_untouched() {
+        use crate::config::managed::ManagedConfig;
+
+        let managed = ManagedConfig {
+            source: Some("corp.example.com/ocx-config:user".to_string()),
+            ..ManagedConfig::default()
+        };
+        let body = format!("[managed]\n{}", toml::to_string(&managed).unwrap());
+        let with_block = apply("[registry]\ndefault = \"x\"\n", &body, false, MANAGED_LABEL)
+            .unwrap()
+            .unwrap();
+
+        let removed = remove_block(&with_block, MANAGED_LABEL);
+        assert!(!removed.contains("[managed]"), "the managed fence must be gone");
+        assert!(!removed.contains(MANAGED_LABEL), "no trace of the label must remain");
+        assert!(
+            removed.contains("[registry]\ndefault = \"x\""),
+            "unrelated content must survive untouched"
+        );
+    }
+
+    /// `remove_block` on content with no fence for `label` is a byte-identical no-op.
+    #[test]
+    fn remove_block_absent_fence_is_noop() {
+        let content = "[registry]\ndefault = \"x\"\n";
+        assert_eq!(remove_block(content, MANAGED_LABEL), content);
     }
 }

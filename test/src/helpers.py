@@ -301,6 +301,34 @@ def make_package(
     )
 
 
+def push_managed_config(
+    ocx: OcxRunner,
+    repo: str,
+    tag: str,
+    config_toml: str,
+    tmp_path: Path,
+    *,
+    cascade: bool = False,
+    new: bool = True,
+) -> str:
+    """Publishes a managed-config payload via the real ``ocx config push``
+    (the product path — prefer this over ``src.registry.push_raw_config_package``
+    unless the test needs a malformed wire shape).
+
+    Returns the pushed package's index digest (``sha256:<hex>``).
+    """
+    payload = tmp_path / f"managed-config-{uuid4().hex[:8]}.toml"
+    payload.write_text(config_toml)
+    args = ["config", "push", "-i", f"{ocx.registry}/{repo}:{tag}"]
+    if cascade:
+        args.append("--cascade")
+    if new:
+        args.append("--new")
+    args.append(str(payload))
+    report = ocx.json(*args)
+    return report["manifest_digest"]
+
+
 def make_package_with_entrypoints(
     ocx: OcxRunner,
     unique_repo: str,

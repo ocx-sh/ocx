@@ -9,10 +9,12 @@ use ocx_lib::cli;
 use crate::command;
 
 mod context;
-pub use context::Context;
+pub use context::{Context, ManagedConfigGate};
 
 mod context_options;
 pub use context_options::ContextOptions;
+
+mod managed_config_check;
 
 pub mod plugin_dispatch;
 
@@ -168,9 +170,20 @@ impl App {
             _ => {}
         }
 
-        let context = Context::try_init(&cli.context, color_config).await?;
+        let context = Context::try_init(
+            &cli.context,
+            color_config,
+            ManagedConfigGate {
+                enforce_required: should_enforce_managed_config_required(&cli.command),
+                onboarding: is_managed_config_onboarding_command(&cli.command),
+            },
+        )
+        .await?;
         if should_check_for_update(&cli.command) {
             update_check::check_for_update(&context).await;
+        }
+        if should_check_managed_config_refresh(&cli.command) {
+            managed_config_check::check_for_managed_config_refresh(&context).await;
         }
         let Some(command) = &cli.command else {
             unreachable!("None handled in static-command bypass above");
@@ -188,6 +201,54 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
                 | command::Command::About(_)
                 | command::Command::Shell(command::shell::Shell::Completion(_))
                 | command::Command::Self_(_)
+        )
+    )
+}
+
+/// Skip the managed-config background-refresh probe for commands that only
+/// print static info, plus the `ocx config` group itself — an explicit
+/// `config update` already performs the full (non-throttled) refresh, and
+/// `config push` is the operator-side publish command that never consults
+/// the local tier.
+fn should_check_managed_config_refresh(command: &Option<command::Command>) -> bool {
+    !matches!(
+        command,
+        Some(
+            command::Command::Version(_)
+                | command::Command::About(_)
+                | command::Command::Shell(command::shell::Shell::Completion(_))
+                | command::Command::Self_(_)
+                | command::Command::Config(_)
+        )
+    )
+}
+
+/// Gates `Context::try_init`'s `[managed]` required-snapshot enforcement
+/// (ADR Decision E, criterion 6: `required = true` + no matching snapshot →
+/// exit 78 for ordinary commands).
+///
+/// Exempts the same command set as [`should_check_managed_config_refresh`]:
+/// `ocx config update` is the ONLY command that can create the missing
+/// snapshot in the first place (the CI-ephemeral recipe is
+/// `OCX_MANAGED_CONFIG=... && ocx config update && ocx <cmd>` — the update
+/// step itself must be reachable with no snapshot yet), and the `self`/
+/// static commands never consult the managed-config tier.
+fn should_enforce_managed_config_required(command: &Option<command::Command>) -> bool {
+    should_check_managed_config_refresh(command)
+}
+
+/// Names the two commands that can adopt a brand-new managed-config source
+/// with no seed present (`ocx config update`, `ocx self setup
+/// --managed-config <ref>`): only they get the managed-fetch client built
+/// when no source resolves yet. Deliberately narrower than the
+/// required-gate exemption above — `ocx self activate` runs on every shell
+/// startup and must not pay the client-build cost for an unconfigured tier.
+fn is_managed_config_onboarding_command(command: &Option<command::Command>) -> bool {
+    matches!(
+        command,
+        Some(
+            command::Command::Config(command::config::ConfigGroup::Update(_))
+                | command::Command::Self_(command::self_group::SelfGroup::Setup(_))
         )
     )
 }

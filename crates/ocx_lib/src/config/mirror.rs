@@ -32,6 +32,19 @@ pub struct MirrorConfig {
     /// Nexus Repository 3.83+ also uses path-based routing without the legacy
     /// `/repository/` prefix — the repo-key alone, the same shape as Artifactory.
     pub url: Option<String>,
+
+    /// Runtime provenance marker: this entry was declared at the SYSTEM config
+    /// scope (`/etc/ocx/config.toml`), so it is NON-OVERRIDABLE by any lower
+    /// tier for this upstream host. Mirrors [`PatchConfig`](crate::config::PatchConfig)'s
+    /// C7 lock, but unconditional and per-host-entry — unlike
+    /// `[patches].required`, a `[mirrors."<host>"]` entry has no opt-out
+    /// field, so any system-scope declaration for that host is authoritative.
+    ///
+    /// Never serialized — set by the loader via [`Self::lock_as_system`]
+    /// after parsing the system-scope file, not read from disk.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub system_locked: bool,
 }
 
 /// A parsed mirror endpoint: scheme split out as `protocol`, the host, and the
@@ -109,9 +122,28 @@ pub enum MirrorConfigError {
 }
 
 impl MirrorConfig {
+    /// Mark this entry as system-locked — non-overridable by lower tiers for
+    /// this upstream host.
+    ///
+    /// Called by the config loader on each entry of the system-scope file's
+    /// (`/etc/ocx/config.toml`) `[mirrors]` table, after parsing and before
+    /// folding higher tiers in. Unconditional: a `[mirrors."<host>"]` entry
+    /// has no opt-out field to gate on, unlike [`PatchConfig::lock_as_system`].
+    pub fn lock_as_system(&mut self) {
+        self.system_locked = true;
+    }
+
     /// Merge `other` into `self` field-by-field. `other`'s `Some` values
     /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    ///
+    /// A system-locked entry (`self.system_locked`) ignores ALL lower-tier
+    /// overrides for this host. The locked flag stays on `self` (sticky). The
+    /// loader folds the system tier in FIRST as the accumulator base, so
+    /// `self` is the system entry when locked.
     pub fn merge(&mut self, other: MirrorConfig) {
+        if self.system_locked {
+            return;
+        }
         if other.url.is_some() {
             self.url = other.url;
         }
@@ -233,13 +265,15 @@ pub fn resolve_mirror_map(
     let mut entries = Vec::with_capacity(merged.len());
     let mut pairs = Vec::with_capacity(merged.len());
     for (upstream, url) in merged {
-        let parsed =
-            MirrorConfig { url: Some(url.clone()) }
-                .parse_url()
-                .map_err(|source| MirrorConfigError::InvalidEntry {
-                    upstream: upstream.clone(),
-                    source: Box::new(source),
-                })?;
+        let parsed = MirrorConfig {
+            system_locked: false,
+            url: Some(url.clone()),
+        }
+        .parse_url()
+        .map_err(|source| MirrorConfigError::InvalidEntry {
+            upstream: upstream.clone(),
+            source: Box::new(source),
+        })?;
 
         // Plain-HTTP gate: an http:// mirror only composes with the existing
         // plain-HTTP set when the operator lists the mirror host explicitly.
@@ -265,9 +299,13 @@ mod tests {
     #[test]
     fn mirror_config_merge_none_in_higher_does_not_clobber_lower_url() {
         let mut lower = MirrorConfig {
+            system_locked: false,
             url: Some("https://company.jfrog.io/ghcr-remote".to_string()),
         };
-        let higher = MirrorConfig { url: None };
+        let higher = MirrorConfig {
+            system_locked: false,
+            url: None,
+        };
         lower.merge(higher);
         assert_eq!(
             lower.url.as_deref(),
@@ -279,9 +317,11 @@ mod tests {
     #[test]
     fn mirror_config_merge_some_in_higher_overrides_lower_url() {
         let mut lower = MirrorConfig {
+            system_locked: false,
             url: Some("https://old.example/remote".to_string()),
         };
         let higher = MirrorConfig {
+            system_locked: false,
             url: Some("https://new.example/remote".to_string()),
         };
         lower.merge(higher);
@@ -290,6 +330,45 @@ mod tests {
             Some("https://new.example/remote"),
             "Some in higher should override lower's url"
         );
+    }
+
+    // ── MirrorConfig system lock (mirrors PatchConfig C7, per host entry) ────
+
+    /// `lock_as_system` is unconditional — no opt-out field like
+    /// `[patches].required` exists for a `[mirrors."<host>"]` entry.
+    #[test]
+    fn mirror_config_lock_as_system_sets_locked() {
+        let mut mirror = MirrorConfig {
+            url: Some("https://mirror.corp/ghcr-remote".to_string()),
+            system_locked: false,
+        };
+        mirror.lock_as_system();
+        assert!(mirror.system_locked, "lock_as_system must set system_locked");
+    }
+
+    /// A system-locked `MirrorConfig` entry ignores a lower-tier override; the
+    /// lock flag stays sticky after merge.
+    #[test]
+    fn mirror_config_merge_system_locked_ignores_lower_tier() {
+        let mut system = MirrorConfig {
+            url: Some("https://system-mirror.corp/ghcr-remote".to_string()),
+            system_locked: false,
+        };
+        system.lock_as_system();
+        assert!(system.system_locked);
+
+        let user = MirrorConfig {
+            url: Some("https://user-mirror.corp/ghcr-remote".to_string()),
+            system_locked: false,
+        };
+        system.merge(user);
+
+        assert_eq!(
+            system.url.as_deref(),
+            Some("https://system-mirror.corp/ghcr-remote"),
+            "locked system mirror url must not be redirected by a lower tier"
+        );
+        assert!(system.system_locked, "lock flag stays sticky after merge");
     }
 
     // ── Step 3.1 specification tests ─────────────────────────────────────────
@@ -343,7 +422,10 @@ mod tests {
     /// "url is required at map-build time" to prevent silent egress.
     #[test]
     fn parse_url_errors_on_none_url() {
-        let cfg = MirrorConfig { url: None };
+        let cfg = MirrorConfig {
+            system_locked: false,
+            url: None,
+        };
         let result = cfg.parse_url();
         assert!(
             matches!(result, Err(MirrorConfigError::MissingUrl)),
@@ -358,6 +440,7 @@ mod tests {
     #[test]
     fn parse_url_errors_on_empty_url() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some(String::new()),
         };
         let result = cfg.parse_url();
@@ -373,6 +456,7 @@ mod tests {
     #[test]
     fn parse_url_splits_scheme_host_and_path_prefix() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://host/a/b/c".to_string()),
         };
         let parsed = cfg.parse_url().expect("valid url must parse");
@@ -387,6 +471,7 @@ mod tests {
     #[test]
     fn parse_url_host_only_yields_empty_prefix() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://ghcr-remote.jfrog.io".to_string()),
         };
         let parsed = cfg.parse_url().expect("valid host-only url must parse");
@@ -400,6 +485,7 @@ mod tests {
     #[test]
     fn parse_url_http_scheme_preserved() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("http://local-mirror.corp/docker-remote".to_string()),
         };
         let parsed = cfg.parse_url().expect("http url must parse");
@@ -421,6 +507,7 @@ mod tests {
     #[test]
     fn parse_url_artifactory_repo_key_survives_verbatim() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://art.corp/ghcr-remote".to_string()),
         };
         let parsed = cfg.parse_url().expect("Artifactory url must parse");
@@ -442,6 +529,7 @@ mod tests {
     #[test]
     fn parse_url_docker_io_mirror_host_not_special_cased() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://docker.io/my-proxy".to_string()),
         };
         let parsed = cfg.parse_url().expect("docker.io mirror url must parse");
@@ -459,6 +547,7 @@ mod tests {
     #[test]
     fn parse_url_trailing_slash_trimmed_from_prefix() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://mirror.corp/proxy-repo/".to_string()),
         };
         let parsed = cfg.parse_url().expect("url with trailing slash must parse");
@@ -478,6 +567,7 @@ mod tests {
     #[test]
     fn parse_url_double_trailing_slash_only_strips_one() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://mirror.corp/proxy-repo//".to_string()),
         };
         let parsed = cfg.parse_url().expect("url with double trailing slash must parse");
@@ -498,6 +588,7 @@ mod tests {
     #[test]
     fn parse_url_host_with_single_trailing_slash_yields_empty_prefix() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://host/".to_string()),
         };
         let parsed = cfg.parse_url().expect("host-only url with trailing slash must parse");
@@ -517,6 +608,7 @@ mod tests {
     #[test]
     fn parse_url_errors_on_scheme_only_missing_host() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https://".to_string()),
         };
         let result = cfg.parse_url();
@@ -531,6 +623,7 @@ mod tests {
     #[test]
     fn parse_url_errors_on_empty_host_before_prefix() {
         let cfg = MirrorConfig {
+            system_locked: false,
             url: Some("https:///prefix".to_string()),
         };
         let result = cfg.parse_url();
@@ -554,6 +647,7 @@ mod tests {
                 m.insert(
                     "docker.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://".to_string()),
                     },
                 );
@@ -592,6 +686,7 @@ mod tests {
                 m.insert(
                     "ghcr.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://old-mirror.corp/ghcr-remote".to_string()),
                     },
                 );
@@ -606,6 +701,7 @@ mod tests {
                 m.insert(
                     "ghcr.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://new-mirror.corp/ghcr-remote".to_string()),
                     },
                 );
@@ -642,6 +738,7 @@ mod tests {
             map.insert(
                 (*host).to_string(),
                 MirrorConfig {
+                    system_locked: false,
                     url: Some((*url).to_string()),
                 },
             );
@@ -750,7 +847,13 @@ mod tests {
         let config = Config {
             mirrors: Some({
                 let mut m = HashMap::new();
-                m.insert("ghcr.io".to_string(), MirrorConfig { url: None });
+                m.insert(
+                    "ghcr.io".to_string(),
+                    MirrorConfig {
+                        system_locked: false,
+                        url: None,
+                    },
+                );
                 m
             }),
             ..Default::default()
@@ -783,12 +886,14 @@ mod tests {
                 m.insert(
                     "ghcr.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://old-mirror.corp/ghcr-remote".to_string()),
                     },
                 );
                 m.insert(
                     "docker.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://old-mirror.corp/dockerhub-remote".to_string()),
                     },
                 );
@@ -803,6 +908,7 @@ mod tests {
                 m.insert(
                     "ghcr.io".to_string(),
                     MirrorConfig {
+                        system_locked: false,
                         url: Some("https://new-mirror.corp/ghcr-remote".to_string()),
                     },
                 );
