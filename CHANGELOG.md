@@ -5,18 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.2] - 2026-07-05
 
 ### Added
 
-- libc family differentiation for Linux packages: OCX probes the host dynamic linker at startup and encodes the result in `Platform.os_features` using the `libc.*` namespace (`libc.glibc`, `libc.musl`). Detection enumerates the full set of libc families the host provides — a multi-libc host (e.g. glibc plus musl) advertises all of them. Index resolution applies subset semantics so glibc hosts install glibc entries, musl hosts install musl entries, dual-libc hosts can install either, and static/untagged entries match every host. Detected libc families surface in `ocx version` / `ocx about`. *(oci, cli)*
-- `--platform` accepts optional `os.features` (e.g. `linux/amd64+libc.glibc`) so a specific feature-tagged manifest can be selected explicitly for force / cross-fetch. *(cli)*
+- Fluent upload progress via streamed chunked push *(oci)*
+- Differentiate platforms by libc via os.features *(oci,cli)* **BREAKING**
+- Add corporate managed configuration tier as config-as-package *(config)*
 
-### Changed
+### Fixed
 
-- **Breaking:** `Platform::matches` (strict-equality matcher) deleted; replaced by `Platform::can_run` with subset semantics on `os_features`. *(oci)*
-- `Platform::Specific.features` (OCI v1.1.1 RESERVED field) is no longer serialized; inbound values from foreign manifests are warn-and-dropped. *(oci)*
-- `os_features` values are normalized (sorted and deduplicated) on serialization to keep cascade eviction deterministic. *(oci)*
+- Bundle CA roots so TLS works without a system trust store *(oci)*
 
 ## [0.4.1] - 2026-07-03
 
@@ -32,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve `any` companions during patch sync *(patches)*
 - Static-link liblzma so the macOS binary is self-contained *(build)*
 - Upload acceptance binary before the test step clobbers the seam *(ci)*
+
+### Release
+
+- V0.4.1
 
 ## [0.4.0] - 2026-07-03
 
@@ -616,6 +619,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.4.2]: https://github.com/ocx-sh/ocx/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/ocx-sh/ocx/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/ocx-sh/ocx/compare/v0.3.12..v0.4.0
 [0.3.12]: https://github.com/ocx-sh/ocx/compare/v0.3.11..v0.3.12
