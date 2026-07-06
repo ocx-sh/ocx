@@ -1,6 +1,7 @@
 [submodule "external/rust-oci-client"]
 	path = external/rust-oci-client
 	url = https://github.com/ocx-sh/rust-oci-client.git
+	branch = ocx/integration
 [submodule "external/docker_credential"]
 	path = external/docker_credential
 	url = https://github.com/ocx-sh/docker_credential.git
