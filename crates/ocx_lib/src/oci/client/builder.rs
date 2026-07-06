@@ -26,7 +26,9 @@ impl ClientBuilder {
                 // 128 KiB progress-frame size in `native_transport::progress_body_stream`
                 // — that governs progress granularity, this governs request count.
                 push_chunk_size: 16 * 1024 * 1024,
-                extra_root_certificates: bundled_root_certificates(),
+                // CA roots are seeded by the fork's `ClientConfig::default()`
+                // (self-contained on hosts with no system trust store), inherited
+                // here via `..Default::default()`. Single source of truth: the fork.
                 ..Default::default()
             },
             lock_timeout: None,
@@ -135,32 +137,6 @@ impl Default for ClientBuilder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Mozilla's CA root set, compiled into the binary.
-///
-/// The vendored `oci-client` builds its reqwest client with rustls, which under
-/// reqwest 0.13 delegates trust to `rustls-platform-verifier`. With no explicit
-/// roots the verifier loads roots *only* from the system store and hard-errors
-/// (`No CA certificates were loaded from the system`) when that store is empty —
-/// a minimal container, a CI runner without `ca-certificates`, or an
-/// `SSL_CERT_FILE` pointing at a bundle that yields no certificates. `Client::new`
-/// then "falls back" to `reqwest::Client::default()`, whose internal `.expect()`
-/// re-triggers the identical failure as a process-crashing panic.
-///
-/// Seeding these bundled roots makes the client self-contained: reqwest takes the
-/// `Verifier::new_with_extra_roots` path, which never errors on an empty system
-/// store and still *merges* whatever the native store provides — so an operator's
-/// corporate root (via `SSL_CERT_FILE`/`SSL_CERT_DIR`) keeps working alongside the
-/// public roots.
-fn bundled_root_certificates() -> Vec<oci::native::Certificate> {
-    webpki_root_certs::TLS_SERVER_ROOT_CERTS
-        .iter()
-        .map(|cert| oci::native::Certificate {
-            encoding: oci::native::CertificateEncoding::Der,
-            data: cert.as_ref().to_vec(),
-        })
-        .collect()
 }
 
 #[cfg(test)]

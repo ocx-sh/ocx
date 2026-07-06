@@ -30,7 +30,6 @@ schemars.workspace = true
 tokio.workspace = true
 
 oci-client.workspace = true
-webpki-root-certs.workspace = true
 lzma-rust2.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
@@ -107,6 +106,10 @@ windows-sys.workspace = true
 # runtime `use anyhow` a compile error. Placement locked by
 # `script::dependency_hygiene_tests::anyhow_is_dev_dependency_only`.
 anyhow.workspace = true
+# Test-only. `oci::client::builder` tests assert the client inherits the fork's
+# bundled Mozilla CA roots; the roots themselves are seeded by the vendored
+# `oci-client` fork's `ClientConfig::default()`, not by ocx_lib at runtime.
+webpki-root-certs.workspace = true
 
 [lints]
 workspace = true
