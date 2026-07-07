@@ -96,27 +96,27 @@ Security-conscious environments often forbid piping a network script into an int
 
 | Platform | Architecture | Archive |
 |---|---|---|
-| Linux | x86_64 | [`ocx-x86_64-unknown-linux-gnu.tar.xz`][dl-linux-x64] |
-| Linux | aarch64 | [`ocx-aarch64-unknown-linux-gnu.tar.xz`][dl-linux-arm64] |
-| Linux (static) | x86_64 | [`ocx-x86_64-unknown-linux-musl.tar.xz`][dl-linux-musl-x64] |
-| Linux (static) | aarch64 | [`ocx-aarch64-unknown-linux-musl.tar.xz`][dl-linux-musl-arm64] |
-| macOS | Apple Silicon | [`ocx-aarch64-apple-darwin.tar.xz`][dl-macos-arm64] |
-| macOS | Intel | [`ocx-x86_64-apple-darwin.tar.xz`][dl-macos-x64] |
+| Linux | x86_64 | [`ocx-x86_64-unknown-linux-gnu.tar.gz`][dl-linux-x64] |
+| Linux | aarch64 | [`ocx-aarch64-unknown-linux-gnu.tar.gz`][dl-linux-arm64] |
+| Linux (static) | x86_64 | [`ocx-x86_64-unknown-linux-musl.tar.gz`][dl-linux-musl-x64] |
+| Linux (static) | aarch64 | [`ocx-aarch64-unknown-linux-musl.tar.gz`][dl-linux-musl-arm64] |
+| macOS | Apple Silicon | [`ocx-aarch64-apple-darwin.tar.gz`][dl-macos-arm64] |
+| macOS | Intel | [`ocx-x86_64-apple-darwin.tar.gz`][dl-macos-x64] |
 | Windows | x86_64 | [`ocx-x86_64-pc-windows-msvc.zip`][dl-win-x64] |
 | Windows | ARM64 | [`ocx-aarch64-pc-windows-msvc.zip`][dl-win-arm64] |
 
-Each release also includes a `sha256sum.txt` file for checksum verification.
+Each release also includes a `sha256.sum` file for checksum verification.
 
 ```sh
 # Download the archive and checksums
-curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.xz
-curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/sha256sum.txt
+curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/sha256.sum
 
 # Verify checksum
-sha256sum --check --ignore-missing sha256sum.txt
+sha256sum --check --ignore-missing sha256.sum
 
 # Extract and run the managed setup
-tar xf ocx-x86_64-unknown-linux-gnu.tar.xz
+tar xf ocx-x86_64-unknown-linux-gnu.tar.gz
 ./ocx-x86_64-unknown-linux-gnu/ocx self setup
 ```
 
@@ -258,12 +258,12 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [elvish]: https://elv.sh/
 
 <!-- downloads -->
-[dl-linux-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.xz
-[dl-linux-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-gnu.tar.xz
-[dl-linux-musl-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-musl.tar.xz
-[dl-linux-musl-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-musl.tar.xz
-[dl-macos-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-apple-darwin.tar.xz
-[dl-macos-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-apple-darwin.tar.xz
+[dl-linux-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.gz
+[dl-linux-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-gnu.tar.gz
+[dl-linux-musl-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-musl.tar.gz
+[dl-linux-musl-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-musl.tar.gz
+[dl-macos-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-apple-darwin.tar.gz
+[dl-macos-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-apple-darwin.tar.gz
 [dl-win-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-pc-windows-msvc.zip
 [dl-win-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-pc-windows-msvc.zip
 
