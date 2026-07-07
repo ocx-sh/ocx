@@ -21,6 +21,10 @@ docker_credential = { path = "external/docker_credential" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+# Symbols are useless in release assets (user backtraces are unsymbolized
+# anyway) and cost ~9 MB binary / ~1.7 MB archive. cargo-auditable's .dep-v0
+# section survives a symbol strip.
+strip = "symbols"
 
 # Size-tuned profile for the committed Windows shim blob (crates/ocx_shim,
 # issue #66). A dedicated profile (not a per-crate `release` override, which
