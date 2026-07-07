@@ -95,7 +95,7 @@ jobs:
           mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
           for target in "${TARGETS[@]}"; do
             ext=""
-            archive_ext="tar.xz"
+            archive_ext="tar.gz"
             if [[ "$target" == *windows* ]]; then
               ext=".exe"
               archive_ext="zip"
