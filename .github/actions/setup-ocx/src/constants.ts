@@ -30,9 +30,14 @@ export function getTarget(): { target: string; isWindows: boolean } {
   return { target, isWindows };
 }
 
-export function getArchiveName(target: string, isWindows: boolean): string {
-  const ext = isWindows ? ".zip" : ".tar.xz";
-  return `ocx-${target}${ext}`;
+/**
+ * Candidate archive names in download order. Unix releases ship .tar.gz
+ * since the xz-utils-free install switch; older releases ship .tar.xz.
+ * The version is unknown here, so try gz first and fall back to xz.
+ */
+export function getArchiveNames(target: string, isWindows: boolean): string[] {
+  const exts = isWindows ? [".zip"] : [".tar.gz", ".tar.xz"];
+  return exts.map((ext) => `ocx-${target}${ext}`);
 }
 
 export function getDownloadUrl(version: string, filename: string): string {

@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import * as tc from "@actions/tool-cache";
 import * as crypto from "crypto";
 import * as fs from "fs";
-import { getArchiveName, getDownloadUrl, getTarget } from "./constants";
+import { getArchiveNames, getDownloadUrl, getTarget } from "./constants";
 
 export interface DownloadResult {
   binDir: string;
@@ -11,7 +11,6 @@ export interface DownloadResult {
 
 export async function downloadOcx(version: string, token: string): Promise<DownloadResult> {
   const { target, isWindows } = getTarget();
-  const archiveName = getArchiveName(target, isWindows);
 
   // Check tool cache first
   const cached = tc.find("ocx", version, process.arch);
@@ -21,11 +20,25 @@ export async function downloadOcx(version: string, token: string): Promise<Downl
     return { binDir, version };
   }
 
-  // Download archive
-  const archiveUrl = getDownloadUrl(version, archiveName);
-  core.info(`Downloading OCX ${version} from ${archiveUrl}`);
-
-  const archivePath = await tc.downloadTool(archiveUrl, undefined, token ? `token ${token}` : undefined);
+  // Download archive: candidates in order (.tar.gz, then .tar.xz for
+  // releases that predate the gz switch). 404 on gz → try xz.
+  const candidates = getArchiveNames(target, isWindows);
+  let archiveName = "";
+  let archivePath = "";
+  for (const [index, candidate] of candidates.entries()) {
+    const archiveUrl = getDownloadUrl(version, candidate);
+    core.info(`Downloading OCX ${version} from ${archiveUrl}`);
+    try {
+      archivePath = await tc.downloadTool(archiveUrl, undefined, token ? `token ${token}` : undefined);
+      archiveName = candidate;
+      break;
+    } catch (error) {
+      if (index === candidates.length - 1) {
+        throw error;
+      }
+      core.info(`${candidate} not available, trying next archive format`);
+    }
+  }
 
   // Download and verify checksum
   const checksumUrl = getDownloadUrl(version, `${archiveName}.sha256`);

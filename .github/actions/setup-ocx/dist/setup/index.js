@@ -28204,7 +28204,7 @@ module.exports = {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.REPO_NAME = exports.REPO_OWNER = void 0;
 exports.getTarget = getTarget;
-exports.getArchiveName = getArchiveName;
+exports.getArchiveNames = getArchiveNames;
 exports.getDownloadUrl = getDownloadUrl;
 exports.REPO_OWNER = "ocx-sh";
 exports.REPO_NAME = "ocx";
@@ -28232,9 +28232,14 @@ function getTarget() {
     const isWindows = process.platform === "win32";
     return { target, isWindows };
 }
-function getArchiveName(target, isWindows) {
-    const ext = isWindows ? ".zip" : ".tar.xz";
-    return `ocx-${target}${ext}`;
+/**
+ * Candidate archive names in download order. Unix releases ship .tar.gz
+ * since the xz-utils-free install switch; older releases ship .tar.xz.
+ * The version is unknown here, so try gz first and fall back to xz.
+ */
+function getArchiveNames(target, isWindows) {
+    const exts = isWindows ? [".zip"] : [".tar.gz", ".tar.xz"];
+    return exts.map((ext) => `ocx-${target}${ext}`);
 }
 function getDownloadUrl(version, filename) {
     return `https://github.com/${exports.REPO_OWNER}/${exports.REPO_NAME}/releases/download/v${version}/${filename}`;
@@ -28290,7 +28295,6 @@ const fs = __importStar(__nccwpck_require__(9896));
 const constants_1 = __nccwpck_require__(7242);
 async function downloadOcx(version, token) {
     const { target, isWindows } = (0, constants_1.getTarget)();
-    const archiveName = (0, constants_1.getArchiveName)(target, isWindows);
     // Check tool cache first
     const cached = tc.find("ocx", version, process.arch);
     if (cached) {
@@ -28298,10 +28302,26 @@ async function downloadOcx(version, token) {
         const binDir = findBinDir(cached);
         return { binDir, version };
     }
-    // Download archive
-    const archiveUrl = (0, constants_1.getDownloadUrl)(version, archiveName);
-    core.info(`Downloading OCX ${version} from ${archiveUrl}`);
-    const archivePath = await tc.downloadTool(archiveUrl, undefined, token ? `token ${token}` : undefined);
+    // Download archive: candidates in order (.tar.gz, then .tar.xz for
+    // releases that predate the gz switch). 404 on gz → try xz.
+    const candidates = (0, constants_1.getArchiveNames)(target, isWindows);
+    let archiveName = "";
+    let archivePath = "";
+    for (const [index, candidate] of candidates.entries()) {
+        const archiveUrl = (0, constants_1.getDownloadUrl)(version, candidate);
+        core.info(`Downloading OCX ${version} from ${archiveUrl}`);
+        try {
+            archivePath = await tc.downloadTool(archiveUrl, undefined, token ? `token ${token}` : undefined);
+            archiveName = candidate;
+            break;
+        }
+        catch (error) {
+            if (index === candidates.length - 1) {
+                throw error;
+            }
+            core.info(`${candidate} not available, trying next archive format`);
+        }
+    }
     // Download and verify checksum
     const checksumUrl = (0, constants_1.getDownloadUrl)(version, `${archiveName}.sha256`);
     core.info(`Verifying checksum from ${checksumUrl}`);
