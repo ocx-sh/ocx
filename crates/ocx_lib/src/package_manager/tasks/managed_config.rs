@@ -12,6 +12,7 @@
 
 use super::super::PackageManager;
 use crate::config::managed::{RefreshPolicy, ResolvedManagedConfig};
+use crate::config::patch::ResolvedPatchConfig;
 use crate::managed_config::ManagedConfigUpdateError;
 use crate::oci::Digest;
 use crate::{log, oci};
@@ -119,21 +120,37 @@ impl PackageManager {
         // `tag`/`fetched_at` bookkeeping must track the newly requested ref.
         let canonical_source = resolved.source.to_string();
         let existing = crate::managed_config::read_managed_config_snapshot(&self.file_structure.state).await;
-        if let Some(existing) = &existing
+
+        // Capture the payload text before `persist_managed_config` consumes
+        // `fetched` — the patch piggyback below needs it on both the persist
+        // and the already-current paths.
+        let payload_text = fetched.config_text.clone();
+
+        let result = if let Some(existing) = &existing
             && existing.source == canonical_source
             && existing.digest == fetched.manifest_digest
         {
-            return Ok(ManagedConfigUpdateResult::AlreadyCurrent {
+            ManagedConfigUpdateResult::AlreadyCurrent {
                 digest: existing.digest.clone(),
-            });
-        }
+            }
+        } else {
+            let snapshot =
+                crate::managed_config::persist_managed_config(&self.file_structure.state, &resolved.source, fetched)
+                    .await?;
+            ManagedConfigUpdateResult::Updated {
+                digest: snapshot.digest,
+            }
+        };
 
-        let snapshot =
-            crate::managed_config::persist_managed_config(&self.file_structure.state, &resolved.source, fetched)
-                .await?;
-        Ok(ManagedConfigUpdateResult::Updated {
-            digest: snapshot.digest,
-        })
+        // Best-effort: converge patch descriptors declared by the freshly
+        // fetched payload's `[patches]` pointer. The manager's construction-time
+        // `patches()` reflects the PRE-update config, so a managed config that
+        // introduces or moves the patch tier would otherwise never sync until
+        // the user ran `ocx patch sync` by hand (the reported bug). Mirrors the
+        // `ocx index update` piggyback — never fails this update.
+        sync_patches_from_payload(self, &payload_text).await;
+
+        Ok(result)
     }
 
     /// Probe-only: fetches the managed-config artifact's current manifest
@@ -280,6 +297,10 @@ impl PackageManager {
                         // Touch only after the persist succeeds — the tier is
                         // now current, so the window may safely close.
                         crate::file_structure::StateStore::touch(marker).await;
+                        // Same best-effort patch convergence as the explicit
+                        // update path — a silently-applied managed config must
+                        // also pull the patch descriptors it now points at.
+                        sync_patches_from_payload(self, &snapshot.config).await;
                         ManagedConfigRefreshOutcome::Applied {
                             digest: snapshot.digest,
                         }
@@ -290,6 +311,61 @@ impl PackageManager {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Best-effort patch-descriptor sync driven by a just-fetched managed-config
+/// payload.
+///
+/// A managed config commonly distributes the fleet's `[patches]` registry
+/// pointer (ADR `adr_managed_config_tier.md`), but the manager's `patches()`
+/// field is resolved once at construction from the PRE-update config — so the
+/// pointer the payload just introduced or moved is invisible to it. Re-resolve
+/// `[patches]` from the payload text and sync against that instead of trusting
+/// the stale field.
+///
+/// Never fails the caller: parse/resolve problems log at debug, a sync failure
+/// logs a warning, and offline / no-patch-tier payloads are skipped. Mirrors
+/// the `ocx index update` piggyback (host platform only).
+async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str) {
+    if manager.is_offline() {
+        return;
+    }
+    let Some(resolved) = patches_from_payload(payload_toml) else {
+        return; // payload declares no (usable) patch tier — nothing to converge
+    };
+
+    // `with_patches` overrides the manager's construction-time (stale) tier with
+    // the one the payload just distributed; host platform only, matching the
+    // `ocx index update` piggyback.
+    let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+    match manager.clone().with_patches(Some(resolved)).sync_patches(&[host]).await {
+        Ok(_report) => log::debug!("managed-config patch sync: completed"),
+        Err(error) => log::warn!("managed-config patch sync failed (non-fatal): {error}"),
+    }
+}
+
+/// Resolve the `[patches]` tier from a managed-config payload's TOML text.
+///
+/// Returns `None` — never an error — when the payload is unparseable, declares
+/// no patch tier, or declares a malformed one. The piggyback is best-effort, so
+/// every such case collapses to "nothing to converge" (logged at debug). This
+/// is the seam that fixes the reported bug: patches are resolved from the
+/// freshly fetched payload, not from the manager's pre-update `patches()`.
+fn patches_from_payload(payload_toml: &str) -> Option<ResolvedPatchConfig> {
+    let config = match toml::from_str::<crate::config::Config>(payload_toml) {
+        Ok(config) => config,
+        Err(error) => {
+            log::debug!("managed-config patch sync: parsing payload TOML failed: {error}");
+            return None;
+        }
+    };
+    match crate::config::patch::resolve_patch_config(&config) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            log::debug!("managed-config patch sync: resolving [patches] from payload failed: {error}");
+            None
         }
     }
 }
@@ -333,6 +409,39 @@ mod tests {
             interval,
             system_required: false,
         }
+    }
+
+    // ── patches_from_payload (managed-config → patch tier resolution) ─────────
+
+    /// A payload that declares a `[patches]` registry resolves to a usable
+    /// tier — the seam that lets a managed config distribute the fleet's patch
+    /// pointer and have it synced without a manual `ocx patch sync`.
+    #[test]
+    fn patches_from_payload_extracts_configured_tier() {
+        let payload = "[patches]\nregistry = \"patches.corp.com\"\n";
+        let resolved = patches_from_payload(payload).expect("payload with [patches] must resolve a tier");
+        assert_eq!(resolved.registry, "patches.corp.com");
+    }
+
+    /// A payload without a `[patches]` section resolves to `None` — the
+    /// piggyback then skips the sync entirely (no patch tier to converge).
+    #[test]
+    fn patches_from_payload_none_when_absent() {
+        let payload = "[registry]\ndefault = \"corp\"\n";
+        assert!(
+            patches_from_payload(payload).is_none(),
+            "payload without [patches] must resolve to None"
+        );
+    }
+
+    /// Unparseable payload collapses to `None` (best-effort — never an error),
+    /// so a garbled managed config can never poison the update path.
+    #[test]
+    fn patches_from_payload_none_when_malformed() {
+        assert!(
+            patches_from_payload("this = = not valid toml").is_none(),
+            "malformed payload must resolve to None, not panic or error"
+        );
     }
 
     // ── update_managed_config ────────────────────────────────────────────────
