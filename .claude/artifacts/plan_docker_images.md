@@ -119,3 +119,34 @@ Post-merge:
 - Scheduled workflows auto-disable after 60d repo inactivity — noted, unlikely.
 - glibc floor: cargo-dist gnu builds (ubuntu-22.04, glibc 2.35) ≤ trixie 2.41 today; smoke test catches future drift.
 - `alpine:3` → future `alpine:4` needs manual FROM bump (intentional).
+
+## Follow-up: #180 — container-workflow docs
+
+Commit `d8b3767d` closed **#190** (publish the images) but not the broader
+**#180** (images + container-workflow docs). Two of #180's five acceptance
+criteria were still open: frozen-index `docker build` resolving without an
+unpinned tag (criterion 3) and a "Containers" doc page teaching the
+multi-stage + reproducible-resolution patterns runnably (criterion 4). No new
+product features — `--frozen`, `--offline`, `ocx pull`, `ocx run` already exist.
+
+Delivered on branch `docs/container-workflow-180`:
+
+- `website/src/docs/docker.md` — new `## Reproducible Resolution {#frozen}`
+  section: `ocx --frozen pull` freezes tag→digest resolution to the lockfile
+  (criterion 3), paired with the `--offline` run; `:::details` air-gapped aside;
+  `OCX_INDEX` bundled-snapshot cross-link for the bare-tag (Actions/Bazel) case.
+  Builds on the existing single-stage `## Bake a Project Toolchain` example — no
+  new Dockerfile.
+
+Multi-stage dropped (user call, two review rounds): the classic motivation —
+keep the build toolchain out of prod — does not apply here. ocx ships pre-built
+binaries, `ocx pull` compiles nothing, and the ocx base is already
+`debian-trixie-slim`, so a slim runtime saves near-zero for a tools-only image
+while adding ceremony (whole-`$OCX_HOME` copy). The CI proof
+(`.github/workflows/docker-examples.yml`) and tested example
+(`website/src/_scripts/docker/`) were removed with it. #180 criterion 4's
+"multi-stage example" is intentionally unmet — frozen resolution is documented,
+not CI-tested. Criterion 3 stands.
+
+Out of scope: **#193** (no-ocx PATH-only runtime) — runtime keeps ocx as
+launcher.
