@@ -1,0 +1,216 @@
+name: Docker Publish
+
+# Publishes ghcr.io/ocx-sh/ocx container images (trixie + alpine variants,
+# linux/amd64 + linux/arm64). Binaries are NOT rebuilt here: they are
+# extracted from the cargo-dist release archives via `gh release download`.
+# That path is uniform across all three triggers — when called from the
+# release workflow the post-announce phase runs strictly after `host`
+# uploaded the assets, so they are guaranteed present.
+#
+# Tag policy (python model): rolling tags (X.Y.Z[-variant], X.Y[-variant],
+# X[-variant], variant, latest) move on the weekly base-image refresh; the
+# date-stamped tag X.Y.Z-<variant>-YYYYMMDD is immutable so previously
+# published digests never become untagged (and thus GC-able).
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        # cargo-dist post-announce contract; not consumed.
+        required: true
+        type: string
+  schedule:
+    # Weekly base-image refresh of the latest release (silent rebuild).
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z). Empty = latest release.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a publish mid-push: a half-pushed multi-tag set is worse
+  # than a queued duplicate run (idempotent tags).
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      skip: ${{ steps.v.outputs.skip }}
+      date: ${{ steps.v.outputs.date }}
+    steps:
+      - name: Resolve release version
+        id: v
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            schedule)          tag="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" ;;
+            workflow_dispatch) tag="${DISPATCH_TAG:-$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)}" ;;
+            # workflow_call: github.event_name/ref_name are the caller's
+            # (tag push), so REF_NAME is the release tag.
+            *)                 tag="$REF_NAME" ;;
+          esac
+          version="${tag#v}"
+          skip=false
+          # Prerelease guard (e.g. v0.6.0-canary.1) — mirrors
+          # post-release-oci-publish.yml.
+          [[ "$version" == *-* ]] && skip=true
+          # Freeze the date once so both matrix legs share the stamped tag.
+          {
+            echo "version=$version"
+            echo "skip=$skip"
+            echo "date=$(date -u +%Y%m%d)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # actions/attest-build-provenance
+      attestations: write # actions/attest-build-provenance
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - variant: trixie
+            libc: gnu
+          - variant: alpine
+            libc: musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          LIBC: ${{ matrix.libc }}
+        run: |
+          set -euo pipefail
+          # Both compressions: releases <= v0.4.2 shipped .tar.xz, newer
+          # releases ship .tar.gz.
+          gh release download "v${VERSION}" \
+            --pattern "ocx-*-unknown-linux-${LIBC}.tar.gz" \
+            --pattern "ocx-*-unknown-linux-${LIBC}.tar.xz" \
+            --dir archives
+          ls -l archives
+
+      - name: Stage binaries into build context
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          LIBC: ${{ matrix.libc }}
+        run: |
+          set -euo pipefail
+          declare -A ARCH=([x86_64]=amd64 [aarch64]=arm64)
+          for rust in x86_64 aarch64; do
+            stage="$(mktemp -d)"
+            # -xf auto-detects gz vs xz compression.
+            tar -xf archives/ocx-"${rust}"-unknown-linux-"${LIBC}".tar.* -C "$stage"
+            found="$(find "$stage" -name ocx -type f | head -1)"
+            if [[ -z "$found" ]]; then
+              echo "::error::no ocx binary in archive for ${rust}"
+              exit 1
+            fi
+            install -D -m 0755 "$found" "build-context/binaries/${ARCH[$rust]}/ocx"
+            rm -rf "$stage"
+          done
+          # Smoke: the amd64 binary runs on the runner (musl is static; gnu
+          # needs glibc <= the runner's, true for cargo-dist builds) and
+          # reports the expected version.
+          ./build-context/binaries/amd64/ocx version | grep -F "$VERSION"
+
+      - name: Compute tags
+        id: tags
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          VARIANT: ${{ matrix.variant }}
+          DATE: ${{ needs.resolve.outputs.date }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          MM="${VERSION%.*}"
+          M="${VERSION%%.*}"
+          tags=(
+            "${VERSION}-${VARIANT}" "${MM}-${VARIANT}" "${M}-${VARIANT}"
+            "${VARIANT}" "${VERSION}-${VARIANT}-${DATE}"
+          )
+          # Unsuffixed tags alias the default variant (python model).
+          if [[ "$VARIANT" == trixie ]]; then
+            tags+=("$VERSION" "$MM" "$M" latest)
+          fi
+          printf -v joined "${IMAGE}:%s," "${tags[@]}"
+          echo "tags=${joined%,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Used for OCI labels/annotations only — tags are computed above
+      # because the version is pre-resolved in all trigger paths (a cron
+      # run has no tag ref for semver templating).
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ghcr.io/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.vendor=ocx.sh
+            org.opencontainers.image.url=https://ocx.sh
+            org.opencontainers.image.documentation=https://ocx.sh/docs/docker
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: build-context
+          file: docker/${{ matrix.variant }}.dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # mode=max captures base.name/base.digest in the provenance.
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v2.2.3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Smoke-test pushed image
+        env:
+          REF: ghcr.io/${{ github.repository }}:${{ needs.resolve.outputs.version }}-${{ matrix.variant }}-${{ needs.resolve.outputs.date }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: docker run --rm "$REF" ocx version | grep -F "$VERSION"

@@ -52,6 +52,10 @@ export default defineConfig({
           link: "/docs/installation",
         },
         {
+          text: "Docker",
+          link: "/docs/docker",
+        },
+        {
           text: "Getting Started",
           link: "/docs/getting-started",
         },

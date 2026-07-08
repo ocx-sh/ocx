@@ -21,6 +21,14 @@
       "pinDigests": true
     },
     {
+      "description": "Dockerfile base images — group, keep digests pinned, ci(deps) prefix",
+      "matchManagers": ["dockerfile"],
+      "groupName": "docker-base-images",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps",
+      "pinDigests": true
+    },
+    {
       "description": "Cargo crates — group, chore(deps) prefix",
       "matchManagers": ["cargo"],
       "groupName": "rust-deps",

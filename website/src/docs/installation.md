@@ -154,6 +154,16 @@ echo "ocx self setup 0.9.2@$digest"
 
 That digest round-trips: the next `ocx self setup 0.9.2@<digest>` call succeeds immediately (`already_present`) if the same version is already installed, or downloads and verifies the exact content otherwise. Under `--frozen`, a tag-only pin resolves from the local index (exit 81 if the tag is absent) and a digest-only pin works when the blobs are already cached — both suitable for hermetic CI where the index is pre-populated.
 
+## Docker {#docker}
+
+Official container images at `ghcr.io/ocx-sh/ocx` ship the release binary on a slim base — `trixie` (Debian, default) and `alpine` (static musl) variants, for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker run --rm ghcr.io/ocx-sh/ocx ocx version
+```
+
+Use them as a `FROM` base for toolchain builds, or `COPY --from` the binary into your own image. Tags, reproducibility pinning, and the Dockerfile patterns live in the [Docker guide][docker-guide].
+
 ## Updating {#updating}
 
 Once ocx is installed, it updates itself — no index refresh, reinstall, and reselect dance. [`ocx self update`][cmd-self-update] resolves the latest release through your [local index][fs-index], installs it, and swaps the `current` symlink, then heals the `$OCX_HOME/env.*` shims and the managed profile block so the refreshed binary stays wired into your shells:
@@ -268,6 +278,7 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [dl-win-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-pc-windows-msvc.zip
 
 <!-- pages -->
+[docker-guide]: ./docker.md
 [getting-started]: ./getting-started.md
 [user-guide]: ./user-guide.md
 [env-ref]: ./reference/environment.md

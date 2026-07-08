@@ -25,7 +25,10 @@ source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
-post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release"]
+post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", "./docker-publish"]
+# Extra permissions for custom jobs. The override REPLACES the defaults, so
+# every scope the called workflow needs must be listed.
+github-custom-job-permissions = { docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" } }
 # Whether to embed dependency information using cargo-auditable
 cargo-auditable = true
 # Whether to use cargo-cyclonedx to generate an SBOM
