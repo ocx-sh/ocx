@@ -70,6 +70,7 @@ impl ConfigPushArgs {
             identifier.to_string(),
             outcome.manifest_digest.to_string(),
             outcome.cascade_tags,
+            outcome.layer_counts,
         ))?;
 
         Ok(ExitCode::SUCCESS)

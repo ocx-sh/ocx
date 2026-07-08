@@ -244,6 +244,7 @@ pub async fn publish_managed_config(
     let layers = [LayerRef::File {
         path: archive,
         layout: Default::default(),
+        mount_from: None,
     }];
 
     let outcome = if options.cascade {

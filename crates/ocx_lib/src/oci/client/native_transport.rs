@@ -10,7 +10,7 @@ use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
 use super::error::ClientError;
-use super::progress_writer::ProgressWriter;
+use super::progress_reader::ProgressReader;
 use super::transport::{MountOutcome, OciTransport, ProgressFn, Result};
 use crate::{auth, log, oci};
 
