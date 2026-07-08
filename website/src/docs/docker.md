@@ -68,6 +68,18 @@ ENTRYPOINT ["ocx", "--offline", "run", "--", "task", "serve"]
 
 [`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned tool for the image platform — it needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx run`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull — if the image builds, it runs.
 
+## Reproducible Resolution {#frozen}
+
+The [project-toolchain build](#project-toolchain) above runs a plain [`ocx pull`][cmd-pull], which resolves whatever a tag points to *now* — if the tag drifted since you wrote the lockfile, the build still succeeds, but with a version you never tested.
+
+Swap in [`ocx --frozen pull`][arg-frozen] to close that gap. Frozen freezes tag→digest *resolution* to what the lockfile already pins: a tag missing from the lock **errors** instead of resolving fresh, so no unpinned version slips into the image. It is not a network ban — the digest-pinned blobs still download; frozen only refuses to *discover* a new mapping. Paired with the [`--offline`][arg-offline] run already in that Dockerfile, drift becomes a hard error at build time rather than a silent swap.
+
+::: details Fully air-gapped builds
+`--frozen pull` still reaches the registry for the digest-pinned blobs. For a build with no network at all, vendor a warm `OCX_HOME` into the build context — a directory populated by an earlier [`ocx pull`][cmd-pull] — and run the pull under [`--offline`][arg-offline], which resolves entirely from that local store and never touches the network.
+:::
+
+Resolving a bare tag like `cmake:3` deterministically *without* a lockfile — the [GitHub Actions][github-actions] and [Bazel][bazel] case — is a different tool: bundle a frozen index snapshot and point ocx at it with [`OCX_INDEX`][env-ocx-index]. See [Bundled Snapshots][indices-indepth].
+
 ## Private Registries {#build-auth}
 
 `ocx pull` against a private registry needs credentials during `docker build`. Never bake them in with `ENV` or `ARG` — both persist in image history. Use [BuildKit secrets][buildkit-secrets], which mount for a single `RUN` and leave no layer behind:
@@ -108,6 +120,8 @@ For CI pipelines that run *inside* these images — caching, matrix setups, and 
 [alpine]: https://alpinelinux.org/
 [uv-docker]: https://docs.astral.sh/uv/guides/integration/docker/
 [buildkit-secrets]: https://docs.docker.com/build/building/secrets/
+[github-actions]: https://docs.github.com/en/actions
+[bazel]: https://bazel.build/
 
 <!-- commands -->
 [cmd-pull]: ./reference/command-line.md#pull
@@ -116,11 +130,14 @@ For CI pipelines that run *inside* these images — caching, matrix setups, and 
 
 <!-- arguments -->
 [arg-offline]: ./reference/command-line.md#arg-offline
+[arg-frozen]: ./reference/command-line.md#arg-frozen
 
 <!-- environment -->
 [env-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
+[env-ocx-index]: ./reference/environment.md#ocx-index
 
 <!-- in depth -->
 [project-indepth]: ./in-depth/project.md
 [ci-indepth]: ./in-depth/ci.md
+[indices-indepth]: ./in-depth/indices.md#bundled
