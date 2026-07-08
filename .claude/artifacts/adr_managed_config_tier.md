@@ -53,7 +53,7 @@
 > - **Trust-boundary clarification (CWE-345, doc-only).** The identity gate (Decision A)
 >   defends against cross-repository/cached-registry snapshot poisoning — it is not a
 >   defense against an attacker who already has local write access to `$OCX_HOME`.
->   `config.toml`, `state/managed-config/snapshot.json`, and `pause.json` are ordinary local
+>   `config.toml`, `state/managed-config/snapshot.json`, `state/managed-config/config.toml`, and `pause.json` are ordinary local
 >   state at the same trust level as any other file such an attacker could already edit; the
 >   tier's digest pins bind fetch-time content, not load-time tamper-evidence.
 >
@@ -186,19 +186,23 @@ pub const MANAGED_CONFIG_ARTIFACT_TYPE: &str = "application/vnd.sh.ocx.config.v1
 pub const MANAGED_CONFIG_LAYER_MEDIA_TYPE: &str = "application/vnd.sh.ocx.config.v1+toml";
 pub const MAX_MANAGED_CONFIG_BYTES: u64 = 64 * 1024;   // mirrors MAX_CONFIG_SIZE
 pub struct FetchedManagedConfig { manifest_bytes, layer_bytes, manifest_digest, layer_digest }
-// Decision D (single-file): snapshot.json = { source, digest, fetched_at, config: "<raw TOML>" }
-pub struct ManagedConfigSnapshot { source: String, digest: oci::Digest, fetched_at: String, config: String }
+// Decision D — amended 2026-07-09 (two-file): metadata `snapshot.json` = { source, tag, digest,
+// fetched_at } + readable sibling `config.toml` holding the raw payload (the `config` field is
+// #[serde(skip)]'d out of the JSON and repopulated from the sibling on read). Payload written first,
+// metadata last; metadata-absent ⟹ whole snapshot reads absent. Supersedes the single-file shape.
+pub struct ManagedConfigSnapshot { source: String, tag: Option<String>, digest: oci::Digest, fetched_at: String, /* #[serde(skip)] */ config: String }
 pub async fn fetch_managed_config(client, identifier) -> Result<Option<FetchedManagedConfig>, FetchError>;
   // via shared fetch_single_layer_artifact on local-only-mirror client: manifest → artifactType
   // check → single layer → media-type check → declared-size cap → STREAM-level cap threaded
   // (patch/persistence.rs:209 pattern); Ok(None) = ref genuinely absent, Err = network/auth
 pub async fn persist_managed_config(state, source, fetched) -> Result<ManagedConfigSnapshot, PersistError>;
   // pure: digest re-verify both → parse as Config → strip .managed (WARN) →
-  // ONE atomic temp+rename write of snapshot.json (kills crash window + concurrent-writer race)
+  // write config.toml (payload) then snapshot.json (metadata), each its own atomic temp+rename
+  // (amended 2026-07-09; per-file torn-write-safe — cross-file pairing is best-effort, drift-sync heals)
 ```
 Client surface: shared `fetch_single_layer_artifact(identifier, artifact_type, layer_media_type, max_bytes)` used by patch descriptors (refactored) + managed config; managed calls run on a client whose `MirrorMap` derives from the local-only Config view — normal `transport_reference` read seam, NO `canonical_reference` bypass.
 
-**3. `StateStore`**: `managed_config_dir/snapshot_file/refresh_marker()` accessors, pure `managed_config_snapshot_path(ocx_home)` shared with loader, + promoted `is_throttled(path, interval)` / `touch(path)`.
+**3. `StateStore`**: `managed_config_dir/snapshot_file/toml_file/refresh_marker()` accessors, pure `managed_config_snapshot_path(ocx_home)` + `managed_config_toml_path_for_snapshot(snapshot_path)` shared with loader, + promoted `is_throttled(path, interval)` / `touch(path)`.
 
 **4. Loader**: `discover_paths()` 4th candidate; `load_and_merge` identity-gated one-hop strip branch for that path; no new loader error variant. Returns local-only Config view alongside merged view.
 
@@ -242,14 +246,14 @@ Client surface: shared `fetch_single_layer_artifact(identifier, artifact_type, l
 3. Seed cleared (`""`) → fence removed AND snapshot dir deleted (no ghost tier).
 4. required=false + registry gone → background debug, explicit update surfaces error, resolution proceeds empty.
 5. System-scope `[managed] required=true` → not clearable via home-tier fence (`system_locked` fold), mirrors [patches].
-6. Concurrent double-apply race → single-file snapshot keeps content+identity consistent (Decision D amendment).
+6. Concurrent double-apply race → each of the two snapshot files is written via its own atomic temp+rename, so a racing writer never leaves a torn/byte-mixed file (Decision D, amended 2026-07-09 to the two-file layout). The cross-file pairing (metadata-of-A + payload-of-B) is best-effort; both are complete valid files and the next drift sync re-persists a consistent pair.
 
 ## One-Way-Door surfaces (complete list)
 
 - `[managed]` seed schema
 - `OCX_MANAGED_CONFIG` semantics
 - Artifact media types + manifest shape (`application/vnd.sh.ocx.config.v1`(+toml), empty config blob, single layer, no index/subject) — falls under CLAUDE.md's "OCI manifest stays backward compatible" exception
-- `snapshot.json` format = local/low-stakes (old = treated absent, re-synced)
+- `snapshot.json` + `config.toml` two-file format = local/low-stakes (old = treated absent, re-synced)
 
 ## Security posture
 

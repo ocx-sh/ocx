@@ -113,15 +113,22 @@ pub struct ResolvedManagedConfig {
     pub system_required: bool,
 }
 
-/// Single-file on-disk snapshot at
-/// [`StateStore::managed_config_snapshot_file`](crate::file_structure::StateStore::managed_config_snapshot_file)
-/// (`$OCX_HOME/state/managed-config/snapshot.json`).
+/// On-disk snapshot of the managed-config tier, persisted as two sibling files
+/// under `$OCX_HOME/state/managed-config/`:
+///
+/// - `snapshot.json` — this struct's metadata (`source`/`tag`/`digest`/
+///   `fetched_at`), written by `serde`;
+/// - `config.toml` — the raw payload bytes, held here in [`Self::config`] but
+///   `#[serde(skip)]`'d out of the JSON so the payload stays a readable,
+///   greppable file instead of an escaped string inside the metadata.
 ///
 /// A config-tier data model: the loader identity-gates it against `source`
-/// before folding the embedded `config` TOML, and the `required` gate compares
-/// it here (see [`snapshot_matches_source`]). The domain layer
-/// ([`crate::managed_config`]) writes and reads it (atomic temp+rename via
-/// `persist_managed_config`) and re-exports this type for API stability.
+/// before folding the `config` payload, and the `required` gate compares it
+/// here (see [`snapshot_matches_source`]). The domain layer
+/// ([`crate::managed_config`]) writes both files (payload first, metadata last)
+/// and reads them back via `persist_managed_config` /
+/// `read_managed_config_snapshot_at`, and re-exports this type for API
+/// stability.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManagedConfigSnapshot {
     /// The managed-config source this snapshot was fetched from, in its
@@ -147,6 +154,13 @@ pub struct ManagedConfigSnapshot {
     /// (ADR Decision I: a remote payload can never redirect/loosen the tier
     /// that fetched it). The loader parses this string directly and folds it
     /// into the accumulator once the source identity check passes.
+    ///
+    /// Persisted as the readable sibling `config.toml`, NOT embedded in
+    /// `snapshot.json`: `#[serde(skip)]` keeps it out of the metadata file, and
+    /// `read_managed_config_snapshot_at` repopulates it from the sibling on load.
+    /// A missing/unreadable sibling makes the whole snapshot read as absent
+    /// (the reader never yields a snapshot with an empty `config`).
+    #[serde(skip)]
     pub config: String,
 }
 

@@ -146,7 +146,7 @@ impl crate::cli::ClassifyExitCode for ManagedConfigFetchError {
 // ── Persist errors ────────────────────────────────────────────────────────────
 
 /// Errors raised while persisting a fetched managed-config payload to the
-/// single-file snapshot.
+/// two-file snapshot (metadata `snapshot.json` + payload `config.toml`).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ManagedConfigPersistError {
@@ -438,9 +438,11 @@ pub async fn probe_managed_config_digest(
 
 /// Parses the fetched payload as TOML, strips any `[managed]` section (WARN if
 /// present — ADR Decision I, a remote payload can never redirect the tier that
-/// fetched it), and writes the resulting [`ManagedConfigSnapshot`] atomically
-/// (single temp+rename) to
-/// [`crate::file_structure::StateStore::managed_config_snapshot_file`].
+/// fetched it), and writes the resulting [`ManagedConfigSnapshot`] as two
+/// sibling files under
+/// [`crate::file_structure::StateStore::managed_config_dir`]: the readable
+/// `config.toml` payload and the `snapshot.json` metadata (each via its own
+/// atomic temp+rename).
 ///
 /// `source` is the effective managed-config source; its canonical `Display`
 /// form is carried into [`ManagedConfigSnapshot::source`] (identity gate) and
@@ -496,31 +498,53 @@ pub async fn persist_managed_config(
     Ok(snapshot)
 }
 
-/// Writes `snapshot` to [`crate::file_structure::StateStore::managed_config_snapshot_file`]
-/// via one temp+rename (atomic) — the single write that keeps both the
-/// crash-window and the concurrent-writer torn-state race closed (Decision D).
+/// Writes `snapshot` as two sibling files under
+/// [`crate::file_structure::StateStore::managed_config_dir`]: the raw
+/// `config.toml` payload and the `snapshot.json` metadata, each via its own
+/// atomic temp+rename.
+///
+/// Write order is payload-first, metadata-last. `snapshot.json` is the commit
+/// marker: by the time a reader observes it, the `config.toml` written before
+/// it is already in place, so the reader never sees metadata pointing at a
+/// missing payload. A crash between the two writes leaves the metadata absent —
+/// the whole snapshot then reads as absent (benign-state rule; the next drift
+/// sync re-persists it).
 async fn write_snapshot_atomic(
     state: &crate::file_structure::StateStore,
     snapshot: &ManagedConfigSnapshot,
 ) -> std::io::Result<()> {
-    use std::io::Write as _;
-
     let dir = state.managed_config_dir();
-    let path = state.managed_config_snapshot_file();
-    let bytes = serde_json::to_vec_pretty(snapshot)
+    let snapshot_path = state.managed_config_snapshot_file();
+    let payload_path = state.managed_config_toml_file();
+    let metadata = serde_json::to_vec_pretty(snapshot)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let payload = snapshot.config.clone().into_bytes();
 
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-        tmp.write_all(&bytes)?;
-        crate::utility::fs::persist_temp_file(tmp, &path)
+        // ponytail: two atomic renames, not one — each file is torn-write-safe
+        // on its own, but the cross-file pairing is not itself atomic, so racing
+        // writers can leave metadata from one and payload from another. Both are
+        // complete, valid files and drift-sync self-heals on the next tick;
+        // tighten to a temp-dir swap only if a real pairing hazard shows up.
+        write_file_atomic(&dir, &payload_path, &payload)?;
+        write_file_atomic(&dir, &snapshot_path, &metadata)?;
+        Ok(())
     })
     .await
     .map_err(|join_error| std::io::Error::other(join_error.to_string()))?
 }
 
-/// Reads and parses the single-file snapshot from `state`'s well-known path,
+/// Publishes `bytes` to `path` via a temp file in `dir` + atomic rename.
+fn write_file_atomic(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    crate::utility::fs::persist_temp_file(tmp, path)
+}
+
+/// Reads and parses the two-file snapshot from `state`'s well-known paths,
 /// treating any I/O or parse failure as absent (benign-state rule — a missing
 /// or corrupt snapshot is never a hard error at read time).
 pub async fn read_managed_config_snapshot(state: &crate::file_structure::StateStore) -> Option<ManagedConfigSnapshot> {
@@ -530,9 +554,18 @@ pub async fn read_managed_config_snapshot(state: &crate::file_structure::StateSt
 /// Path-based variant of [`read_managed_config_snapshot`], for callers (the
 /// config loader) that must not construct a
 /// [`crate::file_structure::StateStore`] or [`crate::file_structure::FileStructure`].
+///
+/// `path` is the metadata `snapshot.json`; the payload is loaded from the
+/// sibling `config.toml` derived by
+/// [`crate::file_structure::StateStore::managed_config_toml_path_for_snapshot`].
+/// A missing or unreadable payload sibling makes the whole snapshot read as
+/// absent — the reader never yields a snapshot with an empty `config`.
 pub async fn read_managed_config_snapshot_at(path: &std::path::Path) -> Option<ManagedConfigSnapshot> {
-    let bytes = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let metadata_bytes = tokio::fs::read(path).await.ok()?;
+    let mut snapshot: ManagedConfigSnapshot = serde_json::from_slice(&metadata_bytes).ok()?;
+    let payload_path = crate::file_structure::StateStore::managed_config_toml_path_for_snapshot(path);
+    snapshot.config = tokio::fs::read_to_string(&payload_path).await.ok()?;
+    Some(snapshot)
 }
 
 #[cfg(test)]
@@ -1029,29 +1062,60 @@ mod tests {
         assert_eq!(snapshot.config, toml);
         assert!(!snapshot.fetched_at.is_empty(), "fetched_at must be populated");
 
-        let on_disk = std::fs::read_to_string(state.managed_config_snapshot_file()).expect("snapshot file must exist");
-        let parsed: ManagedConfigSnapshot = serde_json::from_str(&on_disk).expect("snapshot file must be valid JSON");
+        // Metadata file is JSON WITHOUT the embedded payload (config lives in the sibling).
+        let metadata =
+            std::fs::read_to_string(state.managed_config_snapshot_file()).expect("snapshot metadata file must exist");
+        assert!(
+            !metadata.contains("[registry]"),
+            "the metadata snapshot must not embed the config payload: {metadata}"
+        );
+        let parsed: ManagedConfigSnapshot = serde_json::from_str(&metadata).expect("metadata file must be valid JSON");
         assert_eq!(parsed.source, snapshot.source);
         assert_eq!(parsed.tag, snapshot.tag);
-        assert_eq!(parsed.config, snapshot.config);
+        assert_eq!(
+            parsed.config, "",
+            "config is #[serde(skip)] — absent from the metadata file"
+        );
+
+        // Payload lives in the readable sibling config.toml, byte-identical.
+        let payload =
+            std::fs::read_to_string(state.managed_config_toml_file()).expect("config.toml sibling must exist");
+        assert_eq!(payload, toml, "the payload sibling holds the raw config bytes");
+
+        // Full round-trip through the reader repopulates config from the sibling.
+        let round_tripped = read_managed_config_snapshot(&state)
+            .await
+            .expect("reader must load both files");
+        assert_eq!(round_tripped.config, toml);
+        assert_eq!(round_tripped.source, snapshot.source);
     }
 
-    /// A v1 snapshot (no `tag` field) stays readable — `tag` defaults to
-    /// `None`; refreshed on the next drift sync, no migration.
+    /// A metadata snapshot without a `tag` field stays readable — `tag` defaults
+    /// to `None`; refreshed on the next drift sync, no migration. The payload
+    /// sibling is present, isolating the missing-`tag` case from a missing payload.
     #[tokio::test]
     async fn read_snapshot_without_tag_field_is_readable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("snapshot.json");
-        let v1 = format!(
-            "{{\"source\":\"corp.example.com/ocx-config:user\",\"digest\":\"sha256:{}\",\"fetched_at\":\"old\",\"config\":\"\"}}",
+        let metadata = format!(
+            "{{\"source\":\"corp.example.com/ocx-config:user\",\"digest\":\"sha256:{}\",\"fetched_at\":\"old\"}}",
             "a".repeat(64)
         );
-        std::fs::write(&path, &v1).unwrap();
+        std::fs::write(&path, &metadata).unwrap();
+        std::fs::write(
+            StateStore::managed_config_toml_path_for_snapshot(&path),
+            "[registry]\ndefault = \"x\"\n",
+        )
+        .unwrap();
 
         let snapshot = read_managed_config_snapshot_at(&path)
             .await
-            .expect("a v1 snapshot must stay readable");
+            .expect("a snapshot without a tag field must stay readable");
         assert_eq!(snapshot.tag, None);
+        assert_eq!(
+            snapshot.config, "[registry]\ndefault = \"x\"\n",
+            "config comes from the sibling"
+        );
     }
 
     /// ADR Decision I (one-hop): a remote payload's `[managed]` section is
@@ -1133,33 +1197,61 @@ mod tests {
         );
         assert!(
             !state.managed_config_snapshot_file().exists(),
-            "a persist that fails TOML validation must write no snapshot"
+            "a persist that fails TOML validation must write no metadata snapshot"
+        );
+        assert!(
+            !state.managed_config_toml_file().exists(),
+            "a persist that fails TOML validation must write no payload sibling"
         );
     }
 
-    /// Finding #6: a snapshot file that is syntactically valid JSON but is
-    /// missing a required field (here `config`) must be treated as absent
+    /// Finding #6: a metadata file that is syntactically valid JSON but is
+    /// missing a required field (here `digest`) must be treated as absent
     /// (`None`), exactly like syntactic corruption. This holds because
     /// [`ManagedConfigSnapshot`]'s required fields carry no `#[serde(default)]`
-    /// (only the optional v2 `tag` does), so a missing required field fails
+    /// (only the optional v2 `tag` — and the `#[serde(skip)]` payload `config`,
+    /// loaded separately — do), so a missing required field fails
     /// deserialization and `read_managed_config_snapshot_at`'s `.ok()`
-    /// collapses it to `None`.
+    /// collapses it to `None`. A payload sibling is present so this asserts the
+    /// metadata-parse path, not the missing-payload path.
     #[tokio::test]
     async fn read_snapshot_valid_json_missing_required_field_is_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("snapshot.json");
 
-        // Valid JSON, but the required `config` field is absent.
-        let missing_field = format!(
-            "{{\"source\":\"corp.example.com/ocx-config:user\",\"digest\":\"sha256:{}\",\"fetched_at\":\"2026-07-05T00:00:00Z\"}}",
-            "a".repeat(64)
-        );
-        std::fs::write(&path, &missing_field).unwrap();
+        // Valid JSON, but the required `digest` field is absent.
+        let missing_field = "{\"source\":\"corp.example.com/ocx-config:user\",\"fetched_at\":\"2026-07-05T00:00:00Z\"}";
+        std::fs::write(&path, missing_field).unwrap();
+        std::fs::write(
+            StateStore::managed_config_toml_path_for_snapshot(&path),
+            "[registry]\ndefault = \"x\"\n",
+        )
+        .unwrap();
 
         let snapshot = read_managed_config_snapshot_at(&path).await;
         assert!(
             snapshot.is_none(),
-            "a valid-JSON-but-missing-required-field snapshot must be treated as absent, got {snapshot:?}"
+            "a valid-JSON-but-missing-required-field metadata snapshot must be treated as absent, got {snapshot:?}"
+        );
+    }
+
+    /// Split-file contract: valid metadata JSON but NO sibling `config.toml`
+    /// (a torn/partial write, or a hand-deleted payload) reads as absent — the
+    /// reader never folds an empty config.
+    #[tokio::test]
+    async fn read_snapshot_missing_payload_sibling_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        let metadata = format!(
+            "{{\"source\":\"corp.example.com/ocx-config:user\",\"digest\":\"sha256:{}\",\"fetched_at\":\"now\"}}",
+            "a".repeat(64)
+        );
+        std::fs::write(&path, &metadata).unwrap();
+        // No config.toml sibling written.
+
+        assert!(
+            read_managed_config_snapshot_at(&path).await.is_none(),
+            "metadata without its payload sibling must read as absent"
         );
     }
 
@@ -1177,9 +1269,13 @@ mod tests {
         );
     }
 
-    /// Criterion 21: concurrent double-apply race — the single-file snapshot
-    /// (one temp+rename write) keeps content and identity consistent under
-    /// racing writers. Mirrors `StateStore::touch_atomic_concurrent_safety`.
+    /// Criterion 21: concurrent double-apply race — each file is written via its
+    /// own temp+rename, so a racing writer can never leave a byte-interleaved
+    /// (torn) metadata or payload file; every file on disk is exactly one
+    /// writer's complete content. Mirrors `StateStore::touch_atomic_concurrent_safety`.
+    /// (The cross-file pairing is not itself atomic — see `write_snapshot_atomic`'s
+    /// note — so this asserts each file individually, not that the two came from
+    /// the same writer.)
     #[tokio::test(flavor = "multi_thread")]
     async fn persist_managed_config_concurrent_writers_leave_one_consistent_snapshot() {
         let dir = tempfile::tempdir().unwrap();
@@ -1201,14 +1297,17 @@ mod tests {
                 .expect("every concurrent persist must succeed (each writes its own consistent bytes)");
         }
 
-        let on_disk = std::fs::read_to_string(state.managed_config_snapshot_file()).unwrap();
+        // Metadata file: exactly one writer's complete, valid JSON.
+        let metadata = std::fs::read_to_string(state.managed_config_snapshot_file()).unwrap();
         let parsed: ManagedConfigSnapshot =
-            serde_json::from_str(&on_disk).expect("concurrent writers must never leave a torn/corrupt snapshot file");
+            serde_json::from_str(&metadata).expect("concurrent writers must never leave a torn/corrupt metadata file");
         assert_eq!(parsed.source, "corp.example.com/ocx-config:user");
+
+        // Payload file: exactly one writer's complete config, not a byte mix.
+        let payload = std::fs::read_to_string(state.managed_config_toml_file()).unwrap();
         assert!(
-            parsed.config.contains("writer-"),
-            "the final snapshot must be exactly one writer's content, not a byte mix: {:?}",
-            parsed.config
+            payload.contains("writer-"),
+            "the payload must be exactly one writer's content, not a byte mix: {payload:?}"
         );
     }
 }

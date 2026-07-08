@@ -8,6 +8,17 @@ use crate::log;
 use crate::oci;
 use crate::prelude::StringExt as _;
 
+/// Filename of the managed-config snapshot metadata (`source`/`tag`/`digest`/
+/// `fetched_at`) — a small JSON file. The payload it describes lives beside it
+/// in [`MANAGED_CONFIG_PAYLOAD_FILE`].
+const MANAGED_CONFIG_SNAPSHOT_FILE: &str = "snapshot.json";
+
+/// Filename of the managed-config payload — the raw `config.toml` bytes the
+/// metadata snapshot describes, kept as a human-readable sibling of
+/// [`MANAGED_CONFIG_SNAPSHOT_FILE`] (readable, greppable, diffable) rather than
+/// embedded as an escaped string inside the JSON.
+const MANAGED_CONFIG_PAYLOAD_FILE: &str = "config.toml";
+
 /// Manages persistent runtime state files under `$OCX_HOME/state/`.
 ///
 /// `StateStore` is the typed home for state files whose existence or mtime IS
@@ -86,12 +97,23 @@ impl StateStore {
         self.root.join("managed-config")
     }
 
-    /// Returns the path of the single-file managed-config snapshot
+    /// Returns the path of the managed-config snapshot metadata file
     /// (`ManagedConfigSnapshot`, written atomically by `persist_managed_config`).
+    /// The payload it describes lives in the sibling
+    /// [`Self::managed_config_toml_file`].
     ///
     /// Path: `{root}/managed-config/snapshot.json`
     pub fn managed_config_snapshot_file(&self) -> PathBuf {
-        self.managed_config_dir().join("snapshot.json")
+        self.managed_config_dir().join(MANAGED_CONFIG_SNAPSHOT_FILE)
+    }
+
+    /// Returns the path of the managed-config payload file — the raw
+    /// `config.toml` bytes the metadata snapshot describes, written as a
+    /// readable sibling of `snapshot.json` by `persist_managed_config`.
+    ///
+    /// Path: `{root}/managed-config/config.toml`
+    pub fn managed_config_toml_file(&self) -> PathBuf {
+        self.managed_config_dir().join(MANAGED_CONFIG_PAYLOAD_FILE)
     }
 
     /// Returns the zero-byte freshness marker touched by the background
@@ -119,7 +141,23 @@ impl StateStore {
     /// accessor — both must agree on one path so the loader's discovery
     /// candidate and the writer's persist target never drift apart.
     pub fn managed_config_snapshot_path(ocx_home: &Path) -> PathBuf {
-        ocx_home.join("state").join("managed-config").join("snapshot.json")
+        ocx_home
+            .join("state")
+            .join("managed-config")
+            .join(MANAGED_CONFIG_SNAPSHOT_FILE)
+    }
+
+    /// Derives the managed-config payload path (`config.toml`) sitting beside the
+    /// metadata snapshot at `snapshot_path`.
+    ///
+    /// Pure sibling derivation for
+    /// [`read_managed_config_snapshot_at`](crate::managed_config::read_managed_config_snapshot_at),
+    /// which holds only the snapshot path (the config loader never constructs a
+    /// [`StateStore`]). Both this and the writer's
+    /// [`Self::managed_config_toml_file`] resolve to one path, so reader and
+    /// writer can never drift.
+    pub fn managed_config_toml_path_for_snapshot(snapshot_path: &Path) -> PathBuf {
+        snapshot_path.with_file_name(MANAGED_CONFIG_PAYLOAD_FILE)
     }
 
     /// Returns `true` when the state file at `path` was last touched within

@@ -647,12 +647,16 @@ mod tests {
             "source": "other.example.com/ocx-config:v1",
             "digest": index_digest,
             "fetched_at": "2026-07-05T00:00:00Z",
-            "config": "[registry]\ndefault = \"x\"\n",
         });
         std::fs::create_dir_all(manager.file_structure.state.managed_config_dir()).unwrap();
         std::fs::write(
             manager.file_structure.state.managed_config_snapshot_file(),
             serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            manager.file_structure.state.managed_config_toml_file(),
+            "[registry]\ndefault = \"x\"\n",
         )
         .unwrap();
 

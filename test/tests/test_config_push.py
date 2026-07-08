@@ -205,12 +205,12 @@ def test_config_push_then_update_round_trip(
     assert update["status"] == "updated"
     assert update["digest"] == pushed_digest, "snapshot digest must equal the pushed index digest"
 
-    snapshot = json.loads(
-        (Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "snapshot.json").read_text()
-    )
+    state_dir = Path(ocx.env["OCX_HOME"]) / "state" / "managed-config"
+    snapshot = json.loads((state_dir / "snapshot.json").read_text())
     assert snapshot["digest"] == pushed_digest
     assert snapshot["tag"] == "user", "snapshot v2 must carry the source tag"
-    assert "round-trip.example" in snapshot["config"]
+    # The payload lives in the readable sibling config.toml, not embedded in the metadata JSON.
+    assert "round-trip.example" in (state_dir / "config.toml").read_text()
 
 
 def test_config_update_package_without_config_toml_exits_65(
@@ -240,7 +240,6 @@ def test_config_update_ignores_extra_archive_entries(
 
     update = ocx.json("config", "update", env_overrides={"OCX_MANAGED_CONFIG": ref})
     assert update["status"] == "updated"
-    snapshot = json.loads(
-        (Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "snapshot.json").read_text()
-    )
-    assert "extras-ignored.example" in snapshot["config"]
+    # Only config.toml is consumed from the layer; it lands in the payload sibling.
+    config_payload = (Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "config.toml").read_text()
+    assert "extras-ignored.example" in config_payload

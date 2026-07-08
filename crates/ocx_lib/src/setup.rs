@@ -792,16 +792,22 @@ mod tests {
             .await
             .expect("first adopt must succeed");
 
-        // Overwrite the snapshot with one recorded under a different repo.
+        // Overwrite the snapshot with one recorded under a different repo
+        // (metadata + payload sibling, so the gate sees a present-but-mismatched
+        // snapshot rather than an absent one).
         let poisoned = serde_json::json!({
             "source": "other.example.com/poisoned-config:user",
             "digest": format!("sha256:{}", "d".repeat(64)),
             "fetched_at": "old",
-            "config": "[registry]\ndefault = \"poisoned\"\n",
         });
         std::fs::write(
             file_structure.state.managed_config_snapshot_file(),
             serde_json::to_vec(&poisoned).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            file_structure.state.managed_config_toml_file(),
+            "[registry]\ndefault = \"poisoned\"\n",
         )
         .unwrap();
 

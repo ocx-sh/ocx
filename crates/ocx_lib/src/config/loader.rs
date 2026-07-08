@@ -1881,8 +1881,9 @@ mod tests {
     // Tests below cover both the merge path and the ignore paths (mismatch /
     // hermetic / malformed snapshot).
 
-    /// Writes a single-file managed-config snapshot at the well-known path
-    /// under `ocx_home`, mirroring `ManagedConfigSnapshot`'s wire shape.
+    /// Writes a managed-config snapshot at the well-known paths under `ocx_home`,
+    /// mirroring `persist_managed_config`'s two-file layout: `snapshot.json`
+    /// metadata plus the sibling `config.toml` payload.
     fn write_managed_snapshot(ocx_home: &Path, source: &str, config_toml: &str) {
         let path = crate::file_structure::StateStore::managed_config_snapshot_path(ocx_home);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1890,9 +1891,13 @@ mod tests {
             "source": source,
             "digest": format!("sha256:{}", "a".repeat(64)),
             "fetched_at": "2026-07-04T00:00:00Z",
-            "config": config_toml,
         });
         std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        std::fs::write(
+            crate::file_structure::StateStore::managed_config_toml_path_for_snapshot(&path),
+            config_toml,
+        )
+        .unwrap();
     }
 
     /// Precedence + one-hop-strip (criteria 11): the managed snapshot folds
