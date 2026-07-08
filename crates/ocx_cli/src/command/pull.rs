@@ -210,34 +210,77 @@ fn host_pull_pinned(
 /// Resolution failures (network errors when the local index is cold)
 /// surface as `would-fetch` rather than aborting the preview, so a stale
 /// or partial cache still produces a useful report.
+/// One dry-run probe result: the cached / would-fetch status plus the resolved
+/// object-store path when the package is already present.
+type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathBuf>);
+
 async fn run_dry_run(
     context: &crate::app::Context,
     pinned: &[oci::PinnedIdentifier],
     platforms: &[oci::Platform],
 ) -> anyhow::Result<ExitCode> {
-    let manager = context.manager();
+    use api::data::pull_dry_run::{DryRunEntry, PullDryRun, PullStatus};
+
     let platforms = platforms_or_default(platforms);
-    let mut entries = Vec::with_capacity(pinned.len());
-    for id in pinned {
-        let display = id.to_string();
+
+    // Fan out one resolve + probe per pinned id, tagged with its input index.
+    // `resolve` hits the index (network on a cold cache), so a sequential loop
+    // is an O(n) round-trip chain — the real pull already fans out via
+    // `pull_all`, so the preview must too. Same index-tagged JoinSet shape as
+    // `ocx package info` and `index update`.
+    let mut join_set: tokio::task::JoinSet<(usize, anyhow::Result<DryRunProbe>)> = tokio::task::JoinSet::new();
+    for (index, id) in pinned.iter().enumerate() {
+        let manager = context.manager().clone();
         let identifier: oci::Identifier = id.clone().into();
-        let resolved = match manager.resolve(&identifier, platforms.clone()).await {
-            Ok(chain) => Some(chain.pinned),
-            Err(_) => None,
-        };
-        let (status, path) = match resolved {
-            Some(pinned) => match manager.find_plain(&pinned).await? {
-                Some(info) => (
-                    api::data::pull_dry_run::PullStatus::Cached,
-                    Some(info.dir().root().to_path_buf()),
-                ),
-                None => (api::data::pull_dry_run::PullStatus::WouldFetch, None),
-            },
-            None => (api::data::pull_dry_run::PullStatus::WouldFetch, None),
-        };
-        entries.push(api::data::pull_dry_run::DryRunEntry::new(display, status, path));
+        let platforms = platforms.clone();
+        join_set.spawn(async move {
+            let result = async {
+                let resolved = match manager.resolve(&identifier, platforms).await {
+                    Ok(chain) => Some(chain.pinned),
+                    Err(_) => None,
+                };
+                match resolved {
+                    Some(pinned) => match manager.find_plain(&pinned).await? {
+                        Some(info) => Ok((PullStatus::Cached, Some(info.dir().root().to_path_buf()))),
+                        None => Ok((PullStatus::WouldFetch, None)),
+                    },
+                    None => Ok((PullStatus::WouldFetch, None)),
+                }
+            }
+            .await;
+            (index, result)
+        });
     }
-    let report = api::data::pull_dry_run::PullDryRun::new(entries);
+
+    // Place successes by index; collect failures with their index so the
+    // input-order-first error is the one surfaced (deterministic exit code).
+    let mut slots: Vec<Option<DryRunProbe>> = (0..pinned.len()).map(|_| None).collect();
+    let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((index, Ok(value))) => slots[index] = Some(value),
+            Ok((index, Err(e))) => failures.push((index, e)),
+            Err(join_err) => {
+                join_set.abort_all();
+                std::panic::resume_unwind(join_err.into_panic());
+            }
+        }
+    }
+    if !failures.is_empty() {
+        failures.sort_by_key(|(index, _)| *index);
+        let (_, error) = failures.into_iter().next().expect("failures is non-empty");
+        return Err(error);
+    }
+
+    let entries: Vec<DryRunEntry> = pinned
+        .iter()
+        .zip(slots)
+        .map(|(id, slot)| {
+            let (status, path) = slot.expect("all slots filled on success");
+            DryRunEntry::new(id.to_string(), status, path)
+        })
+        .collect();
+    let report = PullDryRun::new(entries);
     context.api().report(&report)?;
     Ok(ExitCode::SUCCESS)
 }

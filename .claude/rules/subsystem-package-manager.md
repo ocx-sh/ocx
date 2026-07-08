@@ -151,8 +151,9 @@ The slug is `to_slug(identifier.to_string())` — replaces all non-alphanumeric 
 
 ## Parallel vs Sequential
 
-- **Parallel** (via `JoinSet`): `find_all`, `find_or_install_all`, `install_all`, `inspect_all`
-- **Sequential**: `find_symlink_all`, `uninstall_all`, `deselect_all`, `clean`, `select_all` (resolve phase is parallel via `find_all`; only the `current` wire-up loops sequentially)
+- **Parallel** (via `JoinSet`): `pull_all`, `install_all` (all three phases), `find_all`, `find_or_install_all`, `inspect_all`, `resolve_all`; `resolve_lock`/`resolve_lock_touched` (project-tier, via `resolve_work`)
+- **Sequential**: `find_symlink_all`, `uninstall_all`, `deselect_all`, `clean`, `select_all` (resolve phase is parallel via `find_all`; only the `current` wire-up loops sequentially) — all local-only (no per-item network), so sequential is correct
+- **CLI-layer fan-outs** (index-tagged `JoinSet`, input order preserved): `package info`, `index update`, `pull --dry-run`. Any new multi-package CLI command doing per-item network work MUST fan out this way, not loop `for … { …await }`.
 
 ## Garbage Collection: canonical-path keying
 
