@@ -224,6 +224,7 @@ impl App {
 /// is a v1 → v2 schema bump.
 fn canonical_command_name(command: &command::Command) -> &'static str {
     use command::Command;
+    use command::config::ConfigGroup as ConfigCmd;
     use command::index::Index as IndexCmd;
     use command::launcher::Launcher as LauncherCmd;
     use command::package::Package as PackageCmd;
@@ -234,6 +235,10 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Env(_) => "env",
         Command::Add(_) => "add",
         Command::Clean(_) => "clean",
+        Command::Config(sub) => match sub {
+            ConfigCmd::Update(_) => "config update",
+            ConfigCmd::Push(_) => "config push",
+        },
         Command::Direnv(_) => "direnv",
         Command::Index(sub) => match sub {
             IndexCmd::Catalog(_) => "index catalog",

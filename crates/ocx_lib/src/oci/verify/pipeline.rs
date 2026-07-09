@@ -108,7 +108,9 @@ impl VerifyPipeline {
             .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?
         {
             SelectResult::Found(id) => id,
-            SelectResult::Ambiguous(_) | SelectResult::NotFound => return Err(VerifyErrorKind::NoSignaturesFound),
+            SelectResult::Ambiguous(_) | SelectResult::NotFound | SelectResult::FeatureMismatch { .. } => {
+                return Err(VerifyErrorKind::NoSignaturesFound);
+            }
         };
         let subject_digest = resolved.digest().ok_or(VerifyErrorKind::NoSignaturesFound)?;
         let registry = resolved.registry().to_string();

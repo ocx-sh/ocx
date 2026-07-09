@@ -442,7 +442,7 @@ impl Context {
             // Narrow projection (ISP): verify pools these with the project
             // ocx.toml's trust policies; the rest of `config` is already
             // extracted into `default_registry` / mirrors / patches above.
-            config_trust: config.trust.unwrap_or_default(),
+            config_trust: config.trust.clone().unwrap_or_default(),
             config_view,
             concurrency,
             progress,

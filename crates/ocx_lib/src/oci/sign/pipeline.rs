@@ -98,7 +98,7 @@ impl SignPipeline {
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?
         {
             SelectResult::Found(id) => id,
-            SelectResult::Ambiguous(_) | SelectResult::NotFound => {
+            SelectResult::Ambiguous(_) | SelectResult::NotFound | SelectResult::FeatureMismatch { .. } => {
                 return Err(SignErrorKind::Internal(
                     format!("no manifest for {} on {}", ctx.identifier, ctx.platform).into(),
                 ));

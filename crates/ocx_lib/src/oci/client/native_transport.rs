@@ -417,13 +417,22 @@ impl OciTransport for NativeTransport {
         artifact_type: Option<&str>,
     ) -> Result<Vec<oci::Descriptor>> {
         let target = image.clone_with_digest(subject_digest.to_string());
-        let index = self
+        // Native-only referrers lookup: a 404 on `/v2/<name>/referrers/<digest>`
+        // means the registry lacks the OCI 1.1 Referrers API — surfaced as
+        // `None` here and mapped to `ReferrersUnsupported` (exit 84), NOT
+        // silently swallowed into an empty list (which would misreport as
+        // "no signatures found", exit 79). See `pull_referrers_native`.
+        match self
             .client
-            .pull_referrers(&target, artifact_type)
+            .pull_referrers_native(&target, artifact_type)
             .await
-            .map_err(|e| referrers_unsupported_or_registry_error(e, image))?;
-
-        Ok(filter_and_convert_referrers(index.manifests, artifact_type))
+            .map_err(|e| referrers_unsupported_or_registry_error(e, image))?
+        {
+            Some(index) => Ok(filter_and_convert_referrers(index.manifests, artifact_type)),
+            None => Err(ClientError::ReferrersUnsupported {
+                registry: image.resolve_registry().to_string(),
+            }),
+        }
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {

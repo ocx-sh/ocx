@@ -320,8 +320,6 @@ mod tests {
             _image: &oci::native::Reference,
             _digest: &Digest,
             _path: &std::path::Path,
-            _total_size: u64,
-            _on_progress: Arc<dyn Fn(u64) + Send + Sync>,
         ) -> Result<(), ClientError> {
             unimplemented!()
         }

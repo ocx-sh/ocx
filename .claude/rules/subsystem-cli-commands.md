@@ -155,6 +155,10 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 All `ConfigGroup` variants are exempt from the required-snapshot gate; `config setup`, `config update`, and `self setup` are the three onboarding commands that get a managed-fetch client with no seed present (`app.rs::is_managed_config_onboarding_command`).
 
+**`config` group notes:**
+- Files: `crates/ocx_cli/src/command/config.rs` (dispatcher) + `config_{setup,update,push}.rs` (one leaf per subcommand).
+- The managed-config tier (`[managed]`) is fetched as an ordinary OCX package; `config push` is the operator-side publish, `config setup`/`config update` the consumer-side onboard/sync. See `adr_managed_config_tier.md`.
+
 ### Other Commands
 
 | Command | Purpose | Key Flags |

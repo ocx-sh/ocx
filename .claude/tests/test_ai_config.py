@@ -1981,6 +1981,9 @@ class TestSubsystemCliCommandsTableCoverage:
         "index_catalog": "index catalog",
         "index_list": "index list",
         "index_update": "index update",
+        # Managed-config group subcommands (file stem -> "config <verb>").
+        "config_update": "config update",
+        "config_push": "config push",
         "direnv_init": "direnv init",
         "direnv_export": "direnv export",
         "shell_completion": "shell completion",
@@ -1998,6 +2001,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "patch",
         "shell",
         "index",
+        "config",
         "launcher",
         "direnv",
         "self_group",
@@ -2030,7 +2034,7 @@ class TestSubsystemCliCommandsTableCoverage:
             head = first_cell.split(" ")
             # Multi-token command (e.g. "package sign IDENTIFIER") — keep first
             # two tokens if first is a group; else single token.
-            group_heads = {"package", "patch", "shell", "index", "ci", "launcher", "generate", "direnv", "self"}
+            group_heads = {"package", "patch", "shell", "index", "config", "ci", "launcher", "generate", "direnv", "self"}
             if head and head[0] in group_heads and len(head) >= 2:
                 cells.add(f"{head[0]} {head[1]}")
             elif head:
