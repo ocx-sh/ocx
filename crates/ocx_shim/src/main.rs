@@ -85,6 +85,14 @@ const ERROR_ACCESS_DENIED_CODE: u32 = windows_sys::Win32::Foundation::ERROR_ACCE
 #[cfg(not(windows))]
 const ERROR_ACCESS_DENIED_CODE: u32 = 5;
 
+/// `ERROR_NOT_SUPPORTED` — what `CreateProcessW` returns when it refuses the
+/// `PROC_THREAD_ATTRIBUTE_LIST` itself. Gates the degraded spawn retry so the
+/// handle/job scoping is surrendered only for that one diagnosed cause.
+#[cfg(windows)]
+const ERROR_NOT_SUPPORTED_CODE: u32 = windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
+#[cfg(not(windows))]
+const ERROR_NOT_SUPPORTED_CODE: u32 = 50;
+
 impl ShimError {
     /// Maps each failure to its process exit code per the ADR §Error Taxonomy
     /// table.
@@ -215,7 +223,7 @@ fn run() -> Result<i32, ShimError> {
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
         UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
@@ -303,13 +311,7 @@ fn run() -> Result<i32, ShimError> {
         if let Ok(canon_home) = dunce::canonicalize(home) {
             match dunce::canonicalize(&pkg_root) {
                 Ok(canon_root) => {
-                    // `packages/` holds installed candidates; `temp/` holds
-                    // `ocx package test` materializations — the test env's
-                    // synthesized entrypoints are launched from there, so it
-                    // is inside the trust boundary too (still under OCX_HOME).
-                    let packages = canon_home.join("packages");
-                    let temp = canon_home.join("temp");
-                    if !canon_root.starts_with(&packages) && !canon_root.starts_with(&temp) {
+                    if !core::pkg_root_allowed(&canon_home, &canon_root) {
                         return Err(ShimError::ContainmentViolation {
                             path: canon_root.display().to_string(),
                         });
@@ -593,7 +595,7 @@ fn run() -> Result<i32, ShimError> {
     // call. `startup_ex` (and its attribute list, kept alive by
     // `attr_list_buf`) outlives the call. All other pointer args are NULL
     // except `process_info`, a valid zero-initialised output struct.
-    let created = unsafe {
+    let mut created = unsafe {
         CreateProcessW(
             app_name_ptr,
             command_line_w.as_mut_ptr(),
@@ -618,6 +620,73 @@ fn run() -> Result<i32, ShimError> {
             unsafe { DeleteProcThreadAttributeList(ptr) };
         }
     };
+
+    // Degraded retry (E7-class): some host states reject the EXTENDED
+    // attribute spawn itself (observed: GHA windows runners returning
+    // ERROR_NOT_SUPPORTED (50) when the shim is launched by the `package
+    // test` script engine with piped stdio). The module already documents
+    // spawning without handle/job scoping as the degraded mode when the
+    // attribute list cannot be BUILT — extend the same degrade to a rejected
+    // extended spawn: retry once with a plain STARTUPINFOW (the
+    // STARTF_USESTDHANDLES trio still wires the std streams). The original
+    // error code is logged so the environments that need this stay visible.
+    //
+    // What the degrade actually costs: the child is no longer born into the
+    // job object created above, so JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE no
+    // longer reaps it if the shim dies — an orphaned child is possible on
+    // this path. Handle inheritance also widens from the explicit
+    // PROC_THREAD_ATTRIBUTE_HANDLE_LIST trio to every inheritable handle.
+    // ERROR_NOT_SUPPORTED (50) here is the classic nested-job symptom, which
+    // points at JOB_LIST rather than HANDLE_LIST as the rejected attribute;
+    // a two-stage degrade (retry with HANDLE_LIST only, then fully plain)
+    // would keep inheritance scoped, but needs a Windows host that actually
+    // reproduces the rejection to verify, so it is deliberately not guessed
+    // at here.
+    // SAFETY: no pointers; reads thread-local last-error.
+    let extended_error = if created == 0 { unsafe { GetLastError() } } else { 0 };
+    // Narrowly gated on ERROR_NOT_SUPPORTED: that is the diagnosed symptom
+    // (the attribute list itself is refused), and it is the only code for
+    // which dropping the scoping is the right answer. Retrying on ANY error
+    // would surrender handle and job scoping for failures that have nothing
+    // to do with the attribute list — an access-denied or missing-image spawn
+    // would still fail, just less safely.
+    if created == 0 && extended_present != 0 && extended_error == ERROR_NOT_SUPPORTED_CODE {
+        let last = extended_error;
+        eprintln!("ocx-shim: extended spawn failed: win32 error {last}; retrying without handle/job scoping");
+        delete_attr_list(attr_list_ptr);
+        attr_list_ptr = std::ptr::null_mut();
+        attr_list_buf.clear();
+        startup_ex.lpAttributeList = std::ptr::null_mut();
+        // `cb` must describe the struct actually passed. The extended call
+        // declared STARTUPINFOEXW; this one hands `CreateProcessW` the inner
+        // STARTUPINFOW with no EXTENDED_STARTUPINFO_PRESENT flag, so leaving
+        // the larger size in place would misdeclare it to any host that
+        // validates the field — and the retry would fail for a second,
+        // unrelated reason.
+        startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        // CreateProcessW may have MODIFIED the mutable command-line buffer on
+        // the failed attempt (documented behaviour) — rebuild it fresh.
+        command_line_w = std::ffi::OsStr::new(&command_line)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: identical contract to the extended call above, minus the
+        // attribute list (`dwCreationFlags = 0`, `lpAttributeList = NULL`).
+        created = unsafe {
+            CreateProcessW(
+                app_name_ptr,
+                command_line_w.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::addr_of!(startup_ex.StartupInfo),
+                &mut process_info,
+            )
+        };
+    }
 
     if created == 0 {
         // SAFETY: no pointers; reads thread-local last-error.
@@ -1558,5 +1627,68 @@ mod tests {
             "shim child line must carry the `launcher exec <pkg_root> --` wire \
              shape shared with the `.sh` body: {line}"
         );
+    }
+
+    // ── E3 containment boundary (core::pkg_root_allowed) ───────────────────
+    //
+    // The boundary is a security control, so it lives in `core` as a pure
+    // function precisely so it can be pinned here on the Linux CI host rather
+    // than only on a Windows runner. The rows below are the allow-list: the
+    // three admitted roots, and the two rejection classes that a raw string
+    // prefix comparison would wrongly admit.
+
+    /// The three roots `validate_launcher_pkg_root` allows are the three this
+    /// admits — no more. `temp/<hash>` is the load-bearing negative: `temp/`
+    /// also holds in-progress download directories, so admitting the whole
+    /// subtree would let a tampered sidecar clear E3 while aiming the shim at
+    /// un-assembled content.
+    #[test]
+    fn pkg_root_allowed_matches_the_cli_allow_list() {
+        let home = std::path::Path::new("/ocx-home");
+        let allowed = [
+            "/ocx-home/packages/ocx.sh/sha256/ab/cdef/content",
+            "/ocx-home/temp/test/pkg",
+            "/ocx-home/temp/patch-test/pkg",
+        ];
+        for root in allowed {
+            assert!(
+                super::core::pkg_root_allowed(home, std::path::Path::new(root)),
+                "{root} must be inside the containment boundary"
+            );
+        }
+
+        let refused = [
+            // `temp/` at large — download staging, not a launcher root.
+            "/ocx-home/temp/0123456789abcdef0123456789abcdef/payload",
+            "/ocx-home/temp/pkg",
+            // Outside OCX_HOME entirely.
+            "/elsewhere/packages/pkg",
+        ];
+        for root in refused {
+            assert!(
+                !super::core::pkg_root_allowed(home, std::path::Path::new(root)),
+                "{root} must be refused by the containment boundary"
+            );
+        }
+    }
+
+    /// Sibling directories whose names merely share a prefix with an allowed
+    /// root must not match. `Path::starts_with` is component-wise, so this
+    /// holds by construction — the test exists because the obvious string
+    /// implementation (`str::starts_with`) admits every row below.
+    #[test]
+    fn pkg_root_allowed_rejects_prefix_siblings() {
+        let home = std::path::Path::new("/ocx-home");
+        for root in [
+            "/ocx-home/temp/test-evil/pkg",
+            "/ocx-home/temp/patch-test-evil/pkg",
+            "/ocx-home/packages-old/pkg",
+            "/ocx-home-evil/packages/pkg",
+        ] {
+            assert!(
+                !super::core::pkg_root_allowed(home, std::path::Path::new(root)),
+                "{root} shares a name prefix with an allowed root but is a different directory"
+            );
+        }
     }
 }
