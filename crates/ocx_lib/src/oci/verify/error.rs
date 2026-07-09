@@ -8,7 +8,7 @@
 
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
-use crate::oci::sign::endpoint::UrlRejection;
+use crate::oci::endpoint::UrlRejection;
 
 /// Top-level verify error carrying the identifier being verified + the kind.
 #[derive(Debug, thiserror::Error)]
@@ -96,8 +96,13 @@ pub enum VerifyErrorKind {
 
     /// Registry returned 404 on referrers endpoint.
     ///
-    /// Exit 84 (`ReferrersUnsupported`).
-    #[error("registry does not support the OCI Referrers API")]
+    /// Exit 84 (`ReferrersUnsupported`). The outer `VerifyError` Display
+    /// (`"{identifier}: {kind}"`) already prefixes this with the registry
+    /// host, so the message itself does not repeat it.
+    #[error(
+        "registry does not support the OCI Referrers API (requires OCI Distribution 1.1+); \
+         supply-chain commands are unavailable for this registry"
+    )]
     ReferrersUnsupported,
 
     /// Rekor unavailable during verify.
@@ -138,10 +143,19 @@ pub enum VerifyErrorKind {
     InvalidEndpointUrl {
         /// Flag name the URL was supplied via (e.g. `--rekor-url`).
         endpoint: String,
-        /// Structured rejection reason from [`crate::oci::sign::endpoint::validate_sigstore_url`].
+        /// Structured rejection reason from [`crate::oci::endpoint::validate_sigstore_url`].
         #[source]
         reason: UrlRejection,
     },
+
+    /// Catch-all for verify-side failures outside the codes above (index
+    /// resolution, digest parse, malformed URL join).
+    ///
+    /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
+    /// `classify_error` chain-walking and `{err:#}` diagnostics preserve the
+    /// cause — never erase it with `.to_string()`.
+    #[error("internal verification error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Typed discriminant for [`VerifyErrorKind::TrustRootLoad`].
@@ -207,6 +221,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
             Self::TrustRootUnavailable | Self::TrustRootLoad(_) => ExitCode::ConfigError,
             Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
+            Self::Internal(_) => ExitCode::Failure,
         }
     }
 
@@ -228,6 +243,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::TrustRootUnavailable => "trust_root_unavailable",
             Self::TrustRootLoad(_) => "trust_root_load",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
+            Self::Internal(_) => "internal",
         }
     }
 }
@@ -363,7 +379,7 @@ mod tests {
 
     #[test]
     fn invalid_endpoint_url_maps_to_usage_error() {
-        use crate::oci::sign::endpoint::UrlRejection;
+        use crate::oci::endpoint::UrlRejection;
         // Verify side borrows its own InvalidEndpointUrl variant so the exit-code
         // classification is independent of the sign side.
         let kind = VerifyErrorKind::InvalidEndpointUrl {
@@ -407,7 +423,7 @@ mod tests {
         // scripts dispatch on them. A rename or typo here is a user-visible breaking
         // change. The exhaustive match in `kind_detail()` ensures a new variant forces
         // a new arm there; this table ensures the *string value* for each arm is pinned.
-        use crate::oci::sign::endpoint::UrlRejection;
+        use crate::oci::endpoint::UrlRejection;
         use VerifyErrorKind::*;
 
         // Construct one representative instance per variant.

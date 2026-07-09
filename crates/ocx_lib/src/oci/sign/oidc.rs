@@ -116,87 +116,32 @@ impl DispatchingTokenProvider {
 
 #[async_trait]
 impl TokenProvider for DispatchingTokenProvider {
-    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("DispatchingTokenProvider::acquire — Phase 5 implements ADR S1-C state machine")
-    }
-}
+    /// ADR S1-C dispatch: override token → ambient providers → browser PKCE,
+    /// with `--no-tty` short-circuiting the browser to a typed pre-check
+    /// failure (exit 77) so headless CI never hangs.
+    async fn acquire(&self, audience: &str) -> Result<OidcToken, SignErrorKind> {
+        // 1. Explicit override (file / stdin / env), resolved by the CLI.
+        if let Some(token) = &self.override_token {
+            return Ok(OidcToken::new(token.as_str().to_owned()));
+        }
 
-/// `--identity-token-file` source — reads the OIDC token from a file with
-/// owner-only permission gating (`mode & 0o077 == 0` on Unix).
-///
-/// Phase 1 stub — Phase 5c wires the file read + `IdentityTokenFilePermissive`
-/// gate into [`TokenProvider::acquire`] so the dispatcher composes uniformly
-/// over file / stdin / env / ambient / browser sources.
-pub struct FileTokenProvider {
-    /// Path to the token file (validated lazily on `acquire`).
-    pub path: std::path::PathBuf,
-}
+        // 2. Ambient providers (CI). The inline env-inspection provider is the
+        //    active path; the `ambient-id` wrapper is a documented v2 seam that
+        //    currently reports "not applicable".
+        let ambient = super::oidc_ambient_inline::InlineAmbientProvider::detect()
+            .or_else(super::oidc_ambient::AmbientIdProvider::detect);
+        if let Some(provider) = ambient
+            && let Ok(token) = provider.acquire(audience).await
+        {
+            return Ok(token);
+        }
 
-impl FileTokenProvider {
-    /// Construct a file-backed token provider. Path is validated when
-    /// [`TokenProvider::acquire`] is called, not at construction time.
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
-#[async_trait]
-impl TokenProvider for FileTokenProvider {
-    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("FileTokenProvider::acquire — Phase 5c reads + validates the token file")
-    }
-}
-
-/// `--identity-token-stdin` source — reads a newline-terminated OIDC token
-/// from the process's standard input. Phase 1 stub.
-pub struct StdinTokenProvider;
-
-impl StdinTokenProvider {
-    /// Construct a stdin-backed token provider.
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for StdinTokenProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl TokenProvider for StdinTokenProvider {
-    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("StdinTokenProvider::acquire — Phase 5c reads + trims the stdin token")
-    }
-}
-
-/// Environment-variable source — reads `OCX_IDENTITY_TOKEN` directly via
-/// `std::env::var` (the value is intentionally not propagated through
-/// `OcxConfigView`; see the credential exemption in `subsystem-cli.md`).
-///
-/// Phase 1 stub.
-pub struct EnvTokenProvider {
-    /// Env-var key the token is read from (defaults to `OCX_IDENTITY_TOKEN`).
-    pub key: &'static str,
-}
-
-impl EnvTokenProvider {
-    /// Construct an env-backed token provider.
-    pub fn new(key: &'static str) -> Self {
-        Self { key }
-    }
-}
-
-impl Default for EnvTokenProvider {
-    fn default() -> Self {
-        Self::new("OCX_IDENTITY_TOKEN")
-    }
-}
-
-#[async_trait]
-impl TokenProvider for EnvTokenProvider {
-    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("EnvTokenProvider::acquire — Phase 5c reads + validates the env-supplied token")
+        // 3. Browser PKCE — suppressed by --no-tty.
+        if self.no_tty {
+            return Err(SignErrorKind::OidcPreCheckFailed {
+                reason: "no_ambient_no_tty".to_string(),
+            });
+        }
+        super::oidc_browser::BrowserOauthProvider::new().acquire(audience).await
     }
 }

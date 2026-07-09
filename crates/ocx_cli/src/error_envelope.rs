@@ -28,14 +28,6 @@
 //!   }
 //! }
 //! ```
-//!
-//! Phase 1 stub — body of [`render_error_envelope`] uses `unimplemented!()`.
-
-// Stubs are consumed by `main.rs` once error-routing dispatch branches on
-// `--format json`. Silence `dead_code` until every consumer is wired.
-// TODO(Phase 5c): remove this allow once main.rs branches on --format json
-//                 and consumes the envelope stubs.
-#![allow(dead_code)]
 
 use ocx_lib::cli::{ClassifyErrorKind, ExitCode, classify_error};
 use serde::Serialize;

@@ -87,7 +87,7 @@ impl ReferrersApiCapability {
         // directly), but the transport requires a well-formed reference.
         let image = native::Reference::with_tag(registry.to_string(), repo.to_string(), "latest".to_string());
 
-        let supported = match transport.list_referrers(&image, digest).await {
+        let supported = match transport.list_referrers(&image, digest, None).await {
             Ok(_) => ReferrersSupport::Supported,
             Err(ClientError::ReferrersUnsupported { .. }) => ReferrersSupport::Unsupported,
             Err(other) => return Err(other),
@@ -371,6 +371,7 @@ mod tests {
             &self,
             _image: &oci::native::Reference,
             _subject_digest: &Digest,
+            _artifact_type: Option<&str>,
         ) -> Result<Vec<oci::Descriptor>, ClientError> {
             let inner = self.inner.read().unwrap();
             match &inner.response {
@@ -421,6 +422,44 @@ mod tests {
         let transport = ProbeStub::error("internal server error");
         let result = ReferrersApiCapability::probe(&transport, "test.example", "myrepo", &zero_digest()).await;
         assert!(result.is_err(), "non-404 error must propagate");
+    }
+
+    /// A fresh cache entry must short-circuit the probe entirely (#106
+    /// acceptance criterion: "cached capability is used on subsequent
+    /// invocations ... no second probe request").
+    ///
+    /// Mirrors the exact decision both `SignPipeline::ensure_referrers_supported`
+    /// and `VerifyPipeline::list_signature_referrers` make:
+    /// `from_cache().ok().flatten().filter(is_fresh)` then `Some(hit) => hit,
+    /// None => probe(...)`. The transport here errors on any `list_referrers`
+    /// call, so if this short-circuit ever regresses (probe runs despite a
+    /// fresh cache), the `.expect()` below panics instead of the test
+    /// silently passing.
+    #[tokio::test]
+    async fn fresh_cache_short_circuits_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let written = ReferrersApiCapability {
+            registry: "ghcr.io".to_string(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now(),
+            ttl_seconds: TTL_SECS,
+        };
+        written.write_cache(tmp.path()).await.expect("write_cache must succeed");
+
+        let would_error_if_probed = ProbeStub::error("probe must not run when the cache is fresh");
+
+        let cached = ReferrersApiCapability::from_cache("ghcr.io", tmp.path())
+            .await
+            .ok()
+            .flatten()
+            .filter(ReferrersApiCapability::is_fresh);
+        let capability = match cached {
+            Some(hit) => hit,
+            None => ReferrersApiCapability::probe(&would_error_if_probed, "ghcr.io", "myrepo", &zero_digest())
+                .await
+                .expect("probe should not be reached with a fresh cache"),
+        };
+        assert_eq!(capability.supported, ReferrersSupport::Supported);
     }
 
     // ── write_cache + from_cache round-trip ──────────────────────────────────

@@ -13,7 +13,7 @@
 
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
-use crate::oci::sign::endpoint::UrlRejection;
+use crate::oci::endpoint::UrlRejection;
 
 /// Top-level sign error carrying the identifier being signed + the kind.
 ///
@@ -79,8 +79,13 @@ pub enum SignErrorKind {
     /// Registry returned 404 on `/v2/<name>/referrers/`.
     ///
     /// Exit 84 (`ReferrersUnsupported`). Remediation: use a registry with OCI
-    /// 1.1 referrers support.
-    #[error("registry does not support the OCI Referrers API")]
+    /// 1.1 referrers support. The outer `SignError` Display (`"{identifier}:
+    /// {kind}"`) already prefixes this with the registry host, so the message
+    /// itself does not repeat it.
+    #[error(
+        "registry does not support the OCI Referrers API (requires OCI Distribution 1.1+); \
+         supply-chain commands are unavailable for this registry"
+    )]
     ReferrersUnsupported,
 
     /// OIDC pre-check (expiry, audience) failed client-side — token never sent to Fulcio.
@@ -132,7 +137,7 @@ pub enum SignErrorKind {
     InvalidEndpointUrl {
         /// Flag name the URL was supplied via (e.g. `--fulcio-url`).
         endpoint: String,
-        /// Structured rejection reason from [`crate::oci::sign::endpoint::validate_sigstore_url`].
+        /// Structured rejection reason from [`crate::oci::endpoint::validate_sigstore_url`].
         #[source]
         reason: UrlRejection,
     },
@@ -354,7 +359,7 @@ mod tests {
         // scripts dispatch on them. A rename or typo here is a user-visible breaking
         // change. The exhaustive match in `kind_detail()` ensures a new variant forces
         // a new arm there; this table ensures the *string value* for each arm is pinned.
-        use crate::oci::sign::endpoint::UrlRejection;
+        use crate::oci::endpoint::UrlRejection;
         use SignErrorKind::*;
 
         // Construct one representative instance per variant.

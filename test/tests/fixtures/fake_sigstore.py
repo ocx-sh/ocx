@@ -112,17 +112,15 @@ class FakeFulcio:
 
     url: str
     root_pem: Path
-    invalid_chain: bool = False
+    control: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def set_invalid_chain(self, value: bool) -> None:
-        """Toggle the fake Fulcio into "issue a malformed cert chain" mode.
+        """Toggle the fake Fulcio into "issue a non-chaining leaf" mode.
 
-        Phase 5c wires the handler to honour this flag and emit a chain that
-        fails cert-chain validation; pre-5c the flag is recorded but the
-        handler still issues a valid chain. Tests that depend on this
-        toggle are gated behind ``xfail(strict=True)``.
+        The handler mints the leaf with a throwaway CA while still advertising
+        the real root, so verify fails with ``CertChainInvalid`` (exit 65).
         """
-        self.invalid_chain = value
+        self.control["fulcio_invalid_chain"] = value
 
 
 @dataclasses.dataclass
@@ -141,26 +139,25 @@ class FakeRekor:
 
     url: str
     public_key_pem: Path
-    tampered_set: bool = False
-    failure_mode: object | None = None
+    control: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def set_tampered_set(self, value: bool) -> None:
-        """Toggle the fake Rekor into "return a tampered SET" mode.
+        """Toggle the fake Rekor into "sign a non-reconstructible SET" mode.
 
-        Phase 5c wires the handler to flip one bit in the SET payload before
-        signing, so the verify pipeline's SET check fails. Pre-5c the flag
-        is recorded only; tests gated behind ``xfail(strict=True)``.
+        The handler signs a payload the verifier cannot reconstruct, so the SET
+        check fails with ``RekorSetInvalid`` (exit 65). Toggle BEFORE signing so
+        the produced bundle carries the bad SET.
         """
-        self.tampered_set = value
+        self.control["rekor_tampered_set"] = value
 
     def set_failure_mode(self, mode: object | None) -> None:
         """Configure the fake Rekor's failure mode (e.g. ``HttpStatus(503)``).
 
-        ``None`` clears the failure mode. Phase 5c wires the handler to honour
-        the mode; pre-5c only the value is stored. Tests gated behind
-        ``xfail(strict=True)``.
+        ``None`` clears it. When set, every Rekor request (including the
+        verify-time ``GET /api/v1/log/publicKey``) returns that status, so
+        verify surfaces ``RekorUnavailable`` (exit 83).
         """
-        self.failure_mode = mode
+        self.control["rekor_failure_mode"] = mode
 
 
 class HttpStatus:
@@ -472,9 +469,16 @@ def _make_oidc_handler(key_material: _OidcKeyMaterial, server_url: str) -> type:
 
 
 def _make_fulcio_handler(
-    oidc_key: _OidcKeyMaterial, ca: _FulcioCaMaterial
+    oidc_key: _OidcKeyMaterial, ca: _FulcioCaMaterial, control: dict[str, Any]
 ) -> type:
-    """Return a Fulcio handler class."""
+    """Return a Fulcio handler class.
+
+    ``control["fulcio_invalid_chain"]`` (bool) makes Fulcio mint the leaf with a
+    throwaway CA while still advertising the real root, so the leaf does not
+    chain to the trust root and verify fails with ``CertChainInvalid`` (exit 65).
+    """
+    # Throwaway CA used only for the invalid-chain injection.
+    bad_ca = _FulcioCaMaterial()
 
     class FulcioHandler(_SilentHandler):
         def do_POST(self) -> None:  # noqa: N802
@@ -515,7 +519,9 @@ def _make_fulcio_handler(
                 return
 
             try:
-                pub_key_pem = base64.b64decode(pub_key_content + "==")
+                # OCX sends standard (padded) base64 of the ephemeral public
+                # key PEM; decode it directly.
+                pub_key_pem = base64.b64decode(pub_key_content)
                 from cryptography.hazmat.primitives.serialization import load_pem_public_key
                 subject_pub_key = load_pem_public_key(pub_key_pem)
                 if not isinstance(subject_pub_key, EllipticCurvePublicKey):
@@ -526,7 +532,11 @@ def _make_fulcio_handler(
                 return
 
             oidc_issuer = claims.get("iss", FAKE_ISSUER_URL)
-            leaf_pem = ca.mint_leaf_cert(subject_email, subject_pub_key, oidc_issuer)
+            # Invalid-chain injection: mint with the throwaway CA but advertise
+            # the real root so the leaf fails chain validation against the
+            # trust root.
+            minting_ca = bad_ca if control.get("fulcio_invalid_chain") else ca
+            leaf_pem = minting_ca.mint_leaf_cert(subject_email, subject_pub_key, oidc_issuer)
             root_pem = ca.root_pem()
 
             # Fulcio v2 response shape: signedCertificateEmbeddedSct.chain.certificates
@@ -561,13 +571,28 @@ def _make_fulcio_handler(
 # ---------------------------------------------------------------------------
 
 
-def _make_rekor_handler(rekor_key: _RekorKeyMaterial) -> type:
-    """Return a Rekor handler class."""
+def _make_rekor_handler(rekor_key: _RekorKeyMaterial, control: dict[str, Any]) -> type:
+    """Return a Rekor handler class.
+
+    ``control`` is shared mutable state the test toggles via the ``FakeRekor``
+    handle: ``rekor_failure_mode`` (an ``HttpStatus`` sentinel or ``None``) and
+    ``rekor_tampered_set`` (bool).
+    """
     _log_index_counter = [0]
     _lock = threading.Lock()
 
     class RekorHandler(_SilentHandler):
+        def _maybe_fail(self) -> bool:
+            """Honor an injected failure mode; returns True if it responded."""
+            mode = control.get("rekor_failure_mode")
+            if isinstance(mode, HttpStatus):
+                self._respond(mode.status, b"injected rekor failure")
+                return True
+            return False
+
         def do_GET(self) -> None:  # noqa: N802
+            if self._maybe_fail():
+                return
             if self.path in ("/api/v1/log/publicKey", "/api/v1/log/publicKey/"):
                 pub_pem = rekor_key.public_pem()
                 self._respond(200, pub_pem, content_type="application/x-pem-file")
@@ -575,6 +600,8 @@ def _make_rekor_handler(rekor_key: _RekorKeyMaterial) -> type:
                 self._respond(404, b"not found")
 
         def do_POST(self) -> None:  # noqa: N802
+            if self._maybe_fail():
+                return
             if self.path not in ("/api/v1/log/entries", "/api/v1/log/entries/"):
                 self._respond(404, b"not found")
                 return
@@ -601,30 +628,26 @@ def _make_rekor_handler(rekor_key: _RekorKeyMaterial) -> type:
             entry_uuid = uuid.uuid4().hex
             integrated_time = int(time.time())
 
-            # TODO(phase-5c-verify): this SET payload is simplified for slice-1 scaffolding.
-            # Rekor v1 signs a canonicalized JSON payload describing the log entry (not a
-            # protobuf — sigstore_rekor.proto describes the entry schema, not the signing
-            # payload). Phase 5c must either (a) align this payload with the real Rekor v1
-            # signing format, or (b) route the Rust verify pipeline through a fake-aware
-            # SET verifier shim.
+            # OCX-specific SET signing payload. The OCX verify pipeline
+            # reconstructs these exact bytes (see `set_signing_payload` in
+            # crates/ocx_lib/src/oci/sign/rekor.rs) and Ed25519-verifies the SET
+            # against this log's published public key. Deliberately NOT the
+            # public-good Rekor v1 SET wire format (real-network verification is
+            # out of #194 scope, a network-gated `#[ignore]` path); this format
+            # is byte-reproducible across Python and Rust without JSON
+            # canonicalization ambiguity, and binds the entry body to its
+            # inclusion metadata so single-bit tampering breaks verification.
             #
-            # SOTA NOTE (2026-04-21): Rekor v2 went GA on 2025-10-10, dropping SET entirely
-            # in favour of RFC 3161 Timestamp Authority responses. The VerifyErrorKind
-            # `RekorSetAbsentTsaPresent` safety valve already accommodates that transition.
-            # Phase 5c must handle both v1 (SET) and v2 (TSA) verification paths.
-            # Refs: https://blog.sigstore.dev/rekor-v2-ga/
-            #       https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_rekor.proto
-            #
-            # Build a stable deterministic payload so the verify path can reproduce it.
-            canonical = json.dumps(
-                {
-                    "body": base64.b64encode(body_raw).decode(),
-                    "integratedTime": integrated_time,
-                    "logID": rekor_key.log_id,
-                    "logIndex": log_index,
-                },
-                sort_keys=True,
+            # Field order MUST match the Rust reconstruction exactly:
+            #   ocx-rekor-set-v1\n<logIndex>\n<integratedTime>\n<logID>\n<base64(body)>
+            body_b64 = base64.b64encode(body_raw).decode()
+            canonical = (
+                f"ocx-rekor-set-v1\n{log_index}\n{integrated_time}\n{rekor_key.log_id}\n{body_b64}"
             ).encode()
+            if control.get("rekor_tampered_set"):
+                # Sign a payload the verifier will not reconstruct → SET fails
+                # to verify → RekorSetInvalid (exit 65).
+                canonical = b"tampered-" + canonical
 
             set_bytes = rekor_key.sign(canonical)
             set_b64 = base64.b64encode(set_bytes).decode()
@@ -679,6 +702,13 @@ class FakeSigstoreStack:
         self._oidc_key = _OidcKeyMaterial()
         self._ca = _FulcioCaMaterial()
         self._rekor_key = _RekorKeyMaterial()
+        # Shared mutable injection state read by the Fulcio + Rekor handlers and
+        # mutated by the FakeFulcio / FakeRekor handles' setters.
+        self._control: dict[str, Any] = {
+            "fulcio_invalid_chain": False,
+            "rekor_tampered_set": False,
+            "rekor_failure_mode": None,
+        }
 
         # Start OIDC server first so we can include its URL in the discovery doc.
         oidc_port = _find_free_port()
@@ -690,14 +720,14 @@ class FakeSigstoreStack:
         # Fulcio server
         fulcio_port = _find_free_port()
         self._fulcio_url = f"http://127.0.0.1:{fulcio_port}"
-        fulcio_handler = _make_fulcio_handler(self._oidc_key, self._ca)
+        fulcio_handler = _make_fulcio_handler(self._oidc_key, self._ca, self._control)
         self._fulcio_server = HTTPServer(("127.0.0.1", fulcio_port), fulcio_handler)
         self._start_thread(self._fulcio_server)
 
         # Rekor server
         rekor_port = _find_free_port()
         self._rekor_url = f"http://127.0.0.1:{rekor_port}"
-        rekor_handler = _make_rekor_handler(self._rekor_key)
+        rekor_handler = _make_rekor_handler(self._rekor_key, self._control)
         self._rekor_server = HTTPServer(("127.0.0.1", rekor_port), rekor_handler)
         self._start_thread(self._rekor_server)
 
@@ -791,6 +821,7 @@ def fake_fulcio(tmp_path: Path, fake_sigstore_stack: "FakeSigstoreStack") -> Fak
     return FakeFulcio(
         url=fake_sigstore_stack.fulcio_url,
         root_pem=fake_sigstore_stack.trust_root_pem_path(),
+        control=fake_sigstore_stack._control,
     )
 
 
@@ -804,6 +835,7 @@ def fake_rekor(tmp_path: Path, fake_sigstore_stack: "FakeSigstoreStack") -> Fake
     return FakeRekor(
         url=fake_sigstore_stack.rekor_url,
         public_key_pem=fake_sigstore_stack.rekor_public_key_pem_path(),
+        control=fake_sigstore_stack._control,
     )
 
 

@@ -93,6 +93,15 @@ allocative.workspace = true
 # ELF PT_INTERP parsing — libc-family host detection (os.features).
 elf.workspace = true
 
+# Keyless Sigstore signing (issue #194) — see workspace Cargo.toml for the
+# feature/version rationale.
+sigstore.workspace = true
+sigstore_protobuf_specs.workspace = true
+p256.workspace = true
+x509-cert.workspace = true
+ed25519-dalek.workspace = true
+reqwest.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 

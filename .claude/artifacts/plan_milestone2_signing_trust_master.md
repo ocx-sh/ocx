@@ -4,8 +4,8 @@
 
 - **Plan:** plan_milestone2_signing_trust
 - **Active phase:** B — Per-issue loop
-- **Step:** /swarm-x → Phase B, cursor at #195
-- **Last update:** 2026-07-09 (after setup: swarm-loop + swarm-x skills, long-living branch)
+- **Step:** /swarm-x → Phase B, cursor at #98 (#195 + #194 + #106 merged into base)
+- **Last update:** 2026-07-09 (after 1317e48d: actionable ReferrersUnsupported message + capability-cache reuse test, #106)
 
 ## Goal
 
@@ -47,8 +47,8 @@ No A→B milestone edges. Cross-repo: ocx-mirror#7 depends on #194 (out of scope
 | # | Issue | Branch | Tier | Gate / notes |
 |---|-------|--------|------|--------------|
 | 1 | #195 | `wip/195-referrers-registry` | high | zot harness (registry:2/registry:3 confirmed NOT to serve the Referrers API); keep one registry:2 as permanent ReferrersUnsupported negative fixture; ocx.sh referrers support confirmed. Acceptance infra only — no product code path yet. |
-| 2 | #194 | `wip/194-sigstore-pipeline` | max | **critical path.** Step 0 spike (sigstore-rs bundle write, TUF TrustedRoot fetch, Rekor v1, offline root override, `--trust-root` seam). Fill ~10 stub modules; NativeTransport referrers HTTP incl. `?artifactType=`; wire capability cache; flip `#[ignore]` + un-skip acceptance specs; `--format json` verify contract (global flag). Target Rekor v1 + TUF root; v2 = #107. |
-| 3 | #106 | `wip/106-capability-wiring` | high | Wire capability cache into pipelines (`no_cache` seam exists); clean actionable error, no tag fallback; acceptance vs stubbed 404 + registry:2 fixture. Delete fictional `_catalog`/capabilities.toml/24h TTL from issue body. |
+| 2 | #194 | `wip/194-sigstore-pipeline` | max | **critical path — done.** Hand-rolled Fulcio/Rekor HTTP (reqwest), not sigstore-rs's `SigningSession` (mandates an SCT; different wire shape than the offline fake). Trust root = supplied Fulcio CA PEM via `--trust-root`/`OCX_SIGSTORE_TRUST_ROOT`, not a TUF fetch — embedded TUF root stays stubbed (exit 78 `TrustRootUnavailable`); Rekor pubkey fetched online, not pinned. Referrers capability cache wired into both pipelines (`from_cache→probe→write_cache`, `--no-cache` seam) — narrows #106 to error text + a dedicated acceptance test. `#[ignore]` flipped, acceptance specs un-skipped (26 passed); `--format json` verify contract shipped as a flat report, not the ADR's `signatures[]` shape (test pinned the flat shape — test won). Rekor v1 + SET only; v2 delta = #107. Full deviation log: `plan_issue194_sigstore_pipeline.md`. |
+| 3 | #106 | `wip/106-capability-wiring` | high | **Done.** Capability-cache wiring into both pipelines landed with #194 (`ensure_referrers_supported` / `list_signature_referrers`); finalized user-facing error text (registry host + remediation clause) and `test_referrers_capability.py` acceptance test proving a second invocation within the 6h TTL does not re-probe; no tag fallback confirmed (S1-F). |
 | 4 | #98 | `wip/98-trust-policy` | max | `[trust.policy]` in ocx.toml: `identity` (exact) + `identity_regexp` (mutually exclusive); most-specific scope wins, ANY-of among equal; tier array-merge; `--certificate-identity/-oidc-issuer` optional when policy matches. Docs: configuration.md, user-guide, exit codes. |
 | 5 | #196 | `wip/196-offline-verify` | high | OCX_OFFLINE + policy-matched install: fail vs skip-with-warn (never silent skip); trust-root cache in `state/`, TTL/refresh, `OCX_SIGSTORE_TUF_ROOT` override; resolve verify-online-only vs install-offline-first. Gates #99. |
 | 6 | #99 | `wip/99-auto-verify` | max | Verify after resolve, before download (metadata-first seam); offline semantics from #196; flag>env precedence, WARN once/invocation; OCX_NO_VERIFY into environment.md + `Env::apply_ocx_config`. |

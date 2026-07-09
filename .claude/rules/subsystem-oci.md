@@ -41,13 +41,13 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/sign/oidc_ambient.rs` | Ambient CI token detection (dispatches to inline fallback) |
 | `oci/sign/oidc_ambient_inline.rs` | Per-platform inline ambient OIDC fetchers (GHA, GCP, etc.) |
 | `oci/sign/oidc_browser.rs` | Interactive browser OAuth PKCE flow (suppressed with `--no-tty`) |
-| `oci/sign/pipeline.rs` | `SignPipeline` orchestrator (Phase 5c stub — pending sigstore-rs integration) |
+| `oci/sign/pipeline.rs` | `SignPipeline` orchestrator — resolve target, capability-check referrers, acquire OIDC token, delegate signing to a `Signer`, push bundle + referrer manifest. Wired end-to-end (#194); hand-rolled Fulcio/Rekor HTTP against the fake stack's wire shapes — see signing.md "Current Limitations" for production-hardening gaps |
 | `oci/sign/rekor.rs` | Rekor transparency-log client — log entry POST + SET extraction |
 | `oci/sign/signer.rs` | `KeylessSigner` — ephemeral ECDSA P-256 keypair generation |
 | `oci/verify.rs` | Root module; re-exports verification public types |
 | `oci/verify/error.rs` | `VerifyError` + `VerifyErrorKind` — three-layer error with exit-code classification |
 | `oci/verify/identity.rs` | Certificate identity + OIDC issuer exact-match policy |
-| `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator (Phase 5c stub — pending sigstore-rs integration) |
+| `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator — resolve target, list signature referrers (capability cache), parse bundle, verify cert chain + Rekor SET + signature + identity/issuer. Wired end-to-end (#194); embedded TUF trust root still stubbed (`--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` required) — see signing.md "Current Limitations" |
 | `oci/verify/trust_root.rs` | TUF trust root loading (embedded asset + network refresh) |
 
 ## Key Types

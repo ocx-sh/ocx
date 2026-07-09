@@ -2671,6 +2671,7 @@ mod tests {
             &self,
             _image: &oci::native::Reference,
             _subject_digest: &oci::Digest,
+            _artifact_type: Option<&str>,
         ) -> super::transport::Result<Vec<oci::Descriptor>> {
             unimplemented!("not needed for the streaming-interruption test")
         }

@@ -3,17 +3,58 @@
 
 //! Certificate identity + issuer matchers.
 //!
-//! Implements exact-match for `--certificate-identity` (SAN) and
-//! `--certificate-oidc-issuer` (Fulcio OIDC issuer OID extension). Parses
-//! the Fulcio-standard X.509 extension OIDs.
-//!
-//! Phase 1 stub — bodies use `unimplemented!()`.
+//! Exact-match (byte-equal, no normalization) for `--certificate-identity`
+//! against the leaf certificate's SubjectAltName and `--certificate-oidc-issuer`
+//! against the Fulcio OIDC-issuer OID extension (`1.3.6.1.4.1.57264.1.1`).
+
+use x509_cert::Certificate;
+use x509_cert::der::{Decode, oid::ObjectIdentifier};
+use x509_cert::ext::pkix::SubjectAltName;
+use x509_cert::ext::pkix::name::GeneralName;
 
 use super::error::VerifyErrorKind;
 
-/// Certificate SAN matcher.
+/// Fulcio OIDC-issuer extension OID (`1.3.6.1.4.1.57264.1.1`).
+const FULCIO_ISSUER_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.1");
+/// SubjectAltName extension OID (`2.5.29.17`).
+const SUBJECT_ALT_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
+
+/// Parse a DER leaf certificate, mapping failures to `CertChainInvalid`.
+pub(crate) fn parse_certificate(cert_der: &[u8]) -> Result<Certificate, VerifyErrorKind> {
+    Certificate::from_der(cert_der).map_err(|_| VerifyErrorKind::CertChainInvalid)
+}
+
+/// Extract the certificate's signing identity from its SubjectAltName.
+///
+/// Returns the first RFC822 (email) or URI general name — the two forms Fulcio
+/// issues for human and workload identities. `None` when no SAN is present.
+pub(crate) fn subject_identity(cert: &Certificate) -> Option<String> {
+    let extensions = cert.tbs_certificate.extensions.as_deref()?;
+    let ext = extensions.iter().find(|e| e.extn_id == SUBJECT_ALT_NAME_OID)?;
+    let san = SubjectAltName::from_der(ext.extn_value.as_bytes()).ok()?;
+    san.0.iter().find_map(|name| match name {
+        GeneralName::Rfc822Name(email) => Some(email.as_str().to_owned()),
+        GeneralName::UniformResourceIdentifier(uri) => Some(uri.as_str().to_owned()),
+        _ => None,
+    })
+}
+
+/// Extract the OIDC issuer URL from the Fulcio issuer OID extension.
+///
+/// The extension value is a DER `UTF8String` carrying the issuer URL. `None`
+/// when the extension is absent or malformed.
+pub(crate) fn oidc_issuer(cert: &Certificate) -> Option<String> {
+    let extensions = cert.tbs_certificate.extensions.as_deref()?;
+    let ext = extensions.iter().find(|e| e.extn_id == FULCIO_ISSUER_OID)?;
+    let raw = ext.extn_value.as_bytes();
+    // Fulcio encodes v1 of this extension as a bare DER UTF8String.
+    x509_cert::der::asn1::Utf8StringRef::from_der(raw)
+        .ok()
+        .map(|s| s.as_str().to_owned())
+}
+
+/// Certificate SAN matcher (exact, byte-equal).
 pub struct IdentityMatcher {
-    #[allow(dead_code)]
     expected: String,
 }
 
@@ -23,17 +64,21 @@ impl IdentityMatcher {
         Self { expected }
     }
 
-    /// Verify that the certificate's SAN equals the expected identity.
+    /// Verify the certificate's SAN equals the expected identity byte-for-byte.
     ///
-    /// Returns [`VerifyErrorKind::IdentityMismatch`] on mismatch.
-    pub fn verify(&self, _cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
-        unimplemented!("IdentityMatcher::verify — Phase 5 parses SAN from cert extensions")
+    /// Returns [`VerifyErrorKind::IdentityMismatch`] on mismatch or when the
+    /// certificate carries no usable SAN.
+    pub fn verify(&self, cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
+        let cert = parse_certificate(cert_der)?;
+        match subject_identity(&cert) {
+            Some(san) if san == self.expected => Ok(()),
+            _ => Err(VerifyErrorKind::IdentityMismatch),
+        }
     }
 }
 
-/// Certificate issuer matcher (Fulcio OIDC-issuer OID extension).
+/// Certificate issuer matcher (Fulcio OIDC-issuer OID extension, exact).
 pub struct IssuerMatcher {
-    #[allow(dead_code)]
     expected: String,
 }
 
@@ -43,141 +88,54 @@ impl IssuerMatcher {
         Self { expected }
     }
 
-    /// Verify that the certificate's issuer extension equals the expected URL.
+    /// Verify the certificate's issuer extension equals the expected URL.
     ///
-    /// Returns [`VerifyErrorKind::IssuerMismatch`] on mismatch.
-    pub fn verify(&self, _cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
-        unimplemented!("IssuerMatcher::verify — Phase 5 parses OIDC issuer OID extension")
+    /// Returns [`VerifyErrorKind::IssuerMismatch`] on mismatch or when the
+    /// extension is absent.
+    pub fn verify(&self, cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
+        let cert = parse_certificate(cert_der)?;
+        match oidc_issuer(&cert) {
+            Some(issuer) if issuer == self.expected => Ok(()),
+            _ => Err(VerifyErrorKind::IssuerMismatch),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::panic;
-
+    //! Unit smoke tests: garbage input must be rejected (never panic, never a
+    //! false positive). The positive-path SAN/issuer extraction + exact-match
+    //! semantics (byte-equal, trailing-slash, mixed-case) are validated
+    //! end-to-end against real Fulcio-minted certs by the acceptance suite
+    //! (`test/tests/test_verify.py`: identity/issuer mismatch → exit 77).
     use super::*;
 
-    // ── Stub-panic guards ────────────────────────────────────────────────────
-    //
-    // Both matchers below are synchronous, so `catch_unwind` is sufficient —
-    // no Tokio runtime needed. The stubs never inspect `_cert_der`, so an empty
-    // slice is a valid input for panic-detection purposes.
-
-    /// Assert that [`IdentityMatcher::verify`] still panics with the Phase-5
-    /// stub message.
-    ///
-    /// Mirrors `verify_pipeline_stub_is_unimplemented` in `pipeline.rs`.
-    /// Protects against the stub being silently swapped for a no-op `Ok(())`
-    /// before Phase 5c lands: if that happened, the three `#[ignore]`d xfail
-    /// tests below would pass vacuously when `#[ignore]` is removed, pinning
-    /// no contract whatsoever.  This guard forces the implementor to update
-    /// both this test AND the xfail tests in a single pass.
     #[test]
-    fn identity_matcher_verify_is_unimplemented() {
-        let result = panic::catch_unwind(|| {
-            let matcher = IdentityMatcher::new("test@example.com".to_string());
-            let _ = matcher.verify(&[]);
-        });
-        let panic_payload = match result {
-            Err(payload) => payload,
-            Ok(_) => panic!("IdentityMatcher::verify must panic (Phase 5c stub) — returned Ok instead"),
-        };
-        let msg = panic_payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-            .unwrap_or("<non-string panic>");
-        assert!(
-            msg.contains("Phase 5"),
-            "expected Phase-5 stub panic message, got: {msg}"
-        );
+    fn parse_rejects_non_certificate_bytes() {
+        assert!(matches!(
+            parse_certificate(b"not a cert"),
+            Err(VerifyErrorKind::CertChainInvalid)
+        ));
+        assert!(matches!(parse_certificate(&[]), Err(VerifyErrorKind::CertChainInvalid)));
     }
 
-    /// Assert that [`IssuerMatcher::verify`] still panics with the Phase-5
-    /// stub message.
-    ///
-    /// `IssuerMatcher` is a separate type from `IdentityMatcher` (SAN vs OIDC
-    /// issuer OID extension) so it needs its own guard — the two stubs are
-    /// independent and one could be implemented without the other.
     #[test]
-    fn issuer_matcher_verify_is_unimplemented() {
-        let result = panic::catch_unwind(|| {
-            let matcher = IssuerMatcher::new("https://accounts.google.com".to_string());
-            let _ = matcher.verify(&[]);
-        });
-        let panic_payload = match result {
-            Err(payload) => payload,
-            Ok(_) => panic!("IssuerMatcher::verify must panic (Phase 5c stub) — returned Ok instead"),
-        };
-        let msg = panic_payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-            .unwrap_or("<non-string panic>");
-        assert!(
-            msg.contains("Phase 5"),
-            "expected Phase-5 stub panic message, got: {msg}"
-        );
+    fn identity_matcher_rejects_garbage_cert() {
+        let matcher = IdentityMatcher::new("test@example.com".to_string());
+        // A non-parseable cert must fail closed, never match.
+        assert!(matcher.verify(b"garbage").is_err());
     }
 
-    // ── xfail contract anchors (Phase 5c) ───────────────────────────────────
-    //
-    // The bodies below are commented implementation sketches. When Phase 5c
-    // removes `#[ignore]`, the empty/sketch body will fail to compile (or
-    // trivially pass), signalling the implementor to write the actual contract
-    // assertion before flipping `#[ignore]` active.
-
-    /// Exact byte-equal identity strings match (Phase 5c identity contract anchor).
-    ///
-    /// `IdentityMatcher::verify` MUST accept a cert whose SAN equals the expected
-    /// string byte-for-byte. This is the positive-path contract: same bytes => Ok.
     #[test]
-    #[ignore = "phase 5c — IdentityMatcher::verify is unimplemented; flip active when identity parsing lands"]
-    fn identity_byte_equal_match() {
-        // Phase 5c implementation sketch:
-        //
-        //   let identity = "test@example.com";
-        //   let cert_der = build_test_cert_with_san(identity); // helper in test utils
-        //   let matcher = IdentityMatcher::new(identity.to_string());
-        //   assert!(matcher.verify(&cert_der).is_ok(), "byte-equal SAN must match");
+    fn issuer_matcher_rejects_garbage_cert() {
+        let matcher = IssuerMatcher::new("https://issuer.example".to_string());
+        assert!(matcher.verify(b"garbage").is_err());
     }
 
-    /// Trailing-slash variant of a SAN MUST NOT match the untrailed form.
-    ///
-    /// `https://accounts.google.com/` vs `https://accounts.google.com` are
-    /// distinct strings. Phase 5c must perform byte-equal comparison only —
-    /// no URL normalization, no path trimming. Mismatch => `IssuerMismatch`.
     #[test]
-    #[ignore = "phase 5c — IdentityMatcher::verify is unimplemented; flip active when identity parsing lands"]
-    fn identity_trailing_slash_rejected() {
-        // Phase 5c implementation sketch:
-        //
-        //   let san_in_cert = "https://accounts.google.com/";
-        //   let expected = "https://accounts.google.com";
-        //   let cert_der = build_test_cert_with_san(san_in_cert);
-        //   let matcher = IdentityMatcher::new(expected.to_string());
-        //   assert!(
-        //       matches!(matcher.verify(&cert_der), Err(VerifyErrorKind::IdentityMismatch)),
-        //       "trailing-slash SAN must not match untrailed expected string"
-        //   );
-    }
-
-    /// Mixed-case domain in SAN MUST NOT match the canonical lowercase form.
-    ///
-    /// `Github.com` vs `github.com` differ; Phase 5c performs no Unicode or
-    /// case canonicalization at v1. Byte-equal only. Mismatch => `IdentityMismatch`.
-    #[test]
-    #[ignore = "phase 5c — IdentityMatcher::verify is unimplemented; flip active when identity parsing lands"]
-    fn identity_mixed_case_domain_rejected() {
-        // Phase 5c implementation sketch:
-        //
-        //   let san_in_cert = "https://Github.com/actions/runner";
-        //   let expected = "https://github.com/actions/runner";
-        //   let cert_der = build_test_cert_with_san(san_in_cert);
-        //   let matcher = IdentityMatcher::new(expected.to_string());
-        //   assert!(
-        //       matches!(matcher.verify(&cert_der), Err(VerifyErrorKind::IdentityMismatch)),
-        //       "mixed-case domain in SAN must not match lowercase expected string"
-        //   );
+    fn fulcio_oid_parses() {
+        // Guard the hard-coded OIDs against a typo — construction must not panic.
+        assert_eq!(FULCIO_ISSUER_OID.to_string(), "1.3.6.1.4.1.57264.1.1");
+        assert_eq!(SUBJECT_ALT_NAME_OID.to_string(), "2.5.29.17");
     }
 }

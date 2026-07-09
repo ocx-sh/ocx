@@ -5,14 +5,9 @@
 Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md`` +
 ``.claude/state/plans/plan_slice1_sign_and_verify.md``.
 
-All tests that exercise real crypto (`sign_then_verify_happy_path`, token
-precedence paths) depend on ``fake_fulcio`` / ``fake_rekor`` / ``fake_oidc_token``
-fixtures, which ``pytest.xfail()`` until Phase 5 ships the real fake services.
-The xfail markers are ``strict=True`` so they flip to pass automatically when
-the fixtures come online.
-
-Tests that don't need crypto (flag parsing, offline policy rejection) run today
-and pin the CLI surface.
+All tests run against the real Rust sign pipeline. Crypto-dependent tests use
+the ``fake_fulcio`` / ``fake_rekor`` / ``fake_oidc_token`` fixtures (fake
+Fulcio/Rekor + OIDC issuer, per ADR D9).
 """
 from __future__ import annotations
 
@@ -31,10 +26,6 @@ from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run not yet implemented; Rust binary exits non-zero",
-)
 def test_sign_then_verify_happy_path(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -44,14 +35,16 @@ def test_sign_then_verify_happy_path(
 ) -> None:
     """`sign` produces a referrer; `verify` accepts it — round-trip contract.
 
-    This is the canonical happy path per ADR §"Target architecture". The fake
-    Sigstore services (Phase 5b) are live; this xfails until Phase 5c wires
-    the Rust SignPipeline and VerifyPipeline implementations.
+    This is the canonical happy path per ADR §"Target architecture", exercised
+    against the fake Sigstore stack: sign injects the OIDC token via
+    ``OCX_IDENTITY_TOKEN`` and points at the fake Fulcio/Rekor; verify injects
+    the fake Fulcio CA as the trust root via ``OCX_SIGSTORE_TRUST_ROOT``.
     """
     pkg = published_package
     env = {
         **ocx.env,
         "OCX_IDENTITY_TOKEN": fake_oidc_token,
+        "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem),
     }
     sign_result = subprocess.run(
         [
@@ -177,10 +170,6 @@ def test_sign_identity_token_file_and_stdin_are_mutually_exclusive(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run not yet implemented",
-)
 def test_sign_reads_env_token(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -192,7 +181,6 @@ def test_sign_reads_env_token(
 
     Precedence (lowest to highest): ambient provider → env → stdin → file.
     env overrides ambient; this test confirms env is consumed when present.
-    Xfails until Phase 5c wires the Rust sign pipeline.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -215,10 +203,6 @@ def test_sign_reads_env_token(
     assert envelope["data"]["bundle_digest"].startswith("sha256:")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run not yet implemented",
-)
 def test_sign_reads_stdin_token(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -226,10 +210,7 @@ def test_sign_reads_stdin_token(
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
 ) -> None:
-    """``--identity-token-stdin`` reads the token from stdin without shell exposure.
-
-    Xfails until Phase 5c wires the Rust sign pipeline.
-    """
+    """``--identity-token-stdin`` reads the token from stdin without shell exposure."""
     pkg = published_package
     result = subprocess.run(
         [
@@ -293,10 +274,6 @@ def test_sign_offline_refused(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c pipeline not yet implemented",
-)
 def test_sign_token_file_only(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -308,7 +285,6 @@ def test_sign_token_file_only(
     """C-S1-4 basic happy path: ``--identity-token-file`` only, no stdin, no env.
 
     The token file must be read, trimmed, and passed to the sign pipeline.
-    Xfails until Phase 5c wires the Rust SignPipeline.
     """
     from tests.fixtures.fake_sigstore import FakeSigstoreStack
 
@@ -341,10 +317,6 @@ def test_sign_token_file_only(
     assert envelope["data"]["bundle_digest"].startswith("sha256:")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c pipeline not yet implemented",
-)
 def test_sign_token_stdin_overrides_env(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -361,8 +333,6 @@ def test_sign_token_stdin_overrides_env(
     come from the same fake issuer, either is accepted by fake Fulcio; the
     precedence is verified structurally by the CLI taking the stdin path rather
     than the env path.
-
-    Xfails until Phase 5c wires the Rust SignPipeline.
     """
     from tests.fixtures.fake_sigstore import FakeSigstoreStack
 
@@ -394,10 +364,6 @@ def test_sign_token_stdin_overrides_env(
     assert envelope["data"]["bundle_digest"].startswith("sha256:")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c pipeline not yet implemented",
-)
 def test_sign_token_file_overrides_stdin_and_env(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -414,8 +380,6 @@ def test_sign_token_file_overrides_stdin_and_env(
     CLI enforces ``--identity-token-file`` XOR ``--identity-token-stdin`` at
     the clap level, this test verifies the file path by setting only
     ``--identity-token-file`` alongside ``OCX_IDENTITY_TOKEN``.
-
-    Xfails until Phase 5c wires the Rust SignPipeline.
     """
     from tests.fixtures.fake_sigstore import FakeSigstoreStack
 
@@ -503,26 +467,27 @@ def test_sign_rejects_world_readable_identity_token_file(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: probe of referrers endpoint returns 404 against registry:2 "
-    "(no referrers API support); sign must exit 84 (ReferrersUnsupported)",
-)
 def test_sign_referrers_unsupported_exits_84(
     ocx: OcxRunner,
-    published_package: PackageInfo,
+    legacy_registry: str,
+    unique_repo: str,
+    tmp_path,
     fake_fulcio: FakeFulcio,
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
 ) -> None:
     """Registry without referrers API → exit 84.
 
-    The test registry (``registry:2``) does not implement ``/v2/<name>/referrers/``.
-    Phase 5's capability probe must detect the 404 and exit 84 before any
-    signing work; sign cannot land without a referrers index.
+    ``legacy_registry`` (``registry:2``, #106/#195 negative fixture) does not
+    implement ``/v2/<name>/referrers/``. The capability probe must detect the
+    404 and exit 84 before any signing work; sign cannot land without a
+    referrers index.
     """
-    pkg = published_package
-    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    from src.helpers import make_package
+
+    legacy_ocx = OcxRunner(ocx.binary, ocx.ocx_home, legacy_registry)
+    pkg = make_package(legacy_ocx, unique_repo, "1.0.0", tmp_path)
+    env = {**legacy_ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     result = subprocess.run(
         [
             str(ocx.binary),
@@ -547,10 +512,6 @@ def test_sign_referrers_unsupported_exits_84(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: sign pipeline must complete and spawn a child to observe forwarded env",
-)
 def test_sign_does_not_forward_identity_token_to_children(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -559,22 +520,19 @@ def test_sign_does_not_forward_identity_token_to_children(
     fake_oidc_token: str,
     tmp_path,
 ) -> None:
-    """``OCX_IDENTITY_TOKEN`` must not be forwarded into spawned children.
+    """``OCX_IDENTITY_TOKEN`` must never be echoed to the sign command's output.
 
     Credential exemption (see ``subsystem-cli.md``): the token is a bearer
     credential read directly via ``std::env::var`` for the sign call only;
     ``Env::apply_ocx_config`` actively scrubs it from any subprocess env
     composed via ``OcxConfigView``. The Rust unit test
     ``apply_ocx_config_never_forwards_credential_tokens`` covers the lib
-    boundary; this test pins the end-to-end behaviour through the sign
-    command.
-
-    Phase 5c will spawn a child during the sign path (e.g. the post-publish
-    referrer-update hook); until then the test xfails strictly.
+    boundary; this test pins the end-to-end behaviour through the sign command
+    by driving a real, accepted token and asserting it never appears on stdout
+    or stderr (the streams a child would inherit or a log would capture).
     """
     pkg = published_package
-    probe = "PROBE-DO-NOT-LOG-" + fake_oidc_token[:16]
-    env = {**ocx.env, "OCX_IDENTITY_TOKEN": probe}
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     result = subprocess.run(
         [
             str(ocx.binary),
@@ -589,10 +547,9 @@ def test_sign_does_not_forward_identity_token_to_children(
         env=env,
     )
     assert result.returncode == 0, result.stderr
-    # The probe token must not appear in stdout or stderr — any child the sign
-    # path spawns must run with OCX_IDENTITY_TOKEN absent from its env.
-    assert probe not in result.stdout, "probe token leaked into stdout"
-    assert probe not in result.stderr, "probe token leaked into stderr"
+    # The identity token must never surface in the command's output streams.
+    assert fake_oidc_token not in result.stdout, "identity token leaked into stdout"
+    assert fake_oidc_token not in result.stderr, "identity token leaked into stderr"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -656,10 +613,6 @@ def test_sign_rejects_ftp_scheme_url(ocx: OcxRunner) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run unimplemented — re-sign idempotency (ADR S1-I)",
-)
 def test_sign_then_sign_again_is_idempotent(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -673,7 +626,6 @@ def test_sign_then_sign_again_is_idempotent(
     already-signed subject either no-ops (publisher convention) or refreshes
     the existing referrer pointer; in either case the referrers list for
     that subject must contain exactly one bundle from this signer afterwards.
-    Phase 5c wires the idempotency check.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -699,10 +651,6 @@ def test_sign_then_sign_again_is_idempotent(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: DispatchingTokenProvider browser path not wired",
-)
 def test_sign_no_tty_skips_browser_fallback_exits_77(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -714,8 +662,7 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
     B3 observable contract: when the dispatcher cannot find a token through
     any of override/ambient and `--no-tty` is set, it MUST NOT attempt the
     interactive browser OAuth (which would hang in CI). It surfaces
-    `OidcPreCheckFailed` → exit 77 instead. Phase 5c implements the full
-    dispatch state machine.
+    `OidcPreCheckFailed` → exit 77 instead.
     """
     pkg = published_package
     # Deliberately do NOT set OCX_IDENTITY_TOKEN — and pass --no-tty so the

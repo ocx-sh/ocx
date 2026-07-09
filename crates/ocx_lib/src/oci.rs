@@ -62,6 +62,11 @@ pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
 
 pub mod referrer;
 
+// Shared Sigstore endpoint URL validation (`UrlRejection`, `validate_sigstore_url`).
+// Lifted here as a peer of `sign`/`verify` so verify does not depend on sign for a
+// primitive both use (ADR `adr_oci_referrers_signing_v1.md` Amendment 2).
+pub mod endpoint;
+
 pub mod sign;
 
 pub mod verify;

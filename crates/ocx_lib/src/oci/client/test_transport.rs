@@ -289,6 +289,7 @@ impl OciTransport for StubTransport {
         &self,
         _image: &oci::native::Reference,
         _subject_digest: &oci::Digest,
+        _artifact_type: Option<&str>,
     ) -> Result<Vec<oci::Descriptor>> {
         unimplemented!("list_referrers — Phase 5 adds builder-mode referrer injection")
     }

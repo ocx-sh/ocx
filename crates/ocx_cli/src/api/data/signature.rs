@@ -54,7 +54,6 @@ pub struct SignatureReport {
 }
 
 impl SignatureReport {
-    #[allow(dead_code)] // Phase 5c consumer
     pub fn new(
         identifier: String,
         subject_digest: oci::Digest,

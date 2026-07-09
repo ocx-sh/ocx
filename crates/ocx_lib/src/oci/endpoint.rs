@@ -9,12 +9,13 @@
 //! integration tests can point at the local `fake_sigstore` stack
 //! (`http://127.0.0.1:PORT/...`).
 //!
-//! Lives in `ocx_lib` rather than the CLI so any future library consumer
-//! (mirror tool, SDK, Bazel rule) routes through the same guard before
-//! constructing a [`super::pipeline::SignContext`] or a verify context.
-//! The function returns a [`UrlRejection`] on failure; each caller wraps
-//! it into their own `InvalidEndpointUrl` variant so exit-code
-//! classification stays local to the sign or verify subsystem.
+//! Lives at `oci::endpoint` (a peer of `oci::sign` and `oci::verify`, per ADR
+//! `adr_oci_referrers_signing_v1.md` Amendment 2) so both pipelines share one
+//! validator without verify depending on sign. Any future library consumer
+//! (mirror tool, SDK, Bazel rule) routes through the same guard before it
+//! reaches an HTTP client. The function returns a [`UrlRejection`] on failure;
+//! each caller wraps it into their own `InvalidEndpointUrl` variant so
+//! exit-code classification stays local to the sign or verify subsystem.
 
 use url::{Host, Url};
 

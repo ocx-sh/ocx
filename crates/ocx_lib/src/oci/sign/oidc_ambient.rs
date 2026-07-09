@@ -20,16 +20,22 @@ pub struct AmbientIdProvider;
 
 impl AmbientProvider for AmbientIdProvider {
     fn detect() -> Option<Box<dyn TokenProvider>> {
-        unimplemented!(
-            "AmbientIdProvider::detect — Phase 5 delegates to `ambient_id::detect()` \
-             and returns Some(Box::new(Self)) when a CI provider matches"
-        )
+        // v2 seam: the `ambient-id` crate is not yet a dependency (it is in
+        // Fedora packaging review). The inline env-inspection provider
+        // (`oidc_ambient_inline`) is the active ambient path for v1; this
+        // provider reports "not applicable" so the dispatch chain falls
+        // through to it.
+        None
     }
 }
 
 #[async_trait]
 impl TokenProvider for AmbientIdProvider {
     async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("AmbientIdProvider::acquire — Phase 5 delegates to ambient-id")
+        // Unreachable in v1: `detect` always returns `None`, so the dispatcher
+        // never constructs this provider. Kept as the typed v2 seam.
+        Err(SignErrorKind::OidcPreCheckFailed {
+            reason: "ambient_id_not_wired".to_string(),
+        })
     }
 }

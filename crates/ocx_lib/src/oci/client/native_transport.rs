@@ -140,6 +140,66 @@ fn repository_not_found_or_registry_error(
     }
 }
 
+/// Maps OCI distribution errors to [`ClientError::ReferrersUnsupported`] when
+/// the registry returns HTTP 404 for `/v2/<name>/referrers/<digest>`, and
+/// falls back to [`ClientError::Registry`] for everything else.
+///
+/// A 404 here means the endpoint itself is absent (registry lacks the OCI
+/// 1.1 Referrers API) — distinct from a 200 with an empty `manifests` array,
+/// which means the subject exists but has zero known referrers.
+fn referrers_unsupported_or_registry_error(
+    e: oci_client::errors::OciDistributionError,
+    image: &oci::native::Reference,
+) -> ClientError {
+    use oci_client::errors::OciDistributionError::*;
+    use oci_client::errors::OciErrorCode;
+    let registry = image.resolve_registry().to_string();
+    match &e {
+        RegistryError { envelope, .. } => {
+            let is_not_found = envelope.errors.iter().any(|err| {
+                matches!(
+                    err.code,
+                    OciErrorCode::ManifestUnknown | OciErrorCode::NotFound | OciErrorCode::NameUnknown
+                )
+            });
+            if is_not_found {
+                ClientError::ReferrersUnsupported { registry }
+            } else {
+                ClientError::Registry(Box::new(e))
+            }
+        }
+        ServerError { code: 404, .. } => ClientError::ReferrersUnsupported { registry },
+        _ => ClientError::Registry(Box::new(e)),
+    }
+}
+
+/// Filters referrer entries by `artifact_type` (when provided) and converts
+/// the survivors to [`oci::Descriptor`].
+///
+/// The OCI spec permits a server to ignore the `artifactType` query filter
+/// (or apply it without setting the advisory `OCI-Filters-Applied` header),
+/// so this client-side pass is the only filtering callers can rely on.
+fn filter_and_convert_referrers(
+    entries: Vec<oci_client::manifest::ImageIndexEntry>,
+    artifact_type: Option<&str>,
+) -> Vec<oci::Descriptor> {
+    entries
+        .into_iter()
+        .filter(|entry| match artifact_type {
+            Some(wanted) => entry.artifact_type.as_deref() == Some(wanted),
+            None => true,
+        })
+        .map(|entry| oci::Descriptor {
+            media_type: entry.media_type,
+            digest: entry.digest,
+            size: entry.size,
+            urls: None,
+            artifact_type: None,
+            annotations: entry.annotations,
+        })
+        .collect()
+}
+
 fn io_error(path: &Path, e: impl Into<std::io::Error>) -> ClientError {
     ClientError::Io {
         path: path.to_path_buf(),
@@ -220,9 +280,7 @@ impl OciTransport for NativeTransport {
         let digest_str = digest.to_string();
         log::debug!("Pulling blob {} for image {} to {}", digest_str, image, path.display());
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_error(parent, e))?;
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
         }
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -316,20 +374,56 @@ impl OciTransport for NativeTransport {
 
     async fn push_referrer_manifest(
         &self,
-        _image: &oci::native::Reference,
+        image: &oci::native::Reference,
         _subject_digest: &oci::Digest,
-        _manifest_bytes: &[u8],
-        _media_type: &str,
+        manifest_bytes: &[u8],
+        media_type: &str,
     ) -> Result<oci::Descriptor> {
-        unimplemented!("push_referrer_manifest — Phase 5 implements OCI 1.1 referrer push")
+        // The manifest JSON already carries the `subject` field (built by the
+        // caller) — pushing it is a plain manifest PUT addressed by the
+        // manifest's OWN digest (referrer manifests are not tagged).
+        let expected_size = i64::try_from(manifest_bytes.len()).map_err(|_| {
+            ClientError::InvalidManifest(format!(
+                "referrer manifest size {} exceeds i64::MAX",
+                manifest_bytes.len()
+            ))
+        })?;
+        let expected_digest = oci::Algorithm::Sha256.hash(manifest_bytes).to_string();
+        let target = image.clone_with_digest(expected_digest.clone());
+
+        // The push is digest-addressed (`PUT /v2/<repo>/manifests/<expected_digest>`)
+        // over the exact bytes we hashed, so a spec-compliant registry stores the
+        // manifest at precisely `expected_digest` or rejects the request. The
+        // transport's `push_manifest_raw` returns the pullable manifest URL (the
+        // `Location` header), NOT a bare digest, so it cannot be compared to a
+        // digest — integrity is already guaranteed by the content-addressed PUT.
+        self.push_manifest_raw(&target, manifest_bytes.to_vec(), media_type)
+            .await?;
+
+        Ok(oci::Descriptor {
+            media_type: media_type.to_string(),
+            digest: expected_digest,
+            size: expected_size,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        })
     }
 
     async fn list_referrers(
         &self,
-        _image: &oci::native::Reference,
-        _subject_digest: &oci::Digest,
+        image: &oci::native::Reference,
+        subject_digest: &oci::Digest,
+        artifact_type: Option<&str>,
     ) -> Result<Vec<oci::Descriptor>> {
-        unimplemented!("list_referrers — Phase 5 implements GET /v2/<name>/referrers/<digest>")
+        let target = image.clone_with_digest(subject_digest.to_string());
+        let index = self
+            .client
+            .pull_referrers(&target, artifact_type)
+            .await
+            .map_err(|e| referrers_unsupported_or_registry_error(e, image))?;
+
+        Ok(filter_and_convert_referrers(index.manifests, artifact_type))
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {
@@ -507,6 +601,7 @@ fn progress_body_stream(
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use futures::stream;
     use std::sync::Mutex;
 
     /// Regression tests for issue #157 — `list_tags` errors must distinguish
@@ -576,6 +671,132 @@ mod tests {
             let mapped =
                 repository_not_found_or_registry_error(envelope_error(OciErrorCode::Toomanyrequests), &reference());
             assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        }
+    }
+
+    /// Regression tests for issue #194 — `list_referrers` must distinguish a
+    /// registry that lacks the OCI 1.1 Referrers API (404 on the endpoint)
+    /// from a subject with zero referrers (200, empty `manifests`), and from
+    /// a transient registry failure.
+    mod referrers_unsupported_mapping {
+        use super::*;
+        use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
+
+        fn reference() -> oci::native::Reference {
+            oci::native::Reference::try_from("registry.test/mirror/cmake:4.3.3").expect("valid reference")
+        }
+
+        fn envelope_error(code: OciErrorCode) -> OciDistributionError {
+            OciDistributionError::RegistryError {
+                envelope: OciEnvelope {
+                    errors: vec![OciError {
+                        code,
+                        message: String::new(),
+                        detail: serde_json::Value::Null,
+                    }],
+                },
+                url: "https://registry.test/v2/mirror/cmake/referrers/sha256:1111".to_string(),
+            }
+        }
+
+        #[test]
+        fn server_404_maps_to_referrers_unsupported() {
+            let error = OciDistributionError::ServerError {
+                code: 404,
+                url: "https://registry.test/v2/mirror/cmake/referrers/sha256:1111".to_string(),
+                message: "not found".to_string(),
+            };
+            let mapped = referrers_unsupported_or_registry_error(error, &reference());
+            assert!(
+                matches!(&mapped, ClientError::ReferrersUnsupported { registry } if registry == "registry.test"),
+                "expected ReferrersUnsupported, got {mapped:?}"
+            );
+        }
+
+        #[test]
+        fn envelope_not_found_maps_to_referrers_unsupported() {
+            let mapped =
+                referrers_unsupported_or_registry_error(envelope_error(OciErrorCode::NameUnknown), &reference());
+            assert!(
+                matches!(mapped, ClientError::ReferrersUnsupported { .. }),
+                "got {mapped:?}"
+            );
+        }
+
+        #[test]
+        fn server_5xx_stays_registry_error() {
+            let error = OciDistributionError::ServerError {
+                code: 503,
+                url: "https://registry.test/v2/mirror/cmake/referrers/sha256:1111".to_string(),
+                message: "service unavailable".to_string(),
+            };
+            let mapped = referrers_unsupported_or_registry_error(error, &reference());
+            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        }
+
+        #[test]
+        fn rate_limit_envelope_stays_registry_error() {
+            let mapped =
+                referrers_unsupported_or_registry_error(envelope_error(OciErrorCode::Toomanyrequests), &reference());
+            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        }
+    }
+
+    /// Unit tests for [`filter_and_convert_referrers`] — the client-side
+    /// `artifactType` filter that must apply regardless of whether the
+    /// registry honored the server-side query filter (OCI spec §"Listing
+    /// Referrers": servers MAY ignore `?artifactType=`).
+    mod referrer_filtering {
+        use super::*;
+
+        fn entry(digest: &str, artifact_type: Option<&str>) -> oci_client::manifest::ImageIndexEntry {
+            oci_client::manifest::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: digest.to_string(),
+                size: 123,
+                platform: None,
+                artifact_type: artifact_type.map(str::to_string),
+                annotations: None,
+            }
+        }
+
+        #[test]
+        fn no_filter_passes_all_entries_through() {
+            let entries = vec![
+                entry("sha256:aaa", Some("application/vnd.ocx.signature")),
+                entry("sha256:bbb", None),
+            ];
+            let result = filter_and_convert_referrers(entries, None);
+            assert_eq!(result.len(), 2);
+            assert_eq!(result[0].digest, "sha256:aaa");
+            assert_eq!(result[1].digest, "sha256:bbb");
+        }
+
+        #[test]
+        fn filter_keeps_only_matching_artifact_type() {
+            let entries = vec![
+                entry("sha256:aaa", Some("application/vnd.ocx.signature")),
+                entry("sha256:bbb", Some("application/vnd.ocx.sbom")),
+                entry("sha256:ccc", None),
+            ];
+            let result = filter_and_convert_referrers(entries, Some("application/vnd.ocx.signature"));
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].digest, "sha256:aaa");
+        }
+
+        #[test]
+        fn filter_with_no_matches_returns_empty() {
+            let entries = vec![entry("sha256:aaa", Some("application/vnd.ocx.sbom"))];
+            let result = filter_and_convert_referrers(entries, Some("application/vnd.ocx.signature"));
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn empty_manifests_returns_empty_vec_not_error() {
+            // A 200 response with an empty `manifests` array means "subject
+            // exists, zero referrers" — must be `Ok(vec![])`, never an error.
+            let result = filter_and_convert_referrers(vec![], None);
+            assert!(result.is_empty());
         }
     }
 
@@ -732,5 +953,81 @@ mod tests {
             reports.is_empty(),
             "empty blob must fire no progress callbacks, got {reports:?}"
         );
+    }
+
+    /// Creates a chunked progress stream that mirrors the pre-streaming
+    /// `do_push_blob` upload logic (progress reports lag one chunk behind the
+    /// yielded chunk). Retained as a standalone regression witness for the
+    /// conservative-reporting invariant, independent of the streamed push path.
+    ///
+    /// Returns the progress reports collector and the byte stream.
+    fn make_progress_stream(
+        data: Bytes,
+        chunk_size: usize,
+    ) -> (
+        Arc<Mutex<Vec<u64>>>,
+        impl futures::Stream<Item = std::result::Result<Bytes, std::io::Error>>,
+    ) {
+        let total = data.len() as u64;
+        let chunk_count = (total as usize).div_ceil(chunk_size);
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let reports_clone = Arc::clone(&reports);
+        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n| {
+            reports_clone.lock().unwrap().push(n);
+        });
+        let progress_stream = stream::unfold((0usize, 0u64), move |(index, confirmed)| {
+            if index >= chunk_count {
+                return std::future::ready(None);
+            }
+            let start = index * chunk_size;
+            let end = ((index + 1) * chunk_size).min(total as usize);
+            let chunk = data.slice(start..end);
+            progress(confirmed);
+            let confirmed = confirmed + chunk.len() as u64;
+            std::future::ready(Some((Ok::<_, std::io::Error>(chunk), (index + 1, confirmed))))
+        });
+        (reports, progress_stream)
+    }
+
+    /// Replicates the chunking + progress stream from `do_push_blob` and verifies
+    /// that progress reports lag behind yielded chunks (conservative reporting).
+    #[tokio::test]
+    async fn upload_progress_stream_reports_confirmed_bytes() {
+        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 100]), 30);
+
+        // Consume the stream (simulates push_blob_stream polling).
+        let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
+
+        let reports = reports.lock().unwrap();
+
+        // 100 bytes / 30-byte chunks = 4 chunks (30, 30, 30, 10).
+        assert_eq!(collected.len(), 4);
+        assert_eq!(collected[0].len(), 30);
+        assert_eq!(collected[1].len(), 30);
+        assert_eq!(collected[2].len(), 30);
+        assert_eq!(collected[3].len(), 10);
+
+        // Progress reports are conservative: each report reflects bytes from
+        // previously consumed chunks, not the chunk being yielded.
+        assert_eq!(reports.len(), 4);
+        assert_eq!(reports[0], 0); // yielding chunk[0], nothing confirmed yet
+        assert_eq!(reports[1], 30); // yielding chunk[1], chunk[0] confirmed
+        assert_eq!(reports[2], 60); // yielding chunk[2], chunks[0-1] confirmed
+        assert_eq!(reports[3], 90); // yielding chunk[3], chunks[0-2] confirmed
+        // After stream completes, caller adds on_progress(total=100).
+    }
+
+    #[tokio::test]
+    async fn upload_chunking_single_chunk() {
+        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 10]), 1024);
+
+        let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
+
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].len(), 10);
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0], 0); // nothing confirmed when yielding the only chunk
     }
 }

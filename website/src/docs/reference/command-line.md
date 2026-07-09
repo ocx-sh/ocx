@@ -2467,8 +2467,8 @@ ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 
 Never pass a raw token on the command line — it would appear in shell history and process listings.
 
-:::warning Preview / not yet fully implemented
-The `package sign` command is currently in preview. Until the sigstore-rs integration completes in Slice 2, the command validates its inputs and then exits 78 (`pipeline_pending`) — it never reaches the signing pipeline, so it does not panic. Exit codes documented below describe the intended Slice 1 behavior; today only flag validation, offline-mode rejection, identity-token file permission checks, and OIDC token resolution are wired.
+:::warning Verified against the fake Sigstore stack only
+`ocx package sign` runs the full keyless pipeline end-to-end — keypair generation, Fulcio certificate, Rekor entry, bundle assembly, and the referrer push. Its positive path is currently exercised only against the in-repo fake Sigstore stack: a fake [Fulcio][fulcio], [Rekor][rekor], and OIDC issuer. Signing against the public-good Fulcio/Rekor has not yet been wired or tested — the hand-rolled Fulcio/Rekor clients target the fake stack's wire shapes. The exit codes and flag contracts below are stable.
 :::
 
 **Exit codes**
@@ -2556,7 +2556,6 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 | `offline_sign_refused` | 77 | `--offline` is incompatible with `package sign` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
-| `pipeline_pending` | 78 | Sign pipeline not yet wired (Phase 5c pending); command exits with a structured error instead of panicking |
 | `internal` | 1 | Unexpected internal error |
 
 **Example — CI keyless signing with GitHub Actions ambient OIDC**
@@ -2573,7 +2572,7 @@ In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present auto
 
 #### `verify` {#package-verify}
 
-Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against the embedded [TUF][sigstore-tuf] trust root, verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the values you supply. All five checks must pass for the command to exit 0.
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the values you supply. All five checks must pass for the command to exit 0.
 
 There are no default values for `--certificate-identity` and `--certificate-oidc-issuer` — keyless verification is meaningless without specifying whose signature you trust.
 
@@ -2598,10 +2597,11 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | `--certificate-identity` | — | *(required)* | Expected certificate SAN (Subject Alternative Name). Exact match only in Slice 1. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
 | `--certificate-oidc-issuer` | — | *(required)* | Expected OIDC issuer URL. Exact match only in Slice 1. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
 | `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--trust-root` | — | *(embedded root)* | Path to a PEM file of [Fulcio][fulcio] CA certificate(s) to validate the leaf chain against. Overrides the embedded trust root. Equivalent env var: [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]; the flag wins. Required today because the embedded production root is stubbed |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
 
-:::warning Preview / not yet fully implemented
-The `package verify` command is currently in preview. Verification of signatures fetched from a registry's referrers index requires the sigstore-rs integration that ships in Slice 2. Exit codes documented below describe the intended Slice 1 behavior; today the command only resolves the identifier, validates `--rekor-url`, and rejects offline mode before returning a `trust_root_unavailable` error (exit 78). The referrers-capability probe, trust-root load, and full verify pipeline land in Slice 2; `--no-cache` is accepted but has no effect until the capability probe is wired.
+:::warning Verified against the fake Sigstore stack only
+`ocx package verify` runs the full five-check pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, [Rekor][rekor] SET, subject-digest signature, identity and issuer match. Its positive path is currently exercised only against the in-repo fake Sigstore stack. Verifying signatures from public-good Fulcio/Rekor is not yet wired or tested: the embedded production [TUF][sigstore-tuf] trust root is stubbed (supply a Fulcio CA via `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]), and the Rekor SET is checked against the fake stack's payload format rather than the public Rekor wire format. See [Current limitations][signing-limitations] before relying on this against production Sigstore. Exit codes and flag contracts below are stable.
 :::
 
 **Exit codes**
@@ -2625,7 +2625,7 @@ The `package verify` command is currently in preview. Verification of signatures
 
 **JSON output** (`--format json`)
 
-On success, `ocx package verify` emits a C-S1-1 success envelope:
+On success, `ocx package verify` emits a success envelope wrapping the flat verification report:
 
 ```json
 {
@@ -2633,26 +2633,11 @@ On success, `ocx package verify` emits a C-S1-1 success envelope:
   "command": "package verify",
   "exit_code": 0,
   "data": {
-    "subject": "registry.example/pkg:1.0",
-    "bundle_digest": "sha256:<64-hex>",
-    "signature_count": 1,
-    "signatures": [
-      {
-        "signature_format": "sigstore-bundle-v0.3",
-        "discovery_method": "referrers-api",
-        "certificate": {
-          "issuer": "https://token.actions.githubusercontent.com",
-          "san": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
-          "not_before": "2026-04-19T11:55:00Z",
-          "not_after": "2026-04-19T12:05:00Z"
-        },
-        "rekor": {
-          "log_index": 98765432,
-          "integrated_time": "2026-04-19T12:00:00Z",
-          "log_id": "abcdef1234567890"
-        }
-      }
-    ]
+    "subject_digest": "sha256:<64-hex>",
+    "referrer_digest": "sha256:<64-hex>",
+    "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+    "signed_at": "2026-04-19T12:00:00Z"
   }
 }
 ```
@@ -2661,21 +2646,11 @@ On success, `ocx package verify` emits a C-S1-1 success envelope:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `subject` | string | Identifier argument passed to the command |
-| `bundle_digest` | string (`sha256:...`) | Digest of the OCI referrer manifest carrying the signature |
-| `signature_count` | integer | Number of valid signatures found (Slice 1: always `1`) |
-| `signatures` | array | Per-signature detail (Slice 1: exactly one entry) |
-| `signatures[].signature_format` | string | Bundle format; always `"sigstore-bundle-v0.3"` in Slice 1 |
-| `signatures[].discovery_method` | string | How the bundle was found; always `"referrers-api"` in Slice 1 |
-| `signatures[].certificate.issuer` | string | OIDC issuer URL from the Fulcio cert |
-| `signatures[].certificate.san` | string | Subject Alternative Name (identity) from the Fulcio cert |
-| `signatures[].certificate.not_before` | string (ISO-8601) | Certificate validity start |
-| `signatures[].certificate.not_after` | string (ISO-8601) | Certificate validity end |
-| `signatures[].rekor.log_index` | integer | Rekor log index for the entry |
-| `signatures[].rekor.integrated_time` | string (ISO-8601) | Time the entry was added to the log |
-| `signatures[].rekor.log_id` | string | Hex public-key digest identifying the Rekor log |
-
-Note the asymmetry with `package sign`: verify uses `subject` (the thing being verified) where sign uses `identifier` (the thing being signed). Both echo the identifier argument, but their field names differ per the C-S1-1 contract.
+| `subject_digest` | string (`sha256:...`) | Digest of the subject manifest whose signature was verified |
+| `referrer_digest` | string (`sha256:...`) | Digest of the OCI referrer manifest carrying the verified bundle |
+| `certificate_identity` | string | Subject Alternative Name (identity) read back from the Fulcio cert |
+| `certificate_oidc_issuer` | string | OIDC issuer URL read back from the Fulcio cert |
+| `signed_at` | string (ISO-8601) | [Rekor][rekor] integrated time of the signature entry |
 
 On error, `ocx package verify` emits a C-S1-1 error envelope. The `error.detail` field is a snake_case discriminant for programmatic matching:
 
@@ -2704,7 +2679,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `no_usable_bundle` | 79 | Referrers found but none has a recognized Sigstore bundle artifact type |
 | `identity_mismatch` | 77 | Certificate SAN does not match `--certificate-identity` |
 | `issuer_mismatch` | 77 | Certificate OIDC issuer does not match `--certificate-oidc-issuer` |
-| `cert_chain_invalid` | 65 | Certificate chain does not verify against the TUF trust root |
+| `cert_chain_invalid` | 65 | Certificate chain does not verify against the supplied trust root |
 | `signature_invalid` | 65 | Signature does not verify over the subject manifest digest |
 | `rekor_set_invalid` | 65 | Rekor SET does not verify (bundle tampered) |
 | `rekor_set_absent_tsa_present` | 83 | Rekor SET absent but RFC 3161 TSA timestamp present (Rekor v2 transition) |
@@ -3439,6 +3414,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-project-running]: ../in-depth/project.md#running
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [in-depth-ci]: ../in-depth/ci.md
+[signing-limitations]: ../in-depth/signing.md#current-limitations
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -3464,6 +3440,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-github-path]: ./environment.md#external-github-path
 [env-gitlab-ci]: ./environment.md#external-gitlab-ci
 [env-identity-token]: ./environment.md#ocx-identity-token
+[env-sigstore-trust-root]: ./environment.md#ocx-sigstore-trust-root
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/

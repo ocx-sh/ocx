@@ -35,6 +35,14 @@ impl Default for BrowserOauthProvider {
 #[async_trait]
 impl TokenProvider for BrowserOauthProvider {
     async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
-        unimplemented!("BrowserOauthProvider::acquire — Phase 5 wraps sigstore::oauth::OauthTokenProvider")
+        // Interactive browser PKCE is deferred (it needs a live OIDC provider
+        // and cannot run headless / in acceptance tests). Surface a typed
+        // pre-check failure (exit 77) with an actionable message instead of a
+        // hang. Automation supplies a token via `OCX_IDENTITY_TOKEN`,
+        // `--identity-token-file`, `--identity-token-stdin`, or CI ambient
+        // detection.
+        Err(SignErrorKind::OidcPreCheckFailed {
+            reason: "browser_flow_unavailable".to_string(),
+        })
     }
 }

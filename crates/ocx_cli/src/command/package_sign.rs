@@ -22,9 +22,12 @@ use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
 
 use ocx_lib::oci;
-use ocx_lib::oci::sign::endpoint::validate_sigstore_url;
-use ocx_lib::oci::sign::{SignError, SignErrorKind};
+use ocx_lib::oci::endpoint::validate_sigstore_url;
+use ocx_lib::oci::sign::{
+    DispatchingTokenProvider, KeylessSigner, SignContext, SignError, SignErrorKind, SignPipeline,
+};
 
+use crate::api::data::signature::SignatureReport;
 use crate::options;
 
 /// Default public Fulcio CA endpoint (overridable via `--fulcio-url`).
@@ -97,7 +100,7 @@ impl PackageSign {
         // boundary before they become HTTP client targets. Failures route
         // through `SignErrorKind::InvalidEndpointUrl` → exit 64 (UsageError),
         // so the error envelope's `error.detail` names the offending flag.
-        let _fulcio_url = validate_sigstore_url(&self.fulcio_url, "--fulcio-url").map_err(|reason| {
+        let fulcio_url = validate_sigstore_url(&self.fulcio_url, "--fulcio-url").map_err(|reason| {
             SignError::new(
                 identifier.clone(),
                 SignErrorKind::InvalidEndpointUrl {
@@ -106,7 +109,7 @@ impl PackageSign {
                 },
             )
         })?;
-        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
+        let rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
             SignError::new(
                 identifier.clone(),
                 SignErrorKind::InvalidEndpointUrl {
@@ -128,27 +131,41 @@ impl PackageSign {
         }
 
         // C-S1-4 token precedence: file > stdin > env. The resolved token is
-        // a plain String; never log, never surface in error context.
-        // Resolution itself is safe to run (no network, no crypto) — the token
-        // will be consumed by Phase 5c's pipeline integration.
-        let _override_token = self.resolve_override_token(&identifier).await?;
+        // held under `Zeroizing`; never log, never surface in error context.
+        let override_token = self.resolve_override_token(&identifier).await?;
 
-        // Phase 5c blocker: `SignPipeline::run` requires a `&dyn OciTransport`
-        // (see `oci::sign::SignContext::transport`) but `oci::Client` keeps
-        // its transport as a private field with no public accessor. Wiring
-        // the pipeline call needs either a `Client::transport()` accessor or
-        // a `SignContext::new_from_client()` helper — both are
-        // design-change-shaped and belong to Phase 5c alongside the
-        // sigstore-rs integration (the pipeline body itself is still a stub).
-        //
-        // Surface a typed `SignErrorKind::PipelinePending` so the CLI exits
-        // with a structured error (exit 78, ConfigError) and a readable
-        // message instead of panicking out of an `async fn`. The verify-side
-        // stub uses the analogous `VerifyErrorKind::TrustRootUnavailable`.
-        Err(anyhow::Error::from(SignError::new(
-            identifier,
-            SignErrorKind::PipelinePending,
-        )))
+        // Online context: sign needs the registry (referrer push) and Fulcio /
+        // Rekor. `online_context` errors on `--offline` (already short-circuited
+        // above via `OfflineSignRefused`).
+        let (index, client) = context.online_context()?;
+
+        let signer = KeylessSigner::new();
+        let token_provider = DispatchingTokenProvider::new(override_token, self.no_tty);
+        let sign_context = SignContext {
+            identifier: &identifier,
+            platform: &self.platform,
+            signer: &signer,
+            token_provider: &token_provider,
+            no_cache: self.no_cache,
+            transport: client.transport(),
+            index,
+            fulcio_url: &fulcio_url,
+            rekor_url: &rekor_url,
+            cache_root: context.file_structure().root(),
+        };
+        let result = SignPipeline::run(sign_context).await?;
+
+        let report = SignatureReport::new(
+            identifier.to_string(),
+            result.subject_digest,
+            result.bundle_digest,
+            result.referrer_digest,
+            &self.platform,
+            result.certificate_identity,
+            result.certificate_oidc_issuer,
+        );
+        context.api().report(&report)?;
+        Ok(ExitCode::SUCCESS)
     }
 
     /// Resolve the override OIDC token per C-S1-4 precedence.

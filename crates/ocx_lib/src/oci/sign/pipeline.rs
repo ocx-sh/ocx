@@ -1,36 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Sign pipeline — 15-step push state machine.
+//! Sign pipeline — the push-side state machine.
 //!
 //! Per
 //! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md):
-//! resolve identifier → acquire OIDC token → generate ephemeral key → Fulcio
-//! CSR → signed cert → sign target digest → Rekor upload → bundle → push bundle
-//! blob → push referrer manifest → emit [`SignResult`].
+//! resolve the per-platform target manifest → check Referrers-API capability →
+//! acquire an OIDC token → produce a Sigstore bundle (delegated to a
+//! [`Signer`]) → push the bundle blob → push the referrer manifest whose
+//! `subject` points at the target.
 //!
-//! The pipeline is a thin orchestrator: the cryptographic signing is
-//! delegated to a [`Signer`] trait object (injected via
-//! [`SignContext::signer`]), and the registry writes go through the
-//! [`OciTransport`] also injected via the context.
-//!
-//! Phase 5c stub — bodies use `unimplemented!()`.
+//! The pipeline is a thin orchestrator: the cryptographic signing is delegated
+//! to a [`Signer`] trait object and the registry writes go through the injected
+//! [`OciTransport`]. No fallback `sha256-<digest>.sig` tag is ever written
+//! (ADR S1-F) — signatures are OCI 1.1 referrers only.
+
+use std::path::Path;
 
 use url::Url;
 
-use super::error::SignError;
+use super::error::{SignError, SignErrorKind};
 use super::oidc::TokenProvider;
 use super::signer::Signer;
 use crate::oci::client::OciTransport;
-use crate::oci::index::Index;
-use crate::oci::{Descriptor, Identifier, Platform};
+use crate::oci::client::error::ClientError;
+use crate::oci::index::{Index, IndexOperation, SelectResult};
+use crate::oci::referrer::ReferrerManifest;
+use crate::oci::referrer::capability::{ReferrersApiCapability, ReferrersSupport};
+use crate::oci::referrer::media_types::{EMPTY_CONFIG_DIGEST, EMPTY_CONFIG_PAYLOAD, SIGSTORE_BUNDLE_V03};
+use crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE;
+use crate::oci::{Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
+
+/// Manifest media types accepted when fetching the per-platform target.
+const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
+    OCI_IMAGE_MEDIA_TYPE,
+    "application/vnd.docker.distribution.manifest.v2+json",
+];
 
 /// Context passed into [`SignPipeline::run`] — all external dependencies.
-///
-/// Every field is a `&` borrow so the context does not take ownership of the
-/// injected components. The `fulcio_url` / `rekor_url` fields are the
-/// C-S1-3 injection seams: production callers use the default Sigstore URLs,
-/// tests inject `http://127.0.0.1:<port>` of the fake helpers.
 pub struct SignContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
     pub identifier: &'a Identifier,
@@ -38,43 +45,35 @@ pub struct SignContext<'a> {
     pub platform: &'a Platform,
     /// Signer producing the cryptographic bundle.
     pub signer: &'a dyn Signer,
-    /// OIDC token provider (used by the signer; surfaced here for diagnostics).
+    /// OIDC token provider (override → ambient → browser dispatch).
     pub token_provider: &'a dyn TokenProvider,
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
     /// Registry transport.
     pub transport: &'a dyn OciTransport,
-    /// Index for resolving tag → digest.
+    /// Index for resolving tag → per-platform manifest digest.
     pub index: &'a Index,
-    /// Fulcio URL (C-S1-3 injection seam).
-    ///
-    /// Default: `https://fulcio.sigstore.dev/api/v2/signingCert`.
+    /// Fulcio URL (validated at the CLI boundary).
     pub fulcio_url: &'a Url,
-    /// Rekor URL (C-S1-3 injection seam).
-    ///
-    /// Default: `https://rekor.sigstore.dev`.
+    /// Rekor URL (validated at the CLI boundary).
     pub rekor_url: &'a Url,
+    /// `$OCX_HOME` root for the referrers-capability cache.
+    pub cache_root: &'a Path,
 }
 
 /// Result emitted by a successful sign pipeline run.
 pub struct SignResult {
     /// Digest of the target manifest the signature was attached to.
-    pub subject_digest: crate::oci::Digest,
+    pub subject_digest: Digest,
     /// Digest of the pushed Sigstore bundle blob.
-    pub bundle_digest: crate::oci::Digest,
-    /// Typed digest of the pushed referrer manifest.
-    ///
-    /// This is the canonical typed field consumed by the CLI layer (e.g.,
-    /// `SignatureReport::new`). The full [`Descriptor`] is retained in
-    /// `referrer_descriptor` for cases that need size / media-type metadata.
-    pub referrer_digest: crate::oci::Digest,
-    /// Full OCI descriptor of the pushed referrer manifest (includes digest,
-    /// size, and media-type). Kept for callers that need the complete descriptor;
-    /// prefer `referrer_digest` when only the digest is required.
+    pub bundle_digest: Digest,
+    /// Digest of the pushed referrer manifest.
+    pub referrer_digest: Digest,
+    /// Full OCI descriptor of the pushed referrer manifest.
     pub referrer_descriptor: Descriptor,
-    /// Cert SAN (identity) that signed the target.
+    /// Cert SAN (identity) that signed the target — the OIDC subject.
     pub certificate_identity: String,
-    /// Cert issuer (`--certificate-oidc-issuer` comparand).
+    /// Cert issuer (`--certificate-oidc-issuer` comparand) — the OIDC issuer.
     pub certificate_oidc_issuer: String,
 }
 
@@ -82,144 +81,216 @@ pub struct SignResult {
 pub struct SignPipeline;
 
 impl SignPipeline {
-    /// Run the 15-step sign pipeline.
-    pub async fn run(_ctx: SignContext<'_>) -> Result<SignResult, SignError> {
-        unimplemented!("SignPipeline::run — Phase 5 implements the 15-step push state machine")
+    /// Run the push-side sign state machine.
+    pub async fn run(ctx: SignContext<'_>) -> Result<SignResult, SignError> {
+        let identifier = ctx.identifier.clone();
+        Self::run_inner(ctx)
+            .await
+            .map_err(|kind| SignError::new(identifier, kind))
     }
+
+    async fn run_inner(ctx: SignContext<'_>) -> Result<SignResult, SignErrorKind> {
+        // 1. Resolve the per-platform target manifest.
+        let resolved = match ctx
+            .index
+            .select(ctx.identifier, vec![ctx.platform.clone()], IndexOperation::Resolve)
+            .await
+            .map_err(|e| SignErrorKind::Internal(Box::new(e)))?
+        {
+            SelectResult::Found(id) => id,
+            SelectResult::Ambiguous(_) | SelectResult::NotFound => {
+                return Err(SignErrorKind::Internal(
+                    format!("no manifest for {} on {}", ctx.identifier, ctx.platform).into(),
+                ));
+            }
+        };
+        let subject_digest = resolved
+            .digest()
+            .ok_or_else(|| SignErrorKind::Internal("resolved target has no digest".into()))?;
+        let registry = resolved.registry().to_string();
+        let repo = resolved.repository().to_string();
+        let image = native::Reference::with_tag(registry.clone(), repo.clone(), "latest".to_string());
+
+        // Fetch the target manifest bytes for the subject descriptor's size.
+        let subject_ref = native::Reference::with_digest(registry.clone(), repo.clone(), subject_digest.to_string());
+        let (subject_bytes, _) = ctx
+            .transport
+            .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
+            .await
+            .map_err(map_client_error)?;
+
+        // 2. Referrers-API capability (cache-first).
+        Self::ensure_referrers_supported(&ctx, &registry, &repo, &subject_digest).await?;
+
+        // 3. Acquire the OIDC token.
+        let token = ctx.token_provider.acquire("sigstore").await?;
+        let certificate_identity = jwt_claim(token.as_str(), "sub")
+            .or_else(|| jwt_claim(token.as_str(), "email"))
+            .unwrap_or_default();
+        let certificate_oidc_issuer = jwt_claim(token.as_str(), "iss").unwrap_or_default();
+
+        // 4. Produce the Sigstore bundle.
+        let bundle = ctx
+            .signer
+            .sign(&subject_digest, &token, ctx.fulcio_url, ctx.rekor_url)
+            .await?;
+
+        // 5. Push the referrer's blobs: the OCI empty-config blob (the manifest's
+        //    `config` descriptor points at it) and the Sigstore bundle blob (the
+        //    `layers[0]` payload). A spec-strict registry (zot) rejects the
+        //    manifest with MANIFEST_INVALID if either referenced blob is absent,
+        //    so both must land before the manifest PUT. `push_blob` HEADs first,
+        //    so re-pushing the shared empty-config blob is a no-op after the first.
+        let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
+        let empty_config_digest =
+            Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        ctx.transport
+            .push_blob(
+                &image,
+                EMPTY_CONFIG_PAYLOAD.to_vec(),
+                &empty_config_digest,
+                no_progress.clone(),
+            )
+            .await
+            .map_err(map_client_error)?;
+        ctx.transport
+            .push_blob(&image, bundle.bytes.clone(), &bundle.digest, no_progress)
+            .await
+            .map_err(map_client_error)?;
+
+        // 6. Build + push the referrer manifest (subject → target).
+        let subject_descriptor = Descriptor {
+            media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
+            digest: subject_digest.to_string(),
+            size: subject_bytes.len() as i64,
+            ..Descriptor::default()
+        };
+        let bundle_descriptor = Descriptor {
+            media_type: BUNDLE_V03_MEDIA_TYPE.to_string(),
+            digest: bundle.digest.to_string(),
+            size: bundle.bytes.len() as i64,
+            ..Descriptor::default()
+        };
+        let manifest = ReferrerManifest::build(subject_descriptor, SIGSTORE_BUNDLE_V03, bundle_descriptor);
+        let manifest_bytes = manifest.to_canonical_json()?;
+        let referrer_descriptor = ctx
+            .transport
+            .push_referrer_manifest(&image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
+            .await
+            .map_err(map_client_error)?;
+        let referrer_digest =
+            Digest::try_from(referrer_descriptor.digest.as_str()).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+
+        Ok(SignResult {
+            subject_digest,
+            bundle_digest: bundle.digest,
+            referrer_digest,
+            referrer_descriptor,
+            certificate_identity,
+            certificate_oidc_issuer,
+        })
+    }
+
+    /// Confirm the registry serves the OCI Referrers API, consulting (and
+    /// refreshing) the per-registry capability cache. `Unsupported` →
+    /// [`SignErrorKind::ReferrersUnsupported`] (exit 84).
+    async fn ensure_referrers_supported(
+        ctx: &SignContext<'_>,
+        registry: &str,
+        repo: &str,
+        subject_digest: &Digest,
+    ) -> Result<(), SignErrorKind> {
+        let cached = if ctx.no_cache {
+            None
+        } else {
+            ReferrersApiCapability::from_cache(registry, ctx.cache_root)
+                .await
+                .ok()
+                .flatten()
+                .filter(ReferrersApiCapability::is_fresh)
+        };
+        let capability = match cached {
+            Some(hit) => hit,
+            None => {
+                let probed = ReferrersApiCapability::probe(ctx.transport, registry, repo, subject_digest)
+                    .await
+                    .map_err(map_client_error)?;
+                // Best-effort cache write; a failure here must not fail the sign.
+                let _ = probed.write_cache(ctx.cache_root).await;
+                probed
+            }
+        };
+        match capability.supported {
+            ReferrersSupport::Supported => Ok(()),
+            ReferrersSupport::Unsupported => Err(SignErrorKind::ReferrersUnsupported),
+        }
+    }
+}
+
+/// Map an OCI client error into the sign taxonomy.
+fn map_client_error(error: ClientError) -> SignErrorKind {
+    match error {
+        ClientError::ReferrersUnsupported { .. } => SignErrorKind::ReferrersUnsupported,
+        other => SignErrorKind::Internal(Box::new(other)),
+    }
+}
+
+/// Read a string claim from a JWT without verifying it (the values only feed
+/// the sign result's reporting fields; Fulcio is the authority on identity).
+fn jwt_claim(jwt: &str, claim: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get(claim).and_then(|v| v.as_str()).map(str::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::panic;
-
-    use async_trait::async_trait;
-
     use super::*;
-    use crate::oci::client::test_transport::{StubTransport, StubTransportData};
-    use crate::oci::index::{Index, IndexImpl, IndexOperation};
 
-    /// Minimal no-op [`IndexImpl`] for stub tests.
-    ///
-    /// The pipeline panics before ever calling index methods, so this
-    /// implementation just needs to satisfy the trait bounds.
-    struct NeverIndex;
-
-    #[async_trait]
-    impl IndexImpl for NeverIndex {
-        async fn list_repositories(&self, _registry: &str) -> crate::Result<Vec<String>> {
-            unimplemented!("NeverIndex: not used in stub tests")
-        }
-
-        async fn list_tags(&self, _id: &crate::oci::Identifier) -> crate::Result<Option<Vec<String>>> {
-            unimplemented!("NeverIndex: not used in stub tests")
-        }
-
-        async fn fetch_manifest(
-            &self,
-            _id: &crate::oci::Identifier,
-            _op: IndexOperation,
-        ) -> crate::Result<Option<(crate::oci::Digest, crate::oci::Manifest)>> {
-            unimplemented!("NeverIndex: not used in stub tests")
-        }
-
-        async fn fetch_manifest_digest(
-            &self,
-            _id: &crate::oci::Identifier,
-            _op: IndexOperation,
-        ) -> crate::Result<Option<crate::oci::Digest>> {
-            unimplemented!("NeverIndex: not used in stub tests")
-        }
-
-        async fn fetch_blob(&self, _blob_ref: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
-            unimplemented!("NeverIndex: not used in stub tests")
-        }
-
-        fn box_clone(&self) -> Box<dyn IndexImpl> {
-            Box::new(NeverIndex)
-        }
+    /// Build an unsigned JWT (`header.payload.sig`) whose payload is `claims`.
+    fn jwt_with_payload(claims: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("eyJhbGciOiJFUzI1NiJ9.{payload}.sig")
     }
 
-    /// Assert that [`SignPipeline::run`] panics with the Phase-5c stub message.
-    ///
-    /// Protects against the stub being silently removed (which would turn
-    /// "unimplemented" into "no-op success") before the real pipeline is wired.
     #[test]
-    #[allow(clippy::result_large_err)] // test uses catch_unwind; large Err is expected and intentional
-    fn pipeline_stub_is_unimplemented() {
-        // Because `unimplemented!()` fires at the top of the async fn before
-        // any await point, polling the Future once is sufficient.  Use
-        // `catch_unwind` to assert the panic message.
-        let result = panic::catch_unwind(|| {
-            let data = StubTransportData::new();
-            let transport = StubTransport::new(data);
+    fn jwt_claim_reads_string_claims() {
+        let jwt = jwt_with_payload(&serde_json::json!({
+            "sub": "me@example.com",
+            "iss": "https://issuer.example",
+        }));
+        assert_eq!(jwt_claim(&jwt, "sub").as_deref(), Some("me@example.com"));
+        assert_eq!(jwt_claim(&jwt, "iss").as_deref(), Some("https://issuer.example"));
+    }
 
-            let identifier = Identifier::parse("registry.example/pkg:1.0").expect("parse");
-            let platform: Platform = "linux/amd64".parse().expect("platform");
-            let signer = super::super::signer::KeylessSigner::new();
-            let token_provider = super::super::oidc::DispatchingTokenProvider::new(None, true);
-            let fulcio_url = Url::parse("https://fulcio.sigstore.dev").expect("url");
-            let rekor_url = Url::parse("https://rekor.sigstore.dev").expect("url");
-            let index = Index::from_impl(NeverIndex);
+    #[test]
+    fn jwt_claim_is_none_for_missing_or_non_string_claims() {
+        let jwt = jwt_with_payload(&serde_json::json!({ "sub": "me", "exp": 12345 }));
+        assert_eq!(jwt_claim(&jwt, "email"), None, "absent claim");
+        assert_eq!(jwt_claim(&jwt, "exp"), None, "numeric claim is not a string");
+    }
 
-            let ctx = SignContext {
-                identifier: &identifier,
-                platform: &platform,
-                signer: &signer,
-                token_provider: &token_provider,
-                no_cache: false,
-                transport: &transport,
-                index: &index,
-                fulcio_url: &fulcio_url,
-                rekor_url: &rekor_url,
-            };
+    #[test]
+    fn jwt_claim_is_none_for_undecodable_input() {
+        assert_eq!(jwt_claim("not-a-jwt", "sub"), None, "no payload segment");
+        assert_eq!(jwt_claim("h.!!!not-base64!!!.s", "sub"), None, "bad base64 payload");
+        assert_eq!(jwt_claim("h..s", "sub"), None, "empty payload");
+    }
 
-            let rt = tokio::runtime::Builder::new_current_thread().build().expect("rt");
-            rt.block_on(SignPipeline::run(ctx))
+    #[test]
+    fn map_client_error_preserves_referrers_unsupported() {
+        let mapped = map_client_error(ClientError::ReferrersUnsupported {
+            registry: "example.com".to_string(),
         });
-
-        let panic_payload = match result {
-            Ok(_) => panic!("SignPipeline::run must panic (Phase 5c stub) — but it returned Ok"),
-            Err(payload) => payload,
-        };
-        let msg = panic_payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-            .unwrap_or("<non-string panic>");
-        assert!(
-            msg.contains("Phase 5"),
-            "expected Phase-5 stub panic message, got: {msg}"
-        );
+        assert!(matches!(mapped, SignErrorKind::ReferrersUnsupported));
     }
 
-    /// ADR S1-F structural test: no fallback-tag PUTs.
-    ///
-    /// OCX must never write `sha256-<hex>.sig` or `sha256-<hex>.att` tags on
-    /// the push side — fallback-tag writes are banned per ADR S1-F. Registries
-    /// that do not support the OCI Referrers API hard-fail with
-    /// `SignErrorKind::ReferrersUnsupported` (exit 84) instead.
-    ///
-    /// This test is **ignored** until Phase 5c wires `SignPipeline::run`.
-    /// When Phase 5c lands:
-    /// 1. Remove the `#[ignore]` attribute.
-    /// 2. Construct a `StubTransportData` with `capture_pushes = true`.
-    /// 3. Run the pipeline against a pre-seeded registry state.
-    /// 4. Walk `data.read().manifests` and assert no key matches
-    ///    `^sha256-[0-9a-f]{64}\.(sig|att)$` (ADR S1-F invariant).
     #[test]
-    #[ignore = "Phase 5c: SignPipeline::run is unimplemented — flip to active when pipeline is wired"]
-    fn push_sequence_emits_no_fallback_tags() {
-        // Phase 5c implementation sketch:
-        //
-        //   let data = StubTransportData::new();
-        //   data.write().capture_pushes = true;
-        //   // ... seed subject manifest + run pipeline successfully ...
-        //   let inner = data.read();
-        //   for key in inner.manifests.keys() {
-        //       let is_fallback = key.starts_with("sha256-")
-        //           && (key.ends_with(".sig") || key.ends_with(".att"))
-        //           && key.len() == "sha256-".len() + 64 + ".sig".len();
-        //       assert!(!is_fallback, "ADR S1-F violation: fallback tag in manifests: {key}");
-        //   }
+    fn map_client_error_wraps_other_errors_as_internal() {
+        let mapped = map_client_error(ClientError::InvalidManifest("bad".to_string()));
+        assert!(matches!(mapped, SignErrorKind::Internal(_)));
     }
 }

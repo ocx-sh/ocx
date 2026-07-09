@@ -13,12 +13,12 @@ The user-facing surface — sign a release, verify what you install — lives in
 
 ## Trust Root {#trust-root}
 
-OCX verifies [Fulcio][fulcio] certificates against a trust root: a set of DER-encoded X.509 CA certificates. Two construction paths exist in the code:
+OCX verifies [Fulcio][fulcio] certificates against a trust root: a set of DER-encoded X.509 CA certificates. You supply one in two ways, in precedence order:
 
-- **`TrustRoot::load_embedded()`** — intended to ship a bundled [TUF][sigstore-tuf] trust root asset compiled into the binary. In Slice 1 this path returns `TrustRootUnavailable` (exit 78); the production trust bundle ships in Slice 2.
-- **`TrustRoot::load_from_pem(pem_bytes)`** — loads one or more `CERTIFICATE` PEM blocks from a supplied byte slice. Used by the acceptance test stack to inject the `fake_fulcio` self-signed root, so the verify pipeline trusts test-minted certificates without shipping production roots.
+- **`--trust-root <PATH>`** on `ocx package verify`, or the [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] environment variable (the flag wins) — a PEM file of one or more `CERTIFICATE` blocks, loaded by `TrustRoot::load_from_pem`. This is the seam the acceptance suite uses to inject the `fake_fulcio` self-signed root so the verify pipeline trusts test-minted certificates.
+- **The embedded production root** — `TrustRoot::load_embedded` is intended to ship a bundled [TUF][sigstore-tuf] trust root compiled into the binary. It is **stubbed** in this release: with no flag or env override, verify exits 78 (`TrustRootUnavailable`).
 
-Until `load_embedded` is wired in Slice 2, `ocx package verify` against a real [Sigstore][sigstore] deployment will exit 78. The trust-root loading path and all downstream verification logic is otherwise fully functional once a root is supplied.
+So today, `ocx package verify` requires an explicit `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT`. The chain check and every downstream verification step run fully once a root is supplied.
 
 ## Referrers Capability Cache {#referrers-cache}
 
@@ -87,15 +87,26 @@ The `@refs/heads/main` suffix is the ref the workflow ran on; pin to the exact r
 
 ## Slice Boundary {#slice-boundary}
 
-OCX ships signing and verification in two slices:
+**This release** wires the complete keyless pipeline: OIDC token acquisition, ephemeral ECDSA P-256 keypair generation, the [Fulcio][fulcio] certificate request, the [Rekor][rekor] log entry, [Sigstore bundle v0.3][sigstore-bundle] assembly, the referrer push, and the full five-check verify path — certificate chain against the trust root, Rekor SET, signature over the subject digest, identity match, issuer match. Sign and verify run end-to-end; their exit-code and flag contracts are stable.
 
-**Slice 1 (this release):** Wires flag parsing, OIDC token acquisition, referrers-capability probing, trust-root loader infrastructure (`load_from_pem` fully functional, `load_embedded` returns `TrustRootUnavailable`), and the full offline-mode rejection. Both stub boundaries surface a typed error that classifies to exit 78 (`ConfigError`): `ocx package sign` returns `SignErrorKind::PipelinePending` (the `pipeline_pending` detail discriminant) before the [sigstore-rs][sigstore-rs] pipeline would run, and `ocx package verify` returns `VerifyErrorKind::TrustRootUnavailable`. Both are operator-visible contracts — CI scripts may condition on exit 78 (and the snake_case `detail` discriminant) to detect the slice boundary, with no panic output to scrape. Exit codes and flag contracts are stable; scripts may condition on them today.
+What is **not** yet done is production hardening against public-good Sigstore. The pipeline is exercised only against the in-repo fake Sigstore stack — see [Current Limitations](#current-limitations). The Fulcio and Rekor clients are hand-rolled against that fake stack's wire shapes, the embedded TUF trust root is stubbed, and the Rekor SET is checked over a fake-stack payload format. Wiring and testing against public Fulcio/Rekor/TUF is tracked as a follow-up.
 
-**Slice 2 (planned):** Ships the complete sigstore-rs integration: Fulcio CSR construction, ECDSA P-256 keypair generation, Rekor log entry, and the full five-check verify path (certificate chain against TUF root, Rekor SET, signature over subject digest, identity match, issuer match). Also ships the production TUF trust root bundle (`load_embedded`) and cache-hit verify in `--offline` mode.
+**Rekor v2 transition:** Bundles signed against a Rekor v2 instance carry RFC 3161 TSA timestamps instead of SETs. OCX treats these as exit 83 (`RekorUnavailable`) with `VerifyErrorKind::RekorSetAbsentTsaPresent`. Full TSA verification ships in a future slice when [sigstore-rs][sigstore-rs] lands a Rekor v2 client.
 
-**Rekor v2 transition:** Bundles signed against a Rekor v2 instance carry RFC 3161 TSA timestamps instead of SETs. OCX v1 treats these as exit 83 (`RekorUnavailable`) with `VerifyErrorKind::RekorSetAbsentTsaPresent`. Full TSA verification ships in a future slice when [sigstore-rs][sigstore-rs] lands a Rekor v2 client.
+**DSSE / `ocx package attest`:** DSSE attestation signing and verification are not implemented. The verify path rejects a DSSE-envelope bundle with `NoUsableBundle` (exit 79). Deferred until [sigstore-rs][sigstore-rs] ships DSSE support.
 
-**DSSE / `ocx package attest`:** DSSE attestation signing is not in Slice 1 or Slice 2. Deferred until [sigstore-rs][sigstore-rs] ships DSSE signing support (no upstream PR as of 2026-05). DSSE verification (reading external attestations) is on the Slice 2 roadmap.
+## Current Limitations {#current-limitations}
+
+The pipeline is verified end-to-end against the in-repo fake Sigstore stack, not the public-good Fulcio/Rekor/TUF. Until production hardening lands, be aware:
+
+- **Single-hop certificate chain.** The leaf is verified directly against a trust-root CA; intermediate certificates in the bundle are not walked. A real Fulcio leaf signed by an intermediate will not validate unless that intermediate is itself in the supplied trust root.
+- **No certificate temporal-validity check.** The leaf's `notBefore` / `notAfter` are not checked against the [Rekor][rekor] integrated time, so a certificate that had expired by verify time is not yet rejected on that basis.
+- **Rekor SET format is fake-stack-specific.** The Signed Entry Timestamp is Ed25519-verified over OCX's own deterministic payload, not the public Rekor canonical wire format. Verification against public-good Rekor is not yet supported.
+- **No Merkle inclusion proof.** Only the Rekor SET (inclusion promise) is checked; the transparency-log inclusion and consistency proofs are not verified.
+- **Rekor key is fetched, not pinned.** The Rekor public key is fetched from `--rekor-url/api/v1/log/publicKey` at verify time (trust-on-first-use) rather than pinned in the trust root.
+- **Embedded TUF trust root is stubbed.** `TrustRoot::load_embedded` returns `TrustRootUnavailable`; you must pass `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root].
+
+Do not treat a green `ocx package verify` against production Sigstore as a completed cryptographic verification until these are addressed.
 
 :::warning Offline verification (Slice 1)
 `ocx package verify` requires a live network connection in Slice 1. Offline cache-hit verification is planned for Slice 2. If you pass `--offline`, the command exits 81 (`PolicyBlocked`).
@@ -104,7 +115,7 @@ OCX ships signing and verification in two slices:
 :::
 
 :::tip Custom Sigstore endpoints
-`--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio/Rekor. `validate_sigstore_url` accepts `http://` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`); any non-loopback target must be `https://`, so the SSRF guard stays active. The end-to-end signing pipeline lands in Slice 2 (see [Slice Boundary](#slice-boundary)).
+`--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio/Rekor. `validate_sigstore_url` accepts `http://` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`); any non-loopback target must be `https://`, so the SSRF guard stays active. The clients are hand-rolled against the fake stack's wire shapes today (see [Current Limitations](#current-limitations)).
 :::
 
 ## Signing Flow Summary {#signing-flow}
@@ -146,6 +157,7 @@ OCX ships signing and verification in two slices:
 
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
+[env-sigstore-trust-root]: ../reference/environment.md#ocx-sigstore-trust-root
 
 <!-- user guide -->
 [user-supply-chain]: ../user-guide.md#supply-chain

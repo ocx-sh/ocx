@@ -176,6 +176,14 @@ Token precedence for `ocx package sign` (highest to lowest):
 OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
 :::
 
+### `OCX_SIGSTORE_TRUST_ROOT` {#ocx-sigstore-trust-root}
+
+Path to a PEM file of [Fulcio][fulcio] CA certificate(s) that [`ocx package verify`][cmd-package-verify] validates the signing certificate chain against. Equivalent to the `--trust-root` flag; the flag takes precedence when both are set.
+
+When neither is given, verify falls back to the embedded production trust root — which is stubbed in this release (`TrustRoot::load_embedded` returns `TrustRootUnavailable`, exit 78). Until it ships, supplying a Fulcio CA via this variable or the flag is **required** to verify. It is the seam the acceptance suite uses to inject the fake Fulcio root when verifying test-minted certificates.
+
+This variable affects only the local verify operation and is **not** forwarded to subprocess children.
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
@@ -629,11 +637,13 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 [mozilla-ca]: https://wiki.mozilla.org/CA/Included_Certificates
 [distroless]: https://github.com/GoogleContainerTools/distroless
+[fulcio]: https://github.com/sigstore/fulcio
 
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-direnv]: command-line.md#direnv
 [cmd-package-sign]: command-line.md#package-sign
+[cmd-package-verify]: command-line.md#package-verify
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag

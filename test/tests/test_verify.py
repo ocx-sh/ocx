@@ -6,23 +6,16 @@ Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``
 (specifically C-S1-1 frozen envelope + C-S1-2 VerifyErrorKind variant set) and
 ``.claude/state/plans/plan_slice1_sign_and_verify.md``.
 
-Test strategy
-=============
-
-- **Envelope golden tests** run today against the unimplemented CLI and
-  ``xfail(strict=True)`` until Phase 5. They pin byte-level v1 contract shape.
-- **Signer-mismatch + unknown-signer tests** depend on ``fake_fulcio``
-  minting leaf certs with controllable SANs; xfail until fixtures land.
-- **No-signatures tests** can potentially run today (registry has no
-  referrers at all) but exit 79 requires the error classifier to route
-  ``VerifyErrorKind::NoSignaturesFound`` correctly — xfail until Phase 5.
+Trust-root seam: every verify subprocess that must succeed (or reach crypto)
+sets ``OCX_SIGSTORE_TRUST_ROOT`` to the fake Fulcio CA (``fake_fulcio.root_pem``)
+so the leaf cert chain validates against the fake root rather than a real
+Sigstore trust bundle.
 """
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
-
-import pytest
 
 from src.runner import OcxRunner, PackageInfo
 from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
@@ -33,10 +26,6 @@ from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run and VerifyPipeline::run not yet implemented",
-)
 def test_verify_unknown_signer_fails_identity_mismatch(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -50,7 +39,6 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     expected" signal. Distinct from ``NoSignaturesFound`` (79) — the bundle
     exists and cryptographically verifies, but the cert SAN doesn't match the
     caller's ``--certificate-identity``.
-    Xfails until Phase 5c wires both Rust pipelines.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -71,6 +59,7 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     assert sign.returncode == 0, f"sign setup failed: {sign.stderr}"
 
     # Now verify as signer B — different identity, same bundle.
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -83,7 +72,7 @@ def test_verify_unknown_signer_fails_identity_mismatch(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 77, (
         f"expected exit 77 (PermissionDenied / IdentityMismatch), "
@@ -91,10 +80,6 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: SignPipeline::run and VerifyPipeline::run not yet implemented",
-)
 def test_verify_issuer_mismatch_exits_77(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -102,10 +87,7 @@ def test_verify_issuer_mismatch_exits_77(
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
 ) -> None:
-    """Cert-issuer mismatch → exit 77. Distinct variant, same code as identity.
-
-    Xfails until Phase 5c wires both Rust pipelines.
-    """
+    """Cert-issuer mismatch → exit 77. Distinct variant, same code as identity."""
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     sign = subprocess.run(
@@ -123,6 +105,7 @@ def test_verify_issuer_mismatch_exits_77(
     )
     assert sign.returncode == 0
 
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -135,7 +118,7 @@ def test_verify_issuer_mismatch_exits_77(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 77, (
         f"expected exit 77 (IssuerMismatch), got {verify.returncode}\n"
@@ -148,21 +131,18 @@ def test_verify_issuer_mismatch_exits_77(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: unsigned package yields VerifyErrorKind::NoSignaturesFound → "
-    "exit 79; stub currently panics with unimplemented!()",
-)
 def test_verify_no_signatures_exits_79(
-    ocx: OcxRunner, published_package: PackageInfo
+    ocx: OcxRunner, published_package: PackageInfo, fake_fulcio: FakeFulcio
 ) -> None:
     """A package with no referrers → exit 79.
 
     C-S1-2: ``NoSignaturesFound`` maps to 79 so CI scripts can distinguish
     "not signed" (retryable: sign first) from "bad signature" (terminal) via
-    ``$?`` alone.
+    ``$?`` alone. Fails before reaching crypto, so the trust-root env is
+    harmless here — added for consistency with every other verify call.
     """
     pkg = published_package
+    env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     result = subprocess.run(
         [
             str(ocx.binary),
@@ -174,7 +154,7 @@ def test_verify_no_signatures_exits_79(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=env,
     )
     assert result.returncode == 79, (
         f"expected exit 79 (NotFound / NoSignaturesFound), "
@@ -187,21 +167,26 @@ def test_verify_no_signatures_exits_79(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: registry:2 does not implement /v2/<name>/referrers/; "
-    "verify must detect 404 via capability probe and exit 84",
-)
 def test_verify_referrers_unsupported_exits_84(
-    ocx: OcxRunner, published_package: PackageInfo
+    ocx: OcxRunner,
+    legacy_registry: str,
+    unique_repo: str,
+    tmp_path,
+    fake_fulcio: FakeFulcio,
 ) -> None:
     """Registry without referrers API → exit 84.
 
-    Discovery must fail hard — silently returning an empty result set when
-    the registry doesn't support the endpoint would masquerade as
-    ``NoSignaturesFound``, muddying the exit-code contract.
+    ``legacy_registry`` (``registry:2``, #106/#195 negative fixture) does not
+    implement ``/v2/<name>/referrers/``. Discovery must fail hard — silently
+    returning an empty result set when the registry doesn't support the
+    endpoint would masquerade as ``NoSignaturesFound``, muddying the
+    exit-code contract.
     """
-    pkg = published_package
+    from src.helpers import make_package
+
+    legacy_ocx = OcxRunner(ocx.binary, ocx.ocx_home, legacy_registry)
+    pkg = make_package(legacy_ocx, unique_repo, "1.0.0", tmp_path)
+    env = {**legacy_ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     result = subprocess.run(
         [
             str(ocx.binary),
@@ -213,7 +198,7 @@ def test_verify_referrers_unsupported_exits_84(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=env,
     )
     assert result.returncode == 84, (
         f"expected exit 84 (ReferrersUnsupported), got {result.returncode}\n"
@@ -226,13 +211,8 @@ def test_verify_referrers_unsupported_exits_84(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: render_error_envelope is unimplemented; error branch emits "
-    "v1 schema with `error.kind=not_found` and `exit_code=79` for unsigned pkg",
-)
 def test_verify_error_envelope_golden_shape(
-    ocx: OcxRunner, published_package: PackageInfo
+    ocx: OcxRunner, published_package: PackageInfo, fake_fulcio: FakeFulcio
 ) -> None:
     """Error-branch JSON envelope matches frozen v1 contract (C-S1-1).
 
@@ -244,6 +224,7 @@ def test_verify_error_envelope_golden_shape(
     - No ``data`` key on error branches.
     """
     pkg = published_package
+    env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     result = subprocess.run(
         [
             str(ocx.binary),
@@ -256,7 +237,7 @@ def test_verify_error_envelope_golden_shape(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=env,
     )
     assert result.returncode != 0, "unsigned package must fail verify"
     envelope = json.loads(result.stdout or result.stderr)
@@ -270,11 +251,6 @@ def test_verify_error_envelope_golden_shape(
     assert isinstance(error["context"], dict)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: success-branch envelope emits v1 shape with top-level data "
-    "wrapping VerifyResult (subject_digest + referrer_digest + cert identity)",
-)
 def test_verify_success_envelope_golden_shape(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -308,6 +284,7 @@ def test_verify_success_envelope_golden_shape(
     )
     assert sign.returncode == 0
 
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -321,7 +298,7 @@ def test_verify_success_envelope_golden_shape(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 0, verify.stderr
     envelope = json.loads(verify.stdout)
@@ -341,10 +318,6 @@ def test_verify_success_envelope_golden_shape(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: VerifyPipeline SET canonicalization not yet wired",
-)
 def test_verify_detects_tampered_rekor_set(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -354,13 +327,15 @@ def test_verify_detects_tampered_rekor_set(
 ) -> None:
     """A tampered Rekor SET → exit 65 (DataError), not exit 83.
 
-    Locks the TODO at ``fake_sigstore.py:551-562``. RekorSetInvalid is a
-    data-integrity failure (the bundle has been altered) — retry will not
-    help, so it must map to ``DataError`` not ``RekorUnavailable``. Phase 5c
-    must canonicalize the SET payload in a way that catches single-bit
-    tampering during ``VerifyPipeline::run``.
+    RekorSetInvalid is a data-integrity failure (the bundle has been
+    altered) — retry will not help, so it must map to ``DataError`` not
+    ``RekorUnavailable``. The tamper toggle is set BEFORE signing so the
+    produced bundle carries the bad SET (see ``FakeRekor.set_tampered_set``
+    docstring).
     """
     pkg = published_package
+    fake_rekor.set_tampered_set(True)
+
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     sign = subprocess.run(
         [
@@ -377,9 +352,7 @@ def test_verify_detects_tampered_rekor_set(
     )
     assert sign.returncode == 0, sign.stderr
 
-    # Toggle the fake Rekor into tampered-SET mode (Phase 5c adds the toggle).
-    fake_rekor.set_tampered_set(True)  # type: ignore[attr-defined]
-
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -392,7 +365,7 @@ def test_verify_detects_tampered_rekor_set(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 65, (
         f"expected exit 65 (DataError / RekorSetInvalid), got {verify.returncode}\n"
@@ -405,29 +378,30 @@ def test_verify_detects_tampered_rekor_set(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: VerifyPipeline::run unimplemented",
-)
 def test_verify_detects_tampered_bundle_signature_exits_65(
     ocx: OcxRunner,
     published_package: PackageInfo,
     fake_fulcio: FakeFulcio,
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
-    tmp_path,
 ) -> None:
     """Flip a byte in the published bundle blob → exit 65 (SignatureInvalid).
 
-    The bundle is content-addressed, so altering the OCI blob will fail the
-    subject-digest signature check. Phase 5c implements the full verify
-    pipeline; pre-5c the test xfails strictly.
+    The bundle is content-addressed, so this is registry surgery: sign
+    normally, fetch the referrer manifest + its bundle-blob layer, corrupt
+    ``messageSignature.signature`` by flipping one byte, push the corrupted
+    blob under a new digest, then DELETE the original referrer manifest and
+    push a replacement pointing at the corrupted blob — so exactly one
+    referrer exists for the subject and it is the tampered one.
     """
+    from src.registry import delete_manifest, get_blob, get_manifest, push_blob, push_manifest
+
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     sign = subprocess.run(
         [
             str(ocx.binary),
+            "--format", "json",
             "package", "sign",
             "--fulcio-url", fake_fulcio.url,
             "--rekor-url", fake_rekor.url,
@@ -439,10 +413,22 @@ def test_verify_detects_tampered_bundle_signature_exits_65(
         env=env,
     )
     assert sign.returncode == 0, sign.stderr
+    referrer_digest = json.loads(sign.stdout)["data"]["referrer_digest"]
 
-    # Phase 5c wires the bundle-tamper path. The probe — flipping a single
-    # byte in the bundle blob and re-pushing — runs at Phase 5c time.
+    manifest = get_manifest(ocx.registry, pkg.repo, referrer_digest)
+    bundle_layer = manifest["layers"][0]
+    bundle = json.loads(get_blob(ocx.registry, pkg.repo, bundle_layer["digest"]))
+    signature = bytearray(base64.b64decode(bundle["messageSignature"]["signature"]))
+    signature[0] ^= 0xFF  # flip a byte — deterministically invalidates the signature
+    bundle["messageSignature"]["signature"] = base64.b64encode(bytes(signature)).decode()
+    corrupted_bytes = json.dumps(bundle).encode()
 
+    new_blob_digest = push_blob(ocx.registry, pkg.repo, corrupted_bytes)
+    manifest["layers"][0] = {**bundle_layer, "digest": new_blob_digest, "size": len(corrupted_bytes)}
+    delete_manifest(ocx.registry, pkg.repo, referrer_digest)
+    push_manifest(ocx.registry, pkg.repo, manifest)
+
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -455,7 +441,7 @@ def test_verify_detects_tampered_bundle_signature_exits_65(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 65, (
         f"expected exit 65 (DataError / SignatureInvalid), got {verify.returncode}\n"
@@ -468,10 +454,6 @@ def test_verify_detects_tampered_bundle_signature_exits_65(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: VerifyPipeline::run unimplemented",
-)
 def test_verify_invalid_cert_chain_exits_65(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -483,8 +465,7 @@ def test_verify_invalid_cert_chain_exits_65(
 
     Toggles ``fake_fulcio.set_invalid_chain(True)`` before signing so the
     bundle carries a chain that the verify pipeline rejects via
-    ``CertChainInvalid``. Phase 5c implements the trust-root chain check;
-    pre-5c xfail strictly.
+    ``CertChainInvalid``.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -504,6 +485,7 @@ def test_verify_invalid_cert_chain_exits_65(
     )
     assert sign.returncode == 0, sign.stderr
 
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -516,7 +498,7 @@ def test_verify_invalid_cert_chain_exits_65(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 65, (
         f"expected exit 65 (DataError / CertChainInvalid), got {verify.returncode}\n"
@@ -529,10 +511,6 @@ def test_verify_invalid_cert_chain_exits_65(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5c: VerifyPipeline::run unimplemented",
-)
 def test_verify_rekor_unavailable_exits_83(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -543,8 +521,7 @@ def test_verify_rekor_unavailable_exits_83(
     """Fake Rekor returns 503 during the verify SET lookup → exit 83.
 
     Distinguished from ``RekorSetInvalid`` (exit 65) because retry MAY help
-    here — the service is transiently down, not a crypto failure. Phase 5c
-    implements the SET fetch + classification.
+    here — the service is transiently down, not a crypto failure.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -566,6 +543,7 @@ def test_verify_rekor_unavailable_exits_83(
     from tests.fixtures.fake_sigstore import HttpStatus
     fake_rekor.set_failure_mode(HttpStatus(503))
 
+    verify_env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
     verify = subprocess.run(
         [
             str(ocx.binary),
@@ -578,7 +556,7 @@ def test_verify_rekor_unavailable_exits_83(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=verify_env,
     )
     assert verify.returncode == 83, (
         f"expected exit 83 (RekorUnavailable), got {verify.returncode}\n"

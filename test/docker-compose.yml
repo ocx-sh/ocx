@@ -15,7 +15,10 @@ services:
   registry:
     image: ghcr.io/project-zot/zot:v2.1.18
     ports:
-      - "5000:5000"
+      # ponytail: host port overridable (default unchanged) so a squatted
+      # 5000 on the runner's machine doesn't block bring-up; set
+      # OCX_ZOT_PORT + REGISTRY=localhost:<port> together.
+      - "${OCX_ZOT_PORT:-5000}:5000"
     volumes:
       - ./zot-config.json:/etc/zot/config.json:ro
 

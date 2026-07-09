@@ -15,20 +15,23 @@
 //! values — keyless verification is meaningless without knowing whose
 //! signature you trust.
 //!
-//! Phase 5a wires the non-network plumbing: flag parsing, identifier
-//! resolution, and a scoped `VerifyErrorKind::TrustRootUnavailable` /
-//! `BundleNotFound` surface. The full verify state machine
-//! (`VerifyPipeline::run`) is Phase 5c, blocked on sigstore-rs integration
-//! and a public `Client::transport()` accessor.
+//! This command resolves the identifier, validates `--rekor-url` (SSRF guard),
+//! resolves the trust root (`--trust-root` flag, then the
+//! `OCX_SIGSTORE_TRUST_ROOT` env var, then the stubbed embedded root), and
+//! drives [`VerifyPipeline::run`], which runs the full state machine and
+//! returns a [`VerificationReport`]. The positive path is currently exercised
+//! only against the fake Sigstore stack; production hardening against
+//! public-good Fulcio/Rekor/TUF is tracked separately.
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
 use ocx_lib::oci;
-use ocx_lib::oci::sign::endpoint::validate_sigstore_url;
-use ocx_lib::oci::verify::{VerifyError, VerifyErrorKind};
+use ocx_lib::oci::endpoint::validate_sigstore_url;
+use ocx_lib::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyErrorKind, VerifyPipeline};
 
+use crate::api::data::verification::VerificationReport;
 use crate::options;
 
 /// Default public Rekor transparency-log endpoint (overridable via `--rekor-url`).
@@ -60,6 +63,15 @@ pub struct Verify {
     #[clap(long = "no-cache")]
     no_cache: bool,
 
+    /// Trust-root override: a PEM file of Fulcio CA certificate(s).
+    ///
+    /// By default verification uses the bundled Sigstore trust root. This flag
+    /// (or the `OCX_SIGSTORE_TRUST_ROOT` env var) points at a custom Fulcio CA
+    /// PEM for air-gapped deployments or against a private Sigstore instance.
+    /// The flag takes precedence over the env var.
+    #[clap(long = "trust-root", value_name = "PATH")]
+    trust_root: Option<std::path::PathBuf>,
+
     /// Package identifier to verify (`registry/repo:tag[@digest]`).
     identifier: options::Identifier,
 }
@@ -73,7 +85,7 @@ impl Verify {
         // UrlRejection into `VerifyErrorKind::InvalidEndpointUrl` so the
         // exit-code classifier maps it to `UsageError` (64) via the verify
         // error path — no cross-subsystem dependency on SignError.
-        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
+        let rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
             VerifyError::new(
                 identifier.clone(),
                 VerifyErrorKind::InvalidEndpointUrl {
@@ -85,21 +97,67 @@ impl Verify {
 
         // Online-only: verify needs the registry to fetch referrers (and Rekor
         // to verify the SET). Offline mode → exit 81 via `OfflineMode` classifier.
-        let (_index, _client) = context.online_context()?;
+        let (index, client) = context.online_context()?;
 
-        // Phase 5c blocker: `VerifyPipeline::run` requires a `&dyn OciTransport`
-        // (see `oci::verify::VerifyContext::transport`) plus a populated
-        // `TrustRoot` (`TrustRoot::load_embedded` is also Phase 5c, blocked on
-        // the `sigstore-trust-root` crate). Until both land we surface
-        // `VerifyErrorKind::TrustRootUnavailable` so the exit-code classifier
-        // produces `ConfigError` (78) — a readable "the verify path isn't
-        // wired yet" signal rather than a panic. (Verify reuses the existing
-        // `TrustRootUnavailable` variant because the trust root is genuinely
-        // missing in Slice 1 — there is no value in introducing a separate
-        // verify-side `NotImplemented` until the embedded TUF root ships.)
-        Err(anyhow::Error::from(VerifyError::new(
-            identifier,
-            VerifyErrorKind::TrustRootUnavailable,
-        )))
+        let trust_root = self.resolve_trust_root(&identifier)?;
+
+        let verify_context = VerifyContext {
+            identifier: &identifier,
+            platform: &self.platform,
+            certificate_identity: &self.certificate_identity,
+            certificate_oidc_issuer: &self.certificate_oidc_issuer,
+            no_cache: self.no_cache,
+            transport: client.transport(),
+            index,
+            trust_root: &trust_root,
+            rekor_url: &rekor_url,
+            cache_root: context.file_structure().root(),
+        };
+        let result = VerifyPipeline::run(verify_context).await?;
+
+        let report = VerificationReport::new(
+            result.subject_digest,
+            result.referrer_digest,
+            result.certificate_identity,
+            result.certificate_oidc_issuer,
+            iso8601(result.signed_at),
+        );
+        context.api().report(&report)?;
+        Ok(ExitCode::SUCCESS)
     }
+
+    /// Resolve the trust root: `--trust-root` flag > `OCX_SIGSTORE_TRUST_ROOT`
+    /// env > the bundled Sigstore root. The override is a PEM of Fulcio CA
+    /// certificate(s).
+    fn resolve_trust_root(&self, identifier: &oci::Identifier) -> anyhow::Result<TrustRoot> {
+        let override_path = self
+            .trust_root
+            .clone()
+            .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(std::path::PathBuf::from));
+        match override_path {
+            Some(path) => {
+                let bytes = std::fs::read(&path).map_err(|source| {
+                    VerifyError::new(
+                        identifier.clone(),
+                        VerifyErrorKind::TrustRootLoad(
+                            ocx_lib::oci::verify::error::TrustRootLoadReason::AssetReadFailed {
+                                source: Box::new(source),
+                            },
+                        ),
+                    )
+                })?;
+                TrustRoot::load_from_pem(&bytes)
+                    .map_err(|kind| anyhow::Error::from(VerifyError::new(identifier.clone(), kind)))
+            }
+            None => TrustRoot::load_embedded()
+                .map_err(|kind| anyhow::Error::from(VerifyError::new(identifier.clone(), kind))),
+        }
+    }
+}
+
+/// Format a UTC epoch-seconds timestamp as ISO-8601 (`YYYY-MM-DDThh:mm:ssZ`).
+fn iso8601(epoch_secs: u64) -> String {
+    chrono::DateTime::from_timestamp(epoch_secs as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default()
 }

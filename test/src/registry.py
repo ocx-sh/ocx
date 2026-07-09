@@ -265,6 +265,38 @@ def push_referrer(
     return push_manifest(registry, repo, manifest, insecure=insecure)
 
 
+def get_manifest(
+    registry: str, repo: str, digest: str, *, insecure: bool = True
+) -> dict[str, Any]:
+    """GET a manifest by digest; return the parsed OCI manifest JSON."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http(
+        "GET",
+        f"{scheme}://{registry}/v2/{repo}/manifests/{digest}",
+        headers={"Accept": IMAGE_MANIFEST_MEDIA_TYPE},
+    )
+    if status != 200:
+        raise RuntimeError(f"manifest GET failed ({status}) for {repo}@{digest}")
+    return json.loads(body)
+
+
+def get_blob(registry: str, repo: str, digest: str, *, insecure: bool = True) -> bytes:
+    """GET a blob by digest; return the raw bytes."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http("GET", f"{scheme}://{registry}/v2/{repo}/blobs/{digest}")
+    if status != 200:
+        raise RuntimeError(f"blob GET failed ({status}) for {repo}@{digest}")
+    return body
+
+
+def delete_manifest(registry: str, repo: str, digest: str, *, insecure: bool = True) -> None:
+    """DELETE a manifest by digest (e.g. to replace a referrer in-place for a tamper test)."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http("DELETE", f"{scheme}://{registry}/v2/{repo}/manifests/{digest}")
+    if status not in (200, 202, 204):
+        raise RuntimeError(f"manifest DELETE failed ({status}) for {repo}@{digest}: {body!r}")
+
+
 def list_referrers(
     registry: str,
     repo: str,

@@ -292,15 +292,14 @@ def test_rekor_set_verifies_with_public_key(tmp_path: Path) -> None:
         body = json.loads(resp.read())
         _uuid, entry = next(iter(body.items()))
 
-        # Reconstruct the canonical payload that was signed.
-        canonical = json.dumps(
-            {
-                "body": base64.b64encode(req_body_bytes).decode(),
-                "integratedTime": entry["integratedTime"],
-                "logID": entry["logID"],
-                "logIndex": entry["logIndex"],
-            },
-            sort_keys=True,
+        # Reconstruct the canonical payload that was signed. Must match the
+        # OCX-specific SET format the fake Rekor handler produces (and that
+        # crates/ocx_lib/src/oci/sign/rekor.rs::set_signing_payload verifies) —
+        # NOT the public-good Rekor v1 JSON-canonicalization format.
+        body_b64 = base64.b64encode(req_body_bytes).decode()
+        canonical = (
+            f"ocx-rekor-set-v1\n{entry['logIndex']}\n{entry['integratedTime']}\n"
+            f"{entry['logID']}\n{body_b64}"
         ).encode()
 
         set_bytes = base64.b64decode(entry["verification"]["signedEntryTimestamp"])

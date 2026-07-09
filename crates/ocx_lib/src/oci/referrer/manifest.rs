@@ -11,8 +11,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::Descriptor;
+use super::media_types::{EMPTY_CONFIG, EMPTY_CONFIG_DIGEST, EMPTY_CONFIG_SIZE};
 use crate::oci::sign::error::SignErrorKind;
+use crate::oci::{Descriptor, OCI_IMAGE_MEDIA_TYPE};
 
 /// OCI 1.1 image manifest carrying a `subject` descriptor.
 ///
@@ -49,17 +50,34 @@ impl ReferrerManifest {
     ///
     /// `artifact_type` is the referrer's media type (e.g.
     /// [`SIGSTORE_BUNDLE_V03`](super::media_types::SIGSTORE_BUNDLE_V03)).
-    /// `payload` is the descriptor of the pushed payload blob.
-    pub fn build(_subject: Descriptor, _artifact_type: &str, _payload: Descriptor) -> Self {
-        unimplemented!("ReferrerManifest::build — Phase 5 implementation")
+    /// `payload` is the descriptor of the pushed payload blob. The config is the
+    /// OCI empty-config descriptor per the empty-descriptor convention.
+    pub fn build(subject: Descriptor, artifact_type: &str, payload: Descriptor) -> Self {
+        let config = Descriptor {
+            media_type: EMPTY_CONFIG.to_string(),
+            digest: EMPTY_CONFIG_DIGEST.to_string(),
+            size: EMPTY_CONFIG_SIZE as i64,
+            ..Descriptor::default()
+        };
+        Self {
+            schema_version: 2,
+            media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
+            artifact_type: artifact_type.to_string(),
+            config,
+            layers: vec![payload],
+            subject,
+        }
     }
 
-    /// Serialize the manifest to canonical JSON bytes for push.
+    /// Serialize the manifest to JSON bytes for push.
+    ///
+    /// The registry addresses the referrer by the SHA-256 of exactly these
+    /// bytes, so the caller must digest the same buffer it pushes.
     ///
     /// # Errors
     ///
     /// Returns [`SignErrorKind::Internal`] when JSON serialization fails.
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, SignErrorKind> {
-        unimplemented!("ReferrerManifest::to_canonical_json — Phase 5 implementation")
+        serde_json::to_vec(self).map_err(|e| SignErrorKind::Internal(Box::new(e)))
     }
 }
