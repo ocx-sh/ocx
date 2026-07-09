@@ -180,8 +180,8 @@ ocx self update --check
 
 Version discovery honors `--offline` and `--frozen` because it runs through the [local index][fs-index] like every other command; pass [`--remote`][arg-remote] to force a live probe of the registry for the newest published release.
 
-::: tip `self update` is not `upgrade`
-[`ocx self update`][cmd-self-update] upgrades the ocx binary itself. It is distinct from `ocx upgrade`, which bumps the versions pinned in a project's `ocx.lock` — different verb, different target. Don't reach for one expecting the other.
+::: tip `ocx self update` is not `ocx update`
+[`ocx self update`][cmd-self-update] updates the ocx binary itself. [`ocx update`][cmd-update] re-resolves your toolchain's declared tags into `ocx.lock` — different verb, different target. Don't reach for one expecting the other.
 :::
 
 Alternatively, re-run the installer — it always fetches the latest release:
@@ -289,6 +289,7 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [cmd-env]: ./reference/command-line.md#env-root
 [cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
+[cmd-update]: ./reference/command-line.md#update
 [cmd-uninstall]: ./reference/command-line.md#uninstall
 [cmd-clean]: ./reference/command-line.md#clean
 [arg-remote]: ./reference/command-line.md#arg-remote

@@ -76,6 +76,18 @@ This produces a two-level lock: the tool version locks the bundled snapshot, whi
 
 The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] — one `filename → checksum` entry per `version × os × arch` — is clear: a version bump means editing one rule version, not a dictionary.
 
+## The `update` family {#update-family}
+
+Three OCX commands share the `update` verb. Each refreshes exactly one record, and confusing them means refreshing the wrong one.
+
+| Command | Refreshes |
+|---|---|
+| [`ocx index update`][cmd-index-update] | The local tag snapshot under [`~/.ocx/tags/`][in-depth-storage-tags] |
+| [`ocx self update`][cmd-self-update] | The managed ocx install itself |
+| [`ocx update`][cmd-update] | A project's `ocx.lock` |
+
+`ocx update` never writes to the tag snapshot — `ocx.lock` is its only canonical record. Re-resolving a project's pinned tools does not change what `cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
+
 ## See Also
 
 - [Indices section in the user guide][user-indices] — how-to: refresh, work offline, use `--remote`
@@ -99,6 +111,8 @@ The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] — o
 [cmd-index-update]: ../reference/command-line.md#index-update
 [cmd-index-catalog]: ../reference/command-line.md#index-catalog
 [cmd-index-list]: ../reference/command-line.md#index-list
+[cmd-self-update]: ../reference/command-line.md#self-update
+[cmd-update]: ../reference/command-line.md#update
 [arg-remote]: ../reference/command-line.md#arg-remote
 [arg-offline]: ../reference/command-line.md#arg-offline
 [arg-index]: ../reference/command-line.md#arg-index

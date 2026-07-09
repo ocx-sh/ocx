@@ -337,7 +337,7 @@ Use the root `--global` flag (before the subcommand) to target `$OCX_HOME/ocx.to
 
 `ocx --global add` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs, and selects the package in one step. Because a tool must be on PATH to be useful globally, select is always implied.
 
-The same root `--global` flag works with `remove`, `lock`, `upgrade`, and `pull`:
+The same root `--global` flag works with `remove`, `lock`, `update`, and `pull`:
 
 <<< @/_scripts/user-guide/global-manage.sh{sh}
 
@@ -391,7 +391,7 @@ Two commands that are always hermetic regardless of context:
 A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
 
 ::: tip Learn more
-[Command-line reference → root `--global` flag][cmd-add-global] — root flag before the subcommand; affects toolchain-tier commands `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`.
+[Command-line reference → root `--global` flag][cmd-add-global] — root flag before the subcommand; affects toolchain-tier commands `add`, `remove`, `lock`, `update`, `pull`, `run`, `env`.
 [Env-composition reference → Strict isolation][env-composition-strict-isolation] — reference-level statement of the no-composition rule.
 [Command-line reference → `ocx env`][cmd-env-root] — toolchain env exporter, format options, `--shell` safety rule.
 :::
@@ -420,7 +420,7 @@ Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/r
 ::: tip Edited `ocx.toml` by hand? Run `ocx lock`.
 [`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. The lock carries a hash over the canonicalized `ocx.toml`; commands that read the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the drift and exit 65 telling you the lock is stale. Re-run [`ocx lock`][cmd-lock] to sync. The default is intentional: read paths never silently re-resolve, so CI cannot drift behind a stray editor save.
 
-Adding or removing a tool never silently upgrades your other tools — [`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] carry every untouched lock entry forward unchanged. Only [`ocx upgrade`][cmd-upgrade] re-resolves surviving tags.
+Adding or removing a tool never silently updates your other tools — [`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] carry every untouched lock entry forward unchanged. Only [`ocx update`][cmd-update] re-resolves surviving tags.
 :::
 
 ::: warning Commit your `ocx.lock`
@@ -841,9 +841,9 @@ Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--lo
 
 [`--frozen`][arg-frozen] and [`--offline`][arg-offline] sit on different axes. `--frozen` freezes *version discovery*: a tag already in the local index (or a digest-pinned reference) resolves, but an unknown tag errors instead of being fetched — known content still downloads over the network. `--offline` bans the *network* entirely, so even a digest-pinned blob that is not already cached fails. Use `--frozen` to guarantee no unfamiliar version slips in; use `--offline` for a fully air-gapped run; combine both for the strictest mode (offline wins where they overlap).
 
-Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx upgrade`][cmd-upgrade]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
+Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
 
-For the "verify a subset would not change without writing" flow, use [`ocx upgrade --check`][cmd-upgrade]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
+For the "verify a subset would not change without writing" flow, use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
 
 ## Migration {#project-toolchain-migration}
 
@@ -966,7 +966,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
 [cmd-lock]: ./reference/command-line.md#lock
-[cmd-upgrade]: ./reference/command-line.md#upgrade
+[cmd-update]: ./reference/command-line.md#update
 [cmd-pull]: ./reference/command-line.md#pull
 [cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init

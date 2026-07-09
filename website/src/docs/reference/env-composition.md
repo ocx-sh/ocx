@@ -112,7 +112,7 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 | [`ocx add`][cmd-add] | Adds binding to the global file |
 | [`ocx remove`][cmd-remove] | Removes binding from the global file |
 | [`ocx lock`][cmd-lock] | Re-locks the global file |
-| [`ocx upgrade`][cmd-upgrade] | Advances a binding in the global file |
+| [`ocx update`][cmd-update] | Advances a binding in the global file |
 | [`ocx pull`][cmd-pull] | Pre-warms packages declared by the global file |
 | [`ocx run`][cmd-run] | Composes env from the global file + its lock |
 | [`ocx env`][cmd-env-root] | Emits composed toolchain env for the global file |
@@ -151,7 +151,7 @@ See [In Depth — Project Toolchain → Composition order rule][in-depth-project
 [cmd-pull]: ./command-line.md#pull
 [cmd-remove]: ./command-line.md#remove
 [cmd-run]: ./command-line.md#run
-[cmd-upgrade]: ./command-line.md#upgrade
+[cmd-update]: ./command-line.md#update
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec
 

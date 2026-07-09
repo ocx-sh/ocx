@@ -126,7 +126,7 @@ If neither is set, OCX uses `ocx.sh`.
 
 Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
 
-When set to a [truthy value](#truthy-values), toolchain-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. Equivalent to passing the root flag `--global` (before the subcommand): `ocx --global add ripgrep:14`.
+When set to a [truthy value](#truthy-values), toolchain-tier commands (`add`, `remove`, `lock`, `update`, `pull`, `run`, `env`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. Equivalent to passing the root flag `--global` (before the subcommand): `ocx --global add ripgrep:14`.
 
 ```sh
 export OCX_GLOBAL=1

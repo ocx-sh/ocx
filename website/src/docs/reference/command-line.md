@@ -220,7 +220,7 @@ ocx --global add ripgrep:14      # correct
 ocx add --global ripgrep:14      # error: unknown flag
 ```
 
-When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, and `env`.
+When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `env`.
 
 `--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
@@ -387,7 +387,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
+| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx update` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
 
@@ -620,7 +620,7 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 | 65 | `ocx.lock` is stale — run `ocx lock` (project tier). |
 | 78 | `ocx.toml` or `ocx.lock` parse error (project tier); or `--ci=github` used outside [GitHub Actions][github-actions-workflow-commands] where [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path] are unset. |
 
-The global tier is lenient: `ocx --global env` never fails on an unconfigured or corrupt global toolchain — it exports an empty environment. This is one predictable rule that does not depend on `--shell` (which only selects the output format, never whether the command errors). A corrupt global lock surfaces instead via the commands that rewrite it — `ocx --global lock`, `ocx --global add`, `ocx --global upgrade`. The project tier stays strict (a missing/stale/corrupt `ocx.lock` errors). A useful consequence of the lenient global rule: the installer's `env.sh`/`env.ps1`, which source `ocx --global env --shell=…` on every shell start, can never be broken by global toolchain state.
+The global tier is lenient: `ocx --global env` never fails on an unconfigured or corrupt global toolchain — it exports an empty environment. This is one predictable rule that does not depend on `--shell` (which only selects the output format, never whether the command errors). A corrupt global lock surfaces instead via the commands that rewrite it — `ocx --global lock`, `ocx --global add`, `ocx --global update`. The project tier stays strict (a missing/stale/corrupt `ocx.lock` errors). A useful consequence of the lenient global rule: the installer's `env.sh`/`env.ps1`, which source `ocx --global env --shell=…` on every shell start, can never be broken by global toolchain state.
 
 ---
 
@@ -1118,7 +1118,7 @@ ocx --format json logout ghcr.io
 
 ### `lock` {#lock}
 
-Resolves every tool tag in the nearest `ocx.toml` to per-platform leaf digests and writes the result to `ocx.lock` next to it. The command is a **whole-file reconcile**: when the lock is already current (its `declaration_hash` matches the config), every pin is carried forward verbatim — a byte-identical, idempotent no-op that never advances a moving tag, even if it has moved upstream. When the config drifted, every declared tag is re-resolved and a moving tag may advance to wherever it points today. To force-advance pins on a current lock, use [`ocx upgrade`](#upgrade).
+Resolves every tool tag in the nearest `ocx.toml` to per-platform leaf digests and writes the result to `ocx.lock` next to it. The command is a **whole-file reconcile**: when the lock is already current (its `declaration_hash` matches the config), every pin is carried forward verbatim — a byte-identical, idempotent no-op that never advances a moving tag, even if it has moved upstream. When the config drifted, every declared tag is re-resolved and a moving tag may advance to wherever it points today. To force-advance pins on a current lock, use [`ocx update`](#update).
 
 For each tool, the lock records the bare registry/repository coordinates plus a `[tool.platforms]` table mapping every platform the publisher ships to its leaf manifest digest. The command records all shipped platforms regardless of which OS it runs on, so a lock committed on Linux is complete for macOS and Windows CI runners. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
 
@@ -1126,8 +1126,8 @@ The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](http
 
 After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
 
-::: tip `ocx lock` vs `ocx upgrade`
-`ocx lock` is an idempotent reconcile — it re-resolves only when `ocx.toml` changed. Use `ocx upgrade` to force a re-resolve of every tag regardless of drift.
+::: tip `ocx lock` vs `ocx update`
+`ocx lock` is an idempotent reconcile — it re-resolves only when `ocx.toml` changed. Use `ocx update` to force a re-resolve of every tag regardless of drift.
 :::
 
 **Usage**
@@ -1175,22 +1175,26 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | `digest` | string | Host-platform leaf digest in `sha256:<hex>` form. |
 | `platforms` | object | Full available-only map: platform key string to leaf digest. Keys follow the lossless platform encoding (e.g. `"linux/amd64"`, `"darwin/arm64"`, `"any"`). |
 
-Concurrent invocations of `ocx lock` and `ocx upgrade` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
+Concurrent invocations of `ocx lock` and `ocx update` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
 
-### `upgrade` {#upgrade}
+### `update` {#update}
 
-Re-resolves advisory tags in `ocx.toml` and rewrites `ocx.lock`. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved against the registry, even when the lock is already current. A moving tag (`:latest`, `:3`) advances to wherever it points today; an unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written.
+Re-resolves advisory tags in `ocx.toml` against the live registry and rewrites `ocx.lock`. Unlike [`ocx lock`](#lock) or [`ocx add`](#add), which resolve through the local index by default, `ocx update` talks to the registry every time — the same default [`ocx self update`](#self-update) uses, since the whole point is to see where a moving tag (`:latest`, `:3`) points *today*. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved, even when the lock is already current. An unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written. Resolution only ever writes `ocx.lock`; it never rewrites the local tag pointers under `~/.ocx/tags/`.
 
-Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped upgrade advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an upgrade.
+Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped update advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an update.
 
-::: tip `ocx upgrade` vs `ocx lock`
-Whole-file `ocx upgrade` always re-resolves every tag; scoped to `-g`/`NAME` arguments, it re-resolves only those. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean). To advance versions, use `ocx upgrade`. To reconcile a changed config, use `ocx lock`.
+::: tip `ocx update` vs `ocx lock`
+Whole-file `ocx update` always re-resolves every tag against the registry; scoped to `-g`/`NAME` arguments, it re-resolves only those. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean), and prefers the local index like other project-tier commands. To advance versions, use `ocx update`. To reconcile a changed config, use `ocx lock`.
+:::
+
+::: tip The update family
+Three verbs share the name; each refreshes exactly one record. [`ocx index update`](#index-update) refreshes the local index snapshot under `~/.ocx/tags/`. [`ocx self update`](#self-update) refreshes the managed ocx install. `ocx update` refreshes `ocx.lock`. Under [`--frozen`](#arg-frozen), `ocx update` caps discovery at that local index snapshot — a declared tag it doesn't already know exits [`81`](#exit-codes). Under [`--offline`](#arg-offline), no network call is made at all, which also exits `81` when resolution is required.
 :::
 
 **Usage**
 
 ```shell
-ocx upgrade [OPTIONS] [NAME...]
+ocx update [OPTIONS] [NAME...]
 ```
 
 **Options**
@@ -1203,11 +1207,11 @@ ocx upgrade [OPTIONS] [NAME...]
 | `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
 | `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
-| `--remote` | | Route tag resolution to the remote registry instead of the local index. | false |
+| `--remote` | | Redundant — resolution already talks to the registry by default. Still accepted. | false |
 | `-h`, `--help` | | Print help information. | |
 
 ::: tip Target the global toolchain
-Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--global`][global-flag].
+Pass `--global` **before** the subcommand: `ocx --global update`. See [`--global`][global-flag].
 :::
 
 **Exit codes**
@@ -1215,32 +1219,29 @@ Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--globa
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, `--global` combined with `--project`, multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate), or an unknown `-g` group or unknown binding `NAME` in a scoped upgrade. |
-| 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream), or a scoped upgrade whose `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate), or an unknown `-g` group or unknown binding `NAME` in a scoped update. |
+| 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream), or a scoped update whose `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
-| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped upgrade with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
+| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
 **Examples**
 
 ```shell
-# Re-resolve every declared tag:
-ocx upgrade
-
-# Re-resolve with a live registry lookup (bypass local index cache):
-ocx upgrade --remote
+# Re-resolve every declared tag against the registry:
+ocx update
 
 # Advance just ripgrep to where its declared tag points today:
-ocx upgrade ripgrep
+ocx update ripgrep
 
 # Advance every tool in the ci group, freezing the rest:
-ocx upgrade -g ci
+ocx update -g ci
 ```
 
-Concurrent invocations of `ocx upgrade` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
+Concurrent invocations of `ocx update` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
 
 ### `pull` {#pull}
 
@@ -1250,7 +1251,7 @@ creating [install symlinks][fs-symlinks]. Distinct from
 tool comes from the digest-pinned lock, never from the index — making it the
 recommended primitive for reproducible CI setups.
 
-`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx upgrade`;
+`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx update`;
 rewriting from the config lives in `ocx lock`.
 
 **Usage**
@@ -1435,7 +1436,7 @@ Pass `--global` **before** the subcommand: `ocx --global remove ripgrep`. See [`
 | 65 | `ocx.toml` drifted from `ocx.lock` before this remove — run `ocx lock` to reconcile. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | A survivor's legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error. |
+| 78 | A survivor's legacy lock entry can no longer be migrated exactly — run `ocx update` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error. |
 | 79 | Binding not found in the specified group (or any group when `--group` is omitted). |
 
 ### `select` {#select}

@@ -81,13 +81,13 @@ Each `[[tool]]` entry is independent, so concatenation usually produces a syntac
 
 ### Concurrent writes {#lock-concurrency}
 
-Project-state writes (`ocx lock`, `ocx upgrade`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
+Project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
 
 ## Pin preservation {#pin-preservation}
 
 `ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving tool's live tag. This is the guarantee that adding a new tool or dropping an old one never silently advances the versions of everything else.
 
-The carry-forward has two modes depending on the lock format of the surviving entry. A V2 entry is passed through byte-identical — no registry contact. A V1 (legacy) entry is transcribed using the pinned index digest it already stores: OCX reads the exact same index manifest and extracts its per-platform leaf digests, producing a V2 entry with the identical pins. If the V1 index is no longer retrievable from the registry, the command fails with exit 78 and a message directing you to `ocx upgrade` — it never silently re-resolves against the live tag.
+The carry-forward has two modes depending on the lock format of the surviving entry. A V2 entry is passed through byte-identical — no registry contact. A V1 (legacy) entry is transcribed using the pinned index digest it already stores: OCX reads the exact same index manifest and extracts its per-platform leaf digests, producing a V2 entry with the identical pins. If the V1 index is no longer retrievable from the registry, the command fails with exit 78 and a message directing you to `ocx update` — it never silently re-resolves against the live tag.
 
 The freshness gate runs before any carry-forward. If `ocx.toml` drifted from `ocx.lock` since the lock was last written (the `declaration_hash` does not match), the mutator fails with exit 65 before touching anything. The fix is a single `ocx lock` to reconcile the file, after which the add or remove succeeds.
 
@@ -96,9 +96,9 @@ The two commands that intentionally advance version pins are:
 | Command | When it re-resolves |
 |---------|---------------------|
 | `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
-| `ocx upgrade` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
+| `ocx update` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
 
-Groups are primarily a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx upgrade` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
+Groups are primarily a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
 
 ## Pulling and executing {#pull-exec}
 
