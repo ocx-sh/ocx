@@ -151,7 +151,7 @@ Global flags: `--offline`, `--remote`, `--format json`.
 - **Workspace**: `crates/ocx_lib` (core) + `crates/ocx_cli` (CLI); the mirror tool lives in its own repo ([ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror))
 - **Default registry**: `ocx.sh` (configurable via `OCX_DEFAULT_REGISTRY`)
 - **Platform support**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
-- **Testing**: pytest acceptance tests against real OCI registry (registry:2 via docker-compose)
+- **Testing**: pytest acceptance tests against real OCI registries via docker-compose — zot (OCI 1.1 Referrers API primary) + registry:2 (mirror / referrers-negative fixture)
 
 ## Update Protocol
 

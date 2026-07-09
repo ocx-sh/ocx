@@ -49,8 +49,8 @@ This is an explicit design choice: a silent fallback would let signatures be pub
 
 OCX `package sign` / `package verify` require OCI Distribution Spec v1.1 Referrers API. As of May 2026:
 
-- **Supported:** `registry:2` v2.8.0+, [Harbor][harbor] 2.5+, [Zot][zot], JFrog Artifactory (recent), `ocx.sh`.
-- **Not supported (exit 84):** [GHCR][ghcr] (GitHub Container Registry), [Docker Hub][docker-hub]. No public roadmap to add Referrers API as of 2026-05. Use a v1.1-compatible registry for signed packages.
+- **Supported:** [Zot][zot], [Harbor][harbor] 2.9+, JFrog Artifactory 7.90+ (including `ocx.sh`), Amazon ECR, Azure ACR, Google Artifact Registry, Red Hat Quay 3.12+.
+- **Not supported (exit 84):** CNCF Distribution `registry:2` / `registry:3` (no Referrers API — it serves only the tag-schema fallback, which OCX does not use), [GHCR][ghcr] (GitHub Container Registry), [Docker Hub][docker-hub]. Use a registry from the supported list for signed packages.
 
 This is by design — OCX never writes legacy `sha256-<digest>.sig` fallback tags (ADR S1-F). The hard error gives operators a clear "change registry" signal rather than silent downgrade.
 :::

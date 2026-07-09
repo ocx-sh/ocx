@@ -125,7 +125,13 @@ jobs:
       - name: Start Registry
         shell: bash
         run: |
-          docker run -d --name test-registry -p 5000:5000 registry:2
+          # zot (OCI 1.1 Referrers API) is the primary acceptance registry —
+          # distribution's registry:2/registry:3 do NOT serve
+          # /v2/<name>/referrers/<digest> (#195). Started from the compose file
+          # (single source of truth). Both services run so the registry:2
+          # negative fixture (legacy_registry, #106) is CI-provable and the
+          # mirror tests run in CI too (deliberate scope expansion).
+          docker compose -f test/docker-compose.yml up -d registry mirror-registry
           for _ in $(seq 1 30); do
             if curl -sf http://localhost:5000/v2/ > /dev/null 2>&1; then
               echo "Registry is ready"
@@ -160,7 +166,7 @@ jobs:
       - name: Stop Registry
         if: ${{ always() }}
         shell: bash
-        run: docker rm -f test-registry 2>/dev/null || true
+        run: docker compose -f test/docker-compose.yml down 2>/dev/null || true
       - name: Upload Test Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -46,7 +46,7 @@ No A→B milestone edges. Cross-repo: ocx-mirror#7 depends on #194 (out of scope
 
 | # | Issue | Branch | Tier | Gate / notes |
 |---|-------|--------|------|--------------|
-| 1 | #195 | `wip/195-referrers-registry` | high | registry:3 (or zot) harness; keep one registry:2 as permanent ReferrersUnsupported negative fixture; pre-flight: confirm ocx.sh referrers support. Acceptance infra only — no product code path yet. |
+| 1 | #195 | `wip/195-referrers-registry` | high | zot harness (registry:2/registry:3 confirmed NOT to serve the Referrers API); keep one registry:2 as permanent ReferrersUnsupported negative fixture; ocx.sh referrers support confirmed. Acceptance infra only — no product code path yet. |
 | 2 | #194 | `wip/194-sigstore-pipeline` | max | **critical path.** Step 0 spike (sigstore-rs bundle write, TUF TrustedRoot fetch, Rekor v1, offline root override, `--trust-root` seam). Fill ~10 stub modules; NativeTransport referrers HTTP incl. `?artifactType=`; wire capability cache; flip `#[ignore]` + un-skip acceptance specs; `--format json` verify contract (global flag). Target Rekor v1 + TUF root; v2 = #107. |
 | 3 | #106 | `wip/106-capability-wiring` | high | Wire capability cache into pipelines (`no_cache` seam exists); clean actionable error, no tag fallback; acceptance vs stubbed 404 + registry:2 fixture. Delete fictional `_catalog`/capabilities.toml/24h TTL from issue body. |
 | 4 | #98 | `wip/98-trust-policy` | max | `[trust.policy]` in ocx.toml: `identity` (exact) + `identity_regexp` (mutually exclusive); most-specific scope wins, ANY-of among equal; tier array-merge; `--certificate-identity/-oidc-issuer` optional when policy matches. Docs: configuration.md, user-guide, exit codes. |
