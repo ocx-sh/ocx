@@ -115,6 +115,18 @@ Do not treat a green `ocx package verify` against production Sigstore as a compl
 Everything above describes the standalone `ocx package verify` command. Once a [`[[trust.policy]]`][config-trust] covers a package, [`install`][cmd-package-install], [`pull`][cmd-package-pull], and every command that auto-installs on demand run the same check automatically — see [Verify by default][guide-auto-verify] in the user guide. That gate has its own scope limitations, distinct from the cryptographic ones above: a covered root's transitive dependencies are verified only if a policy also covers each dependency's own `registry/repository` scope, and the automatic check reads the operator `config.toml` tier only — a project `ocx.toml` policy never gates it.
 :::
 
+## Deferred to Future Work {#deferred-future-work}
+
+This release delivers the whole keyless surface — sign, verify, [`[[trust.policy]]`][config-trust] identity pinning, [auto-verify on install][guide-auto-verify], and [offline/air-gapped verification](#offline-verification) — against operator-supplied trust material and the in-repo fake Sigstore stack. Everything beyond that needs real network Sigstore integration and is deferred:
+
+- Real [Fulcio][fulcio] intermediate-chain walking and certificate temporal-validity checking.
+- The public Rekor SET wire format and Merkle inclusion proof, in place of the fake-stack payload checked today.
+- A TUF-distributed trust root with network fetch and refresh, in place of the stubbed embedded root.
+- **Rekor v2** ([#107][gh-107]) — [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client; OCX targets Rekor v1 `hashedrekord` until one exists.
+- **cosign v3 bidirectional interop** ([#197][gh-197]) — **blocked**, not merely unwired. OCX's bundles are produced against the fake Fulcio/Rekor with a custom SET payload format and a single-hop certificate chain, so [`cosign verify`][cosign] cannot validate one today, and `ocx package verify` cannot validate a bundle cosign produced against real Sigstore. Both directions require OCX to first emit real Sigstore-format bundles against real Fulcio and Rekor — the same production-hardening work as the three items above.
+
+The first three items are documented limitations (see [Current Limitations](#current-limitations)), tracked in a production-hardening follow-up issue (to be filed at milestone close) alongside [#107][gh-107] and [#197][gh-197], the two deferrals already formally tracked for this milestone.
+
 ## Offline and Air-Gapped Verification {#offline-verification}
 
 Verifying an artifact means reading it — and its signature — from the registry where it lives. In an air-gapped deployment that registry is a local mirror the operator runs, so `ocx package verify` treats the artifact registry as always-available. What `--offline` / [`OCX_OFFLINE`][env-offline] removes for verify is the **Sigstore trust-services** network: the Rekor public-key fetch and TUF. Those are the calls that need trust material, and offline verify sources that material locally instead.
@@ -156,6 +168,7 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
 - [`package sign` reference][cmd-package-sign] — flags, token-source precedence, exit codes, CI example
 - [`package verify` reference][cmd-package-verify] — flags, identity matching options, exit codes
 - [Configuration reference → `[[trust.policy]]`][config-trust] — schema, scope matching, most-specific-wins resolution, operator-vs-project tier precedence
+- [Deferred to Future Work](#deferred-future-work) — production-Sigstore-fidelity gaps, Rekor v2 (#107), cosign v3 interop (#197)
 <!-- external -->
 [sigstore]: https://www.sigstore.dev/
 [fulcio]: https://github.com/sigstore/fulcio
@@ -182,6 +195,10 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
 
 <!-- reference -->
 [config-trust]: ../reference/configuration.md#keys-trust
+
+<!-- issues -->
+[gh-107]: https://github.com/ocx-sh/ocx/issues/107
+[gh-197]: https://github.com/ocx-sh/ocx/issues/197
 
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token

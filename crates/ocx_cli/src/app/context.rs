@@ -651,6 +651,10 @@ fn build_auto_verify(
         oci::endpoint::validate_sigstore_url(DEFAULT_REKOR_URL, "rekor").expect("built-in default Rekor URL is valid");
     Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
         operator_policies,
+        // ponytail: seam for the deferred project-tier auto-verify (#99 known gap
+        // — `ocx.toml` policies not yet read on OCI-tier install/pull/exec/env/run
+        // surfaces, operator `config.toml` only today). Wire real project policies
+        // here once that follow-up is scheduled; until then, always empty.
         project_policies: Vec::new(),
         registry_client: registry_client.clone(),
         rekor_url,

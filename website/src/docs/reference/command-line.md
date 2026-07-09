@@ -2438,7 +2438,7 @@ At least one of the above metadata options must be provided.
 
 #### `sign` {#package-sign}
 
-Publishes a [Sigstore][sigstore] keyless signature for a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest, where it can be discovered and verified by `ocx package verify` and by [`cosign verify`][cosign].
+Publishes a [Sigstore][sigstore] keyless signature for a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest, discoverable and verifiable by `ocx package verify`. Verifying it with [`cosign verify`][cosign] is not yet supported — see [Deferred to Future Work][signing-deferred] in the signing guide.
 
 Signing requires network access — `--offline` is rejected with exit 77.
 
@@ -2771,7 +2771,7 @@ This is the OCI-tier install command. For project-tier installs driven by `ocx.t
 
 When a [`[[trust.policy]]`][config-trust] entry in the operator `config.toml` tier covers the package's `registry/repository`, install verifies its [Sigstore][sigstore] signature automatically — at the metadata-first seam, after the manifest digest resolves and before any layer downloads. A failed check aborts before any package-store or symlink state is written, so a rejected artifact costs a manifest fetch, not a wasted download. Auto-verify consults the operator tier only; unlike [`package verify`][cmd-package-verify], a project `ocx.toml` policy is never considered here.
 
-The same gate applies to **every** command that fetches a package, not just `install`: `package pull`, and every command that auto-installs on demand — [`package exec`](#package-exec), [`package env`](#package-env), and [`run`](#run). Only `install` and `pull` carry the `--verify` / `--no-verify` flag; the others opt out via [`OCX_NO_VERIFY`][env-no-verify].
+The same gate applies to **every** command that fetches a package, not just `install`: `package pull`, and every command that auto-installs on demand — [`package exec`](#package-exec), [`package env`](#package-env), root [`env`](#env-root), [`run`](#run), and patch discovery ([`patch why`](#patch-why) / [`patch test`](#patch-test)). Only `install` and `pull` carry the `--verify` / `--no-verify` flag; the others opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
 A package outside every policy's scope is not verified — trust is opt-in, and OCX logs an `INFO` line noting the skip. This opt-in is per scope: a covered package's transitive dependencies are verified only if a policy also covers *their* scope. When a policy does cover the package, a failed check exits with the same taxonomy [`package verify`][cmd-package-verify] uses: `65` for a tampered bundle, `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy configuration problem, `79` for no signature found.
 
@@ -3465,6 +3465,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-ci]: ../in-depth/ci.md
 [signing-limitations]: ../in-depth/signing.md#current-limitations
 [signing-offline]: ../in-depth/signing.md#offline-verification
+[signing-deferred]: ../in-depth/signing.md#deferred-future-work
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

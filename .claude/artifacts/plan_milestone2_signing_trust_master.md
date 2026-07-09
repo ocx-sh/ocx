@@ -66,6 +66,16 @@ focused on *milestone* completion — every acceptance criterion met, threat tab
 claims only shipped defenses, docs + website cast complete, no dangling
 cross-issue seams. Exit on clean review or 5 rounds. Oscillating → defer.
 
+## Deferred to follow-up
+
+- **Website sign/verify cast** — de-scoped from milestone-2 close. #24 "Done
+  when" and #194's acceptance criteria both name a recorded cast, but
+  `task recordings:build` runs the doc-script pipeline against `registry:2`,
+  which lacks the OCI 1.1 Referrers API (#195), and the fake Sigstore stack
+  (`fake_sigstore.py`) is not wired into the recordings harness. Gated on the
+  recordings pipeline gaining a referrers-capable registry. Exact GitHub edits
+  + follow-up issue draft: `.claude/artifacts/milestone2_close_checklist.md`.
+
 ## Phase D — Merge-ready PR
 
 `task verify` (basic) + deep gate (`task rust:verify` + acceptance suite) green,

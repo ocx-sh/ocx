@@ -836,11 +836,12 @@ ocx package sign -p linux/amd64 registry.example/pkg:1.0
 
 ### Verify what you install {#supply-chain-verification}
 
-[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust:
+[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. This release also needs an explicit [`--tuf-root`][env-sigstore-tuf-root] — the embedded production trust root ships stubbed, so verify has nothing to check the certificate against otherwise (see [Current Limitations][in-depth-signing-limitations]):
 
 ```shell
 ocx package verify \
   -p linux/amd64 \
+  --tuf-root /etc/ocx/trusted_root.json \
   --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
@@ -886,10 +887,10 @@ identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/h
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
-Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no flags needed for any package under `ghcr.io/acme/`:
+Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the [`--tuf-root`][env-sigstore-tuf-root] requirement from [above](#supply-chain-verification) still applies):
 
 ```shell
-ocx package verify -p linux/amd64 ghcr.io/acme/tool:1.0
+ocx package verify -p linux/amd64 --tuf-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
 ```
 
 The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
@@ -918,7 +919,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 
 A [`[[trust.policy]]`][config-trust] entry is only useful if the check it describes actually runs. Left as a manual step, verification is the thing that gets skipped the first time a deploy is running late — the exact gap the [tip](#supply-chain-verification) earlier in this section called out.
 
-Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], and [`ocx run`][cmd-run]. No extra flag, no separate step before or after:
+Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] / [`ocx patch test`][cmd-patch-test]). No extra flag, no separate step before or after:
 
 ```shell
 # with the ghcr.io/acme/* policy from the previous section in place
@@ -931,7 +932,7 @@ Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[tru
 
 Sometimes you need to skip the check anyway — a mirror with no referrers support, a package you're debugging. Pass `--no-verify` to skip it for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out; `--verify` re-enables the check for one invocation even with the environment variable set, since the flag always wins. Either bypass logs one `WARN` per invocation — a skipped check is visible in the logs, never silent.
 
-[`--offline`][arg-offline] install and pull verify the same way, reusing whatever trust material is already local: a [Sigstore trusted-root JSON][env-sigstore-tuf-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. With neither available for a policy-covered package, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
+Because the embedded production trust root ships stubbed in this release (see [Current Limitations][in-depth-signing-limitations]), a policy-covered install needs trust material available whether or not [`--offline`][arg-offline] is set: a [Sigstore trusted-root JSON][env-sigstore-tuf-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. With neither available, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
 
 ::: tip Learn more
 [Command-line reference → `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] — the full auto-verify contract, options table, and exit codes.
@@ -1105,6 +1106,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env]: ./reference/command-line.md#env
 [cmd-env-root]: ./reference/command-line.md#env-root
+[cmd-patch-why]: ./reference/command-line.md#patch-why
+[cmd-patch-test]: ./reference/command-line.md#patch-test
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
 [cmd-lock]: ./reference/command-line.md#lock
@@ -1186,3 +1189,4 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
 [in-depth-project-running]: ./in-depth/project.md#running
 [in-depth-signing]: ./in-depth/signing.md
+[in-depth-signing-limitations]: ./in-depth/signing.md#current-limitations
