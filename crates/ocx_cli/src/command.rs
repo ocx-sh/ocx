@@ -98,7 +98,15 @@ pub enum Command {
     Login(login::Login),
     /// Remove credentials for a registry.
     Logout(logout::Logout),
-    /// Re-resolve every declared tag in the lock to its newest digest.
+    /// Re-resolve declared tags in the lock; whole file or a named subset.
+    ///
+    /// With no arguments, re-resolves every declared tag against the registry
+    /// and rewrites `ocx.lock`; a moving tag (`:latest`, `:3`) advances to
+    /// wherever it points today. Pass binding names or `-g/--group` to advance
+    /// only part of the toolchain and freeze the rest: `ocx upgrade ripgrep`
+    /// advances one binding, `ocx upgrade -g ci` advances a whole group. A
+    /// scoped upgrade needs an existing `ocx.lock` (exit 78), refuses a drifted
+    /// `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64).
     Upgrade(upgrade::Upgrade),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]

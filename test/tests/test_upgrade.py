@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx upgrade`` (whole-file lock model).
+"""Acceptance tests for ``ocx upgrade`` (whole-file and scoped lock model).
 
-``ocx upgrade`` is the whole-file bump verb: it re-resolves EVERY declared
-tag, always, even when the lock is already current. There is no subset
-surface — ``--group`` / ``-g`` and positional binding names were removed.
-Groups are a composition concern only, never an upgrade scope.
+``ocx upgrade`` with no arguments is the whole-file bump verb: it re-resolves
+EVERY declared tag, always, even when the lock is already current.
 
-1. ``ocx upgrade`` (no args)  — re-resolves the whole file (bumps every tag)
-2. ``ocx upgrade --group ci`` — rejected by clap (exit 64); subset surface gone
-3. ``ocx upgrade cmake``      — rejected by clap (exit 64); positional scoping gone
+``ocx upgrade`` also accepts binding names and ``-g``/``--group`` to advance
+only part of the toolchain and freeze the rest. A scoped upgrade re-resolves
+only the named bindings' declared tags and carries every other pin forward
+verbatim, so a single tool can move while every other pin stays frozen.
 
-Spec: ``design_spec_partial_mutator_pin_preservation.md`` §2, §4.5, §8.2.
+1. ``ocx upgrade`` (no args)      — re-resolves the whole file (bumps every tag)
+2. ``ocx upgrade NAME``           — advances only the named binding(s)
+3. ``ocx upgrade -g GROUP``       — advances only the named group(s)
+4. ``ocx upgrade`` scoped, no lock — exit 78 (needs a predecessor to carry forward)
+5. ``ocx upgrade`` scoped, drift   — exit 65 (``ocx.toml`` changed since ``ocx lock``)
+6. ``ocx upgrade UNKNOWN``        — exit 64 (unknown binding name)
+
+Guarantee preservation: only the explicitly named bindings re-resolve against
+the live index (no laundering); untouched pins are carried forward, never
+live-re-resolved (no drift); the freshness gate refuses a drifted ``ocx.toml``.
+See ``.claude/artifacts/adr_scoped_upgrade.md``.
 """
 from __future__ import annotations
 
@@ -26,7 +35,9 @@ from src.runner import OcxRunner, registry_dir
 
 
 EXIT_SUCCESS = 0
-EXIT_USAGE = 64        # clap unknown-arg → EX_USAGE
+EXIT_USAGE = 64        # clap unknown-arg / unknown group or name → EX_USAGE
+EXIT_DATA = 65         # scoped upgrade on a drifted ocx.toml (StaleLockOnPartial)
+EXIT_CONFIG = 78       # scoped upgrade with no predecessor ocx.lock
 EXIT_POLICY_BLOCKED = 81
 
 
@@ -220,18 +231,192 @@ b = "{ocx.registry}/{repo_b}:2.0.0"
 
 
 # ---------------------------------------------------------------------------
-# 3. The subset surface is gone — positional args and --group → exit 64
+# 3. Scoped upgrade — advance only the named binding(s) / group(s)
 # ---------------------------------------------------------------------------
 
 
-def test_upgrade_rejects_positional_args(
+def test_upgrade_single_tool_bumps_only_named(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade <binding>`` is rejected by clap (exit 64): positional
-    scoping no longer exists. The existing ``ocx.lock`` is left untouched.
+    """``ocx upgrade a`` with two tools both on a moving ``:latest`` that has
+    advanced upstream: only ``a``'s leaf digests change; ``b`` is carried
+    forward verbatim (frozen). This is the load-bearing scoped-upgrade
+    contract — advance one tool without moving the rest.
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_pos"
+    repo_a = f"t_{short}_scoped_a"
+    repo_b = f"t_{short}_scoped_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:latest"
+b = "{ocx.registry}/{repo_b}:latest"
+""",
+    )
+
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    initial_text = _read_lock_text(project)
+    initial_a = _leaves_for(initial_text, "a")
+    initial_b = _leaves_for(initial_text, "b")
+    assert initial_a and initial_b, "both tools must record leaf digests"
+
+    # Advance both moving tags upstream (cascade re-points ``:latest``).
+    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    for repo in (repo_a, repo_b):
+        refresh = subprocess.run(
+            _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+        )
+        assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    # Scoped upgrade of ONLY ``a``.
+    result = _run_update(ocx, project, "a")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"scoped ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    after_text = _read_lock_text(project)
+    after_a = _leaves_for(after_text, "a")
+    after_b = _leaves_for(after_text, "b")
+    assert after_a != initial_a, "'a' was named — its leaves must advance"
+    assert after_b == initial_b, "'b' was not named — its leaves must stay frozen"
+
+
+def test_upgrade_scoped_preserves_untouched_pins(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The untouched ``[[tool]]`` entry is carried forward byte-for-byte.
+
+    Complements ``test_upgrade_single_tool_bumps_only_named`` by asserting the
+    stronger property: the frozen tool's on-disk lock slice is identical, not
+    merely resolving to the same digest.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_preserve_a"
+    repo_b = f"t_{short}_preserve_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:latest"
+b = "{ocx.registry}/{repo_b}:latest"
+""",
+    )
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+
+    def _tool_slice(lock_text: str, name: str) -> str:
+        marker = f'name = "{name}"'
+        start = lock_text.index(marker)
+        rest = lock_text[start:]
+        nxt = rest.find("[[tool]]", len("[[tool]]"))
+        return rest if nxt == -1 else rest[:nxt]
+
+    before_b_slice = _tool_slice(_read_lock_text(project), "b")
+
+    # Advance only ``a`` upstream, then scoped-upgrade ``a``.
+    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    refresh = subprocess.run(
+        _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo_a}"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    result = _run_update(ocx, project, "a")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    after_b_slice = _tool_slice(_read_lock_text(project), "b")
+    assert after_b_slice == before_b_slice, (
+        "the untouched tool 'b' must be carried forward byte-for-byte"
+    )
+
+
+def test_upgrade_group_scopes_to_group(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade -g ci`` advances every binding in the ``ci`` group and
+    freezes the default ``[tools]`` table.
+    """
+    short = uuid4().hex[:8]
+    repo_default = f"t_{short}_grp_def"
+    repo_ci = f"t_{short}_grp_ci"
+    make_package(ocx, repo_default, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_ci, "1.0.0", tmp_path, new=True, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo_default}:latest"
+
+[group.ci]
+citool = "{ocx.registry}/{repo_ci}:latest"
+""",
+    )
+
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    initial_text = _read_lock_text(project)
+    initial_default = _leaves_for(initial_text, "tool")
+    initial_ci = _leaves_for(initial_text, "citool")
+    assert initial_default and initial_ci, "both tools must record leaf digests"
+
+    make_package(ocx, repo_default, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_ci, "2.0.0", tmp_path, new=False, cascade=True)
+    for repo in (repo_default, repo_ci):
+        refresh = subprocess.run(
+            _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+        )
+        assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    result = _run_update(ocx, project, "-g", "ci")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade -g ci failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    after_text = _read_lock_text(project)
+    assert _leaves_for(after_text, "citool") != initial_ci, (
+        "the ci-group tool must advance — it is in scope"
+    )
+    assert _leaves_for(after_text, "tool") == initial_default, (
+        "the default-group tool must stay frozen — it is out of scope"
+    )
+
+
+def test_upgrade_scoped_no_lock_errors_78(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A scoped ``ocx upgrade tool`` with NO ``ocx.lock`` exits 78: there is
+    no predecessor to carry untouched pins forward from. ``ocx.lock`` is never
+    created.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_scoped_nolock"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
     project = tmp_path / "proj"
@@ -243,32 +428,73 @@ def test_upgrade_rejects_positional_args(
 tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
+    assert not (project / "ocx.lock").exists()
 
+    result = _run_update(ocx, project, "tool")
+    assert result.returncode == EXIT_CONFIG, (
+        f"scoped ocx upgrade with no lock must exit {EXIT_CONFIG}; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert not (project / "ocx.lock").exists(), (
+        "scoped ocx upgrade must not create ocx.lock when it fails"
+    )
+
+
+def test_upgrade_scoped_stale_toml_errors_65(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A scoped ``ocx upgrade a`` on an ``ocx.toml`` hand-edited since the last
+    ``ocx lock`` exits 65 (the freshness gate refuses to carry a stale lock
+    forward) and leaves ``ocx.lock`` untouched.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_stale_a"
+    repo_b = f"t_{short}_stale_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:1.0.0"
+""",
+    )
     initial = _run_lock(ocx, project)
     assert initial.returncode == EXIT_SUCCESS, initial.stderr
     before_bytes = (project / "ocx.lock").read_bytes()
 
-    result = _run_update(ocx, project, "tool")
-    assert result.returncode == EXIT_USAGE, (
-        f"`ocx upgrade tool` must be rejected (exit {EXIT_USAGE}); "
+    # Hand-edit ocx.toml AFTER locking: add a binding so it drifts from the lock.
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:1.0.0"
+b = "{ocx.registry}/{repo_b}:1.0.0"
+""",
+    )
+
+    result = _run_update(ocx, project, "a")
+    assert result.returncode == EXIT_DATA, (
+        f"scoped ocx upgrade on a drifted ocx.toml must exit {EXIT_DATA}; "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
-
     after_bytes = (project / "ocx.lock").read_bytes()
     assert after_bytes == before_bytes, (
-        "ocx.lock must NOT be rewritten when a positional arg is rejected"
+        "scoped ocx upgrade must NOT rewrite ocx.lock when refusing a stale toml"
     )
 
 
-def test_upgrade_rejects_group_flag(
+def test_upgrade_unknown_name_errors_64(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade --group ci`` is rejected by clap (exit 64): the subset
-    surface is gone. ``-g`` is also rejected. Groups are a composition
-    concern only, never an upgrade scope.
+    """``ocx upgrade does-not-exist`` exits 64 (the name matches no binding)
+    and leaves ``ocx.lock`` untouched.
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_grpflag"
+    repo = f"t_{short}_unknown_name"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
     project = tmp_path / "proj"
@@ -276,17 +502,23 @@ def test_upgrade_rejects_group_flag(
     _write_ocx_toml(
         project,
         f"""\
-[group.ci]
+[tools]
 tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    before_bytes = (project / "ocx.lock").read_bytes()
 
-    for flag in ("--group", "-g"):
-        result = _run_update(ocx, project, flag, "ci")
-        assert result.returncode == EXIT_USAGE, (
-            f"`ocx upgrade {flag} ci` must be rejected (exit {EXIT_USAGE}); "
-            f"got {result.returncode}\nstderr:\n{result.stderr}"
-        )
+    result = _run_update(ocx, project, "does-not-exist")
+    assert result.returncode == EXIT_USAGE, (
+        f"`ocx upgrade does-not-exist` must exit {EXIT_USAGE}; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    after_bytes = (project / "ocx.lock").read_bytes()
+    assert after_bytes == before_bytes, (
+        "ocx.lock must NOT be rewritten when a binding name is unknown"
+    )
 
 
 def test_upgrade_offline_uncached_policy_blocked(
@@ -462,6 +694,70 @@ mover = "{ocx.registry}/{repo}:latest"
     after_lock = (project / "ocx.lock").read_bytes()
     assert before_lock == after_lock, (
         "ocx upgrade --check must NOT rewrite ocx.lock when refusing"
+    )
+
+
+def test_upgrade_scoped_check_isolates_scope(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Scoped ``ocx upgrade NAME --check`` verifies only the named binding.
+
+    Two tools are locked at ``:latest``; only ``b`` advances upstream. A scoped
+    ``--check`` on the still-current ``a`` exits 0 (``b``'s drift is out of
+    scope and carried forward frozen), while a scoped ``--check`` on the moved
+    ``b`` exits 65. Neither writes ``ocx.lock``. This is the scoped counterpart
+    to ``test_upgrade_check_exits_65_on_whole_file_drift``: a whole-file
+    ``--check`` here would exit 65 because ``b`` moved.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_chk_a"
+    repo_b = f"t_{short}_chk_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:latest"
+b = "{ocx.registry}/{repo_b}:latest"
+""",
+    )
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    before_lock = (project / "ocx.lock").read_bytes()
+
+    # Only ``b`` advances upstream; ``a`` stays put.
+    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    refresh = subprocess.run(
+        _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo_b}"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    # ``a`` is still current → scoped --check on ``a`` passes; ``b``'s drift is
+    # out of scope and carried forward frozen.
+    in_scope_current = _run_update(ocx, project, "a", "--check")
+    assert in_scope_current.returncode == EXIT_SUCCESS, (
+        f"scoped --check on the still-current 'a' must exit 0; "
+        f"rc={in_scope_current.returncode}\nstderr:\n{in_scope_current.stderr}"
+    )
+
+    # ``b`` moved → scoped --check on ``b`` refuses with 65.
+    in_scope_moved = _run_update(ocx, project, "b", "--check")
+    assert in_scope_moved.returncode == EXIT_DATA, (
+        f"scoped --check on the moved 'b' must exit {EXIT_DATA}; "
+        f"rc={in_scope_moved.returncode}\nstderr:\n{in_scope_moved.stderr}"
+    )
+
+    after_lock = (project / "ocx.lock").read_bytes()
+    assert before_lock == after_lock, (
+        "scoped ocx upgrade --check must never rewrite ocx.lock"
     )
 
 

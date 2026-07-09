@@ -96,9 +96,9 @@ The two commands that intentionally advance version pins are:
 | Command | When it re-resolves |
 |---------|---------------------|
 | `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
-| `ocx upgrade` | Always, on every declared tag (whole-file forced bump) |
+| `ocx upgrade` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
 
-Groups are a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. They are not a lock or upgrade scope. `ocx lock` and `ocx upgrade` always operate on the whole file.
+Groups are primarily a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx upgrade` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
 
 ## Pulling and executing {#pull-exec}
 

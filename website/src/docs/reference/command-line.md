@@ -1179,16 +1179,18 @@ Concurrent invocations of `ocx lock` and `ocx upgrade` are serialised via an in-
 
 ### `upgrade` {#upgrade}
 
-Re-resolves every advisory tag in `ocx.toml` and rewrites `ocx.lock`. This is the **whole-file forced-bump verb**: every declared tag is re-resolved against the registry, even when the lock is already current. A moving tag (`:latest`, `:3`) advances to wherever it points today; an unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written.
+Re-resolves advisory tags in `ocx.toml` and rewrites `ocx.lock`. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved against the registry, even when the lock is already current. A moving tag (`:latest`, `:3`) advances to wherever it points today; an unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written.
+
+Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped upgrade advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an upgrade.
 
 ::: tip `ocx upgrade` vs `ocx lock`
-`ocx upgrade` always re-resolves every tag. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean). To advance versions, use `ocx upgrade`. To reconcile a changed config, use `ocx lock`.
+Whole-file `ocx upgrade` always re-resolves every tag; scoped to `-g`/`NAME` arguments, it re-resolves only those. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean). To advance versions, use `ocx upgrade`. To reconcile a changed config, use `ocx lock`.
 :::
 
 **Usage**
 
 ```shell
-ocx upgrade [OPTIONS]
+ocx upgrade [OPTIONS] [NAME...]
 ```
 
 **Options**
@@ -1197,7 +1199,9 @@ ocx upgrade [OPTIONS]
 |------|-------|-------------|---------|
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
-| `--check` | — | Re-resolves every declared tag, compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
+| `--group <NAME>` | `-g` | Advance every binding in one or more named groups; freeze the rest. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to advance only those bindings within the named groups. | *(whole file)* |
+| `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
+| `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--remote` | | Route tag resolution to the remote registry instead of the local index. | false |
 | `-h`, `--help` | | Print help information. | |
@@ -1211,12 +1215,12 @@ Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--globa
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
-| 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream). |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate), or an unknown `-g` group or unknown binding `NAME` in a scoped upgrade. |
+| 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream), or a scoped upgrade whose `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
-| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, or a requested `--platform` is not shipped by a tool. |
+| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped upgrade with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1228,6 +1232,12 @@ ocx upgrade
 
 # Re-resolve with a live registry lookup (bypass local index cache):
 ocx upgrade --remote
+
+# Advance just ripgrep to where its declared tag points today:
+ocx upgrade ripgrep
+
+# Advance every tool in the ci group, freezing the rest:
+ocx upgrade -g ci
 ```
 
 Concurrent invocations of `ocx upgrade` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
