@@ -59,12 +59,22 @@ Groups (`[group.ci]`) remain **only** a composition concern: `add -g ci` chooses
 to; `run`/`env` compose a subset. Groups are **never** a lock or upgrade scope — the `--group`/`-g`
 flag and any positional PKGS scoping are removed from `lock` and `upgrade`.
 
+> **[SUPERSEDED 2026-07-09 — `adr_scoped_upgrade.md`]** The "no subset upgrade" stance below (the
+> `upgrade` row of this table, §4.5, §8.1) is **reversed for `upgrade` only**. `ocx upgrade` now
+> accepts `-g/--group` and positional binding names to advance a named subset, routed through
+> `resolve_lock_touched` — the same pin-preserving primitive `add`/`remove` use. Both guarantees hold:
+> only explicitly named bindings re-resolve (no laundering, Codex-H1) and untouched pins are carried
+> forward verbatim (no drift, Codex-R2); the freshness gate still refuses a drifted `ocx.toml` (65).
+> Bare `ocx upgrade` (no args) keeps the whole-file behavior recorded here. `ocx lock` stays
+> whole-file-only. See `adr_scoped_upgrade.md` for the guarantee-preservation argument.
+
 | Command | Re-resolves (live tag) | Carries forward verbatim | Errors when |
 |---|---|---|---|
 | `add X` | only `X` (the new binding) | every pre-existing binding (V2 byte-identical; V1 via pinned-index transcribe, exact-only) | (a) `ocx.toml` drifted from lock **before** this add (pre-mutation hash ≠ lock hash) → `StaleLockOnPartial` (65), remedy "run `ocx lock`"; (b) a carried entry's pinned V1 index is GONE → `LockUpgradeRequired` (78), remedy "run `ocx upgrade`"; (c) `X` unresolvable → `TagNotFound` (79) / `AuthFailure` (80) / `RegistryUnreachable` (69) / `PolicyBlocked` (81) |
 | `remove X` | **nothing** | every survivor (same pinned-index transcription for V1) | (a) lock drifted on a *survivor* before this remove → 65 ("run `ocx lock`"); (b) a survivor's pinned V1 index is GONE → 78 ("run `ocx upgrade`") |
 | `lock` | every declared tag **iff dirty**; **nothing** iff clean (byte-identical rewrite) | n/a (whole-file) | tag unresolvable (79/80/69/81); offline/frozen + uncached on a dirty re-resolve → `PolicyBlocked` (81) |
-| `upgrade` | **every** declared tag, always (even when clean) | n/a (whole-file) | tag unresolvable (79/80/69/81); offline/frozen + uncached → `PolicyBlocked` (81) |
+| `upgrade` (bare) | **every** declared tag, always (even when clean) | n/a (whole-file) | tag unresolvable (79/80/69/81); offline/frozen + uncached → `PolicyBlocked` (81) |
+| `upgrade -g G / NAME` *(added `adr_scoped_upgrade.md`)* | only the named `(group, name)` bindings | every other binding (V2 byte-identical; V1 exact-transcribe) — via `resolve_lock_touched` | no predecessor `ocx.lock` → `ConfigError` (78); `ocx.toml` drifted from lock → `StaleLockOnPartial` (65); unknown group/name → `UsageError` (64); tag unresolvable (79/80/69/81) |
 | `run` / `env` / `pull` | nothing (read-only; read BOTH V1 and V2) | everything (no write-behavior change to `pull`) | only when pinned content is unavailable: V1 index orphaned → cannot select host platform; V2 no host leaf → `NoHostLeaf` (78). Stale lock vs config at load → `StaleLock` (65) via the read-side gate |
 
 Notes:
@@ -76,6 +86,9 @@ Notes:
   via `tools_content_equal`, `lock.rs:480-518`).
 - **`ocx upgrade` is the bump verb.** Bare whole-file `resolve_lock(staged.config(), index, &[], …)`.
   No subset, no carry-forward, nothing untouched — laundering/drift impossible by construction.
+  *(Superseded for the scoped forms by `adr_scoped_upgrade.md`: `upgrade -g G` / `upgrade NAME`
+  re-resolve only the named bindings via `resolve_lock_touched` and carry the rest forward verbatim.
+  Bare `upgrade` is exactly as described here.)*
 - **`run`/`env`/`pull` are unchanged.** A healthy V1 lock needs no upgrade to be *read*; the read
   path already branches on `LockedResolution` (`lock.rs:200-219`). There is no `--upgrade` migration
   step a user must run before reading.
@@ -250,6 +263,14 @@ acceptance test that asserts a re-resolved survivor digest on `remove` (test pla
 
 ### 4.5 `upgrade.rs`
 
+> **[SUPERSEDED 2026-07-09 — `adr_scoped_upgrade.md`]** This section deleted the `upgrade` subset
+> surface. That deletion is **reversed**: `upgrade` re-gains `-g/--group` + positional names, but the
+> scoped branch now routes through `resolve_lock_touched` (the `add`/`remove` primitive), not the
+> deleted `resolve_lock_partial → catch → resolve_lock(&[])` fallback this section removed. The
+> dangerous silent-full-re-resolve fallback stays deleted. The `rejects_group_flag` /
+> `rejects_positional_args` tests this section introduced are replaced by parse + `select_touched`
+> unit tests. See `adr_scoped_upgrade.md`.
+
 `ocx upgrade` becomes a **bare whole-file resolve** — delete the partial branch entirely.
 
 - Delete the `--group`/`-g` flag (`upgrade.rs:38-44`) and the positional `packages` arg
@@ -372,9 +393,13 @@ Both hold because the offending path is **absent**, not guarded — the whole po
 - `merge_carry_forward_drops_undeclared_binding` — a `(group,name)` absent from `candidate` is not
   carried (remove path).
 
-`upgrade.rs`: replace the 3 deleted `is_partial_op` tests with a parser test asserting `--group` and
-positional args are rejected (exit 64). `lock.rs`: parser test asserting `--group`/`--upgrade` are
-rejected (exit 64). `error.rs`: assert updated `StaleLockOnPartial` message names `ocx lock`,
+`upgrade.rs`: ~~replace the 3 deleted `is_partial_op` tests with a parser test asserting `--group` and
+positional args are rejected (exit 64)~~ **[SUPERSEDED — `adr_scoped_upgrade.md`]** — `upgrade` now
+parses `-g`/positional; the tests instead assert `-g`/positional **parse** and cover `select_touched`
+(name→pairs, group→pairs, name∩group, unknown name/group → 64), plus pytest acceptance for scoped
+bump / group scope / untouched-pin preservation / no-lock-78 / stale-toml-65 / unknown-name-64.
+`lock.rs`: parser test asserting `--group`/`--upgrade` are rejected (exit 64) — `lock` stays
+whole-file-only, unchanged. `error.rs`: assert updated `StaleLockOnPartial` message names `ocx lock`,
 `LockUpgradeRequired` names `ocx upgrade`, neither contains an internal function name, both are
 tier-neutral.
 
