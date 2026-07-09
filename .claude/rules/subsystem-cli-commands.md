@@ -17,7 +17,7 @@ The CLI surface splits into two tiers. The split is firm.
 
 | Tier | Commands | Input | Consults `ocx.toml`? |
 |------|----------|-------|----------------------|
-| **Toolchain-tier** | `add`, `remove`, `lock`, `upgrade`, `run`, `env` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
+| **Toolchain-tier** | `add`, `remove`, `lock`, `update`, `run`, `env` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
 | **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which`, `deps` | OCI identifiers | **Never** |
 | **Bootstrap / mixed** | `init`, `direnv init`, `direnv export`, `about`, `version`, `shell completion` | Varies | — |
 | **Low-level registry** | `package pull`, `package push`, `package describe`, `package info`, `package create`, `index update/list/catalog`, `login`, `logout` | OCI identifiers | Never |
@@ -39,13 +39,13 @@ The CLI surface splits into two tiers. The split is firm.
 | `--format plain\|json` | — | plain (all commands, no exceptions) | Root-only output format; no subcommand-level `--format` |
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level |
-| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`upgrade`/`pull`/`run`/`env` (plus `patch freeze`, which reads `context.global()`); mutually exclusive with `--project` |
+| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`update`/`pull`/`run`/`env` (plus `patch freeze`, which reads `context.global()`); mutually exclusive with `--project` |
 
 ## Toolchain-Tier: `--global` vs Project
 
 `--global` is a **root flag** (before the subcommand), defined once on `ContextOptions` (peer of
 `--project`). It re-targets the project file to `$OCX_HOME/ocx.toml` for the toolchain-tier
-commands: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`. Canonical form:
+commands: `add`, `remove`, `lock`, `update`, `pull`, `run`, `env`. Canonical form:
 `ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
 
 Project-tier commands resolve their project file in strict precedence order: `--global` (explicit) → `--project`/`OCX_PROJECT` (explicit) → CWD walk → None.
@@ -66,7 +66,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `init` | Create minimal `ocx.toml` in current directory | — |
 | `remove IDENTIFIER...` | Drop one or more bindings from `ocx.toml`, rewrite lock (fail-fast, all-or-nothing) | — |
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
-| `upgrade [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock; whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64) | `-g/--group`, `--check`, `--pull/--no-pull` |
+| `update [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock against the LIVE registry by default (update-family verb: writes `ocx.lock` only, never tag pointers; `--remote` redundant-but-accepted; `--frozen` caps at snapshot, unknown tag exit 81); whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64). ADR `adr_toolchain_update_family.md` | `-g/--group`, `--check`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
 | `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |

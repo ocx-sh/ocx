@@ -74,7 +74,7 @@ or `$OCX_HOME/ocx.toml` under `--global`.
 | `ocx [--global] add <id>` | record + resolve + install into the toolchain |
 | `ocx [--global] remove <name>` | drop from the toolchain |
 | `ocx [--global] lock` | resolve only |
-| `ocx [--global] upgrade [-g grp]` | re-resolve advisory tags |
+| `ocx [--global] update [-g grp]` | re-resolve advisory tags (renamed from `upgrade`; registry-by-default, lock-only writes — `adr_toolchain_update_family.md`) |
 | `ocx [--global] run -- cmd` | run a command with the toolchain env |
 | `ocx [--global] env` | **composed env of the in-scope toolchain** |
 
