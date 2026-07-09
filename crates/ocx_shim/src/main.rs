@@ -303,8 +303,13 @@ fn run() -> Result<i32, ShimError> {
         if let Ok(canon_home) = dunce::canonicalize(home) {
             match dunce::canonicalize(&pkg_root) {
                 Ok(canon_root) => {
+                    // `packages/` holds installed candidates; `temp/` holds
+                    // `ocx package test` materializations — the test env's
+                    // synthesized entrypoints are launched from there, so it
+                    // is inside the trust boundary too (still under OCX_HOME).
                     let packages = canon_home.join("packages");
-                    if !canon_root.starts_with(&packages) {
+                    let temp = canon_home.join("temp");
+                    if !canon_root.starts_with(&packages) && !canon_root.starts_with(&temp) {
                         return Err(ShimError::ContainmentViolation {
                             path: canon_root.display().to_string(),
                         });
