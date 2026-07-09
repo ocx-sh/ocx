@@ -846,8 +846,8 @@ ocx package verify \
   registry.example/pkg:1.0
 ```
 
-:::warning Auto-verify during install is not yet enabled
-`ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly in CI before deploying a package to a production environment.
+:::tip Want this to happen automatically?
+Once you [pin a signer identity](#supply-chain-trust-policy) below, [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install — no flags, no extra step. See [Verify by default](#supply-chain-auto-verify).
 :::
 
 ### Air-gapped verification {#supply-chain-offline}
@@ -912,6 +912,30 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 [Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
 [Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching, most-specific-wins resolution, and operator-vs-project tier precedence.
 [`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
+:::
+
+### Verify by default {#supply-chain-auto-verify}
+
+A [`[[trust.policy]]`][config-trust] entry is only useful if the check it describes actually runs. Left as a manual step, verification is the thing that gets skipped the first time a deploy is running late — the exact gap the [tip](#supply-chain-verification) earlier in this section called out.
+
+Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], and [`ocx run`][cmd-run]. No extra flag, no separate step before or after:
+
+```shell
+# with the ghcr.io/acme/* policy from the previous section in place
+ocx package install ghcr.io/acme/tool:1.0
+```
+
+The check runs before any layer is downloaded, at the point where the manifest digest has just resolved. A tampered digest or a signer outside the pinned identity aborts the install right there, with the same exit codes [`ocx package verify`][cmd-package-verify] uses — `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy problem, `79` for a missing signature, `65` for a tampered bundle. Nothing has been written to the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
+
+Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[trust.policy]]` scope installs exactly as it did before this feature existed — OCX logs an `INFO` line noting that no policy covered it, and nothing blocks. The same rule applies to a covered package's transitive dependencies: each is verified only if a policy also covers *its* scope. Pin a scope broad enough (`ghcr.io/acme/*`) to cover a dependency closure you want verified end to end. Auto-verify also reads the operator `config.toml` tier only: unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
+
+Sometimes you need to skip the check anyway — a mirror with no referrers support, a package you're debugging. Pass `--no-verify` to skip it for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out; `--verify` re-enables the check for one invocation even with the environment variable set, since the flag always wins. Either bypass logs one `WARN` per invocation — a skipped check is visible in the logs, never silent.
+
+[`--offline`][arg-offline] install and pull verify the same way, reusing whatever trust material is already local: a [Sigstore trusted-root JSON][env-sigstore-tuf-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. With neither available for a policy-covered package, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
+
+::: tip Learn more
+[Command-line reference → `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] — the full auto-verify contract, options table, and exit codes.
+[Environment reference → `OCX_NO_VERIFY`][env-no-verify] — CI-wide opt-out, truthy/falsy values, forwarding to subprocess children.
 :::
 
 ## Remove and clean up {#cleanup}
@@ -1112,6 +1136,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-docker-config]: ./reference/environment.md#external-docker-config
 [env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
+[env-no-verify]: ./reference/environment.md#ocx-no-verify
 [env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
 [env-ref]: ./reference/environment.md

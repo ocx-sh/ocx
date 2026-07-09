@@ -25,6 +25,23 @@ impl Verify {
     pub fn enabled(&self) -> bool {
         !self.no_verify
     }
+
+    /// Resolve verification against an env-var opt-out, with the flag winning
+    /// over the env. Used by install/pull where `OCX_NO_VERIFY` mirrors
+    /// `--no-verify`:
+    ///
+    /// - explicit `--no-verify` → `false` (off, regardless of env)
+    /// - explicit `--verify` → `true` (on, overriding an env opt-out)
+    /// - neither flag → `!env_opt_out` (the env decides)
+    pub fn resolve(&self, env_opt_out: bool) -> bool {
+        if self.no_verify {
+            false
+        } else if self.verify {
+            true
+        } else {
+            !env_opt_out
+        }
+    }
 }
 
 #[cfg(test)]
@@ -63,5 +80,30 @@ mod tests {
     fn last_wins() {
         assert!(!enabled(&["--verify", "--no-verify"]), "--no-verify wins when last");
         assert!(enabled(&["--no-verify", "--verify"]), "--verify wins when last");
+    }
+
+    fn resolve(args: &[&str], env_opt_out: bool) -> bool {
+        let mut argv = vec!["harness"];
+        argv.extend_from_slice(args);
+        Harness::try_parse_from(argv)
+            .expect("parse")
+            .verify
+            .resolve(env_opt_out)
+    }
+
+    #[test]
+    fn resolve_flag_wins_over_env() {
+        // Explicit --no-verify turns off regardless of env.
+        assert!(!resolve(&["--no-verify"], false));
+        assert!(!resolve(&["--no-verify"], true));
+        // Explicit --verify turns on, overriding an env opt-out.
+        assert!(resolve(&["--verify"], true));
+        assert!(resolve(&["--verify"], false));
+    }
+
+    #[test]
+    fn resolve_env_decides_when_no_flag() {
+        assert!(resolve(&[], false), "no flag + env off => verification on");
+        assert!(!resolve(&[], true), "no flag + env opt-out => verification off");
     }
 }

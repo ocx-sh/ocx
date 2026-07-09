@@ -111,6 +111,10 @@ The pipeline is verified end-to-end against the in-repo fake Sigstore stack, not
 
 Do not treat a green `ocx package verify` against production Sigstore as a completed cryptographic verification until these are addressed.
 
+:::tip Automatic verification at install time
+Everything above describes the standalone `ocx package verify` command. Once a [`[[trust.policy]]`][config-trust] covers a package, [`install`][cmd-package-install], [`pull`][cmd-package-pull], and every command that auto-installs on demand run the same check automatically — see [Verify by default][guide-auto-verify] in the user guide. That gate has its own scope limitations, distinct from the cryptographic ones above: a covered root's transitive dependencies are verified only if a policy also covers each dependency's own `registry/repository` scope, and the automatic check reads the operator `config.toml` tier only — a project `ocx.toml` policy never gates it.
+:::
+
 ## Offline and Air-Gapped Verification {#offline-verification}
 
 Verifying an artifact means reading it — and its signature — from the registry where it lives. In an air-gapped deployment that registry is a local mirror the operator runs, so `ocx package verify` treats the artifact registry as always-available. What `--offline` / [`OCX_OFFLINE`][env-offline] removes for verify is the **Sigstore trust-services** network: the Rekor public-key fetch and TUF. Those are the calls that need trust material, and offline verify sources that material locally instead.
@@ -173,6 +177,8 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
 [cmd-package-sign]: ../reference/command-line.md#package-sign
 [cmd-package-sign-token-precedence]: ../reference/command-line.md#package-sign
 [cmd-package-verify]: ../reference/command-line.md#package-verify
+[cmd-package-install]: ../reference/command-line.md#package-install
+[cmd-package-pull]: ../reference/command-line.md#package-pull
 
 <!-- reference -->
 [config-trust]: ../reference/configuration.md#keys-trust
@@ -185,3 +191,4 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
 
 <!-- user guide -->
 [user-supply-chain]: ../user-guide.md#supply-chain
+[guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify

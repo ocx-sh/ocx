@@ -243,6 +243,20 @@ async fn setup_impl(
         singleflight::Acquisition::Leader(handle) => handle,
     };
 
+    // Policy-gated auto-verify at the metadata-first seam: the manifest digest
+    // is known but no layer has been downloaded, so a fail-closed abort leaves
+    // no package-store or symlink state (only inert content-addressed blob-cache
+    // writes from resolve). Runs leader-only — the singleflight key is the
+    // resolved digest, so a waiter shares an already-verified digest and skips
+    // re-verifying (diamond deps verify once). A verify failure is broadcast to
+    // waiters via `handle.fail`. A no-op unless a `[[trust.policy]]` covers the
+    // package; fires for the root and every transitive dependency (each unique
+    // digest reaches this single choke point). See `tasks::auto_verify`.
+    if let Err(kind) = mgr.maybe_auto_verify(pinned.as_identifier()).await {
+        let shared = handle.fail(kind);
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+    }
+
     // From here on, we own the handle. On success, broadcast the result
     // to waiters. On error, broadcast the error message so waiters get a
     // meaningful diagnostic instead of a generic "abandoned".

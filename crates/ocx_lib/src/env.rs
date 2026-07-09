@@ -83,6 +83,12 @@ pub mod keys {
     /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
     /// `ocx config update` still works when this is set.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
+    /// Boolean — when truthy, skip the policy-gated auto-verify on
+    /// `ocx package install` / `ocx package pull`. Env mirror of the
+    /// per-command `--no-verify` flag (the flag wins). Forwarded to child ocx
+    /// processes via [`Env::apply_ocx_config`] so a CI-wide opt-out reaches a
+    /// launcher-spawned child install.
+    pub const OCX_NO_VERIFY: &str = "OCX_NO_VERIFY";
 
     /// Bearer-credential env vars that `apply_ocx_config` must actively scrub
     /// from a child env. Forwarding these to every subprocess would broaden
@@ -158,6 +164,12 @@ pub struct OcxConfigView {
     /// [`keys::OCX_MANAGED_CONFIG`] so a launcher re-entry resolves the same
     /// managed tier. `None` when no managed-config source is in effect.
     pub managed_config_source: Option<String>,
+    /// When true, the policy-gated auto-verify on install/pull is opted out
+    /// (`OCX_NO_VERIFY` truthy in the parent env). Forwarded as
+    /// [`keys::OCX_NO_VERIFY`] so a child ocx install inherits the same
+    /// CI-wide opt-out. The per-command `--no-verify` flag is a one-shot user
+    /// choice and is NOT forwarded.
+    pub no_verify: bool,
 }
 
 impl OcxConfigView {
@@ -175,6 +187,7 @@ impl OcxConfigView {
             patches: None,
             patch_snapshot: None,
             managed_config_source: None,
+            no_verify: false,
         }
     }
 }
@@ -350,6 +363,11 @@ impl Env {
         match &cfg.managed_config_source {
             Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
             None => self.remove(keys::OCX_MANAGED_CONFIG),
+        }
+        if cfg.no_verify {
+            self.set(keys::OCX_NO_VERIFY, "1");
+        } else {
+            self.remove(keys::OCX_NO_VERIFY);
         }
     }
 
@@ -922,6 +940,30 @@ mod tests {
         assert!(
             env.get(keys::OCX_FROZEN).is_none(),
             "cfg.frozen=false must clear any inherited OCX_FROZEN"
+        );
+    }
+
+    #[test]
+    fn apply_ocx_config_forwards_ocx_no_verify_when_set() {
+        // The auto-verify opt-out is forwarded so a launcher-spawned child
+        // install inherits the same CI-wide `OCX_NO_VERIFY`; unset clears a
+        // stale inherited value. Mirrors the OCX_OFFLINE/FROZEN/GLOBAL contract.
+        let mut cfg = view("/abs/ocx");
+        cfg.no_verify = true;
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+        assert_eq!(
+            env.get(keys::OCX_NO_VERIFY).unwrap(),
+            "1",
+            "cfg.no_verify=true must forward OCX_NO_VERIFY=1 to the child env"
+        );
+
+        let mut env = Env::clean();
+        env.set(keys::OCX_NO_VERIFY, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_NO_VERIFY).is_none(),
+            "cfg.no_verify=false must clear any inherited OCX_NO_VERIFY"
         );
     }
 

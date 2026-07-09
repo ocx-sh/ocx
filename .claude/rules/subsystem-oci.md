@@ -50,6 +50,7 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator — resolve target, list signature referrers (capability cache), parse bundle, verify cert chain + Rekor SET + signature + identity/issuer. Wired end-to-end (#194); embedded TUF trust root still stubbed (`--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` required) — see signing.md "Current Limitations" |
 | `oci/verify/trust_root.rs` | Trust-root loading: Fulcio CA PEM, Sigstore `TrustedRoot` JSON (`--tuf-root`, pinned Rekor key), cache rebuild; embedded asset stubbed |
 | `oci/verify/trust_cache.rs` | Trust-root cache for offline verify (`$OCX_HOME/state/trust_root/<rekor-authority>.json`) — Fulcio CA + pinned Rekor key, atomic write, TTL, fail-open; mirrors `referrer/capability.rs` |
+| `oci/verify/trust_resolve.rs` | `resolve_trust_root(tuf_override, pem_override, cache_root, rekor_cache_key, offline)` — shared trust-root ladder (TUF/PEM override → cache → embedded, with the offline pinned-Rekor-key gate). Single source of the offline gate for the `ocx package verify` command (flag→override) and the auto-verify hook shared across every install surface (env→override) |
 
 ## Key Types
 

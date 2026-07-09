@@ -374,6 +374,20 @@ impl Context {
         .with_patch_snapshot(patch_snapshot)
         .with_managed_config_client(managed_config_client);
 
+        // Attach policy-gated auto-verify ONCE on the shared manager so EVERY
+        // install surface inherits it fail-closed — not just `install`/`pull`
+        // but every `find_or_install_all` path (`package exec`, `package env`,
+        // `run`, patch discovery). `None` when no operator `[[trust.policy]]` is
+        // configured. install/pull refine the opt-out from their
+        // `--verify`/`--no-verify` flag via `conventions::manager_with_verify_flag`.
+        let operator_policies = config.trust.as_ref().map(|t| t.policy.clone()).unwrap_or_default();
+        let manager = manager.with_auto_verify(build_auto_verify(
+            operator_policies,
+            &registry_client,
+            options.offline,
+            file_structure.root(),
+        ));
+
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
         // on whatever `$PATH` resolves at the launcher site. Falling back to
@@ -403,6 +417,11 @@ impl Context {
         // Forward the effective managed-config source so a child ocx (launcher
         // re-entry) resolves the same managed tier via `OCX_MANAGED_CONFIG`.
         config_view.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
+        // Forward the auto-verify opt-out so a launcher-spawned child install
+        // inherits the same CI-wide `OCX_NO_VERIFY`. Pure env passthrough — the
+        // per-command `--no-verify` flag is a one-shot choice and is not
+        // forwarded. (`env::keys::OCX_NO_VERIFY`, see `subsystem-cli.md`.)
+        config_view.no_verify = env::flag(env::keys::OCX_NO_VERIFY, false);
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
@@ -603,6 +622,44 @@ impl Context {
     pub fn verify_context(&self) -> (&oci::index::Index, &oci::Client, bool) {
         (&self.default_index, &self.registry_client, self.offline)
     }
+}
+
+/// Build the shared policy-gated auto-verify config, or `None` when no operator
+/// `[[trust.policy]]` is configured.
+///
+/// Attached once on the manager (every install surface inherits it). Carries the
+/// always-available registry client (verify reads the signature referrer from
+/// the registry even under `--offline`), the offline flag, the
+/// `OCX_SIGSTORE_TUF_ROOT` / `OCX_SIGSTORE_TRUST_ROOT` overrides, and the
+/// `OCX_NO_VERIFY` opt-out default (install/pull refine it from their flag).
+/// OCI-tier gating uses the operator `config.toml` set only; the project
+/// `ocx.toml` pool stays empty (no new OCI-tier carve-out).
+fn build_auto_verify(
+    operator_policies: Vec<ocx_lib::trust::TrustPolicy>,
+    registry_client: &oci::Client,
+    offline: bool,
+    cache_root: &Path,
+) -> Option<package_manager::AutoVerify> {
+    if operator_policies.is_empty() {
+        return None;
+    }
+    // Compile-time-constant, known-valid URL — validated (not parsed by name) so
+    // the CLI never names `url::Url`. Unused when the trust root pins the Rekor
+    // key (the `OCX_SIGSTORE_TUF_ROOT` / offline path).
+    const DEFAULT_REKOR_URL: &str = "https://rekor.sigstore.dev";
+    let rekor_url =
+        oci::endpoint::validate_sigstore_url(DEFAULT_REKOR_URL, "rekor").expect("built-in default Rekor URL is valid");
+    Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
+        operator_policies,
+        project_policies: Vec::new(),
+        registry_client: registry_client.clone(),
+        rekor_url,
+        offline,
+        cache_root: cache_root.to_path_buf(),
+        tuf_root_env: std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(PathBuf::from),
+        pem_root_env: std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(PathBuf::from),
+        user_opted_out: env::flag(env::keys::OCX_NO_VERIFY, false),
+    }))
 }
 
 /// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.

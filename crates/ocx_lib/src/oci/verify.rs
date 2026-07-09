@@ -18,9 +18,11 @@ pub mod error;
 mod identity;
 pub mod pipeline;
 pub mod trust_cache;
+pub mod trust_resolve;
 pub mod trust_root;
 
 pub use error::{VerifyError, VerifyErrorKind};
 pub use pipeline::{VerifyContext, VerifyPipeline, VerifyResult};
 pub use trust_cache::TrustRootCache;
+pub use trust_resolve::resolve_trust_root;
 pub use trust_root::TrustRoot;

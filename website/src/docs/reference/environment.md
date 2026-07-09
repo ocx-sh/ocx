@@ -454,6 +454,16 @@ See the [FAQ][faq-codesign] for details on why this is necessary and how it work
 
 This variable has no effect on non-macOS systems.
 
+### `OCX_NO_VERIFY` {#ocx-no-verify}
+
+When set to a [truthy value](#truthy-values), OCX skips the policy-gated automatic signature verification on [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and on every command that auto-installs on demand — [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery. Only `install` and `pull` also carry a `--verify`/`--no-verify` flag; the others opt out via this variable alone. It follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline).
+
+By default, when a [`[[trust.policy]]`][cmd-trust-policy] covers a package being installed, OCX verifies its Sigstore signature at the metadata-first seam — after the manifest resolves, before any layer downloads — and aborts the install fail-closed if verification fails. This variable is the CI-wide opt-out. When a policy-covered package is skipped this way, OCX logs a single `WARN` per invocation so the bypass is never silent.
+
+The per-command `--no-verify` flag mirrors this variable and **wins over it**: `--verify` on the command line re-enables verification even when `OCX_NO_VERIFY` is truthy. The opt-out is forwarded to subprocess children (a launcher-spawned child install inherits the same CI-wide setting), unlike the local-only [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root) / [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root).
+
+When no `[[trust.policy]]` covers a package, verification does not run regardless of this variable — trust is opt-in. See the [user guide][guide-auto-verify] for the full model.
+
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX disables all network access. Tag→digest resolution must be satisfied by the local index or by a digest-pinned identifier; unpinned tags missing from the local index error immediately. Useful for hermetic CI runs and air-gapped environments. The command line option [`--offline`][arg-offline] takes precedence over this variable.
@@ -660,6 +670,13 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-direnv]: command-line.md#direnv
 [cmd-package-sign]: command-line.md#package-sign
 [cmd-package-verify]: command-line.md#package-verify
+[cmd-package-install]: command-line.md#package-install
+[cmd-package-pull]: command-line.md#package-pull
+[cmd-package-exec]: command-line.md#package-exec
+[cmd-package-env]: command-line.md#package-env
+[cmd-env-root]: command-line.md#env-root
+[cmd-trust-policy]: configuration.md#keys-trust
+[guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag

@@ -551,6 +551,8 @@ Export the composed toolchain environment for the active project or global toolc
 
 This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
+A tool missing from the local object store is auto-installed as part of composition. Because it auto-installs, a tool covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
+
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
 **Usage**
@@ -646,7 +648,7 @@ Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable fo
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
-In the default mode, packages are auto-installed if not already available locally (including transitive dependencies).
+In the default mode, packages are auto-installed if not already available locally (including transitive dependencies). Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before its environment is composed — the same gate as [`package install`](#package-install) (see its auto-verify contract).
 See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
 For the full `ocx package env` entry, see [`package env`](#package-env).
@@ -1327,6 +1329,8 @@ The output respects [`--format json`](#arg-format) and [`--quiet`](#arg-quiet).
 
 Spawns a child process whose environment is composed from the project's `ocx.lock`. This is the **project-tier** env-composition command — symbols are binding names from `ocx.toml`, not OCI identifiers. For OCI-identifier-based invocations, use [`exec`](#exec).
 
+A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
+
 `--` is mandatory and at least one token after it is required. A missing `--` or empty argv produces exit 64.
 
 **Usage**
@@ -1371,10 +1375,11 @@ The composer prepends env entries in iteration order, so the **last group listed
 | *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
 | 1 | Child spawn failed (binary not found, exec errno). |
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; or `--global` combined with `--project`. (OCX remaps clap's default exit 2 to 64.) |
-| 65 | `ocx.lock` is stale — run `ocx lock`. |
+| 65 | `ocx.lock` is stale — run `ocx lock`; or a policy-covered binding's Sigstore bundle is tampered (auto-verify). |
 | 69 | Registry unreachable during auto-install of a missing package. |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
-| 79 | Package not found in registry during auto-install. |
+| 77 | A policy-covered binding's certificate identity or OIDC issuer does not match (auto-verify). |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
+| 79 | Package not found in registry during auto-install; or no signature found for a policy-covered binding (auto-verify). |
 | 80 | Authentication failure during auto-install. |
 
 **Examples**
@@ -2071,6 +2076,8 @@ Downloads packages into the local [object store][fs-objects] without creating
 Unlike [`install`](#install), this command only populates the content-addressed object store — no
 candidate or current symlinks are created. If a package declares [dependencies][ug-dependencies], all transitive dependencies are pulled into the object store as well. This is the recommended primitive for CI environments where reproducibility matters and symlink management is unnecessary.
 
+Like [`package install`][cmd-package-install], `pull` verifies a policy-covered package's [Sigstore][sigstore] signature automatically before downloading, aborting fail-closed on a mismatch or a tampered artifact. See the auto-verify contract under [`install`](#package-install) below for the seam, the operator-config-only policy scope, the `--no-verify` / [`OCX_NO_VERIFY`][env-no-verify] opt-out, and offline behavior.
+
 **Usage**
 
 ```shell
@@ -2084,6 +2091,8 @@ ocx package pull [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platform to consider. Defaults to the current platform.
+- `--verify`: Verify the package's signature when a [`[[trust.policy]]`][config-trust] covers it (default); re-enables verification for this invocation even if [`OCX_NO_VERIFY`][env-no-verify] is set.
+- `--no-verify`: Skip that verification for this invocation. Equivalent env var: [`OCX_NO_VERIFY`][env-no-verify] (the flag wins over the env).
 - `-h`, `--help`: Print help information.
 
 ::: tip
@@ -2631,8 +2640,8 @@ Supplying exactly one of the two flags is a usage error (exit 64) — a `--certi
 | 83 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
 | 84 | Registry does not support the OCI Referrers API |
 
-::: warning No auto-verify during install
-`ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly before using a package in security-sensitive contexts.
+::: tip Automatic verification on install and pull
+When a [`[[trust.policy]]`][config-trust] entry covers a package, [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] verify it automatically before any layer downloads — see the auto-verify contract under [`install`](#package-install) below and [Verify by default][guide-auto-verify] in the user guide. Run `ocx package verify` directly to check a signature by hand, verify a package outside every policy's scope, or verify without installing.
 :::
 
 **JSON output** (`--format json`)
@@ -2760,6 +2769,14 @@ Installs packages into the [object store][fs-objects] and creates a [candidate s
 
 This is the OCI-tier install command. For project-tier installs driven by `ocx.toml`, use [`ocx add`](#add).
 
+When a [`[[trust.policy]]`][config-trust] entry in the operator `config.toml` tier covers the package's `registry/repository`, install verifies its [Sigstore][sigstore] signature automatically — at the metadata-first seam, after the manifest digest resolves and before any layer downloads. A failed check aborts before any package-store or symlink state is written, so a rejected artifact costs a manifest fetch, not a wasted download. Auto-verify consults the operator tier only; unlike [`package verify`][cmd-package-verify], a project `ocx.toml` policy is never considered here.
+
+The same gate applies to **every** command that fetches a package, not just `install`: `package pull`, and every command that auto-installs on demand — [`package exec`](#package-exec), [`package env`](#package-env), and [`run`](#run). Only `install` and `pull` carry the `--verify` / `--no-verify` flag; the others opt out via [`OCX_NO_VERIFY`][env-no-verify].
+
+A package outside every policy's scope is not verified — trust is opt-in, and OCX logs an `INFO` line noting the skip. This opt-in is per scope: a covered package's transitive dependencies are verified only if a policy also covers *their* scope. When a policy does cover the package, a failed check exits with the same taxonomy [`package verify`][cmd-package-verify] uses: `65` for a tampered bundle, `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy configuration problem, `79` for no signature found.
+
+Pass `--no-verify` (below), or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out, to skip a policy-covered package's verification; the flag wins when both are set, and the bypass logs a single `WARN` per invocation. Under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), verification reuses whatever trust material is already local — [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root] or a warm `$OCX_HOME/state/trust_root/` cache entry — and fails closed with exit `78` when neither is available, rather than installing an artifact it could not check. See [Verify by default][guide-auto-verify] in the user guide for the full model.
+
 **Usage**
 
 ```shell
@@ -2776,6 +2793,8 @@ ocx package install [OPTIONS] <PACKAGE>...
 |------|-------|-------------|
 | `-p`, `--platform` | | Target platform — see [Platforms][reference-platforms] for the grammar (e.g. `linux/amd64`, `linux/amd64+libc.glibc`, `linux/amd64+libc.musl`, `darwin/arm64`). Defaults to the auto-detected current platform. When a feature-tagged value is supplied, OCX selects the manifest whose `os.features` are a subset of the supplied features — use this to force a specific libc variant when you know it will run on the host. If the package ships for the host os/arch but no candidate's `os.features` are a subset of the resolved features (e.g. a glibc-only host against a musl-only entry), install exits [`65`](#exit-codes) (`DataError`) and the error lists the available platforms to override with. |
 | `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
+| `--verify` | | Verify the package's signature when a [`[[trust.policy]]`][config-trust] covers it (default); re-enables verification for this invocation even if [`OCX_NO_VERIFY`][env-no-verify] is set. No effect on a package outside every policy's scope. |
+| `--no-verify` | | Skip that verification for this invocation. Equivalent env var: [`OCX_NO_VERIFY`][env-no-verify] (the flag wins over the env). |
 | `-h`, `--help` | | Print help information. |
 
 ::: warning Host-only symlinks for foreign-platform installs
@@ -2861,7 +2880,7 @@ ocx package deselect <PACKAGE>...
 
 Executes a command within the environment of one or more OCI-tier packages.
 
-This is the OCI-tier equivalent of the root [`exec`](#exec) command. Identifiers are OCI references (e.g. `cmake:3.28`), resolved through the index and auto-installed when missing. For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
+This is the OCI-tier equivalent of the root [`exec`](#exec) command. Identifiers are OCI references (e.g. `cmake:3.28`), resolved through the index and auto-installed when missing. Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before it runs — the same gate as [`package install`](#package-install) (see its auto-verify contract). For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
 
 **Usage**
 
@@ -2892,7 +2911,7 @@ Output format is controlled by the root [`--format`](#arg-format) flag (default:
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
-In the default mode, packages are auto-installed if not already available locally (including transitive dependencies).
+In the default mode, packages are auto-installed if not already available locally (including transitive dependencies). Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before its environment is composed — the same gate as [`package install`](#package-install) (see its auto-verify contract).
 See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
 **Usage**
@@ -3474,6 +3493,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-sigstore-trust-root]: ./environment.md#ocx-sigstore-trust-root
 [env-sigstore-tuf-root]: ./environment.md#ocx-sigstore-tuf-root
 [env-offline]: ./environment.md#ocx-offline
+[env-no-verify]: ./environment.md#ocx-no-verify
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/
@@ -3506,6 +3526,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment
 [patches-user-guide]: ../user-guide/patches.md
+[guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
 
 <!-- commands (package-test options) -->
 [cmd-package-push]: #package-push
@@ -3521,6 +3542,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 
 <!-- commands (package group) -->
 [cmd-package-install]: #package-install
+[cmd-package-pull]: #package-pull
+[cmd-package-verify]: #package-verify
 [cmd-package-uninstall]: #package-uninstall
 [cmd-package-select]: #package-select
 [cmd-package-deselect]: #package-deselect

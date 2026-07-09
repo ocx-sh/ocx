@@ -39,7 +39,7 @@ use clap::Parser;
 
 use ocx_lib::oci;
 use ocx_lib::oci::endpoint::validate_sigstore_url;
-use ocx_lib::oci::verify::{TrustRoot, TrustRootCache, VerifyContext, VerifyError, VerifyErrorKind, VerifyPipeline};
+use ocx_lib::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyErrorKind, VerifyPipeline};
 use ocx_lib::trust::{self, CompiledPolicy};
 
 use crate::api::data::verification::VerificationReport;
@@ -239,18 +239,13 @@ impl Verify {
 
     /// Resolve the trust root in precedence order, offline-aware.
     ///
-    /// 1. `--tuf-root` / `OCX_SIGSTORE_TUF_ROOT` — a Sigstore trusted-root JSON
-    ///    (Fulcio CA + **pinned Rekor key**); the air-gapped seam, no TUF fetch.
-    /// 2. `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT` — a Fulcio-CA PEM (no Rekor
-    ///    key; the pipeline fetches it online, or pins it from the cache).
-    /// 3. The fresh trust-root cache for this Rekor instance (Fulcio + Rekor key),
-    ///    populated by a prior online verify.
-    /// 4. The embedded root (stubbed → exit 78).
-    ///
-    /// Offline additionally requires the resolved material to carry a pinned
-    /// Rekor key (only 1 and 3 do). Offline + a bare PEM, or offline + an empty
-    /// cache, fails with an actionable exit-78 error naming the remedy — verify
-    /// is never silently skipped.
+    /// Layers flag-vs-env override resolution on the shared
+    /// [`ocx_lib::oci::verify::resolve_trust_root`] ladder (`--tuf-root` /
+    /// `OCX_SIGSTORE_TUF_ROOT` → `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT` →
+    /// trust-root cache → embedded root, with the offline pinned-Rekor-key
+    /// gate). The flag wins over the env for each override; the shared ladder is
+    /// the single source of truth for the offline gate (auto-verify reuses it).
+    /// Any failure is tagged with the target identifier.
     async fn resolve_trust_root(
         &self,
         identifier: &oci::Identifier,
@@ -258,85 +253,23 @@ impl Verify {
         rekor_cache_key: &str,
         offline: bool,
     ) -> anyhow::Result<TrustRoot> {
-        use ocx_lib::oci::verify::error::TrustRootLoadReason;
-
-        let load_err = |kind: VerifyErrorKind| anyhow::Error::from(VerifyError::new(identifier.clone(), kind));
-        let read_err = |source: std::io::Error| {
-            load_err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
-                source: Box::new(source),
-            }))
-        };
-
-        // 1. TUF trusted-root JSON override (Fulcio CA + pinned Rekor key).
-        let tuf_path = self
+        let tuf_override = self
             .tuf_root
             .clone()
             .or_else(|| std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(std::path::PathBuf::from));
-        if let Some(path) = tuf_path {
-            let json_path = trusted_root_json_path(path);
-            let bytes = std::fs::read(&json_path).map_err(read_err)?;
-            let root = TrustRoot::load_trusted_root_json(&bytes).map_err(load_err)?;
-            return self.enforce_offline_rekor_key(identifier, root, offline);
-        }
-
-        // 2. Fulcio-CA PEM override (no Rekor key).
-        let pem_path = self
+        let pem_override = self
             .trust_root
             .clone()
             .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(std::path::PathBuf::from));
-        if let Some(path) = pem_path {
-            let bytes = std::fs::read(&path).map_err(read_err)?;
-            let root = TrustRoot::load_from_pem(&bytes).map_err(load_err)?;
-            return self.enforce_offline_rekor_key(identifier, root, offline);
-        }
-
-        // 3. Fresh trust-root cache for this Rekor instance (Fulcio + Rekor key).
-        //    A normal cache entry always carries a Rekor key, but route it through
-        //    the same offline gate so a hand-edited keyless entry still yields the
-        //    actionable exit-78 error rather than a deeper exit-83.
-        if let Ok(Some(cached)) = TrustRootCache::from_cache(rekor_cache_key, cache_root).await {
-            return self.enforce_offline_rekor_key(identifier, cached.into_trust_root(), offline);
-        }
-
-        // 4. Nothing cached or supplied. Offline cannot fall back to the
-        //    online-only embedded/fetch path — fail with the remedy.
-        if offline {
-            return Err(load_err(VerifyErrorKind::TrustRootLoad(
-                TrustRootLoadReason::OfflineTrustMaterialUnavailable,
-            )));
-        }
-        TrustRoot::load_embedded().map_err(load_err)
-    }
-
-    /// Offline verify needs a pinned Rekor key (the SET cannot be checked without
-    /// one and there is no network to fetch it). A trust root that lacks one is
-    /// an actionable exit-78 error offline; online it is fine (the key is
-    /// fetched, then cached).
-    fn enforce_offline_rekor_key(
-        &self,
-        identifier: &oci::Identifier,
-        root: TrustRoot,
-        offline: bool,
-    ) -> anyhow::Result<TrustRoot> {
-        use ocx_lib::oci::verify::error::TrustRootLoadReason;
-        if offline && root.rekor_public_key_pem().is_none() {
-            return Err(VerifyError::new(
-                identifier.clone(),
-                VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::OfflineTrustMaterialUnavailable),
-            )
-            .into());
-        }
-        Ok(root)
-    }
-}
-
-/// Resolve a `--tuf-root` value to the trusted-root JSON file: the path itself
-/// when it is a file, or `<dir>/trusted_root.json` when it names a directory.
-fn trusted_root_json_path(path: std::path::PathBuf) -> std::path::PathBuf {
-    if path.is_dir() {
-        path.join("trusted_root.json")
-    } else {
-        path
+        ocx_lib::oci::verify::resolve_trust_root(
+            tuf_override.as_deref(),
+            pem_override.as_deref(),
+            cache_root,
+            rekor_cache_key,
+            offline,
+        )
+        .await
+        .map_err(|kind| VerifyError::new(identifier.clone(), kind).into())
     }
 }
 
