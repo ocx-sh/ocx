@@ -292,7 +292,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 /// `PackageManager::pull_all`. Pure object-store warming: pulls blobs and
 /// assembles package content, never touches the `symlinks/` namespace.
 ///
-/// Toolchain-tier commands (`add`, `lock`, `upgrade`) declare bindings in
+/// Toolchain-tier commands (`add`, `lock`, `update`) declare bindings in
 /// `ocx.toml` + `ocx.lock`; resolution at use-time goes through the lock
 /// (project tier) or `resolve_global_pinned_env` (global tier, ADR D5
 /// amended 2026-05-19). Neither path consults candidate or `current`
@@ -407,7 +407,7 @@ pub(crate) fn has_legacy_entry(tools: &[ocx_lib::project::LockedTool]) -> bool {
 /// `--platform` omitted → the host native platform (default). One or more
 /// `--platform` values → each requested platform verbatim, so an amd64 host
 /// can pre-warm an arm64 (or any other) leaf the V2 lock already pins. Shared
-/// by `materialize_lock` (`add`/`lock`/`upgrade`) and `ocx pull`.
+/// by `materialize_lock` (`add`/`lock`/`update`) and `ocx pull`.
 pub(crate) fn platform_selection(platforms: &[ocx_lib::oci::Platform]) -> Vec<ocx_lib::oci::Platform> {
     if platforms.is_empty() {
         vec![ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any)]
@@ -482,11 +482,11 @@ pub(crate) fn reject_multi_platform_on_legacy(
 ///
 /// Unlike [`load_project_with_lock`], the staleness gate is NOT
 /// enforced here: mutators (`ocx add`, `ocx remove`, `ocx lock`,
-/// `ocx upgrade`) are precisely the commands that *fix* a stale lock.
+/// `ocx update`) are precisely the commands that *fix* a stale lock.
 /// The guard surfaces the predecessor lock verbatim. `add`/`remove`
 /// feed it to `resolve_lock_touched`, which carries untouched bindings
 /// forward and fails closed (no silent fallback) on pre-mutation drift;
-/// `ocx lock`/`ocx upgrade` re-resolve the whole file via `resolve_lock`.
+/// `ocx lock`/`ocx update` re-resolve the whole file via `resolve_lock`.
 ///
 /// Bootstrapping case: when `ocx.toml` exists but `ocx.lock` does
 /// not, [`MutationGuard::previous_lock`] returns `None`. Callers

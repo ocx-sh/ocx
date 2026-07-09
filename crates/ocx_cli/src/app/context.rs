@@ -191,31 +191,19 @@ impl Context {
             blob_store: BlobStore::new(file_structure.blobs.root().to_path_buf()),
         });
 
-        // Single `Index::from_chained` entry point. `remote_index` is the
-        // authoritative signal: `None` means offline (no network sources);
-        // `Some` means online (wrap it as a chain source). `options.remote`
-        // then selects between `Default` (cache-first) and `Remote`
-        // (mutable lookups bypass cache) for online mode. Deriving mode and
-        // sources from the same value prevents the `(offline=false,
-        // remote_index=None)` unreachable case the older bool-based match
-        // produced.
-        let (mode, sources): (index::ChainMode, Vec<index::Index>) = match &remote_index {
-            None => (index::ChainMode::Offline, Vec::new()),
-            Some(remote) => {
-                // Precedence (offline already won via the `None` arm — it
-                // produced no remote_index): frozen ▸ remote ▸ default. Frozen
-                // keeps the remote source so digest-pinned content still
-                // fetches; only unpinned-tag resolution is refused.
-                let mode = if options.frozen {
-                    index::ChainMode::Frozen
-                } else if options.remote {
-                    index::ChainMode::Remote
-                } else {
-                    index::ChainMode::Default
-                };
-                (mode, vec![index::Index::from_remote(remote.clone())])
-            }
+        // Single `Index::from_chained` entry point; see
+        // `chain_mode_and_sources` for the offline/online derivation.
+        // Precedence (offline wins by producing no remote_index): frozen ▸
+        // remote ▸ default. Frozen keeps the remote source so digest-pinned
+        // content still fetches; only unpinned-tag resolution is refused.
+        let online_mode = if options.frozen {
+            index::ChainMode::Frozen
+        } else if options.remote {
+            index::ChainMode::Remote
+        } else {
+            index::ChainMode::Default
         };
+        let (mode, sources) = Self::chain_mode_and_sources(remote_index.as_ref(), online_mode);
         let selected_index = index::Index::from_chained(local_index.clone(), sources, mode);
 
         let default_registry = env::string(
@@ -468,6 +456,38 @@ impl Context {
 
     pub fn default_index(&self) -> &oci::index::Index {
         &self.default_index
+    }
+
+    /// Verb-intent index for the update family (`ocx update`): resolves tags
+    /// live against the registry by default (`Remote`), capped by the policy
+    /// ceilings (`--offline` wins over `--frozen`, same ladder as
+    /// [`Self::try_init`] minus the `Default` arm), and never commits tag
+    /// pointers into the shared local index — the caller's `ocx.lock` is the
+    /// canonical record. See `adr_toolchain_update_family.md`.
+    pub fn update_index(&self) -> oci::index::Index {
+        let online_mode = if self.config_view.frozen {
+            index::ChainMode::Frozen
+        } else {
+            index::ChainMode::Remote
+        };
+        let (mode, sources) = Self::chain_mode_and_sources(self.remote_index.as_ref(), online_mode);
+        oci::index::Index::from_chained_lock_scoped(self.local_index.clone(), sources, mode)
+    }
+
+    /// Shared chain wiring for [`Self::try_init`] and [`Self::update_index`]:
+    /// no remote index (`--offline`) forces `Offline` with no sources; online
+    /// wraps the remote as the single chain source under the caller-chosen
+    /// mode. Deriving mode and sources from the same value prevents the
+    /// `(offline, remote_index = Some)` contradiction a bool-based match
+    /// could produce.
+    fn chain_mode_and_sources(
+        remote_index: Option<&index::RemoteIndex>,
+        online_mode: index::ChainMode,
+    ) -> (index::ChainMode, Vec<index::Index>) {
+        match remote_index {
+            None => (index::ChainMode::Offline, Vec::new()),
+            Some(remote) => (online_mode, vec![index::Index::from_remote(remote.clone())]),
+        }
     }
 
     pub fn default_registry(&self) -> &str {

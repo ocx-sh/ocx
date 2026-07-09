@@ -47,7 +47,13 @@ pub struct ChainedIndex {
     /// Singleflight group for de-duplicating concurrent cache-miss fetches
     /// against the same (mode, identifier) key. Shared across clones so all
     /// `box_clone` spawned waiters converge on the same leader.
-    singleflight: singleflight::Group<String, ()>,
+    singleflight: singleflight::Group<String, Option<oci::Digest>>,
+    /// When set, `fetch_and_persist_chain` never commits a tag pointer into
+    /// the local index — resolution lands only in the caller's own record
+    /// (e.g. `ocx.lock`). Content-addressed blob writes still happen. Set by
+    /// [`Self::new_lock_scoped`] for the update-verb family; see
+    /// `adr_toolchain_update_family.md`.
+    suppress_tag_commit: bool,
 }
 
 /// Max in-flight singleflight keys. Scoped per ChainedIndex instance —
@@ -65,6 +71,18 @@ impl ChainedIndex {
             sources,
             mode,
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
+            suppress_tag_commit: false,
+        }
+    }
+
+    /// Like [`Self::new`], but tag resolution never commits a tag pointer
+    /// into the local index — the caller's lock is the canonical record.
+    /// Used by the update-verb family (`ocx update`), which resolves tags
+    /// live without mutating the shared tag store.
+    pub fn new_lock_scoped(local_index: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
+        Self {
+            suppress_tag_commit: true,
+            ..Self::new(local_index, sources, mode)
         }
     }
 
@@ -97,11 +115,14 @@ impl ChainedIndex {
     /// or digest) and persist the full chain into the cache. Wrapped in a
     /// singleflight guard so concurrent waiters share the leader's result.
     ///
-    /// Returns `Ok(())` when one source successfully persisted the chain, or
-    /// `Ok(())` when no sources are configured (cache-only behaviour). Returns
-    /// `Err(_)` when every source errored — preserves the trust boundary
-    /// between "not found" (cache retry → `None`) and "registry outage".
-    async fn walk_chain(&self, identifier: &oci::Identifier) -> Result<()> {
+    /// Returns `Ok(Some(head))` when one source successfully persisted the
+    /// chain (`head` = the persisted chain's head digest, so callers that
+    /// suppress the tag-pointer commit can still read the blob back), or
+    /// `Ok(None)` when nothing was fetched (not found, no sources, or an
+    /// Offline early-return). Returns `Err(_)` when every source errored —
+    /// preserves the trust boundary between "not found" (cache retry →
+    /// `None`) and "registry outage".
+    async fn walk_chain(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         // No-resolve policies (offline, frozen) refuse to resolve an unpinned
         // (tag-only) reference whose tag→digest mapping is genuinely absent from
         // the local index. A digest-bearing identifier is an already-known
@@ -136,7 +157,7 @@ impl ChainedIndex {
                 // Digest-addressed offline miss: no source contact, content stays
                 // unfetched (the resulting `None` becomes a policy error at the
                 // content boundary).
-                return Ok(());
+                return Ok(None);
             }
             // Frozen refuses to resolve an unpinned reference from a source, but
             // digest-addressed (already-known) content is still fetched like Default.
@@ -186,7 +207,7 @@ impl ChainedIndex {
             .map_err(super::error::Error::SingleflightFailed)?;
         let handle = match acquisition {
             Acquisition::Leader(h) => h,
-            Acquisition::Resolved(()) => return Ok(()),
+            Acquisition::Resolved(head) => return Ok(head),
         };
 
         // Leader path: walk sources and persist on first success. On
@@ -195,9 +216,9 @@ impl ChainedIndex {
         // leader also propagates that wrapped variant to its caller so both
         // ends see a consistent, typed error with the original source chain.
         match self.fetch_and_persist_chain(&walked).await {
-            Ok(()) => {
-                handle.complete(());
-                Ok(())
+            Ok(head) => {
+                handle.complete(head.clone());
+                Ok(head)
             }
             Err(e) => {
                 let arc = crate::error::ArcError::from(e);
@@ -214,12 +235,12 @@ impl ChainedIndex {
     /// Sources are tried sequentially in priority order; the first success short-circuits.
     /// Parallel-peer fallback is intentionally not supported — peer registries are out of scope.
     ///
-    /// Returns `Ok(())` when one source persisted the chain OR every
-    /// source returned a clean not-found with no errors. Returns
-    /// `Err(_)` when any source errored and no source succeeded — we
-    /// do not treat a later `Ok(false)` as disproving an earlier
-    /// failure.
-    async fn fetch_and_persist_chain(&self, identifier: &oci::Identifier) -> Result<()> {
+    /// Returns `Ok(Some(head))` when one source persisted the chain, or
+    /// `Ok(None)` when every source returned a clean not-found with no
+    /// errors. Returns `Err(_)` when any source errored and no source
+    /// succeeded — we do not treat a later `Ok(false)` as disproving an
+    /// earlier failure.
+    async fn fetch_and_persist_chain(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
             match self.local_index.persist_manifest_chain(source, identifier).await {
@@ -235,11 +256,14 @@ impl ChainedIndex {
                     // caller already has the digest pinned in `ocx.lock`, so a
                     // tag-pointer write here is redundant and silently shadows
                     // the lock. See `adr_index_routing_semantics.md`.
-                    if identifier.tag().is_some() && identifier.digest().is_none() {
+                    // `suppress_tag_commit` extends the same principle to
+                    // tag-only resolution performed on behalf of a lock
+                    // (`ocx update`); see `adr_toolchain_update_family.md`.
+                    if !self.suppress_tag_commit && identifier.tag().is_some() && identifier.digest().is_none() {
                         self.local_index.commit_tag(identifier, &digest).await?;
                     }
                     log::debug!("Fetched '{}' from chained source, persisted to cache.", identifier);
-                    return Ok(());
+                    return Ok(Some(digest));
                 }
                 Ok(None) => {
                     log::debug!("Source has no '{}' — trying next source.", identifier);
@@ -258,7 +282,7 @@ impl ChainedIndex {
             return Err(e);
         }
         // All sources either replied Ok(false) or there were no sources.
-        Ok(())
+        Ok(None)
     }
 
     /// Remote-mode pure-query manifest read: consult the source chain directly
@@ -401,7 +425,17 @@ impl index_impl::IndexImpl for ChainedIndex {
         match op {
             IndexOperation::Query => Ok(None),
             IndexOperation::Resolve => {
-                self.walk_chain(identifier).await?;
+                let head = self.walk_chain(identifier).await?;
+                // With the tag-pointer commit suppressed, a tag-addressed
+                // read-back cannot go through the tag store — address the
+                // freshly persisted blob by the walk's head digest instead.
+                if self.suppress_tag_commit
+                    && identifier.digest().is_none()
+                    && let Some(digest) = head
+                {
+                    let pinned = identifier.clone_with_digest(digest);
+                    return self.local_index.fetch_manifest(&pinned, op).await;
+                }
                 self.local_index.fetch_manifest(identifier, op).await
             }
         }
@@ -431,7 +465,12 @@ impl index_impl::IndexImpl for ChainedIndex {
         match op {
             IndexOperation::Query => Ok(None),
             IndexOperation::Resolve => {
-                self.walk_chain(identifier).await?;
+                let head = self.walk_chain(identifier).await?;
+                // Suppressed tag commit: the walk's head digest IS the
+                // resolution — the tag store deliberately has no pointer.
+                if self.suppress_tag_commit && identifier.digest().is_none() && head.is_some() {
+                    return Ok(head);
+                }
                 self.local_index.fetch_manifest_digest(identifier, op).await
             }
         }
@@ -473,6 +512,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             mode: self.mode,
             // Singleflight group is shared across clones so waiters coalesce.
             singleflight: self.singleflight.clone(),
+            suppress_tag_commit: self.suppress_tag_commit,
         })
     }
 }
@@ -734,6 +774,120 @@ mod chain_refs_tests {
             spy.calls(),
             0,
             "Remote mode must NOT consult source for digest-addressed lookups"
+        );
+    }
+
+    // ── update family: lock-scoped resolution ───────────────────────────
+
+    /// `from_chained_lock_scoped` (the `ocx update` index): a tag-addressed
+    /// `Resolve` walks the source and persists the manifest blob, but never
+    /// commits a tag pointer into the local index — the caller's lock is the
+    /// canonical record (`adr_toolchain_update_family.md`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lock_scoped_resolve_persists_blobs_but_never_commits_tag_pointer() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
+
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained_lock_scoped(cache, vec![src_idx], ChainMode::Remote);
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "lock-scoped resolve must reach the source");
+        assert!(spy.calls() > 0, "lock-scoped Remote resolve must consult the source");
+
+        // Blob still persisted — content-addressed, immutable, pre-warms
+        // materialization.
+        let expected_blob = blob_store.data(REGISTRY, &digest_a());
+        assert!(
+            expected_blob.exists(),
+            "lock-scoped resolve must still persist the manifest blob"
+        );
+
+        // Tag pointer must NOT have been committed: an offline probe over the
+        // same directory cannot resolve the tag (the blob alone is not enough
+        // for a tag-addressed query — it needs the tag pointer).
+        let probe = Index::from_chained(make_local_index(&cache_dir), Vec::new(), ChainMode::Offline);
+        let tag_pointer = probe
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            tag_pointer.is_none(),
+            "lock-scoped resolve must never commit a tag pointer; got a manifest for the tag"
+        );
+    }
+
+    /// The suppress-tag-commit flag must survive `box_clone`: resolving
+    /// through a clone of a lock-scoped index still commits no tag pointer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lock_scoped_suppression_survives_box_clone() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        let (_, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained_lock_scoped(cache, vec![src_idx], ChainMode::Remote);
+        let cloned = chained.clone();
+        let result = cloned
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "cloned lock-scoped resolve must reach the source");
+
+        let probe = Index::from_chained(make_local_index(&cache_dir), Vec::new(), ChainMode::Offline);
+        let tag_pointer = probe
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            tag_pointer.is_none(),
+            "suppress_tag_commit must be carried through box_clone; got a manifest for the tag"
+        );
+    }
+
+    /// Concurrent same-tag resolves through a lock-scoped index: every
+    /// waiter — singleflight leader and followers alike — must land on the
+    /// identical head digest (the followers receive it via the shared
+    /// `Option<Digest>` singleflight value), and the tag pointer must stay
+    /// absent afterwards. The source call count is deliberately not asserted:
+    /// without a committed tag pointer a straggler that misses the
+    /// singleflight in-flight window legitimately re-walks the source.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lock_scoped_concurrent_resolves_share_head_digest_without_tag_commit() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        let (_, src_idx) = make_source(TAG, digest_a());
+        let chained = Arc::new(Index::from_chained_lock_scoped(cache, vec![src_idx], ChainMode::Remote));
+
+        let mut tasks: tokio::task::JoinSet<Result<Option<Digest>>> = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let ch = chained.clone();
+            let id = tagged_id();
+            tasks.spawn(async move { ch.fetch_manifest_digest(&id, super::IndexOperation::Resolve).await });
+        }
+        let mut digests = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let resolved = joined.expect("task panicked").expect("fetch_manifest_digest failed");
+            digests.push(resolved.expect("every concurrent waiter must resolve the tag"));
+        }
+        assert_eq!(digests.len(), 4);
+        assert!(
+            digests.iter().all(|digest| *digest == digest_a()),
+            "all concurrent waiters must share the leader's head digest; got {digests:?}"
+        );
+
+        // The concurrent resolves must not have committed a tag pointer.
+        let probe = Index::from_chained(make_local_index(&cache_dir), Vec::new(), ChainMode::Offline);
+        let tag_pointer = probe
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            tag_pointer.is_none(),
+            "concurrent lock-scoped resolves must never commit a tag pointer"
         );
     }
 

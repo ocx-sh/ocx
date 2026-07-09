@@ -25,7 +25,7 @@ use crate::app::project_context::load_project_for_mutate;
 /// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
 /// `ocx.lock` before this remove (run `ocx lock` to reconcile), or exit 78
 /// when a survivor's legacy entry can no longer be migrated exactly (run
-/// `ocx upgrade`).
+/// `ocx update`).
 ///
 /// When the same binding name exists in multiple groups, use `--group` to
 /// target a specific group. `--group default` targets the implicit
@@ -145,7 +145,7 @@ impl Remove {
         // snapshot (`guard.config()`, which still contains the removed binding)
         // so a clean lock passes; drift surfaces as `StaleLockOnPartial` (65,
         // run `ocx lock`) and a survivor's gone V1 index as `LockUpgradeRequired`
-        // (78, run `ocx upgrade`). Both propagate to the `main.rs` boundary.
+        // (78, run `ocx update`). Both propagate to the `main.rs` boundary.
         let new_lock = match guard.previous_lock().cloned() {
             Some(prev) => {
                 resolve_lock_touched(

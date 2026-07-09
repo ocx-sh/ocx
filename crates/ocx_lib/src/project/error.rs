@@ -92,14 +92,14 @@ pub enum ProjectErrorKind {
     /// untouched V1 entry whose legacy index digest is no longer retrievable,
     /// so it could not be transcribed to V2 exact-only. The command refuses to
     /// silently re-resolve the untouched tool's live tag (Codex R2); the user
-    /// must run the whole-file bump verb `ocx upgrade` to re-resolve instead.
+    /// must run the whole-file bump verb `ocx update` to re-resolve instead.
     ///
     /// The remedy is **tier-neutral** (spec §4.1): the error layer has no tier
     /// context, so a `ocx --global add/remove` user is told to add `--global`
-    /// rather than being handed a project-only `ocx upgrade` that would target
+    /// rather than being handed a project-only `ocx update` that would target
     /// the wrong toolchain.
     #[error(
-        "tool '{name}': locked entry can no longer be migrated exactly; run `ocx upgrade` to re-resolve (add `--global` for the global toolchain)"
+        "tool '{name}': locked entry can no longer be migrated exactly; run `ocx update` to re-resolve (add `--global` for the global toolchain)"
     )]
     LockUpgradeRequired { name: String },
 
@@ -108,10 +108,10 @@ pub enum ProjectErrorKind {
     /// bytes, so it surfaces at lock-read **pre-network** rather than as a
     /// late `SelectResult::NotFound`. The publisher does not ship this
     /// platform at the locked version (or the lock predates it) — run
-    /// `ocx upgrade` (the whole-file bump verb) to re-resolve if it has
+    /// `ocx update` (the whole-file bump verb) to re-resolve if it has
     /// since been added.
     #[error(
-        "no '{platform}' leaf for tool '{name}' at the locked version; run `ocx upgrade` to re-resolve if it has since been added"
+        "no '{platform}' leaf for tool '{name}' at the locked version; run `ocx update` to re-resolve if it has since been added"
     )]
     NoHostLeaf { name: String, platform: String },
 
@@ -391,11 +391,11 @@ impl ClassifyExitCode for Error {
                 }
                 ProjectErrorKind::LockMissing => ExitCode::ConfigError,
                 // A carried-forward V1 entry cannot be migrated exactly —
-                // the lock needs an explicit `ocx upgrade` re-resolve.
+                // the lock needs an explicit `ocx update` re-resolve.
                 ProjectErrorKind::LockUpgradeRequired { .. } => ExitCode::ConfigError,
                 // The locked version ships no leaf for the host platform —
                 // a pre-network config-state condition; the remedy is a
-                // whole-file re-resolve (`ocx upgrade`).
+                // whole-file re-resolve (`ocx update`).
                 ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError,
                 ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound,
                 ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError,
@@ -565,30 +565,28 @@ mod tests {
     }
 
     /// `LockUpgradeRequired` (a carried/survivor V1 index gone, exit 78) must
-    /// now name `ocx upgrade` — the whole-file bump verb that re-resolves —
+    /// now name `ocx update` — the whole-file bump verb that re-resolves —
     /// not the deleted `ocx lock --upgrade`. It must name no internal function
     /// and stay tier-neutral (spec §4.1): a `ocx --global add/remove` user must
     /// be steered to add `--global` rather than handed a bare project-only
-    /// `ocx upgrade` that would re-resolve the wrong toolchain.
+    /// `ocx update` that would re-resolve the wrong toolchain.
     #[test]
-    fn lock_upgrade_required_names_ocx_upgrade_remedy() {
+    fn lock_upgrade_required_names_ocx_update_remedy() {
         let kind = ProjectErrorKind::LockUpgradeRequired {
             name: "cmake".to_string(),
         };
         let rendered = kind.to_string();
         assert!(
-            rendered.contains("`ocx upgrade`"),
-            "message must name the user remedy `ocx upgrade`; got {rendered:?}"
+            rendered.contains("`ocx update`"),
+            "message must name the user remedy `ocx update`; got {rendered:?}"
         );
         // Tier-neutral (spec §4.1): the remedy must point `--global` users at
-        // their tier rather than hard-coding a project-only `ocx upgrade`.
+        // their tier rather than hard-coding a project-only `ocx update`.
         assert!(
             rendered.contains("--global"),
             "message must stay tier-neutral by naming `--global` for the global toolchain; got {rendered:?}"
         );
-        // `--upgrade` (substring) is intentionally present inside `--global`-free
-        // checks only via the bare verb; ensure the deleted `lock --upgrade`
-        // flag form does not appear.
+        // Ensure the deleted `lock --upgrade` flag form does not appear.
         assert!(
             !rendered.contains("lock --upgrade"),
             "message must not name the deleted `ocx lock --upgrade` verb; got {rendered:?}"

@@ -16,15 +16,15 @@ use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock};
 use crate::options;
 
-/// Arguments for `ocx upgrade` (whole-file or scoped lock re-resolve).
+/// Arguments for `ocx update` (whole-file or scoped lock re-resolve).
 ///
-/// The user-facing command overview renders from the `Command::Upgrade`
+/// The user-facing command overview renders from the `Command::Update`
 /// variant doc in `command.rs` — clap uses the variant doc as the subcommand
 /// `about`, so a top-level `///` here would be rustdoc-only. Per-mode detail
 /// lives on the `check` / `groups` / `names` argument docs below (those clap
 /// *does* render).
 #[derive(Parser, Clone)]
-pub struct Upgrade {
+pub struct Update {
     /// Verify the candidate lock would match the predecessor and exit.
     ///
     /// Re-resolves the selected scope (every declared tag, or only the
@@ -76,7 +76,7 @@ pub struct Upgrade {
     pub names: Vec<String>,
 }
 
-impl Upgrade {
+impl Update {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Errors propagate to the `main.rs` boundary (logged + classified).
         let guard = load_project_for_mutate(&context).await?;
@@ -85,9 +85,14 @@ impl Upgrade {
         // byte-identical to the snapshot.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
-        let resolve_index = context.default_index();
+        // Update-family routing: resolve tags live against the registry by
+        // default, capped by `--offline`/`--frozen`, and never commit tag
+        // pointers into the shared local index — `ocx.lock` is the canonical
+        // record (`adr_toolchain_update_family.md`).
+        let update_index = context.update_index();
+        let resolve_index = &update_index;
 
-        // A `-g/--group` or a positional binding name switches upgrade from
+        // A `-g/--group` or a positional binding name switches update from
         // the whole-file bump to a scoped bump: only the named bindings
         // re-resolve, everything else is carried forward verbatim.
         let scoped = !self.groups.is_empty() || !self.names.is_empty();
@@ -156,7 +161,7 @@ impl Upgrade {
             if !lock_content_matches(&new_lock, prev) {
                 return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
-                     re-run `ocx upgrade` (without --check) to refresh the lock",
+                     re-run `ocx update` (without --check) to refresh the lock",
                     cli::ExitCode::DataError,
                 )
                 .into());
@@ -202,7 +207,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
 }
 
 /// Resolve the `-g/--group` + positional-name selection into the concrete
-/// `(group, binding)` pairs a scoped `ocx upgrade` must re-resolve.
+/// `(group, binding)` pairs a scoped `ocx update` must re-resolve.
 ///
 /// Group scope: an empty `groups` means every group (the top-level `[tools]`
 /// table plus every `[group.*]`); a non-empty `groups` restricts to exactly
@@ -295,7 +300,7 @@ fn select_touched(
 /// metadata (declaration_hash, lock_version, declaration_hash_version).
 /// Advisory metadata (`generated_at`, `generated_by`) is ignored.
 ///
-/// Used by the `upgrade --check` verify-only path: a candidate that
+/// Used by the `update --check` verify-only path: a candidate that
 /// resolves to a different digest for any entry must surface as
 /// `DataError` (exit 65) without writing.
 fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
@@ -324,12 +329,12 @@ mod tests {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    fn parse(args: &[&str]) -> Upgrade {
-        Upgrade::try_parse_from(args).unwrap()
+    fn parse(args: &[&str]) -> Update {
+        Update::try_parse_from(args).unwrap()
     }
 
-    fn eager(upgrade: &Upgrade) -> bool {
-        !upgrade.no_pull
+    fn eager(update: &Update) -> bool {
+        !update.no_pull
     }
 
     // ── cases ─────────────────────────────────────────────────────────────────
@@ -337,57 +342,57 @@ mod tests {
     /// Neither `--pull` nor `--no-pull` → both fields false; default is eager.
     #[test]
     fn parse_no_flags_defaults_to_eager() {
-        let upgrade = parse(&["upgrade"]);
-        assert!(!upgrade.pull, "pull must be false when neither flag is given");
-        assert!(!upgrade.no_pull, "no_pull must be false when neither flag is given");
-        assert!(eager(&upgrade), "default must be eager (eager = !no_pull)");
+        let update = parse(&["update"]);
+        assert!(!update.pull, "pull must be false when neither flag is given");
+        assert!(!update.no_pull, "no_pull must be false when neither flag is given");
+        assert!(eager(&update), "default must be eager (eager = !no_pull)");
     }
 
     /// `--pull` alone → pull=true, no_pull=false; still eager.
     #[test]
     fn parse_only_pull_is_eager() {
-        let upgrade = parse(&["upgrade", "--pull"]);
-        assert!(upgrade.pull, "pull must be true with --pull");
-        assert!(!upgrade.no_pull, "no_pull must be false with --pull only");
-        assert!(eager(&upgrade), "eager must be true when --pull is the last flag");
+        let update = parse(&["update", "--pull"]);
+        assert!(update.pull, "pull must be true with --pull");
+        assert!(!update.no_pull, "no_pull must be false with --pull only");
+        assert!(eager(&update), "eager must be true when --pull is the last flag");
     }
 
     /// `--no-pull` alone → pull=false, no_pull=true; lazy.
     #[test]
     fn parse_only_no_pull_is_lazy() {
-        let upgrade = parse(&["upgrade", "--no-pull"]);
-        assert!(!upgrade.pull, "pull must be false with --no-pull only");
-        assert!(upgrade.no_pull, "no_pull must be true with --no-pull");
-        assert!(!eager(&upgrade), "eager must be false when --no-pull is set");
+        let update = parse(&["update", "--no-pull"]);
+        assert!(!update.pull, "pull must be false with --no-pull only");
+        assert!(update.no_pull, "no_pull must be true with --no-pull");
+        assert!(!eager(&update), "eager must be false when --no-pull is set");
     }
 
     /// `--pull --no-pull` → POSIX last-wins: no_pull wins, pull=false; lazy.
     #[test]
     fn parse_pull_then_no_pull_no_pull_wins() {
-        let upgrade = parse(&["upgrade", "--pull", "--no-pull"]);
-        assert!(upgrade.no_pull, "no_pull must be true when --no-pull follows --pull");
-        assert!(!upgrade.pull, "pull must be false when --no-pull overrides it");
-        assert!(!eager(&upgrade), "eager must be false when --no-pull wins");
+        let update = parse(&["update", "--pull", "--no-pull"]);
+        assert!(update.no_pull, "no_pull must be true when --no-pull follows --pull");
+        assert!(!update.pull, "pull must be false when --no-pull overrides it");
+        assert!(!eager(&update), "eager must be false when --no-pull wins");
     }
 
     /// `--no-pull --pull` → POSIX last-wins: pull wins, no_pull=false; eager.
     #[test]
     fn parse_no_pull_then_pull_pull_wins() {
-        let upgrade = parse(&["upgrade", "--no-pull", "--pull"]);
-        assert!(upgrade.pull, "pull must be true when --pull follows --no-pull");
-        assert!(!upgrade.no_pull, "no_pull must be false when --pull overrides it");
-        assert!(eager(&upgrade), "eager must be true when --pull wins");
+        let update = parse(&["update", "--no-pull", "--pull"]);
+        assert!(update.pull, "pull must be true when --pull follows --no-pull");
+        assert!(!update.no_pull, "no_pull must be false when --pull overrides it");
+        assert!(eager(&update), "eager must be true when --pull wins");
     }
 
     // ── Scoped surface: `-g` and positional names now parse ─────────────
 
-    /// `ocx upgrade --group ci` / `-g ci,lint` parse into `groups` (the flag
+    /// `ocx update --group ci` / `-g ci,lint` parse into `groups` (the flag
     /// is comma-splittable and repeatable).
     #[test]
     fn parses_group_flag() {
-        let long = parse(&["upgrade", "--group", "ci"]);
+        let long = parse(&["update", "--group", "ci"]);
         assert_eq!(long.groups, vec!["ci".to_string()]);
-        let short = parse(&["upgrade", "-g", "ci,lint"]);
+        let short = parse(&["update", "-g", "ci,lint"]);
         assert_eq!(
             short.groups,
             vec!["ci".to_string(), "lint".to_string()],
@@ -395,20 +400,20 @@ mod tests {
         );
     }
 
-    /// `ocx upgrade <binding>...` parses positional binding names.
+    /// `ocx update <binding>...` parses positional binding names.
     #[test]
     fn parses_positional_names() {
-        let upgrade = parse(&["upgrade", "cmake", "ninja"]);
-        assert_eq!(upgrade.names, vec!["cmake".to_string(), "ninja".to_string()]);
-        assert!(upgrade.groups.is_empty());
+        let update = parse(&["update", "cmake", "ninja"]);
+        assert_eq!(update.names, vec!["cmake".to_string(), "ninja".to_string()]);
+        assert!(update.groups.is_empty());
     }
 
     /// `-g` and names combine (advance named bindings within named groups).
     #[test]
     fn parses_group_and_names() {
-        let upgrade = parse(&["upgrade", "-g", "ci", "ripgrep"]);
-        assert_eq!(upgrade.groups, vec!["ci".to_string()]);
-        assert_eq!(upgrade.names, vec!["ripgrep".to_string()]);
+        let update = parse(&["update", "-g", "ci", "ripgrep"]);
+        assert_eq!(update.groups, vec!["ci".to_string()]);
+        assert_eq!(update.names, vec!["ripgrep".to_string()]);
     }
 
     // ── select_touched ──────────────────────────────────────────────────
@@ -494,9 +499,9 @@ mod tests {
     /// `--platform` is repeatable and parses into the flattened `Platforms`.
     #[test]
     fn parses_repeatable_platform_flag() {
-        let upgrade = parse(&["upgrade", "--platform", "linux/arm64", "-p", "linux/amd64"]);
+        let update = parse(&["update", "--platform", "linux/arm64", "-p", "linux/amd64"]);
         assert_eq!(
-            upgrade.platforms.as_slice().len(),
+            update.platforms.as_slice().len(),
             2,
             "two --platform values must parse into two entries"
         );

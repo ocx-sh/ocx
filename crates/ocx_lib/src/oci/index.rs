@@ -173,6 +173,17 @@ impl Index {
         }
     }
 
+    /// Like [`Self::from_chained`], but tag resolution never commits a tag
+    /// pointer into `cache` — the caller's lock file is the canonical record
+    /// of tag -> digest. Content-addressed blob writes still happen. Built
+    /// for the update-verb family (`ocx update`); see
+    /// `adr_toolchain_update_family.md`.
+    pub fn from_chained_lock_scoped(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
+        Self {
+            inner: Box::new(chained_index::ChainedIndex::new_lock_scoped(cache, sources, mode)),
+        }
+    }
+
     /// List all repositories available in the given registry.
     pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         log::debug!("Listing repositories for registry '{}'.", registry);

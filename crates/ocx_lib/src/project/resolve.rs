@@ -321,7 +321,7 @@ async fn merge_carry_forward(
     // **exact-only** (Codex R2): an unrelated `add`/`remove` must never silently
     // re-resolve an untouched tool's live tag. If the legacy index is no longer
     // retrievable, the transcription fails `LockUpgradeRequired` (78) and
-    // directs the user to run `ocx upgrade`.
+    // directs the user to run `ocx update`.
     let mut tools: Vec<LockedTool> = Vec::with_capacity(carried.len() + resolved.len());
     for tool in carried {
         match tool.resolution {
@@ -1057,7 +1057,7 @@ fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
 /// - `exact_only` — when `true` (mutator carry-forward), transcription is
 ///   exact and **fails on miss** (the index is gone) so an unrelated
 ///   `add`/`remove` never silently re-resolves an untouched entry's live tag
-///   (Codex R2): the user must run `ocx upgrade` to re-resolve. When `false`,
+///   (Codex R2): the user must run `ocx update` to re-resolve. When `false`,
 ///   a miss falls back to re-resolving `declared`'s tag and warns (offline /
 ///   frozen + uncached → `PolicyResolutionBlocked`).
 pub async fn transcribe_v1_to_v2(
@@ -1112,7 +1112,7 @@ pub async fn transcribe_v1_to_v2(
     if exact_only {
         // Mutator carry-forward (Codex R2): never silently re-resolve an
         // untouched tool's live tag. Fail with guidance to run the explicit
-        // whole-file bump verb `ocx upgrade`.
+        // whole-file bump verb `ocx update`.
         return Err(ProjectError::new(
             PathBuf::new(),
             ProjectErrorKind::LockUpgradeRequired {
@@ -2833,7 +2833,7 @@ gamma = "{r}/gamma:1"
         let index = Index::from_impl(mock);
 
         // exact_only = true (partial carry-forward) and exact_only = false
-        // (explicit --upgrade) both pin-preserve when the index is fetchable.
+        // (explicit `ocx update`) both pin-preserve when the index is fetchable.
         let resolution = transcribe_v1_to_v2(
             &index,
             &pinned,
@@ -2999,22 +2999,22 @@ gamma = "{r}/gamma:1"
         );
         let index = Index::from_impl(mock);
 
-        // exact_only = false → explicit --upgrade re-resolve fallback.
+        // exact_only = false → explicit `ocx update` re-resolve fallback.
         let resolution = transcribe_v1_to_v2(
             &index,
             &pinned,
             &declared,
             IndexOperation::Resolve,
-            false, // --upgrade path
+            false, // `ocx update` path
             &fast_options(),
         )
         .await
-        .expect("--upgrade must succeed by re-resolving the declared tag when the V1 index is gone");
+        .expect("`ocx update` must succeed by re-resolving the declared tag when the V1 index is gone");
 
         // The result must be PerPlatform — the caller holds a re-resolved leaf
         // set (from the declared tag), not a LegacyIndex.
         let LockedResolution::PerPlatform { repository, platforms } = resolution else {
-            panic!("--upgrade fallback must produce a PerPlatform resolution; got LegacyIndex");
+            panic!("`ocx update` fallback must produce a PerPlatform resolution; got LegacyIndex");
         };
 
         // Repository coordinates must be bare (no tag, no digest).
@@ -3103,7 +3103,7 @@ gamma = "{r}/gamma:1"
     /// merely that the lock changed) is the gap the existing
     /// `..._resolves_declared_tag_and_warns` test left open.
     #[tokio::test]
-    async fn upgrade_reresolve_fallback_emits_warn() {
+    async fn update_reresolve_fallback_emits_warn() {
         let pinned = v1_pinned();
         let declared = tool_identifier();
 
@@ -3128,18 +3128,18 @@ gamma = "{r}/gamma:1"
             &pinned,
             &declared,
             IndexOperation::Resolve,
-            false, // explicit --upgrade re-resolve fallback
+            false, // explicit `ocx update` re-resolve fallback
             &fast_options(),
         )
         .await
-        .expect("--upgrade re-resolves the declared tag when the V1 index is gone");
+        .expect("`ocx update` re-resolves the declared tag when the V1 index is gone");
         let lines = warn_capture::drain();
 
         assert!(
             lines.iter().any(|line| line.contains("lock upgrade")
                 && line.contains("no longer retrievable")
                 && line.contains("versions may move")),
-            "the --upgrade re-resolve fallback must emit the 'versions may move' WARN; captured: {lines:?}"
+            "the `ocx update` re-resolve fallback must emit the 'versions may move' WARN; captured: {lines:?}"
         );
     }
 }

@@ -27,7 +27,7 @@
 //!   `adr_global_toolchain_tier.md` Decision 5 **amended 2026-05-19**,
 //!   handshake §1/§4). The global tier is the project tier with a different
 //!   load site — the `current` symlink is a separate install/select-only
-//!   abstraction and is NOT consulted (so `ocx --global upgrade` takes effect
+//!   abstraction and is NOT consulted (so `ocx --global update` takes effect
 //!   with no select step). The §4 login exporter
 //!   `eval "$(ocx --global env --shell=sh)"` runs on every shell start — it
 //!   MUST NOT contact the registry, install, or hang. A pinned tool not
@@ -35,7 +35,7 @@
 //!   AVAILABILITY: nothing configured ("no lock / nothing local") OR a
 //!   corrupt/stale `$OCX_HOME/ocx.lock` yields an **empty env** (exit 0) — a
 //!   corrupt lock surfaces loudly via the commands that rewrite it
-//!   (`ocx --global lock`/`add`/`upgrade`), not via this read-only exporter.
+//!   (`ocx --global lock`/`add`/`update`), not via this read-only exporter.
 //!   But leniency stops at SECURITY: once a toolchain resolves, its patch overlay
 //!   is composed with project-tier strictness, so a C7 fail-closed failure (a
 //!   `required`/`system_required` companion missing) PROPAGATES rather than
@@ -97,7 +97,7 @@ use crate::{
 ///   or nothing resolves locally) or a corrupt/stale global lock yields an empty
 ///   env on the report path AND the eval-safe `--shell` path. The global tier is
 ///   lenient about availability; a corrupt lock surfaces via `ocx --global lock`/
-///   `add`/`upgrade`, not this read-only exporter. A C7 patch fail-closed failure
+///   `add`/`update`, not this read-only exporter. A C7 patch fail-closed failure
 ///   (a `required`/`system_required` companion missing on a resolved global
 ///   toolchain) instead PROPAGATES as a non-zero exit — the same fail-closed
 ///   posture as the project tier.
@@ -214,7 +214,7 @@ impl ToolchainEnv {
             // lock, a corrupt/unreadable lock, or a toolchain whose packages are
             // not materialised locally all yield `Ok(None)` → empty env (exit 0).
             // A corrupt lock also surfaces loudly via the commands that rewrite it
-            // (`ocx --global lock`/`add`/`upgrade`), so this read-only exporter
+            // (`ocx --global lock`/`add`/`update`), so this read-only exporter
             // need not.
             //
             // But leniency stops at SECURITY: once a global toolchain resolves,
@@ -347,7 +347,7 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 /// against the local object store — the same model as the project tier. The
 /// `current` symlink is a **separate abstraction** (mutated only by
 /// install/uninstall/select, targeted at devcontainer/IDE stable-anchor use)
-/// and is deliberately NOT consulted here: `ocx --global upgrade` re-pins the
+/// and is deliberately NOT consulted here: `ocx --global update` re-pins the
 /// lock and the exported env follows immediately, with no select step.
 ///
 /// A tool that is in the global lock but not yet materialised locally (e.g.
@@ -363,7 +363,7 @@ fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
 /// no global `ocx.lock`, a corrupt/unreadable lock, or no global tool resolving
 /// locally. The caller maps `Ok(None)` to an empty env (exit 0) — a corrupt lock
 /// surfaces via the lock-rewriting commands (`ocx --global lock`/`add`/
-/// `upgrade`), not this read-only exporter.
+/// `update`), not this read-only exporter.
 ///
 /// Returns `Err` ONLY when a resolved toolchain's patch overlay / env composition
 /// fails — most importantly a C7 fail-closed failure (a `required` /
@@ -397,7 +397,7 @@ pub(crate) async fn resolve_global_pinned_env(
     // exporter stays lenient (empty env). Only a patch-enforcement /
     // env-composition failure of a RESOLVED toolchain (the `resolve_env_with_patch_boundary`
     // call below) propagates. A corrupt lock surfaces loudly via the commands that
-    // rewrite it (`ocx --global lock`/`add`/`upgrade`).
+    // rewrite it (`ocx --global lock`/`add`/`update`).
     let lock = match ProjectLock::from_path(&global_lock_path).await {
         Ok(Some(lock)) => lock,
         Ok(None) => return Ok(None),

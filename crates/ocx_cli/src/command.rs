@@ -54,7 +54,7 @@ pub mod shell;
 pub mod shell_completion;
 pub mod toolchain_env;
 pub mod uninstall;
-pub mod upgrade;
+pub mod update;
 pub mod version;
 pub mod which;
 
@@ -98,16 +98,20 @@ pub enum Command {
     Login(login::Login),
     /// Remove credentials for a registry.
     Logout(logout::Logout),
-    /// Re-resolve declared tags in the lock; whole file or a named subset.
+    /// Re-resolve declared tags against the registry; whole file or a subset.
     ///
-    /// With no arguments, re-resolves every declared tag against the registry
-    /// and rewrites `ocx.lock`; a moving tag (`:latest`, `:3`) advances to
-    /// wherever it points today. Pass binding names or `-g/--group` to advance
-    /// only part of the toolchain and freeze the rest: `ocx upgrade ripgrep`
-    /// advances one binding, `ocx upgrade -g ci` advances a whole group. A
-    /// scoped upgrade needs an existing `ocx.lock` (exit 78), refuses a drifted
-    /// `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64).
-    Upgrade(upgrade::Upgrade),
+    /// Resolves declared tags live against the registry by default (the root
+    /// `--remote` flag is redundant here, but accepted) and records the result
+    /// in `ocx.lock` only - the local index tag snapshot is never modified.
+    /// A moving tag (`:latest`, `:3`) advances to wherever it points today.
+    /// Under `--frozen`, resolution is capped at the local index snapshot (an
+    /// unsnapshotted tag exits 81); `--offline` forbids network access. Pass
+    /// binding names or `-g/--group` to advance only part of the toolchain
+    /// and freeze the rest: `ocx update ripgrep` advances one binding,
+    /// `ocx update -g ci` advances a whole group. A scoped update needs an
+    /// existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65),
+    /// and rejects an unknown group or name (exit 64).
+    Update(update::Update),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
     Launcher(launcher::Launcher),
@@ -150,7 +154,7 @@ impl Command {
             Command::Lock(lock) => lock.execute(context).await,
             Command::Login(login) => login.execute(context).await,
             Command::Logout(logout) => logout.execute(context).await,
-            Command::Upgrade(upgrade) => upgrade.execute(context).await,
+            Command::Update(update) => update.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,
             Command::Package(package) => package.execute(context).await,
             Command::Patch(patch_group) => patch_group.execute(context).await,

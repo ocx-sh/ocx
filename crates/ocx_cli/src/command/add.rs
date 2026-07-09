@@ -27,7 +27,7 @@ use crate::options;
 ///
 /// Fails with exit 65 when `ocx.toml` drifted from `ocx.lock` before
 /// this add (run `ocx lock` to reconcile), or exit 78 when a carried
-/// legacy entry can no longer be migrated exactly (run `ocx upgrade`).
+/// legacy entry can no longer be migrated exactly (run `ocx update`).
 ///
 /// Pass `--no-pull` to write only the manifest and lock without
 /// downloading; materialization is then deferred to `ocx pull` or the
@@ -129,7 +129,7 @@ impl Add {
         // lock. Drift on the pre-mutation snapshot surfaces as
         // `StaleLockOnPartial` (65, run `ocx lock`); a carried V1 entry whose
         // index is gone surfaces as `LockUpgradeRequired` (78, run
-        // `ocx upgrade`). Both propagate to the `main.rs` boundary.
+        // `ocx update`). Both propagate to the `main.rs` boundary.
         // `resolve_lock_touched` dedups the touched set internally.
         let group = self
             .group

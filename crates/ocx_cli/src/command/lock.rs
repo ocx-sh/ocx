@@ -19,7 +19,7 @@ use crate::options;
 /// idempotent no-op that never advances a moving tag. When the config drifted,
 /// every declared tag is re-resolved; a moving tag may advance to wherever it
 /// points today. Fully transactional — either every tool resolves or nothing
-/// is written. Use `ocx upgrade` to force a re-resolve of every tag regardless
+/// is written. Use `ocx update` to force a re-resolve of every tag regardless
 /// of drift.
 ///
 /// Migrates a legacy lock to the current per-platform format automatically
@@ -100,9 +100,9 @@ impl Lock {
         //   resolve. `resolve_lock_touched` with an empty `touched` set resolves
         //   nothing: V2 entries pass through byte-identical, V1 entries are
         //   migrated by exact pinned-index transcription, and a gone V1 index
-        //   fails `LockUpgradeRequired` (78, "run `ocx upgrade`"). A moved
+        //   fails `LockUpgradeRequired` (78, "run `ocx update`"). A moved
         //   upstream tag must NOT change the pin on a clean lock — that is the
-        //   lock-vs-upgrade distinction.
+        //   lock-vs-update distinction.
         // - Predecessor present AND dirty (config changed since the last lock)
         //   → full whole-file re-resolve of every declared tag; advancing a
         //   moved tag is the intended explicit whole-file reconcile behaviour.

@@ -747,7 +747,7 @@ fn resolution_content_equal(left: &LockedTool, right: &LockedTool) -> bool {
 ///
 /// Single source of the resolution-equality predicate shared by the lock
 /// writer's `generated_at`-preservation check ([`tools_content_equal`]) and
-/// the `ocx upgrade --check` verify-only path.
+/// the `ocx update --check` verify-only path.
 pub fn resolutions_content_equal(left: &LockedResolution, right: &LockedResolution) -> bool {
     match (left, right) {
         (LockedResolution::LegacyIndex(a), LockedResolution::LegacyIndex(b)) => a.eq_content(b),
