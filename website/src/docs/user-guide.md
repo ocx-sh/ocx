@@ -836,7 +836,7 @@ ocx package sign -p linux/amd64 registry.example/pkg:1.0
 
 ### Verify what you install {#supply-chain-verification}
 
-[`ocx package verify`][cmd-package-verify] checks a previously published signature. You must supply the expected certificate identity and OIDC issuer — there are no defaults, because verification is meaningless without specifying whose signature you trust:
+[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust:
 
 ```shell
 ocx package verify \
@@ -850,8 +850,44 @@ ocx package verify \
 `ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly in CI before deploying a package to a production environment.
 :::
 
+### Pin the signer identity {#supply-chain-trust-policy}
+
+Passing `--certificate-identity` and `--certificate-oidc-issuer` on every invocation works for a one-off check, but a CI pipeline verifies the same package against the same signer on every run. Repeating both flags in every workflow step is one more place a copy-paste error can silently widen who the pipeline trusts — and it gives you no way to accept a signer during a rotation window without a moment where the old or the new identity fails.
+
+A [`[[trust.policy]]`][config-trust] entry declares the accepted signer once, for every package under a scope, instead of on every command line:
+
+```toml
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no flags needed for any package under `ghcr.io/acme/`:
+
+```shell
+ocx package verify -p linux/amd64 ghcr.io/acme/tool:1.0
+```
+
+The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
+
+When the signing workflow moves (a renamed workflow file, a new repository, a rotated identity), add a second entry at the same scope in the **same file** instead of replacing the first. Both are accepted until you remove the old one, so there is no window where CI fails because the signer changed mid-rotation. (Rotation-by-addition only works within one tier — an old entry in `config.toml` and a new entry in `ocx.toml` do not combine; see the tip below.)
+
+```toml
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
 ::: tip Learn more
 [Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
+[Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching, most-specific-wins resolution, and operator-vs-project tier precedence.
 [`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
 :::
 
@@ -1063,6 +1099,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-patches]: ./reference/configuration.md#keys-patches
 [config-managed]: ./reference/configuration.md#keys-managed
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
+[config-trust]: ./reference/configuration.md#keys-trust
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation

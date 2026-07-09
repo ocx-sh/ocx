@@ -84,6 +84,16 @@ pub struct ProjectConfig {
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, PackageSettings>,
 
+    /// Identity-pinned verification policies; `[[trust.policy]]` in TOML.
+    ///
+    /// Like [`Self::packages`], this is resolve-time policy — NOT a tool
+    /// binding — so it is excluded from [`super::declaration_hash`] (a policy
+    /// edit must not invalidate `ocx.lock`). Consumed by `ocx package verify`,
+    /// where it pools (array-append) with the `config.toml` tiers. See
+    /// `crate::trust`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<crate::trust::TrustConfig>,
+
     /// Lazily-cached canonical declaration hash (RFC 8785 JCS + SHA-256).
     ///
     /// Populated on first call to [`Self::declaration_hash_cached`]. Mutators
@@ -120,6 +130,7 @@ impl Clone for ProjectConfig {
             tools: self.tools.clone(),
             groups: self.groups.clone(),
             packages: self.packages.clone(),
+            trust: self.trust.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -130,7 +141,10 @@ impl PartialEq for ProjectConfig {
         // The cache is a derived datum; comparing it would conflate "same
         // declaration" with "both cached" / "neither cached". Equality
         // speaks to the declared content only.
-        self.tools == other.tools && self.groups == other.groups && self.packages == other.packages
+        self.tools == other.tools
+            && self.groups == other.groups
+            && self.packages == other.packages
+            && self.trust == other.trust
     }
 }
 
@@ -161,6 +175,12 @@ struct RawProjectConfig {
     /// [`ProjectConfig::from_str_with_path`], not at the serde layer.
     #[serde(default, rename = "package")]
     package: BTreeMap<String, PackageSettings>,
+
+    /// Trust policies (`[[trust.policy]]`). Parsed directly (no per-entry
+    /// identifier validation — the scope is a prefix pattern, not an
+    /// [`Identifier`]).
+    #[serde(default)]
+    trust: Option<crate::trust::TrustConfig>,
 }
 
 impl ProjectConfig {
@@ -178,8 +198,16 @@ impl ProjectConfig {
             // `packages` is resolve-time policy, not a tool binding; the
             // programmatic constructor starts with no opt-outs declared.
             packages: BTreeMap::new(),
+            trust: None,
             declaration_hash_cache: OnceLock::new(),
         }
+    }
+
+    /// The trust policies declared in this project's `ocx.toml` (empty when no
+    /// `[trust]` section is present).
+    #[must_use]
+    pub fn trust_policies(&self) -> &[crate::trust::TrustPolicy] {
+        self.trust.as_ref().map_or(&[], |trust| trust.policy.as_slice())
     }
 
     /// Lazily cached canonical declaration hash for this config.
@@ -449,6 +477,7 @@ impl ProjectConfig {
             tools,
             groups,
             packages,
+            trust: raw.trust,
             declaration_hash_cache: OnceLock::new(),
         })
     }
@@ -572,6 +601,34 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    /// `[[trust.policy]]` parses in an `ocx.toml` (the `deny_unknown_fields`
+    /// guard must not reject it) and, like `[package]`, is resolve-time policy
+    /// EXCLUDED from the declaration hash — so adding a policy never
+    /// invalidates `ocx.lock`.
+    #[test]
+    fn trust_policy_parses_and_does_not_affect_declaration_hash() {
+        let base = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+"#;
+        let with_policy = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[[trust.policy]]
+scope = "ocx.sh/*"
+identity = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/tags/v1"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        let base_config = ProjectConfig::from_toml_str(base).expect("parse base");
+        let policy_config = ProjectConfig::from_toml_str(with_policy).expect("parse with policy");
+        assert_eq!(policy_config.trust_policies().len(), 1);
+        assert!(base_config.trust_policies().is_empty());
+        assert_eq!(
+            crate::project::declaration_hash(&base_config),
+            crate::project::declaration_hash(&policy_config),
+            "trust policy must not perturb the lock-invalidating declaration hash",
+        );
     }
 
     // ── [package] per-package settings ──────────────────────────────────────

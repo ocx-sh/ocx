@@ -30,6 +30,7 @@ pub struct Context {
     default_index: oci::index::Index,
     manager: package_manager::PackageManager,
     default_registry: String,
+    config_trust: ocx_lib::trust::TrustConfig,
     config_view: env::OcxConfigView,
     concurrency: package_manager::Concurrency,
     progress: ocx_lib::cli::progress::ProgressManager,
@@ -403,6 +404,10 @@ impl Context {
             default_index: selected_index,
             manager,
             default_registry,
+            // Narrow projection (ISP): verify pools these with the project
+            // ocx.toml's trust policies; the rest of `config` is already
+            // extracted into `default_registry` / mirrors / patches above.
+            config_trust: config.trust.unwrap_or_default(),
             config_view,
             concurrency,
             progress,
@@ -492,6 +497,13 @@ impl Context {
 
     pub fn default_registry(&self) -> &str {
         &self.default_registry
+    }
+
+    /// Operator-tier trust policies from the merged `config.toml` (system /
+    /// user / `$OCX_HOME`, array-appended). `ocx package verify` treats these
+    /// as authoritative over the project `ocx.toml` (`trust::resolve_tiered`).
+    pub fn config_trust_policies(&self) -> &[ocx_lib::trust::TrustPolicy] {
+        &self.config_trust.policy
     }
 
     pub fn file_structure(&self) -> &file_structure::FileStructure {

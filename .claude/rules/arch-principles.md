@@ -93,6 +93,7 @@ CLI command (clap parse)
 | `adr_oci_artifact_enrichment.md` | Signatures, SBOMs, descriptive metadata on OCI artifacts |
 | `adr_oci_referrers_discovery.md` | OCI Referrers API for signature + SBOM discovery (superseded by v2) |
 | `adr_oci_referrers_signing_v1.md` | Keyless Sigstore signing via OCI Referrers (Slice 1 — sign + verify) |
+| `adr_trust_policy.md` | Identity-pinned verify via `[[trust.policy]]` in `config.toml` + `ocx.toml`; operator `config.toml` array-appends + is authoritative over project `ocx.toml` (`resolve_tiered`), most-specific-scope + ANY-of within a tier, `--certificate-identity`/`-oidc-issuer` optional-when-policy-matches (#98) |
 | `adr_ocx_mirror.md` | Standalone binary mirroring tool design |
 | `adr_release_install_strategy.md` | Release + install phased strategy |
 | `adr_sbom_strategy.md` | SBOM gen approach |

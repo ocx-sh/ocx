@@ -148,6 +148,26 @@ pub enum VerifyErrorKind {
         reason: UrlRejection,
     },
 
+    /// No signing identity to verify against: neither the
+    /// `--certificate-identity` + `--certificate-oidc-issuer` flags nor a
+    /// `[[trust.policy]]` whose scope covers the target supplied one.
+    ///
+    /// Exit 64 (`UsageError`) — mirrors the prior "omitted required flag"
+    /// behavior. Verification is meaningless without knowing whose signature to
+    /// trust.
+    #[error(
+        "no trusted identity: pass --certificate-identity with --certificate-oidc-issuer, \
+         or add a matching [trust.policy]"
+    )]
+    NoIdentityProvided,
+
+    /// A `[[trust.policy]]` entry is malformed (both or neither identity form
+    /// set, or an `identity_regexp` that does not compile).
+    ///
+    /// Exit 78 (`ConfigError`).
+    #[error(transparent)]
+    TrustPolicyInvalid(#[from] crate::trust::TrustPolicyError),
+
     /// Catch-all for verify-side failures outside the codes above (index
     /// resolution, digest parse, malformed URL join).
     ///
@@ -219,8 +239,10 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::RekorSetInvalid => ExitCode::DataError,
             Self::RekorSetAbsentTsaPresent | Self::RekorUnavailable => ExitCode::RekorUnavailable,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::TrustRootUnavailable | Self::TrustRootLoad(_) => ExitCode::ConfigError,
-            Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
+            Self::TrustRootUnavailable | Self::TrustRootLoad(_) | Self::TrustPolicyInvalid(_) => {
+                ExitCode::ConfigError
+            }
+            Self::InvalidEndpointUrl { .. } | Self::NoIdentityProvided => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -242,6 +264,8 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::BundleParseFailed => "bundle_parse_failed",
             Self::TrustRootUnavailable => "trust_root_unavailable",
             Self::TrustRootLoad(_) => "trust_root_load",
+            Self::NoIdentityProvided => "no_identity_provided",
+            Self::TrustPolicyInvalid(_) => "trust_policy_invalid",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
             Self::Internal(_) => "internal",
         }
@@ -322,6 +346,22 @@ mod tests {
     #[test]
     fn trust_root_unavailable_maps_to_config_error() {
         assert_eq!(VerifyErrorKind::TrustRootUnavailable.exit_code(), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn no_identity_provided_maps_to_usage_error() {
+        // 64 = "you invoked verify without telling it whose signature to trust"
+        // (no flags, no matching [trust.policy]) — continuity with the prior
+        // required-flag behavior.
+        assert_eq!(VerifyErrorKind::NoIdentityProvided.exit_code(), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn trust_policy_invalid_maps_to_config_error() {
+        let kind = VerifyErrorKind::TrustPolicyInvalid(crate::trust::TrustPolicyError::IdentityUnset {
+            scope: "ghcr.io/acme/*".into(),
+        });
+        assert_eq!(kind.exit_code(), ExitCode::ConfigError);
     }
 
     #[test]
@@ -442,6 +482,13 @@ mod tests {
             ("rekor_unavailable", RekorUnavailable),
             ("bundle_parse_failed", BundleParseFailed),
             ("trust_root_unavailable", TrustRootUnavailable),
+            ("no_identity_provided", NoIdentityProvided),
+            (
+                "trust_policy_invalid",
+                TrustPolicyInvalid(crate::trust::TrustPolicyError::IdentityUnset {
+                    scope: "ghcr.io/acme/*".into(),
+                }),
+            ),
             (
                 "trust_root_load",
                 TrustRootLoad(TrustRootLoadReason::EmbeddedAssetMissing),

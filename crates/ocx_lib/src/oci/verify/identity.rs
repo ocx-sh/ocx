@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Certificate identity + issuer matchers.
+//! Certificate identity + issuer matching against a resolved trust-policy set.
 //!
-//! Exact-match (byte-equal, no normalization) for `--certificate-identity`
-//! against the leaf certificate's SubjectAltName and `--certificate-oidc-issuer`
-//! against the Fulcio OIDC-issuer OID extension (`1.3.6.1.4.1.57264.1.1`).
+//! Extracts the leaf certificate's SubjectAltName and the Fulcio OIDC-issuer
+//! OID extension (`1.3.6.1.4.1.57264.1.1`), then checks them against an ANY-of
+//! set of [`CompiledPolicy`] constraints. The identity constraint is exact
+//! (byte-equal) or an anchored full-match regex ([`crate::trust::IdentityRule`]);
+//! the issuer constraint is always exact.
 
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, oid::ObjectIdentifier};
@@ -53,52 +55,34 @@ pub(crate) fn oidc_issuer(cert: &Certificate) -> Option<String> {
         .map(|s| s.as_str().to_owned())
 }
 
-/// Certificate SAN matcher (exact, byte-equal).
-pub struct IdentityMatcher {
-    expected: String,
-}
+/// Verify a leaf certificate against an ANY-of set of compiled trust policies:
+/// the certificate passes if its SAN + OIDC issuer satisfy *any one* policy
+/// (supporting key/workflow rotation, where old and new identities coexist).
+///
+/// On failure the returned kind preserves the single-policy (flag-mode)
+/// behaviour: if some policy's identity matched but its issuer did not, the
+/// failing part is the issuer → [`VerifyErrorKind::IssuerMismatch`]; otherwise
+/// no identity matched → [`VerifyErrorKind::IdentityMismatch`]. A certificate
+/// with no usable SAN or issuer fails closed.
+pub fn verify_policies(cert_der: &[u8], policies: &[crate::trust::CompiledPolicy]) -> Result<(), VerifyErrorKind> {
+    let cert = parse_certificate(cert_der)?;
+    let san = subject_identity(&cert);
+    let issuer = oidc_issuer(&cert);
 
-impl IdentityMatcher {
-    /// Construct a matcher for the given expected identity string.
-    pub fn new(expected: String) -> Self {
-        Self { expected }
-    }
-
-    /// Verify the certificate's SAN equals the expected identity byte-for-byte.
-    ///
-    /// Returns [`VerifyErrorKind::IdentityMismatch`] on mismatch or when the
-    /// certificate carries no usable SAN.
-    pub fn verify(&self, cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
-        let cert = parse_certificate(cert_der)?;
-        match subject_identity(&cert) {
-            Some(san) if san == self.expected => Ok(()),
-            _ => Err(VerifyErrorKind::IdentityMismatch),
+    let mut any_identity_matched = false;
+    for policy in policies {
+        let identity_ok = san.as_deref().is_some_and(|san| policy.identity.matches(san));
+        let issuer_ok = issuer.as_deref() == Some(policy.issuer.as_str());
+        if identity_ok && issuer_ok {
+            return Ok(());
         }
+        any_identity_matched |= identity_ok;
     }
-}
-
-/// Certificate issuer matcher (Fulcio OIDC-issuer OID extension, exact).
-pub struct IssuerMatcher {
-    expected: String,
-}
-
-impl IssuerMatcher {
-    /// Construct a matcher for the given expected issuer URL.
-    pub fn new(expected: String) -> Self {
-        Self { expected }
-    }
-
-    /// Verify the certificate's issuer extension equals the expected URL.
-    ///
-    /// Returns [`VerifyErrorKind::IssuerMismatch`] on mismatch or when the
-    /// extension is absent.
-    pub fn verify(&self, cert_der: &[u8]) -> Result<(), VerifyErrorKind> {
-        let cert = parse_certificate(cert_der)?;
-        match oidc_issuer(&cert) {
-            Some(issuer) if issuer == self.expected => Ok(()),
-            _ => Err(VerifyErrorKind::IssuerMismatch),
-        }
-    }
+    Err(if any_identity_matched {
+        VerifyErrorKind::IssuerMismatch
+    } else {
+        VerifyErrorKind::IdentityMismatch
+    })
 }
 
 #[cfg(test)]
@@ -120,16 +104,23 @@ mod tests {
     }
 
     #[test]
-    fn identity_matcher_rejects_garbage_cert() {
-        let matcher = IdentityMatcher::new("test@example.com".to_string());
+    fn verify_policies_rejects_garbage_cert() {
         // A non-parseable cert must fail closed, never match.
-        assert!(matcher.verify(b"garbage").is_err());
+        let policies = [crate::trust::CompiledPolicy::exact(
+            "test@example.com".to_string(),
+            "https://issuer.example".to_string(),
+        )];
+        assert!(verify_policies(b"garbage", &policies).is_err());
     }
 
     #[test]
-    fn issuer_matcher_rejects_garbage_cert() {
-        let matcher = IssuerMatcher::new("https://issuer.example".to_string());
-        assert!(matcher.verify(b"garbage").is_err());
+    fn verify_policies_with_no_policies_is_identity_mismatch() {
+        // An empty policy set never matches — the pipeline guards against this
+        // upstream (NoIdentityProvided), but the primitive must still fail closed.
+        assert!(matches!(
+            verify_policies(b"garbage", &[]),
+            Err(VerifyErrorKind::CertChainInvalid) | Err(VerifyErrorKind::IdentityMismatch)
+        ));
     }
 
     #[test]

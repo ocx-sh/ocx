@@ -21,7 +21,7 @@ use p256::ecdsa::signature::{Verifier, hazmat::PrehashVerifier};
 use url::Url;
 
 use super::error::{VerifyError, VerifyErrorKind};
-use super::identity::{IdentityMatcher, IssuerMatcher, oidc_issuer, parse_certificate, subject_identity};
+use super::identity::{oidc_issuer, parse_certificate, subject_identity, verify_policies};
 use super::trust_root::TrustRoot;
 use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
@@ -44,10 +44,11 @@ pub struct VerifyContext<'a> {
     pub identifier: &'a Identifier,
     /// Platform selector for multi-platform manifests.
     pub platform: &'a Platform,
-    /// Expected certificate SAN (user flag).
-    pub certificate_identity: &'a str,
-    /// Expected certificate OIDC issuer (user flag).
-    pub certificate_oidc_issuer: &'a str,
+    /// Resolved ANY-of trust policies the signing certificate must satisfy: a
+    /// single exact pair when `--certificate-identity`/`--certificate-oidc-issuer`
+    /// are supplied (flag mode), or the scope-matched `[[trust.policy]]` set
+    /// (policy mode). See `crate::trust`.
+    pub policies: &'a [crate::trust::CompiledPolicy],
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
     /// Registry transport.
@@ -155,9 +156,8 @@ impl VerifyPipeline {
         // 8. Verify the Rekor SET against the log's published public key.
         verify_rekor_set(&ctx, &parts).await?;
 
-        // 9. Identity + issuer match (byte-equal).
-        IdentityMatcher::new(ctx.certificate_identity.to_string()).verify(&parts.leaf_der)?;
-        IssuerMatcher::new(ctx.certificate_oidc_issuer.to_string()).verify(&parts.leaf_der)?;
+        // 9. Identity + issuer match against the resolved trust policies (ANY-of).
+        verify_policies(&parts.leaf_der, ctx.policies)?;
 
         // 10. Emit the result (identity/issuer read back from the cert).
         let cert = parse_certificate(&parts.leaf_der)?;

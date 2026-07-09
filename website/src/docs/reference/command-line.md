@@ -273,13 +273,13 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 |------|------|----------|-----------|----------|
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
-| 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
+| 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax; `package verify` given only one of `--certificate-identity` / `--certificate-oidc-issuer`, or given neither with no matching [`[[trust.policy]]`][config-trust] scope | Check the command syntax |
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM, offline sign refused, OIDC pre-check failed | Refresh credentials or adjust filesystem permissions |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable | Inspect the config file at the printed path |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a matched [`[[trust.policy]]`][config-trust] entry is malformed | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
@@ -2572,16 +2572,15 @@ In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present auto
 
 #### `verify` {#package-verify}
 
-Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the values you supply. All five checks must pass for the command to exit 0.
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
 
-There are no default values for `--certificate-identity` and `--certificate-oidc-issuer` — keyless verification is meaningless without specifying whose signature you trust.
+`--certificate-identity` and `--certificate-oidc-issuer` are optional — but only when a [`[[trust.policy]]`][config-trust] scope covers the target (see [Identity resolution](#package-verify-identity) below). Keyless verification is meaningless without an identity from one source or the other.
 
 **Usage**
 
 ```shell
 ocx package verify [OPTIONS] --platform <PLATFORM> \
-  --certificate-identity <IDENTITY> \
-  --certificate-oidc-issuer <URL> \
+  [--certificate-identity <IDENTITY> --certificate-oidc-issuer <URL>] \
   <IDENTIFIER>
 ```
 
@@ -2594,11 +2593,20 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | Name | Short | Default | Purpose |
 |------|-------|---------|---------|
 | `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
-| `--certificate-identity` | — | *(required)* | Expected certificate SAN (Subject Alternative Name). Exact match only in Slice 1. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
-| `--certificate-oidc-issuer` | — | *(required)* | Expected OIDC issuer URL. Exact match only in Slice 1. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
+| `--certificate-identity` | — | *(policy-resolved)* | Expected certificate SAN (Subject Alternative Name), exact match. Optional when a [`[[trust.policy]]`][config-trust] scope covers the target; when given, overrides any policy and requires `--certificate-oidc-issuer` too. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
+| `--certificate-oidc-issuer` | — | *(policy-resolved)* | Expected OIDC issuer URL, exact match. Used together with `--certificate-identity` — passing one without the other is a usage error. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
 | `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
 | `--trust-root` | — | *(embedded root)* | Path to a PEM file of [Fulcio][fulcio] CA certificate(s) to validate the leaf chain against. Overrides the embedded trust root. Equivalent env var: [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]; the flag wins. Required today because the embedded production root is stubbed |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+#### Identity resolution {#package-verify-identity}
+
+Two ways to tell `ocx package verify` whose signature to accept:
+
+- **Flags** — pass both `--certificate-identity` and `--certificate-oidc-issuer`. This is an exact-match pair that overrides any configured policy, matching the original flag-only behavior byte-for-byte.
+- **[`[[trust.policy]]`][config-trust]** — omit both flags. Verify first checks the pooled `config.toml`-tier ("operator") policies against the target's canonical `registry/repository`; if any match, the project `ocx.toml` is not consulted at all. Only when no operator policy matches does verify fall back to the project `ocx.toml`'s policies. See the [configuration reference][config-trust] for scope matching, most-specific-wins resolution, regex identities, and the operator-authoritative precedence rule. Reading `[[trust.policy]]` from `ocx.toml` here is the one documented exception to "OCI-tier commands never consult `ocx.toml`" — trust policy is a security posture, not toolchain-binding resolution.
+
+Supplying exactly one of the two flags is a usage error (exit 64) — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64: there is no identity to check the signature against.
 
 :::warning Verified against the fake Sigstore stack only
 `ocx package verify` runs the full five-check pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, [Rekor][rekor] SET, subject-digest signature, identity and issuer match. Its positive path is currently exercised only against the in-repo fake Sigstore stack. Verifying signatures from public-good Fulcio/Rekor is not yet wired or tested: the embedded production [TUF][sigstore-tuf] trust root is stubbed (supply a Fulcio CA via `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]), and the Rekor SET is checked against the fake stack's payload format rather than the public Rekor wire format. See [Current limitations][signing-limitations] before relying on this against production Sigstore. Exit codes and flag contracts below are stable.
@@ -2609,10 +2617,12 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | Code | Condition |
 |------|-----------|
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
-| 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, non-loopback, no credentials, no userinfo). |
+| 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, non-loopback, no credentials, no userinfo) |
+| 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target, or only one of the two flags was given |
 | 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
 | 77 | Certificate identity or OIDC issuer mismatch |
 | 78 | Trust root unavailable or failed to load |
+| 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
 | 79 | No signatures found for target, or no usable Sigstore bundle among referrers |
 | 80 | Registry authentication failed while fetching referrers |
 | 81 | `PolicyBlocked` — `--offline` blocked the network access verify requires. Drop `--offline` and re-run. |
@@ -2677,8 +2687,8 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 |----------------|------|---------|
 | `no_signatures_found` | 79 | No referrers found for the target manifest; publisher has not signed this platform |
 | `no_usable_bundle` | 79 | Referrers found but none has a recognized Sigstore bundle artifact type |
-| `identity_mismatch` | 77 | Certificate SAN does not match `--certificate-identity` |
-| `issuer_mismatch` | 77 | Certificate OIDC issuer does not match `--certificate-oidc-issuer` |
+| `identity_mismatch` | 77 | Certificate SAN does not satisfy the expected identity, whether supplied via `--certificate-identity` or resolved from a [`[[trust.policy]]`][config-trust] entry |
+| `issuer_mismatch` | 77 | Certificate OIDC issuer does not match the expected issuer, whether supplied via `--certificate-oidc-issuer` or resolved from a [`[[trust.policy]]`][config-trust] entry |
 | `cert_chain_invalid` | 65 | Certificate chain does not verify against the supplied trust root |
 | `signature_invalid` | 65 | Signature does not verify over the subject manifest digest |
 | `rekor_set_invalid` | 65 | Rekor SET does not verify (bundle tampered) |
@@ -2688,9 +2698,11 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
 | `trust_root_load` | 78 | Trust root PEM failed to load (malformed PEM, no certificate blocks, TUF fetch failed) |
+| `no_identity_provided` | 64 | No identity to verify against: certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target, or only one of the two flags was given |
+| `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
 
-**Example — verify a package signed in CI**
+**Example — verify a package signed in CI, with flags**
 
 ```shell
 ocx package verify \
@@ -2699,6 +2711,22 @@ ocx package verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
 ```
+
+**Example — verify with a `[[trust.policy]]` covering the target, no flags**
+
+```toml
+# ocx.toml or config.toml
+[[trust.policy]]
+scope       = "registry.example/pkg"
+identity    = "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+```shell
+ocx package verify -p linux/amd64 registry.example/pkg:1.0
+```
+
+See the [configuration reference][config-trust] for the full schema, scope matching, and rotation semantics.
 
 #### `info` {#package-info}
 
@@ -3453,6 +3481,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[config-trust]: ./configuration.md#keys-trust
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

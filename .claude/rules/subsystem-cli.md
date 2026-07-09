@@ -15,6 +15,8 @@ The CLI surface divides into two tiers. **Toolchain-tier (project-tier)** comman
 
 `ocx run` is the toolchain-tier child-spawn command; `ocx package exec` is its OCI-tier counterpart. `ocx env` is the new toolchain-tier composed-env command. For the full command taxonomy, see `subsystem-cli-commands.md`.
 
+**One documented OCI-tier carve-out (#98):** `ocx package verify` reads `[[trust.policy]]` from the project `ocx.toml` when the `--certificate-identity`/`--certificate-oidc-issuer` flags are omitted. The operator `config.toml` trust set is authoritative over the project `ocx.toml` (`trust::resolve_tiered` — a project policy can only add trust for scopes no operator policy governs). This is a deliberate exception to "OCI-tier never consults `ocx.toml`", scoped SOLELY to trust policy (never package resolution) — a security concern, and only fires in policy mode (no flags). ADR `adr_trust_policy.md`.
+
 ## Command Taxonomy (Signed Handshake Model)
 
 ### OCI-tier — `ocx package <verb>`

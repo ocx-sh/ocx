@@ -74,7 +74,7 @@ The certificate [Fulcio][fulcio] issues encodes the signer's identity in two fie
 - **Subject Alternative Name (SAN)** — the signer's OIDC-derived identity. For GitHub Actions this is the workflow run URL (e.g., `https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main`). For human sign flows it is an email address.
 - **Fulcio OIDC issuer extension** — the OID `1.3.6.1.4.1.57264.1.1` contains the OIDC issuer URL (e.g., `https://token.actions.githubusercontent.com`).
 
-At verify time, `--certificate-identity` is checked against the SAN and `--certificate-oidc-issuer` is checked against the issuer extension. Both checks are exact-match in Slice 1. Wildcard and regex matching are planned for Slice 2 — the flags are intentionally named for the eventual match-policy expansion.
+At verify time, the accepted SAN and issuer come from one of two sources. Passed as `--certificate-identity` / `--certificate-oidc-issuer` flags, both checks are exact-match. Resolved instead from a [`[[trust.policy]]`][config-trust] entry whose scope covers the target, the SAN check additionally accepts an anchored regex form (`identity_regexp`); the issuer check stays exact-match either way. See the [configuration reference][config-trust] for the full schema, scope-matching rules, and the tier-pooling behavior.
 
 A concrete GitHub Actions identity looks like this:
 
@@ -133,6 +133,7 @@ Do not treat a green `ocx package verify` against production Sigstore as a compl
 
 - [`package sign` reference][cmd-package-sign] — flags, token-source precedence, exit codes, CI example
 - [`package verify` reference][cmd-package-verify] — flags, identity matching options, exit codes
+- [Configuration reference → `[[trust.policy]]`][config-trust] — schema, scope matching, most-specific-wins resolution, operator-vs-project tier precedence
 <!-- external -->
 [sigstore]: https://www.sigstore.dev/
 [fulcio]: https://github.com/sigstore/fulcio
@@ -154,6 +155,9 @@ Do not treat a green `ocx package verify` against production Sigstore as a compl
 [cmd-package-sign]: ../reference/command-line.md#package-sign
 [cmd-package-sign-token-precedence]: ../reference/command-line.md#package-sign
 [cmd-package-verify]: ../reference/command-line.md#package-verify
+
+<!-- reference -->
+[config-trust]: ../reference/configuration.md#keys-trust
 
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
