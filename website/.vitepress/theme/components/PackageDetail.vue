@@ -122,22 +122,22 @@ onMounted(async () => {
                   <span v-for="kw in info.keywords" :key="kw" class="keyword">{{ kw }}</span>
                 </div>
               </div>
+
+              <div class="header-add">
+                <span class="meta-label">Add</span>
+                <div class="add-row">
+                  <span class="add-scope">Project</span>
+                  <CopySnippet label="$" :code="addProjectCmd" fill />
+                </div>
+                <div class="add-row">
+                  <span class="add-scope">Global</span>
+                  <CopySnippet label="$" :code="addGlobalCmd" fill />
+                </div>
+              </div>
             </div>
             <div v-if="info.platforms.length" class="meta-group header-platforms">
               <span class="meta-label">Supported Platforms</span>
               <PlatformIcons :platforms="info.platforms" mode="os-arch" />
-            </div>
-          </div>
-
-          <div class="header-add">
-            <span class="meta-label">Add</span>
-            <div class="add-row">
-              <span class="add-scope">Project</span>
-              <CopySnippet label="$" :code="addProjectCmd" fill />
-            </div>
-            <div class="add-row">
-              <span class="add-scope">Global</span>
-              <CopySnippet label="$" :code="addGlobalCmd" fill />
             </div>
           </div>
         </div>
@@ -290,12 +290,13 @@ onMounted(async () => {
   color: var(--vp-c-brand-dark);
 }
 
-/* Add commands — full-width single-line snippets below the header meta. */
+/* Add commands — single-line snippets stacked under the description/keywords,
+   forming the left column beside the Supported Platforms rail. */
 .header-add {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  margin-top: 0.9rem;
+  margin-top: 0.3rem;
 }
 
 .add-row {
