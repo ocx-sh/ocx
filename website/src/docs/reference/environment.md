@@ -180,7 +180,19 @@ OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a
 
 Path to a PEM file of [Fulcio][fulcio] CA certificate(s) that [`ocx package verify`][cmd-package-verify] validates the signing certificate chain against. Equivalent to the `--trust-root` flag; the flag takes precedence when both are set.
 
-When neither is given, verify falls back to the embedded production trust root — which is stubbed in this release (`TrustRoot::load_embedded` returns `TrustRootUnavailable`, exit 78). Until it ships, supplying a Fulcio CA via this variable or the flag is **required** to verify. It is the seam the acceptance suite uses to inject the fake Fulcio root when verifying test-minted certificates.
+A PEM carries only the Fulcio CA — not the [Rekor][rekor] public key. So the first verify against a given Rekor instance fetches that key from `--rekor-url` (trust-on-first-use) and then **caches it** under `$OCX_HOME/state/trust_root/`; subsequent verifies pin it from the cache. For a fully pinned root that needs no fetch — required offline — use [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root) instead.
+
+When neither this variable nor `--tuf-root` nor a fresh cache is available, verify falls back to the embedded production trust root — which is stubbed in this release (`TrustRoot::load_embedded` returns `TrustRootUnavailable`, exit 78). Until it ships, supplying a trust root is **required** to verify. This variable is the seam the acceptance suite uses to inject the fake Fulcio root when verifying test-minted certificates.
+
+This variable affects only the local verify operation and is **not** forwarded to subprocess children.
+
+### `OCX_SIGSTORE_TUF_ROOT` {#ocx-sigstore-tuf-root}
+
+Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--tuf-root` flag; the flag takes precedence, and both win over [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root).
+
+Unlike a bare Fulcio PEM, a trusted-root JSON carries **both** the Fulcio CA certificate(s) and the pinned [Rekor][rekor] public key, so verification needs no trust-on-first-use fetch. This is the air-gapped seam: point it at a local trust-root mirror and verify against a private Sigstore deployment with no Sigstore-services network. No [TUF][sigstore-tuf] **network** fetch or metadata-expiry refresh is performed — that is deferred; the file is read as-is.
+
+Combined with [`OCX_OFFLINE`](#ocx-offline), this is the fully offline path: the pinned Rekor key means the Signed Entry Timestamp verifies without contacting Rekor.
 
 This variable affects only the local verify operation and is **not** forwarded to subprocess children.
 
@@ -448,6 +460,8 @@ When set to a [truthy value](#truthy-values), OCX disables all network access. T
 
 Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
 
+For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore trust services** — the Rekor-key fetch and TUF — not the artifact registry, which verify still reads the signature from (a local mirror, in air-gapped deployments). Offline verify reuses cached or supplied trust material and must have a pinned Rekor key, so it comes from [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root), or from the `$OCX_HOME/state/trust_root/` cache a prior online verify wrote. With no such material, verify fails with exit 78 naming the remedy — it never silently skips verification.
+
 ### `OCX_PROJECT` {#ocx-project}
 
 Path to a project-tier `ocx.toml` to load. Bypasses the CWD walk — the named file is used directly. Not part of the ambient configuration chain: the project tier is a separate API surface from the ambient config tier loaded via [`OCX_CONFIG`](#ocx-config-file).
@@ -638,6 +652,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [mozilla-ca]: https://wiki.mozilla.org/CA/Included_Certificates
 [distroless]: https://github.com/GoogleContainerTools/distroless
 [fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
 
 <!-- commands -->
 [cmd-ref]: command-line.md

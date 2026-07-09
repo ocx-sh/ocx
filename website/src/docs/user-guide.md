@@ -850,6 +850,29 @@ ocx package verify \
 `ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly in CI before deploying a package to a production environment.
 :::
 
+### Air-gapped verification {#supply-chain-offline}
+
+Verifying a signature normally reaches out to Sigstore's public trust services to learn the [Rekor][rekor] public key. An air-gapped or hardened runner has no such egress — but it still needs to prove the binary it is about to run was signed by the right identity.
+
+The key insight is that verification has two separate network surfaces. One is the registry the artifact and its signature live in; in an air-gapped setup that is a local mirror you already run. The other is the Sigstore trust services. Only the second is what `--offline` removes for verify — the registry is still read.
+
+So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-tuf-root] carries both the Fulcio CA and the pinned Rekor key, so nothing is fetched:
+
+```shell
+ocx --offline package verify \
+  -p linux/amd64 \
+  --tuf-root /etc/ocx/trusted_root.json \
+  --certificate-identity ci@example.com \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.internal/pkg:1.0
+```
+
+Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--tuf-root` needed.
+
+:::warning Offline verify never skips
+If you go offline with no trusted-root file and no cached material, verify fails with exit 78 and names the remedy. It never silently treats "cannot reach the trust service" as "verified" — an unverifiable package is an error, not a pass.
+:::
+
 ### Pin the signer identity {#supply-chain-trust-policy}
 
 Passing `--certificate-identity` and `--certificate-oidc-issuer` on every invocation works for a one-off check, but a CI pipeline verifies the same package against the same signer on every run. Repeating both flags in every workflow step is one more place a copy-paste error can silently widen who the pipeline trusts — and it gives you no way to accept a signer during a rotation window without a moment where the old or the new identity fails.
@@ -1073,6 +1096,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
+[env-sigstore-tuf-root]: ./reference/environment.md#ocx-sigstore-tuf-root
 [env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home

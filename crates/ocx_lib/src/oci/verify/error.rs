@@ -224,6 +224,14 @@ pub enum TrustRootLoadReason {
     /// valid PEM but carried no certificate body.
     #[error("no certificate blocks in trust-root PEM")]
     NoCertificateBlocks,
+
+    /// Offline verify found no usable trust material: no `--tuf-root` / cached
+    /// trust root supplying a pinned Rekor key, and the online fetch/embedded
+    /// fallback is forbidden offline. The message names the remedy.
+    #[error(
+        "offline verify has no pinned Rekor key: supply --tuf-root, or run an online verify first to populate the trust-root cache"
+    )]
+    OfflineTrustMaterialUnavailable,
 }
 
 impl ClassifyErrorKind for VerifyErrorKind {
@@ -450,6 +458,7 @@ mod tests {
                 detail: "unexpected block label".into(),
             },
             TrustRootLoadReason::NoCertificateBlocks,
+            TrustRootLoadReason::OfflineTrustMaterialUnavailable,
         ];
         for reason in reasons {
             let kind = VerifyErrorKind::TrustRootLoad(reason);

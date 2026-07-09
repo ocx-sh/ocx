@@ -13,12 +13,14 @@ The user-facing surface — sign a release, verify what you install — lives in
 
 ## Trust Root {#trust-root}
 
-OCX verifies [Fulcio][fulcio] certificates against a trust root: a set of DER-encoded X.509 CA certificates. You supply one in two ways, in precedence order:
+OCX verifies [Fulcio][fulcio] certificates against a trust root, and verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. It resolves this material in precedence order:
 
-- **`--trust-root <PATH>`** on `ocx package verify`, or the [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] environment variable (the flag wins) — a PEM file of one or more `CERTIFICATE` blocks, loaded by `TrustRoot::load_from_pem`. This is the seam the acceptance suite uses to inject the `fake_fulcio` self-signed root so the verify pipeline trusts test-minted certificates.
-- **The embedded production root** — `TrustRoot::load_embedded` is intended to ship a bundled [TUF][sigstore-tuf] trust root compiled into the binary. It is **stubbed** in this release: with no flag or env override, verify exits 78 (`TrustRootUnavailable`).
+- **`--tuf-root <PATH>`** on `ocx package verify`, or the [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root] environment variable (the flag wins) — a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`), loaded by `TrustRoot::load_trusted_root_json`. It supplies both the Fulcio CA **and** the pinned Rekor key, so verification needs no network fetch. This is the air-gapped seam.
+- **`--trust-root <PATH>`**, or the [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] environment variable (the flag wins) — a PEM file of one or more `CERTIFICATE` blocks, loaded by `TrustRoot::load_from_pem`. This carries only the Fulcio CA; the Rekor key is fetched from `--rekor-url` on first use, then cached. This is the seam the acceptance suite uses to inject the `fake_fulcio` self-signed root.
+- **The trust-root cache** — a successful online verify writes the Fulcio CA and Rekor key it used to `$OCX_HOME/state/trust_root/`, so a later verify (including [`--offline`][env-offline]) reuses them. See [Offline and Air-Gapped Verification](#offline-verification).
+- **The embedded production root** — `TrustRoot::load_embedded` is intended to ship a bundled [TUF][sigstore-tuf] trust root compiled into the binary. It is **stubbed** in this release: with no override and no cache, verify exits 78 (`TrustRootUnavailable`).
 
-So today, `ocx package verify` requires an explicit `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT`. The chain check and every downstream verification step run fully once a root is supplied.
+So today, `ocx package verify` requires an explicit `--tuf-root` / `--trust-root` (or a populated cache). The chain check and every downstream verification step run fully once a root is supplied.
 
 ## Referrers Capability Cache {#referrers-cache}
 
@@ -103,16 +105,32 @@ The pipeline is verified end-to-end against the in-repo fake Sigstore stack, not
 - **No certificate temporal-validity check.** The leaf's `notBefore` / `notAfter` are not checked against the [Rekor][rekor] integrated time, so a certificate that had expired by verify time is not yet rejected on that basis.
 - **Rekor SET format is fake-stack-specific.** The Signed Entry Timestamp is Ed25519-verified over OCX's own deterministic payload, not the public Rekor canonical wire format. Verification against public-good Rekor is not yet supported.
 - **No Merkle inclusion proof.** Only the Rekor SET (inclusion promise) is checked; the transparency-log inclusion and consistency proofs are not verified.
-- **Rekor key is fetched, not pinned.** The Rekor public key is fetched from `--rekor-url/api/v1/log/publicKey` at verify time (trust-on-first-use) rather than pinned in the trust root.
-- **Embedded TUF trust root is stubbed.** `TrustRoot::load_embedded` returns `TrustRootUnavailable`; you must pass `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root].
+- **Rekor key pinning is partial.** When the trust root carries a Rekor public key — a [`--tuf-root`][env-sigstore-tuf-root] trusted-root JSON, or the trust-root cache — that key is pinned and no fetch happens. With only a bare Fulcio PEM ([`--trust-root`][env-sigstore-trust-root]), the key is still fetched from `--rekor-url/api/v1/log/publicKey` the first time (trust-on-first-use) and then cached.
+- **Embedded TUF trust root is stubbed.** `TrustRoot::load_embedded` returns `TrustRootUnavailable`; you must supply a trust root via [`--tuf-root`][env-sigstore-tuf-root] / [`--trust-root`][env-sigstore-trust-root] (or the fresh cache).
+- **No real TUF fetch or refresh.** A [`--tuf-root`][env-sigstore-tuf-root] trusted-root JSON is read from disk as-is; OCX does not fetch or refresh TUF metadata over the network, nor verify its expiry.
 
 Do not treat a green `ocx package verify` against production Sigstore as a completed cryptographic verification until these are addressed.
 
-:::warning Offline verification (Slice 1)
-`ocx package verify` requires a live network connection in Slice 1. Offline cache-hit verification is planned for Slice 2. If you pass `--offline`, the command exits 81 (`PolicyBlocked`).
+## Offline and Air-Gapped Verification {#offline-verification}
 
-`ocx package sign` rejects `--offline` with exit 77 (`PermissionDenied`) — the policy is on the action (sign cannot proceed offline by design), distinct from verify's read-side block.
-:::
+Verifying an artifact means reading it — and its signature — from the registry where it lives. In an air-gapped deployment that registry is a local mirror the operator runs, so `ocx package verify` treats the artifact registry as always-available. What `--offline` / [`OCX_OFFLINE`][env-offline] removes for verify is the **Sigstore trust-services** network: the Rekor public-key fetch and TUF. Those are the calls that need trust material, and offline verify sources that material locally instead.
+
+There are two offline paths:
+
+- **Supplied trust root.** Pass [`--tuf-root <trusted_root.json>`][env-sigstore-tuf-root] (or the `OCX_SIGSTORE_TUF_ROOT` env var). A Sigstore trusted-root JSON carries both the Fulcio CA and the pinned Rekor public key, so the SET verifies with no fetch. This is the air-gapped seam: point it at a local trust-root mirror.
+- **Cached trust root.** A successful **online** `ocx package verify` writes the Fulcio CA and the Rekor key it used to `$OCX_HOME/state/trust_root/<rekor-authority>.json` (24-hour TTL). A later `--offline` verify against the same Rekor instance reuses that cache with no fetch.
+
+Offline verify requires a **pinned Rekor key** — a bare `--trust-root` PEM does not carry one. When no cached or supplied trust material is available offline, verify fails with exit 78 (`ConfigError`) naming the remedy; it never silently skips verification.
+
+```sh
+# Air-gapped: pin both the Fulcio CA and the Rekor key from a local mirror.
+ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
+  --tuf-root /etc/ocx/trusted_root.json \
+  --certificate-identity ci@example.com \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+`ocx package sign` stays online-only — it needs live Fulcio and Rekor round-trips — and rejects `--offline` with exit 77 (`PermissionDenied`), a policy on the action distinct from verify's read-side behavior.
 
 :::tip Custom Sigstore endpoints
 `--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio/Rekor. `validate_sigstore_url` accepts `http://` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`); any non-loopback target must be `https://`, so the SSRF guard stays active. The clients are hand-rolled against the fake stack's wire shapes today (see [Current Limitations](#current-limitations)).
@@ -162,6 +180,8 @@ Do not treat a green `ocx package verify` against production Sigstore as a compl
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
 [env-sigstore-trust-root]: ../reference/environment.md#ocx-sigstore-trust-root
+[env-sigstore-tuf-root]: ../reference/environment.md#ocx-sigstore-tuf-root
+[env-offline]: ../reference/environment.md#ocx-offline
 
 <!-- user guide -->
 [user-supply-chain]: ../user-guide.md#supply-chain

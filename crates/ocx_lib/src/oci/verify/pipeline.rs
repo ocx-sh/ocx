@@ -22,6 +22,7 @@ use url::Url;
 
 use super::error::{VerifyError, VerifyErrorKind};
 use super::identity::{oidc_issuer, parse_certificate, subject_identity, verify_policies};
+use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
 use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
@@ -55,12 +56,18 @@ pub struct VerifyContext<'a> {
     pub transport: &'a dyn OciTransport,
     /// Index for resolving tag → digest.
     pub index: &'a Index,
-    /// Trust root (Fulcio CA certs); C-S1-3 injection seam.
+    /// Trust root (Fulcio CA certs + optional pinned Rekor key); C-S1-3 seam.
     pub trust_root: &'a TrustRoot,
     /// Rekor URL (C-S1-3 injection seam). Default: `https://rekor.sigstore.dev`.
     pub rekor_url: &'a Url,
-    /// `$OCX_HOME` root for the referrers-capability cache.
+    /// `$OCX_HOME` root for the referrers-capability and trust-root caches.
     pub cache_root: &'a Path,
+    /// When true, no Sigstore trust-services network: the Rekor key must come
+    /// from the (pinned/cached) trust root, never a fetch. The artifact registry
+    /// is still used (verify inherently reads the signature from where it lives).
+    /// On a successful online run the trust material is cached for later offline
+    /// verifies. See `adr_offline_verify_trust_cache.md`.
+    pub offline: bool,
 }
 
 /// Result emitted by a successful verify pipeline run.
@@ -153,13 +160,31 @@ impl VerifyPipeline {
         // 7. Verify the ECDSA signature over the subject digest with the leaf key.
         verify_signature(&parts.leaf_der, &subject_raw, &parts.signature)?;
 
-        // 8. Verify the Rekor SET against the log's published public key.
-        verify_rekor_set(&ctx, &parts).await?;
+        // 8. Verify the Rekor SET against the log's public key — pinned from the
+        //    trust root when present (offline-capable, closes the TOFU hole),
+        //    otherwise fetched online. Returns the key PEM used, so a successful
+        //    online run can cache the trust material for later offline verifies.
+        let rekor_key_pem = verify_rekor_set(&ctx, &parts).await?;
 
         // 9. Identity + issuer match against the resolved trust policies (ANY-of).
         verify_policies(&parts.leaf_der, ctx.policies)?;
 
-        // 10. Emit the result (identity/issuer read back from the cert).
+        // 10. On a successful online run, cache the trust material (Fulcio CA +
+        //     the Rekor key just used) so a later offline verify against the same
+        //     Rekor instance reuses it with no Sigstore-services network.
+        //     Best-effort: a cache-write failure must never fail a valid verify.
+        if !ctx.offline {
+            let entry = TrustRootCache::new(
+                super::trust_cache::cache_key_for_rekor(ctx.rekor_url),
+                ctx.trust_root.der_certs().to_vec(),
+                rekor_key_pem,
+            );
+            if let Err(e) = entry.write_cache(ctx.cache_root).await {
+                tracing::debug!("trust-root cache write skipped: {e}");
+            }
+        }
+
+        // 11. Emit the result (identity/issuer read back from the cert).
         let cert = parse_certificate(&parts.leaf_der)?;
         Ok(VerifyResult {
             subject_digest,
@@ -329,23 +354,25 @@ fn verify_signature(leaf_der: &[u8], subject_raw: &[u8], signature_der: &[u8]) -
         .map_err(|_| VerifyErrorKind::SignatureInvalid)
 }
 
-/// Fetch the Rekor log's public key and verify the SET over the entry payload.
-async fn verify_rekor_set(ctx: &VerifyContext<'_>, parts: &BundleParts) -> Result<(), VerifyErrorKind> {
+/// Verify the SET over the entry payload, returning the Rekor key PEM used.
+///
+/// Key source, in order:
+/// 1. **Pinned** — the trust root carries a Rekor public key (from a TUF root or
+///    the trust-root cache). Used with no network; this is the offline path and
+///    the fix for #194's trust-on-first-use Rekor-key fetch.
+/// 2. **Offline, unpinned** — cannot fetch and no pinned key → fail. (The CLI
+///    gates this to an actionable exit-78 error before the pipeline runs; this
+///    is the defensive backstop.)
+/// 3. **Online, unpinned** — TOFU-fetch from `--rekor-url/api/v1/log/publicKey`
+///    (the prior behavior), and return it so the caller can cache it.
+async fn verify_rekor_set(ctx: &VerifyContext<'_>, parts: &BundleParts) -> Result<String, VerifyErrorKind> {
     use ed25519_dalek::pkcs8::DecodePublicKey;
 
-    let endpoint = ctx
-        .rekor_url
-        .join("api/v1/log/publicKey")
-        .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
-    let response = reqwest::Client::new()
-        .get(endpoint)
-        .send()
-        .await
-        .map_err(|_| VerifyErrorKind::RekorUnavailable)?;
-    if !response.status().is_success() {
-        return Err(VerifyErrorKind::RekorUnavailable);
-    }
-    let pem = response.text().await.map_err(|_| VerifyErrorKind::RekorUnavailable)?;
+    let pem = match ctx.trust_root.rekor_public_key_pem() {
+        Some(pinned) => pinned.to_string(),
+        None if ctx.offline => return Err(VerifyErrorKind::RekorUnavailable),
+        None => fetch_rekor_public_key_pem(ctx.rekor_url).await?,
+    };
     let rekor_key =
         ed25519_dalek::VerifyingKey::from_public_key_pem(&pem).map_err(|_| VerifyErrorKind::RekorSetInvalid)?;
 
@@ -359,7 +386,24 @@ async fn verify_rekor_set(ctx: &VerifyContext<'_>, parts: &BundleParts) -> Resul
         .map_err(|_| VerifyErrorKind::RekorSetInvalid)?;
     rekor_key
         .verify_strict(&payload, &signature)
-        .map_err(|_| VerifyErrorKind::RekorSetInvalid)
+        .map_err(|_| VerifyErrorKind::RekorSetInvalid)?;
+    Ok(pem)
+}
+
+/// Fetch the Rekor log's published public key PEM (trust-on-first-use, online).
+async fn fetch_rekor_public_key_pem(rekor_url: &Url) -> Result<String, VerifyErrorKind> {
+    let endpoint = rekor_url
+        .join("api/v1/log/publicKey")
+        .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
+    let response = reqwest::Client::new()
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|_| VerifyErrorKind::RekorUnavailable)?;
+    if !response.status().is_success() {
+        return Err(VerifyErrorKind::RekorUnavailable);
+    }
+    response.text().await.map_err(|_| VerifyErrorKind::RekorUnavailable)
 }
 
 /// Map an OCI client error into the verify taxonomy.

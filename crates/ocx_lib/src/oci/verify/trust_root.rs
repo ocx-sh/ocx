@@ -3,15 +3,25 @@
 
 //! TUF trust-root loader.
 //!
-//! [`TrustRoot`] holds a collection of DER-encoded X.509 CA certificates
-//! used to verify the Fulcio certificate chain during signature verification.
+//! [`TrustRoot`] holds a collection of DER-encoded X.509 CA certificates used to
+//! verify the Fulcio certificate chain during signature verification, plus an
+//! optional **pinned** Rekor public key (PEM). When present, the verify pipeline
+//! uses the pinned key to check the Signed Entry Timestamp instead of fetching
+//! it from the Rekor endpoint — closing the trust-on-first-use hole and making
+//! offline verification possible (see `adr_offline_verify_trust_cache.md`).
 //!
-//! Two construction paths:
+//! Construction paths:
 //!
-//! - [`TrustRoot::load_from_pem`] — load a PEM file containing one or more
-//!   `CERTIFICATE` blocks. Used by acceptance tests to inject the
-//!   `fake_fulcio` self-signed root so the verify pipeline trusts test-minted
+//! - [`TrustRoot::load_from_pem`] — load a PEM file of one or more `CERTIFICATE`
+//!   blocks (Fulcio CA only; no Rekor key). Used by acceptance tests to inject
+//!   the `fake_fulcio` self-signed root so the verify pipeline trusts test-minted
 //!   certificates.
+//! - [`TrustRoot::load_trusted_root_json`] — parse a Sigstore `TrustedRoot` JSON
+//!   (the `--tuf-root` / `OCX_SIGSTORE_TUF_ROOT` seam): Fulcio CA certs **and**
+//!   the pinned Rekor public key. No TUF network fetch — real TUF refresh is
+//!   deferred.
+//! - [`TrustRoot::from_der_and_rekor`] — rebuild a trust root from cached DER
+//!   certs + a cached Rekor key PEM (the trust-root cache load path).
 //! - [`TrustRoot::load_embedded`] — load the bundled production Sigstore trust
 //!   root. Deferred to a future slice (requires shipping a TUF root bundle).
 
@@ -95,10 +105,13 @@ fn validate_der_certificate(der: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Sigstore trust root (Fulcio root certs + Rekor public keys).
+/// Sigstore trust root (Fulcio root certs + optional pinned Rekor public key).
 ///
-/// Internally stores DER-encoded X.509 certificate bytes. The verify pipeline
-/// uses these as trust anchors for Fulcio certificate chain validation.
+/// Stores DER-encoded X.509 certificate bytes used as trust anchors for Fulcio
+/// certificate chain validation, plus an optional Rekor public key (PEM). When
+/// the Rekor key is present the verify pipeline pins it for SET verification
+/// (no network); when absent the pipeline falls back to fetching it from the
+/// Rekor endpoint (online-only).
 #[derive(Debug)]
 pub struct TrustRoot {
     /// DER-encoded X.509 certificates parsed from the PEM input.
@@ -106,6 +119,12 @@ pub struct TrustRoot {
     /// An empty `Vec` is valid at construction time and means "no trust anchors
     /// loaded" — the verify pipeline will reject all chains if the root is empty.
     der_certs: Vec<Vec<u8>>,
+
+    /// Pinned Rekor public key (PEM), when the trust material carries one.
+    ///
+    /// `Some` for a `TrustedRoot` JSON or a cache load; `None` for a bare
+    /// Fulcio-CA PEM, in which case the pipeline TOFU-fetches the key online.
+    rekor_public_key_pem: Option<String>,
 }
 
 impl TrustRoot {
@@ -154,12 +173,113 @@ impl TrustRoot {
             return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCertificateBlocks));
         }
 
-        Ok(Self { der_certs })
+        Ok(Self {
+            der_certs,
+            rekor_public_key_pem: None,
+        })
+    }
+
+    /// Rebuild a trust root from cached DER certificates + a cached Rekor key.
+    ///
+    /// The trust-root cache load path. `der_certs` are the Fulcio CA certs; the
+    /// Rekor key PEM is `Some` when the cache captured one (the offline path
+    /// requires it). No validation beyond what the cache already round-tripped.
+    pub fn from_der_and_rekor(der_certs: Vec<Vec<u8>>, rekor_public_key_pem: Option<String>) -> Self {
+        Self {
+            der_certs,
+            rekor_public_key_pem,
+        }
+    }
+
+    /// Parse a Sigstore [`TrustedRoot`][trusted-root] JSON document.
+    ///
+    /// Extracts the Fulcio CA certificate(s) from
+    /// `certificateAuthorities[].certChain.certificates[].rawBytes` (base64 DER)
+    /// and the pinned Rekor public key from `tlogs[].publicKey.rawBytes` (base64
+    /// DER SubjectPublicKeyInfo, re-encoded to PEM). Parsed leniently via
+    /// `serde_json` so both the public-good and fake-stack shapes load without a
+    /// protobuf-JSON codec dependency.
+    ///
+    /// This is the `--tuf-root` / `OCX_SIGSTORE_TUF_ROOT` air-gapped seam. It does
+    /// NOT perform any TUF network fetch or metadata-expiry verification — real
+    /// TUF refresh is deferred.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifyErrorKind::TrustRootLoad`] when the JSON is malformed, carries no
+    /// certificate authorities, or a `rawBytes` field is not valid base64.
+    ///
+    /// [trusted-root]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_trustroot.proto
+    pub fn load_trusted_root_json(json_bytes: &[u8]) -> Result<Self, VerifyErrorKind> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let load_err = |detail: String| VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { detail });
+
+        let root: serde_json::Value =
+            serde_json::from_slice(json_bytes).map_err(|e| load_err(format!("invalid TrustedRoot JSON: {e}")))?;
+
+        // Fulcio CA certificates: certificateAuthorities[].certChain.certificates[].rawBytes
+        let mut der_certs: Vec<Vec<u8>> = Vec::new();
+        if let Some(authorities) = root.get("certificateAuthorities").and_then(|v| v.as_array()) {
+            for authority in authorities {
+                let certificates = authority
+                    .get("certChain")
+                    .and_then(|c| c.get("certificates"))
+                    .and_then(|c| c.as_array());
+                for cert in certificates.into_iter().flatten() {
+                    let Some(raw) = cert.get("rawBytes").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let der = b64
+                        .decode(raw)
+                        .map_err(|_| load_err("certificateAuthorities rawBytes is not valid base64".to_string()))?;
+                    validate_der_certificate(&der).map_err(load_err)?;
+                    der_certs.push(der);
+                }
+            }
+        }
+        if der_certs.is_empty() {
+            return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCertificateBlocks));
+        }
+
+        // Rekor public key: first tlogs[].publicKey.rawBytes (DER SPKI) → PEM.
+        // The verify pipeline loads it via `from_public_key_pem`, so re-encode
+        // the DER as a `PUBLIC KEY` PEM block here.
+        let rekor_public_key_pem = root
+            .get("tlogs")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .find_map(|tlog| {
+                tlog.get("publicKey")
+                    .and_then(|k| k.get("rawBytes"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|raw| {
+                let der = b64
+                    .decode(raw)
+                    .map_err(|_| load_err("tlogs publicKey rawBytes is not valid base64".to_string()))?;
+                Ok::<String, VerifyErrorKind>(pem::encode(&pem::Pem::new("PUBLIC KEY", der)))
+            })
+            .transpose()?;
+
+        Ok(Self {
+            der_certs,
+            rekor_public_key_pem,
+        })
     }
 
     /// Returns the DER-encoded certificates held by this trust root.
     pub fn der_certs(&self) -> &[Vec<u8>] {
         &self.der_certs
+    }
+
+    /// Returns the pinned Rekor public key (PEM), if this trust root carries one.
+    ///
+    /// `Some` means the verify pipeline pins this key for SET verification (no
+    /// network); `None` means it TOFU-fetches the key from the Rekor endpoint.
+    pub fn rekor_public_key_pem(&self) -> Option<&str> {
+        self.rekor_public_key_pem.as_deref()
     }
 }
 
@@ -298,6 +418,84 @@ MAMCAQH//w==\n\
             }
             other => panic!("expected TrustRootLoad(PemParseFailed), got: {other:?}"),
         }
+    }
+
+    // A minimal Sigstore TrustedRoot JSON: one Fulcio CA cert (the same
+    // structurally-valid DER as TEST_CERT_PEM, base64 "MAMCAQE=") and one tlog
+    // public key (arbitrary DER — `load_trusted_root_json` does not validate the
+    // Rekor key body, only re-encodes it to PEM). Base64 of [0x30,0x00] = "MAA=".
+    const TRUSTED_ROOT_JSON: &[u8] = br#"{
+      "certificateAuthorities": [
+        { "certChain": { "certificates": [ { "rawBytes": "MAMCAQE=" } ] } }
+      ],
+      "tlogs": [
+        { "publicKey": { "rawBytes": "MAA=" } }
+      ]
+    }"#;
+
+    #[test]
+    fn load_trusted_root_json_extracts_fulcio_and_pinned_rekor_key() {
+        let tr = TrustRoot::load_trusted_root_json(TRUSTED_ROOT_JSON).expect("valid trusted root JSON");
+        assert_eq!(tr.der_certs().len(), 1, "one Fulcio CA cert");
+        assert_eq!(tr.der_certs()[0], vec![0x30, 0x03, 0x02, 0x01, 0x01]);
+        let pem = tr.rekor_public_key_pem().expect("Rekor key pinned");
+        assert!(pem.contains("BEGIN PUBLIC KEY"), "Rekor key re-encoded to PEM: {pem}");
+    }
+
+    #[test]
+    fn load_trusted_root_json_without_tlogs_pins_no_rekor_key() {
+        let json =
+            br#"{ "certificateAuthorities": [ { "certChain": { "certificates": [ { "rawBytes": "MAMCAQE=" } ] } } ] }"#;
+        let tr = TrustRoot::load_trusted_root_json(json).expect("valid");
+        assert!(tr.rekor_public_key_pem().is_none(), "no tlogs → no pinned Rekor key");
+    }
+
+    #[test]
+    fn load_trusted_root_json_rejects_no_authorities() {
+        // Structurally valid JSON but no certificate authorities → NoCertificateBlocks.
+        let json = br#"{ "tlogs": [] }"#;
+        match TrustRoot::load_trusted_root_json(json) {
+            Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCertificateBlocks)) => {}
+            other => panic!("expected NoCertificateBlocks, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_trusted_root_json_rejects_malformed_json() {
+        match TrustRoot::load_trusted_root_json(b"not json at all") {
+            Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { .. })) => {}
+            other => panic!("expected PemParseFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_trusted_root_json_rejects_invalid_fulcio_der() {
+        // A CA rawBytes whose decoded body is not a valid X.509 SEQUENCE.
+        // Base64 "b2N4" decodes to "ocx" (0x6f...), not tag 0x30.
+        let json =
+            br#"{ "certificateAuthorities": [ { "certChain": { "certificates": [ { "rawBytes": "b2N4" } ] } } ] }"#;
+        match TrustRoot::load_trusted_root_json(json) {
+            Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { detail })) => {
+                assert!(detail.contains("invalid X.509 certificate"), "detail: {detail}");
+            }
+            other => panic!("expected PemParseFailed for bad DER, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_der_and_rekor_carries_both() {
+        let tr = TrustRoot::from_der_and_rekor(vec![vec![0x30, 0x03, 0x02, 0x01, 0x01]], Some("PINNED".to_string()));
+        assert_eq!(tr.der_certs().len(), 1);
+        assert_eq!(tr.rekor_public_key_pem(), Some("PINNED"));
+    }
+
+    #[test]
+    fn load_from_pem_pins_no_rekor_key() {
+        let tr = TrustRoot::load_from_pem(TEST_CERT_PEM).expect("valid PEM");
+        assert!(
+            tr.rekor_public_key_pem().is_none(),
+            "a bare Fulcio PEM pins no Rekor key"
+        );
     }
 
     #[test]

@@ -775,6 +775,31 @@ class FakeSigstoreStack:
         """Path to the fake Rekor public key PEM."""
         return self._rekor_pub_path
 
+    def trusted_root_json_path(self) -> Path:
+        """Write and return a minimal Sigstore ``trusted_root.json``.
+
+        Carries the fake Fulcio CA certificate (DER) and the fake Rekor public
+        key (DER SubjectPublicKeyInfo) in the shape ``TrustRoot::load_trusted_root_json``
+        parses, so ``ocx package verify --tuf-root <this>`` (or
+        ``OCX_SIGSTORE_TUF_ROOT``) pins both — no Fulcio/Rekor fetch.
+        """
+        path = self._tmp / "trusted_root.json"
+        if not path.exists():
+            ca_der = self._ca._ca_cert.public_bytes(serialization.Encoding.DER)
+            rekor_spki_der = self._rekor_key._public.public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            doc = {
+                "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",
+                "certificateAuthorities": [
+                    {"certChain": {"certificates": [{"rawBytes": base64.b64encode(ca_der).decode()}]}}
+                ],
+                "tlogs": [{"publicKey": {"rawBytes": base64.b64encode(rekor_spki_der).decode()}}],
+            }
+            path.write_text(json.dumps(doc))
+        return path
+
     def shutdown(self) -> None:
         """Shut down all servers. Safe to call multiple times."""
         for server in (self._oidc_server, self._fulcio_server, self._rekor_server):

@@ -2572,7 +2572,9 @@ In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present auto
 
 #### `verify` {#package-verify}
 
-Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--tuf-root` / `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
+
+`--offline` (or [`OCX_OFFLINE`][env-offline]) scopes to the Sigstore trust services — the Rekor-key fetch and TUF — not the registry: verify still fetches the target and its signature referrer from the registry in every mode. Offline verify requires a pinned Rekor key from `--tuf-root` or a fresh trust-root cache entry; see [Offline and Air-Gapped Verification][signing-offline] for the full model.
 
 `--certificate-identity` and `--certificate-oidc-issuer` are optional — but only when a [`[[trust.policy]]`][config-trust] scope covers the target (see [Identity resolution](#package-verify-identity) below). Keyless verification is meaningless without an identity from one source or the other.
 
@@ -2596,7 +2598,8 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | `--certificate-identity` | — | *(policy-resolved)* | Expected certificate SAN (Subject Alternative Name), exact match. Optional when a [`[[trust.policy]]`][config-trust] scope covers the target; when given, overrides any policy and requires `--certificate-oidc-issuer` too. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
 | `--certificate-oidc-issuer` | — | *(policy-resolved)* | Expected OIDC issuer URL, exact match. Used together with `--certificate-identity` — passing one without the other is a usage error. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
 | `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
-| `--trust-root` | — | *(embedded root)* | Path to a PEM file of [Fulcio][fulcio] CA certificate(s) to validate the leaf chain against. Overrides the embedded trust root. Equivalent env var: [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]; the flag wins. Required today because the embedded production root is stubbed |
+| `--tuf-root` | — | *(none)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies both the [Fulcio][fulcio] CA and the pinned [Rekor][rekor] public key, so no Rekor-key fetch is needed. Takes precedence over `--trust-root`. Equivalent env var: [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root]; the flag wins. The air-gapped seam — required for [`--offline`](#arg-offline) verify unless a fresh trust-root cache entry already exists |
+| `--trust-root` | — | *(embedded root)* | Path to a PEM file of [Fulcio][fulcio] CA certificate(s) to validate the leaf chain against. The PEM carries no Rekor key, so it is fetched from `--rekor-url` on first use (trust-on-first-use) and then cached; supply `--tuf-root` instead to pin the Rekor key up front. Equivalent env var: [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]; the flag wins. One of `--tuf-root`, `--trust-root`, or a fresh trust-root cache entry is required — the embedded production root is stubbed |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
 
 #### Identity resolution {#package-verify-identity}
@@ -2609,7 +2612,7 @@ Two ways to tell `ocx package verify` whose signature to accept:
 Supplying exactly one of the two flags is a usage error (exit 64) — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64: there is no identity to check the signature against.
 
 :::warning Verified against the fake Sigstore stack only
-`ocx package verify` runs the full five-check pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, [Rekor][rekor] SET, subject-digest signature, identity and issuer match. Its positive path is currently exercised only against the in-repo fake Sigstore stack. Verifying signatures from public-good Fulcio/Rekor is not yet wired or tested: the embedded production [TUF][sigstore-tuf] trust root is stubbed (supply a Fulcio CA via `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]), and the Rekor SET is checked against the fake stack's payload format rather than the public Rekor wire format. See [Current limitations][signing-limitations] before relying on this against production Sigstore. Exit codes and flag contracts below are stable.
+`ocx package verify` runs the full five-check pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, [Rekor][rekor] SET, subject-digest signature, identity and issuer match. Its positive path is currently exercised only against the in-repo fake Sigstore stack. Verifying signatures from public-good Fulcio/Rekor is not yet wired or tested: the embedded production [TUF][sigstore-tuf] trust root is stubbed (supply a trust root via `--tuf-root` / [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root], or `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]), and the Rekor SET is checked against the fake stack's payload format rather than the public Rekor wire format. See [Current limitations][signing-limitations] before relying on this against production Sigstore. Exit codes and flag contracts below are stable.
 :::
 
 **Exit codes**
@@ -2621,11 +2624,10 @@ Supplying exactly one of the two flags is a usage error (exit 64) — a `--certi
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target, or only one of the two flags was given |
 | 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
 | 77 | Certificate identity or OIDC issuer mismatch |
-| 78 | Trust root unavailable or failed to load |
+| 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--tuf-root` and no fresh trust-root cache entry); the message names the remedy |
 | 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
 | 79 | No signatures found for target, or no usable Sigstore bundle among referrers |
 | 80 | Registry authentication failed while fetching referrers |
-| 81 | `PolicyBlocked` — `--offline` blocked the network access verify requires. Drop `--offline` and re-run. |
 | 83 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
 | 84 | Registry does not support the OCI Referrers API |
 
@@ -2697,7 +2699,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `rekor_unavailable` | 83 | Rekor transparency log unavailable during verify |
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
-| `trust_root_load` | 78 | Trust root PEM failed to load (malformed PEM, no certificate blocks, TUF fetch failed) |
+| `trust_root_load` | 78 | Trust root failed to load — malformed PEM, no certificate blocks, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--tuf-root`, or run an online verify first to populate the cache) |
 | `no_identity_provided` | 64 | No identity to verify against: certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target, or only one of the two flags was given |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
@@ -3443,6 +3445,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [in-depth-ci]: ../in-depth/ci.md
 [signing-limitations]: ../in-depth/signing.md#current-limitations
+[signing-offline]: ../in-depth/signing.md#offline-verification
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -3469,6 +3472,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-gitlab-ci]: ./environment.md#external-gitlab-ci
 [env-identity-token]: ./environment.md#ocx-identity-token
 [env-sigstore-trust-root]: ./environment.md#ocx-sigstore-trust-root
+[env-sigstore-tuf-root]: ./environment.md#ocx-sigstore-tuf-root
+[env-offline]: ./environment.md#ocx-offline
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/

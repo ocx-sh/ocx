@@ -23,6 +23,14 @@ pub struct Context {
     project_path: Option<PathBuf>,
     remote_client: Option<oci::Client>,
     remote_index: Option<oci::index::RemoteIndex>,
+    /// Registry client available in every mode (including `--offline`).
+    ///
+    /// Built unconditionally so `ocx package verify` can read the artifact + its
+    /// signature referrer from the registry even offline — verify's offline
+    /// semantics scope to Sigstore trust services, not the artifact registry
+    /// (see `verify_context`). `remote_client` / `online_context` stay
+    /// offline-gated for every other command.
+    registry_client: oci::Client,
     local_index: oci::index::LocalIndex,
     file_structure: file_structure::FileStructure,
     api: api::Api,
@@ -161,24 +169,31 @@ impl Context {
         // divergence).
         let api = options.build_api(color_config);
 
+        // Explicit builder (not `from_env_with_progress`) so the config-derived
+        // `MirrorMap` is threaded in; `OCX_MIRRORS` env precedence is already
+        // folded into `mirror_map` by `resolve_mirrors`. A plain-HTTP mirror
+        // requires its host in `OCX_INSECURE_REGISTRIES` (the mirror host is
+        // what gets contacted) — composition with the existing plain-HTTP set,
+        // no implicit scheme-driven opt-out (ADR F2).
+        //
+        // Built unconditionally: `verify` reads the artifact + signature from the
+        // registry in every mode (its `--offline` scopes to Sigstore trust
+        // services, not the registry). Offline still yields `remote_client:
+        // None`, so the manager and `online_context()`/`remote_client()` keep
+        // their offline behavior — only `verify_context()` reads this client.
+        let registry_client = oci::ClientBuilder::new()
+            .plain_http_registries(env::insecure_registries())
+            .mirrors(mirror_map)
+            .progress(progress.clone())
+            .build();
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            // Explicit builder (not `from_env_with_progress`) so the
-            // config-derived `MirrorMap` is threaded in; `OCX_MIRRORS` env
-            // precedence is already folded into `mirror_map` by
-            // `resolve_mirrors`. A plain-HTTP mirror requires its host in
-            // `OCX_INSECURE_REGISTRIES` (the mirror host is what gets contacted)
-            // — composition with the existing plain-HTTP set, no implicit
-            // scheme-driven opt-out (ADR F2).
-            let client = oci::ClientBuilder::new()
-                .plain_http_registries(env::insecure_registries())
-                .mirrors(mirror_map)
-                .progress(progress.clone())
-                .build();
             (
-                Some(client.clone()),
-                Some(index::RemoteIndex::new(index::RemoteConfig { client })),
+                Some(registry_client.clone()),
+                Some(index::RemoteIndex::new(index::RemoteConfig {
+                    client: registry_client.clone(),
+                })),
             )
         };
         let file_structure = file_structure::FileStructure::new();
@@ -395,6 +410,7 @@ impl Context {
         Ok(Context {
             remote_client,
             remote_index,
+            registry_client,
             offline: options.offline,
             project_path,
             file_structure,
@@ -568,10 +584,24 @@ impl Context {
     /// Commands that optionally fall back to online mode should continue to
     /// use [`Self::default_index`] + [`Self::remote_client`] separately; the
     /// paired accessor is for commands where both are always required.
-    #[allow(dead_code)] // Consumed by `command/package_sign.rs` and `command/verify.rs` in Phase 5.
+    #[allow(dead_code)] // Consumed by `command/package_sign.rs` in Phase 5.
     pub fn online_context(&self) -> ocx_lib::Result<(&oci::index::Index, &oci::Client)> {
         let client = self.remote_client.as_ref().ok_or(ocx_lib::Error::OfflineMode)?;
         Ok((&self.default_index, client))
+    }
+
+    /// Returns the default [`Index`] paired with a registry [`oci::Client`] for
+    /// `ocx package verify`, in every mode — including `--offline`.
+    ///
+    /// Unlike [`Self::online_context`], this never returns `OfflineMode`: verify
+    /// inherently reads the artifact and its signature referrer from the
+    /// registry where they live (a local mirror in air-gapped deployments), so
+    /// its `--offline` semantics scope to the Sigstore trust services (the Rekor
+    /// key fetch and TUF), not the artifact registry. The returned `bool` is the
+    /// offline flag, which the verify pipeline uses to forbid trust-services
+    /// network and require cached/supplied trust material.
+    pub fn verify_context(&self) -> (&oci::index::Index, &oci::Client, bool) {
+        (&self.default_index, &self.registry_client, self.offline)
     }
 }
 

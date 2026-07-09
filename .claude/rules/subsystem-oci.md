@@ -48,7 +48,8 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/verify/error.rs` | `VerifyError` + `VerifyErrorKind` — three-layer error with exit-code classification |
 | `oci/verify/identity.rs` | Certificate identity + OIDC issuer exact-match policy |
 | `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator — resolve target, list signature referrers (capability cache), parse bundle, verify cert chain + Rekor SET + signature + identity/issuer. Wired end-to-end (#194); embedded TUF trust root still stubbed (`--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` required) — see signing.md "Current Limitations" |
-| `oci/verify/trust_root.rs` | TUF trust root loading (embedded asset + network refresh) |
+| `oci/verify/trust_root.rs` | Trust-root loading: Fulcio CA PEM, Sigstore `TrustedRoot` JSON (`--tuf-root`, pinned Rekor key), cache rebuild; embedded asset stubbed |
+| `oci/verify/trust_cache.rs` | Trust-root cache for offline verify (`$OCX_HOME/state/trust_root/<rekor-authority>.json`) — Fulcio CA + pinned Rekor key, atomic write, TTL, fail-open; mirrors `referrer/capability.rs` |
 
 ## Key Types
 
