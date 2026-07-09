@@ -136,6 +136,29 @@ fn is_absolute_path(p: &str) -> bool {
     p.starts_with('/')
 }
 
+/// Whether a canonicalized package root is inside the shim's E3 containment
+/// boundary, given the canonicalized `OCX_HOME`.
+///
+/// Three roots are admitted, and they mirror `validate_launcher_pkg_root`'s
+/// allow-list in `ocx_cli` exactly — `$OCX_HOME/packages` (installed
+/// candidates), `$OCX_HOME/temp/test` (`ocx package test`) and
+/// `$OCX_HOME/temp/patch-test` (`ocx patch test`). The two scratch roots are
+/// enumerated rather than collapsed to `$OCX_HOME/temp`: `temp/` also holds
+/// in-progress download directories, so admitting the whole subtree would let
+/// a tampered sidecar aim the shim at un-assembled, mid-download content and
+/// still clear E3.
+///
+/// Comparison is component-wise (`Path::starts_with`), so a sibling whose name
+/// merely shares a prefix — `temp-evil`, `packages-old` — does not match.
+/// Both arguments must already be canonicalized by the caller; this function
+/// performs no I/O so it stays host-runnable on the Linux CI.
+pub(crate) fn pkg_root_allowed(canon_home: &std::path::Path, canon_root: &std::path::Path) -> bool {
+    let temp = canon_home.join("temp");
+    [canon_home.join("packages"), temp.join("test"), temp.join("patch-test")]
+        .iter()
+        .any(|allowed| canon_root.starts_with(allowed))
+}
+
 /// Resolves the program to spawn, applying the Windows
 /// `IF DEFINED OCX_BINARY_PIN` semantics the ADR §Error Taxonomy E5/E6
 /// mandates: if `OCX_BINARY_PIN` is **defined at all** (present, even as
