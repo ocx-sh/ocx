@@ -60,7 +60,7 @@ def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> Path:
 def _packages_present_count(ocx: OcxRunner) -> int:
     """Count distinct ``content/`` directories under
     ``$OCX_HOME/packages/{registry_dir}/`` — the object-store observable for
-    eager-vs-lazy materialization. Toolchain mutators (`add`/`lock`/`upgrade`)
+    eager-vs-lazy materialization. Toolchain mutators (`add`/`lock`/`update`)
     pull blobs and assemble package content but never create candidate or
     `current` symlinks under the new model (see
     ``project_context.rs::materialize_lock``), so package count is the only
@@ -524,7 +524,7 @@ def test_add_untouched_tool_exact_only_fails_on_missing_index(
     Whole-file model §4.3/§8.2: a mutator carries untouched bindings forward
     verbatim; a V1 entry is transcribed exact-only from its pinned index
     digest. When that index is unreachable the add fails with exit 78
-    (``LockUpgradeRequired``) and the message names ``ocx upgrade`` — never a
+    (``LockUpgradeRequired``) and the message names ``ocx update`` — never a
     silent live-tag re-resolve.
 
     Setup: lock two real tools (A, B) to learn the live ``declaration_hash``,
@@ -601,10 +601,10 @@ pinned = "{ocx.registry}/{repo_b}@sha256:{fake_digest}"
         "ocx add must fail with exit 78 (LockUpgradeRequired) when an untouched "
         f"V1 tool's index is unreachable; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    # The error must direct the user to the whole-file bump verb `ocx upgrade`.
+    # The error must direct the user to the whole-file bump verb `ocx update`.
     combined = (result.stderr + result.stdout).lower()
-    assert "upgrade" in combined, (
-        "error message must direct the user to run `ocx upgrade`; "
+    assert "update" in combined, (
+        "error message must direct the user to run `ocx update`; "
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     )
 

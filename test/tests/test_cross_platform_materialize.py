@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for `--platform` on toolchain-tier commands (issue #138).
 
-Toolchain-tier commands (`add`, `lock`, `upgrade`, `pull`, `env`) hardcoded the
+Toolchain-tier commands (`add`, `lock`, `update`, `pull`, `env`) hardcoded the
 host-native platform when warming the object store. These tests prove the new
 `--platform` flag materializes a *foreign* platform's leaf instead — the V2 lock
 already pins every shipped platform's leaf, so `--platform` only selects which
@@ -122,11 +122,11 @@ def test_add_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str
     assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 leaf must be warmed by add --platform"
 
 
-def test_upgrade_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`ocx upgrade --platform=linux/arm64` re-resolves a moved tag and warms
+def test_update_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx update --platform=linux/arm64` re-resolves a moved tag and warms
     ONLY the requested arm64 leaf of the freshly-resolved digest.
 
-    #138 lists `upgrade` in its `--platform` scope; unlike `add`/`lock` this
+    #138 lists `update` in its `--platform` scope; unlike `add`/`lock` this
     is the whole-file bump verb that re-resolves every declared tag even when
     unchanged — publishing a second version and bumping the bound minor tag
     proves `--platform` drives materialization of the NEW lock, not a stale
@@ -137,16 +137,16 @@ def test_upgrade_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo:
 
     # Bump: publish a second version for both platforms. `cascade` (default
     # True in `make_package`) re-points the bound minor tag (3.28) at the
-    # new digest, so `ocx upgrade` has a moved tag to re-resolve.
+    # new digest, so `ocx update` has a moved tag to re-resolve.
     make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_amd64", platform=AMD64, new=False)
     make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_arm64", platform=ARM64, new=False)
 
     assert _dry_run_status(ocx, project_dir, ARM64) == "would-fetch", "arm64 must start uncached"
 
-    upgrade = _run(ocx, project_dir, "upgrade", f"--platform={ARM64}")
-    assert upgrade.returncode == EXIT_SUCCESS, f"cross-platform upgrade failed: {upgrade.stderr}"
+    update = _run(ocx, project_dir, "update", f"--platform={ARM64}")
+    assert update.returncode == EXIT_SUCCESS, f"cross-platform update failed: {update.stderr}"
 
-    assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 must be cached after upgrade"
+    assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 must be cached after update"
     assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
         "amd64 must stay uncached — only the requested arm64 leaf of the "
         "newly-resolved digest was materialized"

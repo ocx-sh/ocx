@@ -335,13 +335,13 @@ def test_env_composition_states_default_run_inherits_and_prepends(
 @pytest.mark.parametrize("anchor,name", [
     ("{#pull}", "pull"),
     ("{#run}", "run"),
-    ("{#upgrade}", "upgrade"),
+    ("{#update}", "update"),
 ])
 def test_exit64_row_mentions_global_project_conflict(
     cli_ref_text: str, anchor: str, name: str
 ) -> None:
     """Plan C: ``command-line.md``'s exit-64 row for ``pull``/``run``/
-    ``upgrade`` must mention the ``--global`` + ``--project`` conflict, for
+    ``update`` must mention the ``--global`` + ``--project`` conflict, for
     parity with ``add``/``lock``/``remove`` (which already say "`--global`
     combined with `--project`").
 

@@ -599,7 +599,7 @@ def test_env_global_corrupt_lock_is_empty_env_both_paths(ocx: OcxRunner, tmp_pat
     tier is lenient and consistent: "no usable global toolchain" is an empty env
     (exit 0) regardless of ``--shell`` — there is no shell/no-shell asymmetry. A
     corrupt global lock instead surfaces via the lock-rewriting commands
-    (``ocx --global lock``/``add``/``upgrade``), not this read-only exporter.
+    (``ocx --global lock``/``add``/``update``), not this read-only exporter.
     (Before Gap A, only the clean "no lock" case was silenced — a parse failure
     propagated via ``?`` and broke the eval line on every shell start.)
     """

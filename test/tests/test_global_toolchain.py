@@ -525,15 +525,15 @@ def test_global_env_follows_lock_pin_not_current_symlink(
     )
 
 
-def test_global_upgrade_takes_effect_without_select(
+def test_global_update_takes_effect_without_select(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """``ocx --global upgrade`` re-pins the lock and ``ocx --global env``
+    """``ocx --global update`` re-pins the lock and ``ocx --global env``
     reflects the new pin immediately — no ``select`` step required.
 
     NEW CONTRACT (adr_global_toolchain_tier.md D5 amended 2026-05-19):
     because ``resolve_global_pinned_env`` reads the lock directly, any
-    change to ``$OCX_HOME/ocx.lock`` (e.g. via ``--global upgrade`` or
+    change to ``$OCX_HOME/ocx.lock`` (e.g. via ``--global update`` or
     ``--global add`` of a new tag) is reflected in the next
     ``ocx --global env`` invocation without an intervening
     ``ocx package select``.
@@ -542,18 +542,18 @@ def test_global_upgrade_takes_effect_without_select(
     1. Push v1 under a rolling tag (``latest``, created by cascade).
        ``add --global`` binds to ``latest`` → lock records v1 digest.
     2. Push v2 with ``new=False`` (cascade overwrites ``latest`` with v2 digest).
-    3. ``upgrade --global`` re-resolves ``latest`` → new digest → lock re-pinned.
+    3. ``update --global`` re-resolves ``latest`` → new digest → lock re-pinned.
     4. ``pull --global`` materialises the new content into the local blob store.
-       (``upgrade`` re-pins the lock but does not download blobs; ``pull`` does.)
+       (``update`` re-pins the lock but does not download blobs; ``pull`` does.)
     5. ``ocx --global env --shell=sh`` must emit the v2 content/bin path with NO
        ``ocx package select`` step — the proof that env reads the lock pin directly,
        not the ``current`` symlink.
     6. The v2 binary must be reachable (runs and prints its v2 marker).
 
     Using a rolling tag (``latest``) is essential: a pinned version tag like
-    ``1.0.0`` always resolves to the same digest, so ``upgrade`` would find
+    ``1.0.0`` always resolves to the same digest, so ``update`` would find
     nothing to advance.  ``latest`` spans both pushes; after step 2 it points
-    at v2, giving ``upgrade`` a real pin change to record.
+    at v2, giving ``update`` a real pin change to record.
     """
     bin_name = "gtool"
 
@@ -570,15 +570,15 @@ def test_global_upgrade_takes_effect_without_select(
     v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, bins=[bin_name])
     assert v1.marker != v2.marker, "precondition: markers differ between versions"
 
-    # Step 3: upgrade the global toolchain.
-    # ``ocx --global upgrade`` re-resolves all tools in the global ocx.toml and
+    # Step 3: update the global toolchain.
+    # ``ocx --global update`` re-resolves all tools in the global ocx.toml and
     # rewrites ocx.lock with the new digests.  ``latest`` now resolves to the v2
-    # digest → lock is updated.  Note: upgrade re-pins the lock only; it does NOT
+    # digest → lock is updated.  Note: update re-pins the lock only; it does NOT
     # download the new manifest blobs — that is pull's responsibility (step 4).
-    upgrade = _run_cmd(ocx, tmp_path, "--global", "upgrade")
-    assert upgrade.returncode == EXIT_SUCCESS, (
-        f"ocx --global upgrade must succeed; rc={upgrade.returncode}\n"
-        f"stderr:\n{upgrade.stderr}"
+    update = _run_cmd(ocx, tmp_path, "--global", "update")
+    assert update.returncode == EXIT_SUCCESS, (
+        f"ocx --global update must succeed; rc={update.returncode}\n"
+        f"stderr:\n{update.stderr}"
     )
 
     # Step 4: pull the new content into the local blob store so that the offline
@@ -587,18 +587,18 @@ def test_global_upgrade_takes_effect_without_select(
     # directly, not the ``current`` symlink).
     pull = _run_cmd(ocx, tmp_path, "--global", "pull")
     assert pull.returncode == EXIT_SUCCESS, (
-        f"ocx --global pull must succeed after upgrade; rc={pull.returncode}\n"
+        f"ocx --global pull must succeed after update; rc={pull.returncode}\n"
         f"stderr:\n{pull.stderr}"
     )
 
     # Step 5: env output must reference the v2 content path.
     env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
     assert env_result.returncode == EXIT_SUCCESS, (
-        f"ocx --global env --shell=sh must succeed after upgrade; "
+        f"ocx --global env --shell=sh must succeed after update; "
         f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
     )
     assert "export" in env_result.stdout, (
-        f"env must emit export lines after upgrade; got:\n{env_result.stdout!r}"
+        f"env must emit export lines after update; got:\n{env_result.stdout!r}"
     )
 
     # Step 6: source the export lines and run the tool; it must print the v2 marker.
@@ -606,12 +606,12 @@ def test_global_upgrade_takes_effect_without_select(
         ocx, tmp_path, env_result.stdout, f"command -v {bin_name} && {bin_name}"
     )
     assert shell_result.returncode == EXIT_SUCCESS, (
-        f"global tool must be reachable after --global upgrade with no select step; "
+        f"global tool must be reachable after --global update with no select step; "
         f"rc={shell_result.returncode}\n"
         f"stdout:\n{shell_result.stdout}\nstderr:\n{shell_result.stderr}"
     )
     assert v2.marker in shell_result.stdout, (
-        f"v2 marker must appear after upgrade (proving lock was re-pinned to v2 digest); "
+        f"v2 marker must appear after update (proving lock was re-pinned to v2 digest); "
         f"v2.marker={v2.marker!r}\nstdout:\n{shell_result.stdout!r}"
     )
 

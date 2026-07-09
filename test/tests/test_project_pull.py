@@ -1631,7 +1631,7 @@ def test_pull_multi_platform_on_legacy_exits_64(
     identifier for every platform, so a multi-platform request cannot be
     honoured (``reject_multi_platform_on_legacy`` in ``project_context.rs``).
 
-    Unlike ``ocx lock``/``ocx add``/``ocx upgrade`` — which always migrate a
+    Unlike ``ocx lock``/``ocx add``/``ocx update`` — which always migrate a
     carried V1 entry to V2 before writing, so their own ``materialize_lock``
     call never observes a legacy entry — ``ocx pull`` reads ``ocx.lock``
     verbatim from disk without ever rewriting or migrating it. A committed
@@ -1705,7 +1705,7 @@ def test_pull_host_platform_absent_exits_78_before_network(
 ) -> None:
     """A V2 lock whose ``[tool.platforms]`` carries only a non-host key causes
     ``ocx pull`` to exit **78** (``ConfigError``) with an error mentioning
-    ``ocx upgrade``, and the failure fires **before** any network I/O (proven by
+    ``ocx update``, and the failure fires **before** any network I/O (proven by
     identical behaviour under ``--offline``).
 
     ADR per-platform-lock-pinning Decision Outcome / absent-key behaviour:
@@ -1777,14 +1777,14 @@ repository = "{bare_repo}"
 """
     )
 
-    # Online run — expect exit 78, error mentions ocx upgrade.
+    # Online run — expect exit 78, error mentions ocx update.
     result_online = _run_pull(ocx, project)
     assert result_online.returncode == EXIT_CONFIG, (
         f"ocx pull with host platform absent must exit 78 (ConfigError); "
         f"got {result_online.returncode}\nstderr:\n{result_online.stderr}"
     )
-    assert "ocx upgrade" in result_online.stderr, (
-        f"stderr must mention 'ocx upgrade'; got:\n{result_online.stderr}"
+    assert "ocx update" in result_online.stderr, (
+        f"stderr must mention 'ocx update'; got:\n{result_online.stderr}"
     )
 
     # Offline run — same exit code and same error text, proving pre-network.
@@ -1802,7 +1802,7 @@ repository = "{bare_repo}"
         f"(pre-network check); got {result_offline.returncode}\n"
         f"stderr:\n{result_offline.stderr}"
     )
-    assert "ocx upgrade" in result_offline.stderr, (
-        f"offline stderr must still mention 'ocx upgrade'; "
+    assert "ocx update" in result_offline.stderr, (
+        f"offline stderr must still mention 'ocx update'; "
         f"got:\n{result_offline.stderr}"
     )

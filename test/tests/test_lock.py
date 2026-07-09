@@ -305,9 +305,9 @@ def test_lock_clean_does_not_bump_moved_tag(
 
     A clean ``ocx lock`` is a reconcile, not a bump: it must carry the
     predecessor forward verbatim and produce a byte-identical lock. The
-    lock-vs-upgrade distinction is the whole point — advancing a moved tag on
-    a clean lock collapses ``ocx lock`` into ``ocx upgrade``. Use ``ocx
-    upgrade`` to force-advance.
+    lock-vs-update distinction is the whole point — advancing a moved tag on
+    a clean lock collapses ``ocx lock`` into ``ocx update``. Use ``ocx
+    update`` to force-advance.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_clean_noop"
@@ -351,7 +351,7 @@ mover = "{ocx.registry}/{repo}:latest"
     after_leaves = _tool_leaf_digests(_read_lock_text(project), "mover")
     assert after_leaves == initial_leaves, (
         "a clean ocx lock must NOT re-resolve the moved tag (pin preserved); "
-        "use `ocx upgrade` to force-advance"
+        "use `ocx update` to force-advance"
     )
     assert after_bytes == initial_bytes, (
         "a clean ocx lock must produce a byte-identical lock (idempotent no-op)"
@@ -685,7 +685,7 @@ def test_lock_rejects_upgrade_flag(
 ) -> None:
     """``ocx lock --upgrade`` is rejected by clap (exit 64): the migration
     flag was folded — V1 → V2 migration is automatic on any write. Use
-    ``ocx upgrade`` to force a re-resolve of every tag.
+    ``ocx update`` to force a re-resolve of every tag.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_lock_upgflag"
@@ -1592,23 +1592,23 @@ pinned = "{fake_registry}/{repo}@sha256:{fake_index_digest}"
 # ---------------------------------------------------------------------------
 
 
-def test_relock_new_platform_lock_is_noop_upgrade_adds_key(
+def test_relock_new_platform_lock_is_noop_update_adds_key(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Pushing a second platform under the same tag is a moving-content change
     with a byte-identical ``ocx.toml``. A clean ``ocx lock`` must NOT pick it up
-    (pin preserved); ``ocx upgrade`` does (whole-file forced bump adds the new
+    (pin preserved); ``ocx update`` does (whole-file forced bump adds the new
     platform key).
 
     ADR per-platform-lock-pinning validation item (d), revised for the
-    lock-vs-upgrade distinction: a newly-shipped platform under an unchanged tag
-    appears as an added key on ``ocx upgrade`` — not on a clean ``ocx lock``,
+    lock-vs-update distinction: a newly-shipped platform under an unchanged tag
+    appears as an added key on ``ocx update`` — not on a clean ``ocx lock``,
     which carries the existing pin forward verbatim.
 
     Setup: push platform A (``new=True``) → ``ocx lock --no-pull`` → record the
     set of leaf digests → push platform B under the same repo:tag
     (``new=False``) → re-index → assert a clean ``ocx lock --no-pull`` is a
-    no-op (still one leaf) → ``ocx upgrade --no-pull`` → assert the lock now
+    no-op (still one leaf) → ``ocx update --no-pull`` → assert the lock now
     carries TWO platform keys and ``generated_at`` advanced (content changed).
 
     NOTE — ``test_lock_relock_dropped_platform_removes_key`` is NOT written
@@ -1670,7 +1670,7 @@ tool = "{ocx.registry}/{repo}:{tag}"
     # A clean `ocx lock` (ocx.toml unchanged → declaration_hash still matches)
     # must carry the existing pin forward verbatim — it must NOT pick up the
     # newly-shipped platform. That is the moving-content advance reserved for
-    # `ocx upgrade`.
+    # `ocx update`.
     clean_relock = _run_lock(ocx, project, "--no-pull")
     assert clean_relock.returncode == EXIT_SUCCESS, (
         f"clean relock failed: rc={clean_relock.returncode}\nstderr:\n{clean_relock.stderr}"
@@ -1681,24 +1681,24 @@ tool = "{ocx.registry}/{repo}:{tag}"
         f"(pin preserved); got {clean_leaves}, expected {first_leaves}"
     )
 
-    # `ocx upgrade` is the whole-file forced bump that re-resolves the tag and
+    # `ocx update` is the whole-file forced bump that re-resolves the tag and
     # picks up the new platform key.
-    upgrade = subprocess.run(
-        _ocx_cmd(ocx, "upgrade", "--no-pull"),
+    update = subprocess.run(
+        _ocx_cmd(ocx, "update", "--no-pull"),
         cwd=project,
         capture_output=True,
         text=True,
         env=ocx.env,
     )
-    assert upgrade.returncode == EXIT_SUCCESS, (
-        f"upgrade after adding platform failed: "
-        f"rc={upgrade.returncode}\nstderr:\n{upgrade.stderr}"
+    assert update.returncode == EXIT_SUCCESS, (
+        f"update after adding platform failed: "
+        f"rc={update.returncode}\nstderr:\n{update.stderr}"
     )
     second_text = _read_lock_text(project)
     second_leaves = set(_leaf_digests(second_text))
 
     assert len(second_leaves) == 2, (
-        f"after adding {second_platform}, `ocx upgrade` must carry two platform "
+        f"after adding {second_platform}, `ocx update` must carry two platform "
         f"leaves; got {second_leaves}"
     )
     assert first_leaves.issubset(second_leaves), (
@@ -1706,7 +1706,7 @@ tool = "{ocx.registry}/{repo}:{tag}"
     )
 
     second_at_match = re.search(r'generated_at\s*=\s*"([^"]+)"', second_text)
-    assert second_at_match, "generated_at must be present in the upgraded lock"
+    assert second_at_match, "generated_at must be present in the updated lock"
     second_generated_at = second_at_match.group(1)
     assert second_generated_at != first_generated_at, (
         "generated_at must advance when the platforms map content changes "
