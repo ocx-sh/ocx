@@ -593,7 +593,7 @@ fn run() -> Result<i32, ShimError> {
     // call. `startup_ex` (and its attribute list, kept alive by
     // `attr_list_buf`) outlives the call. All other pointer args are NULL
     // except `process_info`, a valid zero-initialised output struct.
-    let created = unsafe {
+    let mut created = unsafe {
         CreateProcessW(
             app_name_ptr,
             command_line_w.as_mut_ptr(),
@@ -618,6 +618,47 @@ fn run() -> Result<i32, ShimError> {
             unsafe { DeleteProcThreadAttributeList(ptr) };
         }
     };
+
+    // Degraded retry (E7-class): some host states reject the EXTENDED
+    // attribute spawn itself (observed: GHA windows runners returning
+    // ERROR_NOT_SUPPORTED (50) when the shim is launched by the `package
+    // test` script engine with piped stdio). The module already documents
+    // spawning without handle/job scoping as the degraded mode when the
+    // attribute list cannot be BUILT — extend the same degrade to a rejected
+    // extended spawn: retry once with a plain STARTUPINFOW (the
+    // STARTF_USESTDHANDLES trio still wires the std streams). The original
+    // error code is logged so the environments that need this stay visible.
+    if created == 0 && extended_present != 0 {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: extended spawn failed: win32 error {last}; retrying without handle/job scoping");
+        delete_attr_list(attr_list_ptr);
+        attr_list_ptr = std::ptr::null_mut();
+        attr_list_buf.clear();
+        startup_ex.lpAttributeList = std::ptr::null_mut();
+        // CreateProcessW may have MODIFIED the mutable command-line buffer on
+        // the failed attempt (documented behaviour) — rebuild it fresh.
+        command_line_w = std::ffi::OsStr::new(&command_line)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: identical contract to the extended call above, minus the
+        // attribute list (`dwCreationFlags = 0`, `lpAttributeList = NULL`).
+        created = unsafe {
+            CreateProcessW(
+                app_name_ptr,
+                command_line_w.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::addr_of!(startup_ex.StartupInfo),
+                &mut process_info,
+            )
+        };
+    }
 
     if created == 0 {
         // SAFETY: no pointers; reads thread-local last-error.
