@@ -165,7 +165,11 @@ def test_pull_platform_not_shipped_exits_78(ocx: OcxRunner, unique_repo: str, tm
 
 
 def test_env_platform_single_target(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`ocx env --platform=linux/arm64 --shell=bash` composes the arm64 env."""
+    """`ocx env --platform=linux/arm64 --shell=bash` composes the arm64 env.
+
+    `ocx env` installs on miss by default, so the cross-target (arm64) leaf is
+    materialised on the (amd64) host with no extra flag.
+    """
     _publish_multiplatform(ocx, unique_repo, tmp_path)
     project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
 

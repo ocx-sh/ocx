@@ -44,9 +44,14 @@
 //!   Still offline, never installs, never hangs. (The PROJECT tier stays strict —
 //!   see below.)
 //! - **project** (no `--global`) routes through `load_project_with_lock` +
-//!   `compose_tool_set`, then a **single batched** `find_or_install_all` over
-//!   all composed identifiers (mirrors `run.rs` — no per-tool N+1 network
-//!   round-trip).
+//!   `compose_tool_set`. Materialization is gated by the `--[no-]pull` pair
+//!   (`options::Pull`, eager default): the default runs the **single batched**
+//!   `find_or_install_all` over all composed identifiers (mirrors `run.rs` — a
+//!   present lock-pinned tool resolves locally with no network; only a genuine
+//!   miss falls through to pull). `--no-pull` opts out: it probes the local
+//!   store through an offline `PackageManager` clone, warning + omitting a
+//!   not-materialised tool (mirrors `direnv export`), and never contacts the
+//!   registry. The global tier ignores the pair — it never installs by contract.
 //!
 //! [`resolve_global_pinned_env`] is relocated here from `shell_hook.rs`.
 //! Rationale: it performs toolchain-tier `$OCX_HOME → lock → pinned-digest
@@ -90,6 +95,16 @@ use crate::{
 /// - `--shell[=NAME]`: eval-safe shell export lines. The ONLY sourceable form.
 ///
 /// `eval "$(ocx env)"` is a user error — use `eval "$(ocx env --shell=bash)"`.
+///
+/// # Materialization (`--pull` / `--no-pull`)
+///
+/// By default this command installs any missing tool before composing: a
+/// lock-pinned tool already in the object store resolves locally with no
+/// network, and only a genuine miss falls through to the registry to
+/// materialise it. Pass `--no-pull` to skip that fallback — missing tools are
+/// then reported on stderr (`run \`ocx pull\` to fetch`) and omitted, and the
+/// command never contacts the registry. The flags use POSIX last-wins
+/// semantics; the global tier never installs regardless.
 ///
 /// # Exit codes
 ///
@@ -161,6 +176,9 @@ pub struct ToolchainEnv {
 
     #[clap(flatten)]
     platforms: options::Platforms,
+
+    #[clap(flatten)]
+    pull: options::Pull,
 
     /// Annotate each entry with its origin package or companion identifier.
     ///
@@ -252,15 +270,51 @@ impl ToolchainEnv {
             // surfaces `NoHostLeaf` (exit 78) from `compose_tool_set`.
             let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &target)?;
 
-            let identifiers: Vec<ocx_lib::oci::Identifier> = composed.into_iter().map(|tool| tool.identifier).collect();
             let platforms = platforms_or_default(self.platforms.as_slice());
             let manager = context.manager();
-            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = manager
-                .find_or_install_all(identifiers, platforms, context.concurrency())
-                .await?
-                .into_iter()
-                .map(Arc::new)
-                .collect();
+            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = if self.pull.enabled(true) {
+                // Default: resolve + install-on-miss, a SINGLE batched install
+                // (mirror run.rs). A lock-pinned tool already in the object
+                // store resolves locally with no network (cache-first on the
+                // pinned digest); only a genuine miss falls through to the
+                // registry to materialise it.
+                let identifiers: Vec<ocx_lib::oci::Identifier> =
+                    composed.into_iter().map(|tool| tool.identifier).collect();
+                manager
+                    .find_or_install_all(identifiers, platforms, context.concurrency())
+                    .await?
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect()
+            } else {
+                // `--no-pull`: probe the local object store only, never the
+                // registry. An offline `PackageManager` clone forces any
+                // incidental index lookup (V1 legacy locks walk the cached
+                // index->manifest chain; V2 locks read the pinned leaf
+                // directly) to stay local, so a not-materialised tool is warned
+                // about on stderr and omitted (mirrors `direnv export`); any
+                // other find failure stays a hard error.
+                let offline = manager.offline_view(context.local_index().clone());
+                let mut infos = Vec::with_capacity(composed.len());
+                for tool in &composed {
+                    match offline.find(&tool.identifier, platforms.clone()).await {
+                        Ok(info) => infos.push(Arc::new(info)),
+                        Err(ocx_lib::package_manager::error::PackageErrorKind::NotFound) => {
+                            context.ui().warn(format!(
+                                "{} not installed; run `ocx pull` to fetch or drop --no-pull",
+                                tool.binding
+                            ));
+                        }
+                        Err(kind) => {
+                            return Err(ocx_lib::package_manager::error::Error::FindFailed(vec![
+                                ocx_lib::package_manager::error::PackageError::new(tool.identifier.clone(), kind),
+                            ])
+                            .into());
+                        }
+                    }
+                }
+                infos
+            };
             // Per-package opt-out from the in-scope project `ocx.toml`.
             let scope = ocx_lib::package_manager::PatchScope::Project(ctx.config.no_patches_repositories());
             manager.resolve_env_with_patch_boundary(&infos, false, scope).await?
@@ -552,6 +606,24 @@ mod tests {
         assert_eq!(
             env.groups,
             vec!["ci".to_owned(), "lint".to_owned(), "release".to_owned()]
+        );
+    }
+
+    /// `ocx env` installs on miss by default; `--no-pull` opts out. Pins the
+    /// eager default at the parse/wiring site so a default-flip regresses here
+    /// in milliseconds instead of only in the acceptance suite.
+    #[test]
+    fn pull_flags_flatten_with_eager_default() {
+        let default = ToolchainEnv::try_parse_from(["env"]).unwrap();
+        assert!(
+            default.pull.enabled(true),
+            "env default must be eager (install on miss)"
+        );
+
+        let opt_out = ToolchainEnv::try_parse_from(["env", "--no-pull"]).unwrap();
+        assert!(
+            !opt_out.pull.enabled(true),
+            "--no-pull must opt out of the install fallback"
         );
     }
 

@@ -1,22 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx direnv init``.
+"""Acceptance tests for ``ocx direnv init`` and ``ocx direnv export``.
 
 - ``ocx direnv init`` -> creates ``.envrc`` with the spec content
 - bare ``ocx direnv`` -> defaults to ``init`` (same behavior)
 - ``ocx direnv init`` when ``.envrc`` exists -> exit 78 (ConfigError),
   preserve user content
 - ``ocx direnv init --force`` when ``.envrc`` exists -> overwrites
+- ``ocx direnv export`` (default) -> installs a locked-but-unpulled tool on
+  miss, then emits its env
+- ``ocx direnv export --no-pull`` -> stays strictly offline: warns + omits a
+  missing tool, never mutates the store
 
-We bypass ``OcxRunner.run`` because the command writes to CWD, and the
-runner does not expose a ``cwd=`` parameter (same pattern as
+We bypass ``OcxRunner.run`` because the command writes to / reads from CWD, and
+the runner does not expose a ``cwd=`` parameter (same pattern as
 ``test_lock.py`` / ``test_project_pull.py``).
 """
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
+from src.helpers import make_package
 from src.runner import OcxRunner
 
 
@@ -114,3 +120,77 @@ def test_bare_direnv_defaults_to_init(ocx: OcxRunner, tmp_path: Path) -> None:
     envrc = tmp_path / ".envrc"
     assert envrc.exists(), "bare `ocx direnv` must write .envrc"
     assert envrc.read_text() == EXPECTED_ENVRC
+
+
+# ---------------------------------------------------------------------------
+# ocx direnv export — eager default (install on miss), --no-pull stays offline
+# ---------------------------------------------------------------------------
+
+
+def _make_locked_unpulled_project(ocx: OcxRunner, tmp_path: Path, label: str) -> Path:
+    """Publish a package and create a locked-but-NOT-pulled project dir."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_{label}"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+
+    project = tmp_path / f"proj_{label}"
+    project.mkdir()
+    (project / "ocx.toml").write_text(f'[tools]\ntool = "{fq}"\n')
+
+    lock = subprocess.run(
+        [str(ocx.binary), "lock", "--no-pull"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert lock.returncode == 0, f"lock --no-pull failed: {lock.stderr}"
+    return project
+
+
+def _run_export(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    """Run ``ocx direnv export`` from ``cwd`` (reads the nearest ocx.toml)."""
+    return subprocess.run(
+        [str(ocx.binary), "direnv", "export", *extra],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+
+
+def test_direnv_export_default_installs_missing(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Default ``ocx direnv export`` materialises a locked-but-unpulled tool on
+    miss, then emits its bash env (mirrors ``ocx env``'s eager default)."""
+    project = _make_locked_unpulled_project(ocx, tmp_path, "export_eager")
+
+    result = _run_export(ocx, project)
+    assert result.returncode == 0, f"expected exit 0; stderr:\n{result.stderr}"
+    assert "export" in result.stdout, (
+        f"default export must install the missing tool and emit its env\nstdout:\n{result.stdout}"
+    )
+    assert "not installed" not in result.stderr, result.stderr
+
+
+def test_direnv_export_no_pull_stays_offline(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx direnv export --no-pull`` never contacts the registry: a
+    locked-but-unmaterialised tool is warned about, omitted, and NOT installed —
+    a second run still reports it missing (store untouched). Exit stays 0 so the
+    prompt is never broken."""
+    project = _make_locked_unpulled_project(ocx, tmp_path, "export_nopull")
+
+    result = _run_export(ocx, project, "--no-pull")
+    assert result.returncode == 0, f"expected exit 0; stderr:\n{result.stderr}"
+    assert "not installed" in result.stderr, (
+        f"missing-tool note expected on stderr\nstderr:\n{result.stderr}"
+    )
+    assert "export" not in result.stdout, (
+        f"unmaterialised tool must be omitted\nstdout:\n{result.stdout}"
+    )
+
+    again = _run_export(ocx, project, "--no-pull")
+    assert again.returncode == 0, again.stderr
+    assert "not installed" in again.stderr, (
+        f"--no-pull must never materialise the tool\nstderr:\n{again.stderr}"
+    )

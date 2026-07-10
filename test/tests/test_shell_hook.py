@@ -157,10 +157,12 @@ hello = "{ocx.registry}/{repo}:{tag}"
 def test_direnv_export_skips_uninstalled_tool_with_stderr_note(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Missing tool → stderr ``# ocx: <name> not installed``.
+    """Missing tool under ``--no-pull`` → stderr ``# ocx: <name> not installed``.
 
-    Two tools, only one pulled — the other gets a one-line stderr note and
-    is silently dropped from stdout exports.
+    Two tools, only one pulled — under ``--no-pull`` the other gets a one-line
+    stderr note and is silently dropped from stdout exports. (Without
+    ``--no-pull`` the default now installs the missing tool on the store miss —
+    that eager path is covered in ``test_direnv.py``.)
     """
     repo_installed, tag_installed = _published_tool(ocx, tmp_path, "ok", bin_name="alpha")
     repo_missing, tag_missing = _published_tool(ocx, tmp_path, "miss", bin_name="beta")
@@ -186,7 +188,7 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
         == EXIT_SUCCESS
     )
 
-    result = _run(ocx, project, "direnv", "export")
+    result = _run(ocx, project, "direnv", "export", "--no-pull")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert "beta" in result.stderr, (

@@ -562,6 +562,8 @@ ocx env [OPTIONS]
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
+| `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx run`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
+| `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
 | `-h`, `--help` | | Print help information. | — |
 
@@ -609,6 +611,10 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 
 ::: warning Plain and JSON output are not sourceable
 `ocx env` and `ocx --format json env` print an aligned table or JSON document — neither form is eval-safe. The only eval-safe channel is `--shell[=NAME]`.
+:::
+
+::: tip `ocx env` installs missing tools by default
+The exporter resolves each lock-pinned tool locally first — a tool already in the object store needs no network (its digest is content-addressed, nothing to look up). Only a genuine miss falls through to install it inline, like [`ocx run`](#run). Pass `--no-pull` to skip that fallback and stay strictly offline: unmaterialised tools are warned about on stderr and omitted (the deterministic-CI shape), and the command never downloads.
 :::
 
 **Exit codes**
@@ -783,11 +789,11 @@ ocx direnv init [OPTIONS]
 
 #### `export` {#direnv-export}
 
-Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. It emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, resolves every default-group tool, and prints **bash** export lines for the resolved environment. It emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
 
 Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
 
-The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
+By default a tool missing from the object store is materialised on miss (like [`ocx env`](#env)): a tool already present resolves locally with no network — its digest is content-addressed, nothing to look up — so only a genuine miss falls through to install it. The pull is best-effort and is skipped whenever no registry is reachable (`--offline` / no configured remote), so a missing tool never fails or blocks the prompt. Pass `--no-pull` to keep the hook strictly offline: missing tools then produce a one-line stderr note and are skipped. Either way a stale lock produces a stderr warning but the stale digests are still used, and when no project `ocx.toml` is found in scope the command exits 0 with no output.
 
 **Usage**
 
@@ -797,6 +803,7 @@ ocx direnv export [OPTIONS]
 
 **Options**
 
+- `--pull` / `--no-pull`: `--pull` (default) installs a missing tool on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
 - `-h`, `--help`: Print help information.
 
 **Exit codes**

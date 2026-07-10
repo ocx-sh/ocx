@@ -5,13 +5,14 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::{
-    env,
+    env, oci,
     package_manager::collect_applied,
-    project::{MissingState, load_project_state},
+    project::{DEFAULT_GROUP, MissingState, host_leaf_identifier, load_project_state},
     shell,
 };
 
 use crate::conventions::{emit_lines, supported_platforms};
+use crate::options;
 
 /// Prints stateless shell export statements for the project toolchain.
 ///
@@ -28,13 +29,21 @@ use crate::conventions::{emit_lines, supported_platforms};
 /// <shell>`. Programs invoked via `eval` from `.envrc` therefore must emit
 /// bash. There is no `--shell` flag on this command for the same reason.
 ///
-/// The command never contacts the network and never installs or mutates
-/// filesystem state. Tools missing from the object store produce a one-line
-/// stderr note and are skipped; a stale lock produces a stderr warning but
-/// the stale digests are still used. When no project `ocx.toml` is found,
-/// the command exits 0 with no output.
+/// By default a tool missing from the object store is materialised before
+/// exporting: a tool already present resolves locally with no network (its
+/// lock-pinned digest is content-addressed — nothing to look up), so only a
+/// genuine miss falls through to the registry. Pass `--no-pull` to keep the
+/// command strictly offline — missing tools then produce a one-line stderr
+/// note and are skipped. Either way a stale lock produces a stderr warning but
+/// the stale digests are still used, a missing tool never fails the prompt,
+/// and when no project `ocx.toml` is found the command exits 0 with no output.
+/// The pull fallback is also skipped whenever no registry is reachable
+/// (`--offline` / no configured remote), so an offline shell never blocks.
 #[derive(Parser)]
-pub struct DirenvExport {}
+pub struct DirenvExport {
+    #[clap(flatten)]
+    pull: options::Pull,
+}
 
 impl DirenvExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
@@ -72,19 +81,57 @@ impl DirenvExport {
             eprintln!("# ocx: ocx.lock is stale (ocx.toml changed since last `ocx lock`); using stale digests");
         }
 
-        // Architect boundary: hook MUST NOT contact the registry, regardless
-        // of `--remote`. We force an offline-only `PackageManager` clone so
-        // any incidental index lookup (e.g. via `resolve` to walk the cached
-        // manifest chain) cannot escape into the network.
-        let manager = context.manager().offline_view(context.local_index().clone());
+        // Probe the local object store first through an offline `PackageManager`
+        // clone: any incidental index lookup (V1 legacy locks walk the cached
+        // index->manifest chain; V2 locks read the pinned leaf directly) stays
+        // local, so a present tool resolves with no registry contact and a
+        // not-materialised tool buckets into `missing`.
+        let offline = context.manager().offline_view(context.local_index().clone());
         let platforms = supported_platforms();
-        let applied = collect_applied(&manager, &project.lock, &platforms).await?;
+        let mut applied = collect_applied(&offline, &project.lock, &platforms).await?;
+
+        // Default: materialise anything the store is missing, then re-probe so
+        // the freshly-pulled tools join the export. `--no-pull` opts out and the
+        // command stays strictly offline. The pull is also skipped when no
+        // registry is reachable (`--offline` / no remote) so an offline shell
+        // never blocks. A tool that stays unresolvable (no host leaf, or a pull
+        // that did not produce it) survives the re-probe and is warned + omitted
+        // below — a missing tool must never fail the prompt.
+        if self.pull.enabled(true) && !applied.missing.is_empty() && !context.manager().is_offline() {
+            let missing: std::collections::HashSet<&str> = applied.missing.iter().map(String::as_str).collect();
+            let to_install: Vec<oci::Identifier> = project
+                .lock
+                .tools
+                .iter()
+                .filter(|tool| tool.group == DEFAULT_GROUP && missing.contains(tool.name.as_str()))
+                .filter_map(|tool| {
+                    platforms
+                        .iter()
+                        .find_map(|platform| host_leaf_identifier(tool, platform).ok())
+                })
+                .collect();
+            if !to_install.is_empty() {
+                // Best-effort: a per-prompt hook must never fail on a transient
+                // registry error. A failed pull leaves the tools in `missing`,
+                // so they are warned about + omitted below rather than breaking
+                // the prompt.
+                match context
+                    .manager()
+                    .find_or_install_all(to_install, platforms.clone(), context.concurrency())
+                    .await
+                {
+                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platforms).await?,
+                    Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
+                }
+            }
+        }
+
         for name in &applied.missing {
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
         }
 
         let scope = ocx_lib::package_manager::PatchScope::Project(project.config.no_patches_repositories());
-        let (entries, _, _) = manager
+        let (entries, _, _) = offline
             .resolve_env_with_patch_boundary(&applied.infos, false, scope)
             .await?;
         // Delegate to the shared emit helper (C5 / conventions.rs).

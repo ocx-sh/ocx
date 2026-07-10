@@ -210,7 +210,10 @@ mod tests {
     #[test]
     fn pull_flags_flatten_with_eager_default() {
         assert!(parse(&["lock"]).pull.enabled(true), "default must be eager");
-        assert!(!parse(&["lock", "--no-pull"]).pull.enabled(true), "--no-pull must defer");
+        assert!(
+            !parse(&["lock", "--no-pull"]).pull.enabled(true),
+            "--no-pull must defer"
+        );
     }
 
     /// `--platform` is repeatable (comma-delimited too) and parses into `Platforms`.

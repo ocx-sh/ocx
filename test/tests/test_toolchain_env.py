@@ -1420,3 +1420,88 @@ def test_env_global_group_scoped_composition(ocx: OcxRunner, tmp_path: Path) -> 
     assert home["default"] in both_keys, f"default group must be present; keys={both_keys}"
     assert home["lint"] in both_keys, f"lint group must be present; keys={both_keys}"
     assert home["ci"] not in both_keys, f"unrequested ci group must be absent; keys={both_keys}"
+
+
+# ---------------------------------------------------------------------------
+# --pull / --no-pull — eager default (install on miss), opt-out stays offline
+# ---------------------------------------------------------------------------
+
+
+def _make_unpulled_project(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    label: str,
+    bin_name: str = "tool",
+) -> tuple[Path, str]:
+    """Publish a package, create a locked but NOT pulled project."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_{label}"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+
+    project = tmp_path / f"proj_{label}"
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\n{bin_name} = "{fq}"\n')
+
+    assert _run(ocx, project, "lock", "--no-pull").returncode == EXIT_SUCCESS
+    return project, fq
+
+
+def test_env_default_installs_missing(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Default ``ocx env`` materialises a locked-but-unpulled tool before
+    composing (the historical auto-install behaviour): the tool's env is
+    emitted and no missing-tool warning is printed; exit stays 0."""
+    project, _fq = _make_unpulled_project(ocx, tmp_path, "eager")
+
+    result = _run(ocx, project, "env")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "PATH" in result.stdout, (
+        f"default env must install the missing tool and emit its env\nstdout:\n{result.stdout}"
+    )
+    assert "not installed" not in result.stderr, result.stderr
+
+
+def test_env_no_pull_warns_omits_and_leaves_store_untouched(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env --no-pull`` stays strictly local: a locked-but-unmaterialised
+    tool is warned about (with an ``ocx pull`` hint), omitted from the env, and
+    NOT installed — a second ``--no-pull`` run still reports it missing, proving
+    the exporter never contacted the registry or mutated the store."""
+    project, _fq = _make_unpulled_project(ocx, tmp_path, "nopull")
+
+    result = _run(ocx, project, "env", "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "not installed" in result.stderr, (
+        f"missing-tool warning expected on stderr\nstderr:\n{result.stderr}"
+    )
+    assert "ocx pull" in result.stderr, (
+        f"warning must hint at `ocx pull`\nstderr:\n{result.stderr}"
+    )
+    assert "PATH" not in result.stdout, (
+        f"unmaterialised tool must be omitted from the env\nstdout:\n{result.stdout}"
+    )
+
+    # The exporter must not have installed anything: a second --no-pull run
+    # still misses (proves no network fetch, no store mutation).
+    again = _run(ocx, project, "env", "--no-pull")
+    assert again.returncode == EXIT_SUCCESS, again.stderr
+    assert "not installed" in again.stderr, (
+        f"--no-pull must never materialise the tool\nstderr:\n{again.stderr}"
+    )
+
+
+def test_env_pull_flags_last_wins(ocx: OcxRunner, tmp_path: Path) -> None:
+    """POSIX last-wins: ``--pull --no-pull`` stays local (warns + omits);
+    ``--no-pull --pull`` materialises."""
+    project, _fq = _make_unpulled_project(ocx, tmp_path, "lastwins")
+
+    local = _run(ocx, project, "env", "--pull", "--no-pull")
+    assert local.returncode == EXIT_SUCCESS, local.stderr
+    assert "not installed" in local.stderr, (
+        f"--pull --no-pull must stay local\nstderr:\n{local.stderr}"
+    )
+
+    eager = _run(ocx, project, "env", "--no-pull", "--pull")
+    assert eager.returncode == EXIT_SUCCESS, eager.stderr
+    assert "PATH" in eager.stdout, (
+        f"--no-pull --pull must materialise\nstdout:\n{eager.stdout}"
+    )

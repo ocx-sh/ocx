@@ -34,7 +34,7 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] update [-g GROUP]... [NAME...]` (bare = whole-file bump; scoped by name/group re-resolves only the named bindings via `resolve_lock_touched` and carries the rest forward verbatim — same pin-preserving primitive as `add`/`remove`; resolves live against the registry by default and never writes tag pointers — see `adr_toolchain_update_family.md`)
 - `ocx [--global] run -- cmd` — compose toolchain env for child process only; never mutates parent shell
-- `ocx [--global] env [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below)
+- `ocx [--global] env [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
 
 ### `ocx shell` — reduced to one survivor
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)

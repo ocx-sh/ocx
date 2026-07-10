@@ -68,7 +68,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
 | `update [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock against the LIVE registry by default (update-family verb: writes `ocx.lock` only, never tag pointers; `--remote` redundant-but-accepted; `--frozen` caps at snapshot, unknown tag exit 81); whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64). ADR `adr_toolchain_update_family.md` | `-g/--group`, `--check`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
-| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file` |
+| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 
 ### OCI-Tier Commands (`ocx package`)
@@ -152,7 +152,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` | `--force` |
-| `direnv export` | Stateless bash export generator for direnv `.envrc` | — |
+| `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline | `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
 | `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
@@ -224,6 +224,7 @@ Rules:
 - **`ocx run NAME` scopes host-leaf resolution** — `-g` selects the *namespace* for name resolution, not a mandate that every tool in it be available. The phases split selection from resolution: `select_tool_set` (resolution-free) runs whole-scope duplicate-across-groups validation; `filter_by_names` narrows to the requested NAMEs; `resolve_selected_tools` resolves host leaves for the named subset ONLY. A `NoHostLeaf` (exit 78) on an unrelated, unnamed sibling no longer aborts a narrowly-named run; an unnamed run (`ocx run -- …`) still resolves the whole scope. Duplicate-across-groups validation stays whole-scope regardless of what is named.
 - **`ocx env` output format is a context-only concern** — root `--format` (default plain, same as every command); no subcommand `--format`; no env-specific JSON default (handshake §3 amended 2026-05-19, reversing the original backend-first JSON default). JSON via `ocx --format json env`. Plain and JSON are both NOT sourceable; `--shell[=NAME]` only eval-safe channel.
 - **`package env` auto-installs** — `ocx package env` uses `find_or_install_all` (unlike the deleted `shell env` which used `find_all`). Do NOT assert no-download semantics against `ocx package env`.
+- **Root `ocx env` auto-installs on miss by default** — the project tier runs the batched `find_or_install_all` (a present lock-pinned tool resolves locally with no network; only a genuine miss pulls). `--no-pull` opts out: it probes the store through an offline `PackageManager` clone (`offline_view` + `find`), warns on stderr (`run \`ocx pull\``) + omits a not-materialised tool, exit 0, never touching the registry (shared `options::Pull` flatten, **eager default — same as `add`/`lock`/`update`**; `direnv export` shares the same pair, best-effort pull so a prompt never fails). The global tier never installs regardless.
 - **`login`/`logout` registry optional** — falls back to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`).
 - **`logout` is always exit 0** — matches `docker`/`oras`/`helm`; CI cleanup must not fail.
 - **`--password VALUE` does not exist** — argv-visible secrets leak via `ps`. Use `--password-stdin`.

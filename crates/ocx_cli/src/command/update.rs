@@ -328,7 +328,10 @@ mod tests {
     #[test]
     fn pull_flags_flatten_with_eager_default() {
         assert!(parse(&["update"]).pull.enabled(true), "default must be eager");
-        assert!(!parse(&["update", "--no-pull"]).pull.enabled(true), "--no-pull must defer");
+        assert!(
+            !parse(&["update", "--no-pull"]).pull.enabled(true),
+            "--no-pull must defer"
+        );
     }
 
     // ── Scoped surface: `-g` and positional names now parse ─────────────
