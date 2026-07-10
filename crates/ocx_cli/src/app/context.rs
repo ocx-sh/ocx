@@ -28,8 +28,8 @@ pub struct Context {
     /// Built unconditionally so `ocx package verify` can read the artifact + its
     /// signature referrer from the registry even offline — verify's offline
     /// semantics scope to Sigstore trust services, not the artifact registry
-    /// (see `verify_context`). `remote_client` / `online_context` stay
-    /// offline-gated for every other command.
+    /// (see `verify_context`). `remote_client` stays offline-gated for every
+    /// other command.
     registry_client: oci::Client,
     local_index: oci::index::LocalIndex,
     file_structure: file_structure::FileStructure,
@@ -179,8 +179,8 @@ impl Context {
         // Built unconditionally: `verify` reads the artifact + signature from the
         // registry in every mode (its `--offline` scopes to Sigstore trust
         // services, not the registry). Offline still yields `remote_client:
-        // None`, so the manager and `online_context()`/`remote_client()` keep
-        // their offline behavior — only `verify_context()` reads this client.
+        // None`, so the manager and `remote_client()` keep their offline
+        // behavior — only `verify_context()` reads this client.
         let registry_client = oci::ClientBuilder::new()
             .plain_http_registries(env::insecure_registries())
             .mirrors(mirror_map)
@@ -381,11 +381,17 @@ impl Context {
         // configured. install/pull refine the opt-out from their
         // `--verify`/`--no-verify` flag via `conventions::manager_with_verify_flag`.
         let operator_policies = config.trust.as_ref().map(|t| t.policy.clone()).unwrap_or_default();
+        // Resolve the `OCX_NO_VERIFY` opt-out ONCE here; both the auto-verify
+        // config below and the forwarding `config_view` further down read this
+        // single value (the per-command `--verify`/`--no-verify` flag refines it
+        // in `conventions::manager_with_verify_flag`).
+        let no_verify_env = env::flag(env::keys::OCX_NO_VERIFY, false);
         let manager = manager.with_auto_verify(build_auto_verify(
             operator_policies,
             &registry_client,
             options.offline,
             file_structure.state.clone(),
+            no_verify_env,
         ));
 
         // Capture the absolute path of the running ocx so subprocess spawns
@@ -421,7 +427,7 @@ impl Context {
         // inherits the same CI-wide `OCX_NO_VERIFY`. Pure env passthrough — the
         // per-command `--no-verify` flag is a one-shot choice and is not
         // forwarded. (`env::keys::OCX_NO_VERIFY`, see `subsystem-cli.md`.)
-        config_view.no_verify = env::flag(env::keys::OCX_NO_VERIFY, false);
+        config_view.no_verify = no_verify_env;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
@@ -593,32 +599,16 @@ impl Context {
         self.managed_config_snapshot.as_ref()
     }
 
-    /// Returns the default [`Index`] paired with the online [`oci::Client`].
-    ///
-    /// This is the single accessor for commands that *require* network access
-    /// (sign, verify, publish, …). It returns [`ocx_lib::Error::OfflineMode`]
-    /// when the context was built with `--offline`, routing to exit code 81
-    /// (`PolicyBlocked`) via [`ocx_lib::cli::classify_error`].
-    ///
-    /// Commands that optionally fall back to online mode should continue to
-    /// use [`Self::default_index`] + [`Self::remote_client`] separately; the
-    /// paired accessor is for commands where both are always required.
-    #[allow(dead_code)] // Consumed by `command/package_sign.rs` in Phase 5.
-    pub fn online_context(&self) -> ocx_lib::Result<(&oci::index::Index, &oci::Client)> {
-        let client = self.remote_client.as_ref().ok_or(ocx_lib::Error::OfflineMode)?;
-        Ok((&self.default_index, client))
-    }
-
     /// Returns the default [`Index`] paired with a registry [`oci::Client`] for
     /// `ocx package verify`, in every mode — including `--offline`.
     ///
-    /// Unlike [`Self::online_context`], this never returns `OfflineMode`: verify
-    /// inherently reads the artifact and its signature referrer from the
-    /// registry where they live (a local mirror in air-gapped deployments), so
-    /// its `--offline` semantics scope to the Sigstore trust services (the Rekor
-    /// key fetch and TUF), not the artifact registry. The returned `bool` is the
-    /// offline flag, which the verify pipeline uses to forbid trust-services
-    /// network and require cached/supplied trust material.
+    /// Unlike the offline-gated [`Self::remote_client`], this never fails on
+    /// `--offline`: verify inherently reads the artifact and its signature
+    /// referrer from the registry where they live (a local mirror in air-gapped
+    /// deployments), so its `--offline` semantics scope to the Sigstore trust
+    /// services (the Rekor key fetch and TUF), not the artifact registry. The
+    /// returned `bool` is the offline flag, which the verify pipeline uses to
+    /// forbid trust-services network and require cached/supplied trust material.
     pub fn verify_context(&self) -> (&oci::index::Index, &oci::Client, bool) {
         (&self.default_index, &self.registry_client, self.offline)
     }
@@ -639,6 +629,7 @@ fn build_auto_verify(
     registry_client: &oci::Client,
     offline: bool,
     state: StateStore,
+    user_opted_out: bool,
 ) -> Option<package_manager::AutoVerify> {
     if operator_policies.is_empty() {
         return None;
@@ -646,9 +637,8 @@ fn build_auto_verify(
     // Compile-time-constant, known-valid URL — validated (not parsed by name) so
     // the CLI never names `url::Url`. Unused when the trust root pins the Rekor
     // key (the `OCX_SIGSTORE_TUF_ROOT` / offline path).
-    const DEFAULT_REKOR_URL: &str = "https://rekor.sigstore.dev";
-    let rekor_url =
-        oci::endpoint::validate_sigstore_url(DEFAULT_REKOR_URL, "rekor").expect("built-in default Rekor URL is valid");
+    let rekor_url = oci::endpoint::validate_sigstore_url(oci::endpoint::DEFAULT_REKOR_URL, "rekor")
+        .expect("built-in default Rekor URL is valid");
     Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
         operator_policies,
         // ponytail: seam for the deferred project-tier auto-verify (#99 known gap
@@ -662,7 +652,7 @@ fn build_auto_verify(
         state,
         tuf_root_env: std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(PathBuf::from),
         pem_root_env: std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(PathBuf::from),
-        user_opted_out: env::flag(env::keys::OCX_NO_VERIFY, false),
+        user_opted_out,
     }))
 }
 

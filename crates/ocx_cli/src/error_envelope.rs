@@ -19,7 +19,6 @@
 //!     "kind": "auth_error",
 //!     "detail": "oidc_token_rejected",
 //!     "message": "Fulcio rejected OIDC token: issuer not in trust root",
-//!     "remediation": "Verify --certificate-oidc-issuer matches a Fulcio-trusted issuer",
 //!     "context": {
 //!       "identifier": "ocx.sh/cmake:3.28",
 //!       "bundle_digest": null,
@@ -28,6 +27,10 @@
 //!   }
 //! }
 //! ```
+//!
+//! The `remediation` key is **reserved** in the v1 shape but not currently
+//! emitted: [`render_error_envelope`] always leaves it `None`, so it is omitted
+//! from real output. Consumers must treat it as optional.
 
 use ocx_lib::cli::{ClassifyErrorKind, ExitCode, classify_error};
 use serde::Serialize;
@@ -126,7 +129,9 @@ pub struct EnvelopeError<'a> {
     pub detail: Option<&'a str>,
     /// Full user-facing message (the outermost `Display` of the error chain).
     pub message: String,
-    /// Optional remediation hint.
+    /// Reserved remediation hint — part of the frozen v1 shape but not
+    /// currently emitted (`render_error_envelope` always leaves it `None`, so
+    /// `skip_serializing_if` omits it). Consumers must treat it as optional.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
     /// Structured context — identifier, digests, URLs. Values are

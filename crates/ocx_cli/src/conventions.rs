@@ -197,13 +197,15 @@ pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, en
 /// flag. A plain clone when no policy is configured (`auto_verify` is `None`).
 pub fn manager_with_verify_flag(
     context: &crate::app::Context,
-    verify: &crate::options::Verify,
+    verify: &crate::options::SignatureVerify,
 ) -> ocx_lib::package_manager::PackageManager {
     let manager = context.manager().clone();
     let Some(auto_verify) = manager.auto_verify().cloned() else {
         return manager;
     };
-    let opted_out = !verify.resolve(ocx_lib::env::flag(ocx_lib::env::keys::OCX_NO_VERIFY, false));
+    // `OCX_NO_VERIFY` is resolved once in `Context::try_init` and read back from
+    // the config view here — the `--verify`/`--no-verify` flag wins over it.
+    let opted_out = !verify.resolve(context.config_view().no_verify);
     manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
 }
 

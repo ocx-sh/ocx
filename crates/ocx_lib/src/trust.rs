@@ -10,14 +10,17 @@
 //! own valid GitHub Actions OIDC token passes signature verification.
 //!
 //! Policies are declared as an array-of-tables (`[[trust.policy]]`) in the
-//! tiered `config.toml` (system / user / `$OCX_HOME`) and in the project
-//! `ocx.toml`. All tiers **pool** (array-append, never replace): the effective
-//! policy set is the union of every tier's entries. Resolution is
-//! most-specific-wins (longest literal scope prefix) with **ANY-of** among
-//! equal-specificity scopes, which is what makes key/workflow rotation work —
-//! the old and new identity coexist during the overlap window and either one
-//! passes. Because resolution is a set union + ANY-of, tier *order* never
-//! changes the pass/fail outcome.
+//! operator `config.toml` (system / user / `$OCX_HOME`, which array-append into
+//! one operator set) and in the project `ocx.toml`. Resolution is
+//! **operator-authoritative** ([`resolve_tiered`]): if any operator policy
+//! matches the target, only operator policies apply and the project `ocx.toml`
+//! is ignored for that package, so a project config can never override or weaken
+//! an operator pin. When no operator policy matches, the project tier applies
+//! and may *add* trust for scopes the operator has not governed. Within the
+//! chosen tier, resolution is most-specific-wins (longest literal scope prefix)
+//! with **ANY-of** among equal-specificity scopes, which is what makes
+//! key/workflow rotation work — the old and new identity coexist during the
+//! overlap window and either one passes.
 //!
 //! This module is a leaf: it must not depend on `oci`. The certificate-side
 //! matching that consumes a resolved [`CompiledPolicy`] lives in
@@ -44,9 +47,13 @@ pub struct TrustConfig {
 pub struct TrustPolicy {
     /// Package prefix this policy applies to, e.g. `ghcr.io/acme/*`.
     ///
-    /// The literal prefix (the text before the first `*`) is matched against a
-    /// target's canonical `registry/repository`. A scope without `*` is still a
-    /// prefix — `ghcr.io/acme/tool` also covers `ghcr.io/acme/tool-cli`.
+    /// A scope with no `*` matches the target's canonical `registry/repository`
+    /// on `/`-separated path-segment boundaries: `ghcr.io/acme/tool` matches the
+    /// exact repo `ghcr.io/acme/tool` and any sub-path under it
+    /// (`ghcr.io/acme/tool/plugin`), but NOT a sibling that merely shares the
+    /// prefix text — `ghcr.io/acme/tool` does **not** cover
+    /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string
+    /// `*` is a literal-prefix substring glob (see [`Self::matches_scope`]).
     pub scope: String,
 
     /// Exact expected certificate SAN (byte-equal). Mutually exclusive with

@@ -2471,7 +2471,7 @@ ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 1. `--identity-token-file <PATH>` — read from file (highest precedence)
 2. `--identity-token-stdin` — read from stdin
 3. [`OCX_IDENTITY_TOKEN`][env-identity-token] environment variable
-4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+4. Ambient CI detection — GitHub Actions (`ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), GitLab CI (`SIGSTORE_ID_TOKEN`), CircleCI (`CIRCLE_OIDC_TOKEN_V2`)
 5. Interactive browser OAuth (suppressed when `--no-tty` is set)
 
 Never pass a raw token on the command line — it would appear in shell history and process listings.
@@ -2542,7 +2542,6 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
     "kind": "auth_error",
     "detail": "oidc_token_rejected",
     "message": "Fulcio rejected OIDC token: issuer not in trust root",
-    "remediation": "Verify --certificate-oidc-issuer matches a Fulcio-trusted issuer",
     "context": {
       "identifier": "registry.example/pkg:1.0"
     }
@@ -2550,7 +2549,7 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 }
 ```
 
-`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `rekor_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
+`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). A `remediation` key is reserved in the v1 shape but not currently emitted. The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `unavailable`, `temp_fail`, `rekor_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
 
 **`detail` discriminants for `package sign`** (frozen contract C-S1-1):
 
@@ -2618,7 +2617,7 @@ Two ways to tell `ocx package verify` whose signature to accept:
 - **Flags** — pass both `--certificate-identity` and `--certificate-oidc-issuer`. This is an exact-match pair that overrides any configured policy, matching the original flag-only behavior byte-for-byte.
 - **[`[[trust.policy]]`][config-trust]** — omit both flags. Verify first checks the pooled `config.toml`-tier ("operator") policies against the target's canonical `registry/repository`; if any match, the project `ocx.toml` is not consulted at all. Only when no operator policy matches does verify fall back to the project `ocx.toml`'s policies. See the [configuration reference][config-trust] for scope matching, most-specific-wins resolution, regex identities, and the operator-authoritative precedence rule. Reading `[[trust.policy]]` from `ocx.toml` here is the one documented exception to "OCI-tier commands never consult `ocx.toml`" — trust policy is a security posture, not toolchain-binding resolution.
 
-Supplying exactly one of the two flags is a usage error (exit 64) — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64: there is no identity to check the signature against.
+Supplying exactly one of the two flags is a usage error (exit 64) rejected by the argument parser (clap `requires`) *before* verification runs — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Because it is caught at parse time it produces a bare usage error with **no** JSON envelope and no `error.detail` (it is not the `no_identity_provided` case). Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64, but *that* one is the `NoIdentityProvided` verify error (it does carry an envelope): there is no identity to check the signature against.
 
 :::warning Verified against the fake Sigstore stack only
 `ocx package verify` runs the full five-check pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, [Rekor][rekor] SET, subject-digest signature, identity and issuer match. Its positive path is currently exercised only against the in-repo fake Sigstore stack. Verifying signatures from public-good Fulcio/Rekor is not yet wired or tested: the embedded production [TUF][sigstore-tuf] trust root is stubbed (supply a trust root via `--tuf-root` / [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root], or `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]), and the Rekor SET is checked against the fake stack's payload format rather than the public Rekor wire format. See [Current limitations][signing-limitations] before relying on this against production Sigstore. Exit codes and flag contracts below are stable.
@@ -2629,8 +2628,8 @@ Supplying exactly one of the two flags is a usage error (exit 64) — a `--certi
 | Code | Condition |
 |------|-----------|
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
-| 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, non-loopback, no credentials, no userinfo) |
-| 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target, or only one of the two flags was given |
+| 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
+| 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
 | 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
 | 77 | Certificate identity or OIDC issuer mismatch |
 | 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--tuf-root` and no fresh trust-root cache entry); the message names the remedy |
@@ -2709,7 +2708,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
 | `trust_root_load` | 78 | Trust root failed to load — malformed PEM, no certificate blocks, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--tuf-root`, or run an online verify first to populate the cache) |
-| `no_identity_provided` | 64 | No identity to verify against: certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target, or only one of the two flags was given |
+| `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, but with no envelope and no `detail`.) |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
 
@@ -2718,10 +2717,13 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 ```shell
 ocx package verify \
   -p linux/amd64 \
+  --tuf-root /etc/ocx/trusted_root.json \
   --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
 ```
+
+The `--tuf-root` is required in this release: the embedded production trust root ships stubbed, so verify has nothing to check the certificate against without one (a fresh trust-root cache entry works too). See [Current limitations][signing-limitations].
 
 **Example — verify with a `[[trust.policy]]` covering the target, no flags**
 
@@ -2734,7 +2736,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
 ```shell
-ocx package verify -p linux/amd64 registry.example/pkg:1.0
+ocx package verify -p linux/amd64 --tuf-root /etc/ocx/trusted_root.json registry.example/pkg:1.0
 ```
 
 See the [configuration reference][config-trust] for the full schema, scope matching, and rotation semantics.

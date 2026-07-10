@@ -149,24 +149,6 @@ pub enum SignErrorKind {
     /// cause — never erase it with `.to_string()`.
     #[error("internal signing error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
-
-    /// Sign pipeline plumbed but not wired to sigstore-rs / Fulcio / Rekor yet.
-    ///
-    /// Slice 1 / Phase 5a ships the CLI surface (`ocx package sign`) — flag
-    /// parsing, SSRF hardening, offline policy, and the OIDC token override
-    /// resolution — but `SignPipeline::run` is gated behind sigstore-rs
-    /// integration *and* a public `Client::transport()` accessor (see
-    /// `adr_oci_referrers_signing_v1.md`). Surfacing this variant lets the
-    /// CLI exit with a structured error and a readable exit code instead of
-    /// `unimplemented!()` panicking out of an `async fn`.
-    ///
-    /// Exit 78 (`ConfigError`). Mirrors the verify-side stub at
-    /// `VerifyErrorKind::TrustRootUnavailable`: both signal "the feature is
-    /// plumbed but not yet wired" and route to the same exit code. When
-    /// Phase 5c lands, this variant becomes unreachable — but is kept so
-    /// callers matching on it keep compiling during the transition.
-    #[error("sign pipeline not yet wired (Phase 5c pending)")]
-    PipelinePending,
 }
 
 impl ClassifyErrorKind for SignErrorKind {
@@ -182,7 +164,6 @@ impl ClassifyErrorKind for SignErrorKind {
             }
             Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
-            Self::PipelinePending => ExitCode::ConfigError,
         }
     }
 
@@ -200,7 +181,6 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::IdentityTokenFilePermissive { .. } => "identity_token_file_permissive",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
             Self::Internal(_) => "internal",
-            Self::PipelinePending => "pipeline_pending",
         }
     }
 }
@@ -283,13 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_pending_maps_to_config_error() {
-        // "Feature plumbed but not yet wired" surfaces as 78 (ConfigError),
-        // mirroring `VerifyErrorKind::TrustRootUnavailable` on the verify side.
-        assert_eq!(SignErrorKind::PipelinePending.exit_code(), ExitCode::ConfigError);
-    }
-
-    #[test]
     fn sign_error_display_prefixes_identifier() {
         // Outer Display format: "{identifier}: {kind}".
         let err = SignError::new(id(), SignErrorKind::OidcTokenRejected);
@@ -326,7 +299,6 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/tok"),
                 mode: 0o644,
             },
-            SignErrorKind::PipelinePending,
         ] {
             let msg = format!("{kind}");
             assert!(!msg.ends_with('.'), "trailing period on: {msg}");
@@ -390,7 +362,6 @@ mod tests {
                 },
             ),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
-            ("pipeline_pending", PipelinePending),
         ];
 
         for (expected, kind) in pairs {

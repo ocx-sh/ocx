@@ -88,7 +88,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
 | `package sign IDENTIFIER` | Keyless Sigstore sign via OCI Referrers | `-p/--platform` (required), `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
-| `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | `-p/--platform` (required), `--certificate-identity` / `--certificate-oidc-issuer` (optional-when-a-`[trust.policy]`-matches; **both-or-neither**, one alone → exit 64), `--rekor-url`, `--no-cache` |
+| `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | `-p/--platform` (required), `--certificate-identity` / `--certificate-oidc-issuer` (optional-when-a-`[trust.policy]`-matches; **both-or-neither**, one alone → exit 64), `--trust-root`, `--tuf-root`, `--rekor-url`, `--offline`, `--no-cache` |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |

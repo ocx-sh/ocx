@@ -4,17 +4,19 @@
 //! `sign_one` — package-manager task that signs a single target manifest.
 //!
 //! Wraps [`crate::oci::sign::SignPipeline`] (C-S1-3 pipeline with injection
-//! seams) in the three-layer error model: transport / index come from the
+//! seams) in the three-layer error model: the client / index come from the
 //! [`PackageManager`] facade, the pipeline's [`SignResult`] becomes a
-//! [`SignReport`], and any failure is wrapped in a
-//! [`PackageError`] tagged with the target identifier.
+//! [`SignReport`], and any failure is wrapped in a [`PackageError`] tagged with
+//! the target identifier.
 //!
 //! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
 //! and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
 //! `package_manager/tasks.rs` (not `tasks/mod.rs`).
-//!
-//! Phase 5c stub — body uses `unimplemented!()`.
 
+use url::Url;
+use zeroize::Zeroizing;
+
+use crate::oci::sign::{DispatchingTokenProvider, KeylessSigner, SignContext, SignError, SignPipeline};
 use crate::oci::{self, sign::pipeline::SignResult};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
 
@@ -22,21 +24,24 @@ use super::super::PackageManager;
 
 /// Options forwarded from the CLI to [`PackageManager::sign_one`].
 ///
-/// `fulcio_url` / `rekor_url` are the Sigstore endpoints (C-S1-3 injection
-/// seams — default to the public Fulcio/Rekor URLs, overridden by tests).
+/// `fulcio_url` / `rekor_url` are the validated Sigstore endpoints (C-S1-3
+/// injection seams — default to the public Fulcio/Rekor URLs, overridden by
+/// tests). The CLI performs SSRF validation at its boundary and hands over the
+/// parsed [`Url`]s.
 ///
 /// `identity_token` is the precedence-resolved override token from the CLI
-/// layer (`--identity-token-file` > `--identity-token-stdin` > env). When
-/// `None`, the dispatching token provider falls back to ambient detection
-/// (GHA, GitLab, CircleCI, …) then optionally to a browser OAuth flow when
-/// `no_tty` is `false`. See C-S1-4.
+/// layer (`--identity-token-file` > `--identity-token-stdin` > env), held under
+/// [`Zeroizing`] so the cleartext is scrubbed on drop. When `None`, the
+/// dispatching token provider falls back to ambient detection (GHA, GitLab,
+/// CircleCI, …) then optionally to a browser OAuth flow when `no_tty` is
+/// `false`. See C-S1-4.
 pub struct SignOptions {
-    /// Fulcio CA endpoint. Default: `https://fulcio.sigstore.dev`.
-    pub fulcio_url: String,
-    /// Rekor transparency log endpoint. Default: `https://rekor.sigstore.dev`.
-    pub rekor_url: String,
-    /// OIDC override token (file / stdin / env, resolved by CLI layer).
-    pub identity_token: Option<String>,
+    /// Fulcio CA endpoint (validated by the CLI). Default: `https://fulcio.sigstore.dev`.
+    pub fulcio_url: Url,
+    /// Rekor transparency log endpoint (validated by the CLI). Default: `https://rekor.sigstore.dev`.
+    pub rekor_url: Url,
+    /// OIDC override token (file / stdin / env, resolved by the CLI layer).
+    pub identity_token: Option<Zeroizing<String>>,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
     /// When true, suppress the browser OAuth fallback (CI / headless).
@@ -64,28 +69,47 @@ impl PackageManager {
     /// (exit 84) per ADR S1-F — OCX never writes `sha256-<hex>.sig` fallback
     /// tags on the push side. Emits a [`SignReport`] on success.
     ///
+    /// The registry client comes from the facade ([`require_client`][Self::require_client]);
+    /// signing requires network access, so an offline manager fails with
+    /// `OfflineMode` (exit 81). (`ocx package sign` refuses `--offline` earlier
+    /// with a dedicated policy error.)
+    ///
     /// Returns [`PackageError`] tagged with `package` on any failure —
     /// exit-code classification routes via
     /// [`crate::oci::sign::SignErrorKind`].
-    ///
-    /// Phase 5c stub — Phase 5c implements the pipeline.
     pub async fn sign_one(
         &self,
-        _package: &oci::Identifier,
-        _platform: &oci::Platform,
-        _opts: SignOptions,
+        package: &oci::Identifier,
+        platform: &oci::Platform,
+        opts: SignOptions,
     ) -> Result<SignReport, PackageError> {
-        unimplemented!(
-            "PackageManager::sign_one — Phase 5 wires SignPipeline::run with transport/index from \
-             the facade and wraps errors in PackageError"
-        )
+        let client = self
+            .require_client()
+            .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
+
+        let signer = KeylessSigner::new();
+        let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty);
+        let context = SignContext {
+            identifier: package,
+            platform,
+            signer: &signer,
+            token_provider: &token_provider,
+            no_cache: opts.no_cache,
+            index: self.index(),
+            fulcio_url: &opts.fulcio_url,
+            rekor_url: &opts.rekor_url,
+            state: &self.file_structure().state,
+        };
+        let result = SignPipeline::run(client, context)
+            .await
+            .map_err(|err| map_sign_error(package.clone(), err))?;
+        Ok(SignReport { result })
     }
 }
 
-#[allow(dead_code)]
-fn _map_sign_error(identifier: oci::Identifier, err: crate::oci::sign::SignError) -> PackageError {
-    // Phase 5: concrete mapping. Today the wrapper exists so the return-type
-    // of `sign_one` is stable and call sites compile.
+/// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`,
+/// preserving the sign exit code through `PackageErrorKind::Internal`.
+fn map_sign_error(identifier: oci::Identifier, err: SignError) -> PackageError {
     PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::Sign(Box::new(err))),

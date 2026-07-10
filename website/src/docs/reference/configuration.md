@@ -461,12 +461,20 @@ and [`[mirrors."<host>"]`](#keys-mirrors) give.
 #### Scope matching {#keys-trust-scope}
 
 A scope matches the target's canonical `registry/repository` (tag and digest stripped) on
-**path-segment boundaries**. A scope with no `*` matches the exact package or a package
-directly under it: `scope = "ghcr.io/acme/tool"` matches `ghcr.io/acme/tool` and
-`ghcr.io/acme/tool/plugin`, but **not** `ghcr.io/acme/tool-cli` (and `scope = "ghcr.io/acme"`
-never matches `ghcr.io/acmecorp`). A trailing `/*` is the explicit subtree glob
-(`scope = "ghcr.io/acme/*"` covers everything under `ghcr.io/acme/`); a bare `*` globs on the
-literal prefix before it. An empty scope is a catch-all.
+**path-segment boundaries** — for the two safe forms below. A scope with no `*` matches the
+exact package or a package directly under it: `scope = "ghcr.io/acme/tool"` matches
+`ghcr.io/acme/tool` and `ghcr.io/acme/tool/plugin`, but **not** `ghcr.io/acme/tool-cli` (and
+`scope = "ghcr.io/acme"` never matches `ghcr.io/acmecorp`). A trailing `/*` is the explicit
+subtree glob (`scope = "ghcr.io/acme/*"` covers everything under `ghcr.io/acme/`, but not
+`ghcr.io/acmecorp`). An empty scope is a catch-all.
+
+:::warning A mid-string `*` is a substring match, not segment-bounded
+Segment-boundary matching holds only for the no-wildcard and trailing-`/*` forms. A `*`
+placed anywhere else globs on the literal text before it, with no `/` boundary enforced:
+`scope = "ghcr.io/acme*"` matches `ghcr.io/acmecorp` and `ghcr.io/acme-evil` because it is a
+plain literal-prefix (substring) match on `ghcr.io/acme`. Prefer `ghcr.io/acme/*` (or a bare
+`ghcr.io/acme`) unless you specifically intend the substring behavior.
+:::
 
 When more than one policy's scope matches a target, the **longest** literal prefix wins:
 

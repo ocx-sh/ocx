@@ -21,19 +21,18 @@ use clap::Parser;
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
 
+use ocx_lib::Error as LibError;
 use ocx_lib::oci;
-use ocx_lib::oci::endpoint::validate_sigstore_url;
-use ocx_lib::oci::sign::{
-    DispatchingTokenProvider, KeylessSigner, SignContext, SignError, SignErrorKind, SignPipeline,
-};
+use ocx_lib::oci::endpoint::{DEFAULT_REKOR_URL, validate_sigstore_url};
+use ocx_lib::oci::sign::{SignError, SignErrorKind};
+use ocx_lib::package_manager::SignOptions;
+use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
 
 use crate::api::data::signature::SignatureReport;
 use crate::options;
 
 /// Default public Fulcio CA endpoint (overridable via `--fulcio-url`).
 const DEFAULT_FULCIO_URL: &str = "https://fulcio.sigstore.dev";
-/// Default public Rekor transparency-log endpoint (overridable via `--rekor-url`).
-const DEFAULT_REKOR_URL: &str = "https://rekor.sigstore.dev";
 
 #[derive(Parser, Clone)]
 pub struct PackageSign {
@@ -41,15 +40,17 @@ pub struct PackageSign {
     #[clap(short = 'p', long = "platform", required = true, value_name = "PLATFORM")]
     platform: oci::Platform,
 
-    /// Fulcio CA endpoint (C-S1-3 injection seam, defaults to public Fulcio).
+    // C-S1-3 injection seam: these two URL overrides point sign at a private
+    // Fulcio/Rekor deployment (validated at the boundary in `execute`).
+    /// Fulcio CA endpoint. Defaults to public Fulcio; override for private deployments.
     #[clap(long = "fulcio-url", value_name = "URL", default_value = DEFAULT_FULCIO_URL)]
     fulcio_url: String,
 
-    /// Rekor transparency-log endpoint (C-S1-3 injection seam, defaults to public Rekor).
+    /// Rekor transparency-log endpoint. Defaults to public Rekor; override for private deployments.
     #[clap(long = "rekor-url", value_name = "URL", default_value = DEFAULT_REKOR_URL)]
     rekor_url: String,
 
-    /// Read the OIDC identity token from this file (C-S1-4, highest precedence).
+    /// Read the OIDC identity token from this file (highest precedence).
     ///
     /// Use this when the CI system writes the token to a file instead of the
     /// environment (GitHub Actions `$ACTIONS_ID_TOKEN_REQUEST_TOKEN` flow is
@@ -65,7 +66,7 @@ pub struct PackageSign {
     )]
     identity_token_file: Option<std::path::PathBuf>,
 
-    /// Read the OIDC identity token from stdin (C-S1-4, second precedence).
+    /// Read the OIDC identity token from stdin (second precedence).
     ///
     /// Mutually exclusive with `--identity-token-file`. Accepts a newline-terminated
     /// token on stdin; trailing whitespace is trimmed.
@@ -134,26 +135,23 @@ impl PackageSign {
         // held under `Zeroizing`; never log, never surface in error context.
         let override_token = self.resolve_override_token(&identifier).await?;
 
-        // Online context: sign needs the registry (referrer push) and Fulcio /
-        // Rekor. `online_context` errors on `--offline` (already short-circuited
-        // above via `OfflineSignRefused`).
-        let (index, client) = context.online_context()?;
-
-        let signer = KeylessSigner::new();
-        let token_provider = DispatchingTokenProvider::new(override_token, self.no_tty);
-        let sign_context = SignContext {
-            identifier: &identifier,
-            platform: &self.platform,
-            signer: &signer,
-            token_provider: &token_provider,
+        // Route through the PackageManager facade: it owns the pipeline assembly
+        // (registry client, index, signer, token provider) and returns a
+        // per-package error whose kind preserves the sign exit-code taxonomy.
+        // Offline was already refused above via `OfflineSignRefused`.
+        let options = SignOptions {
+            fulcio_url,
+            rekor_url,
+            identity_token: override_token,
             no_cache: self.no_cache,
-            transport: client.transport(),
-            index,
-            fulcio_url: &fulcio_url,
-            rekor_url: &rekor_url,
-            state: &context.file_structure().state,
+            no_tty: self.no_tty,
         };
-        let result = SignPipeline::run(sign_context).await?;
+        let result = context
+            .manager()
+            .sign_one(&identifier, &self.platform, options)
+            .await
+            .map_err(sign_error_into_anyhow)?
+            .result;
 
         let report = SignatureReport::new(
             identifier.to_string(),
@@ -312,12 +310,30 @@ impl PackageSign {
             return Ok(Some(Zeroizing::new(buf.trim().to_string())));
         }
         // Credential exemption: not forwarded via OcxConfigView. See subsystem-cli.md.
-        if let Ok(token) = std::env::var("OCX_IDENTITY_TOKEN")
+        if let Ok(token) = std::env::var(ocx_lib::env::keys::OCX_IDENTITY_TOKEN)
             && !token.is_empty()
         {
             return Ok(Some(Zeroizing::new(token)));
         }
         Ok(None)
+    }
+}
+
+/// Convert a sign-path [`PackageError`] into an `anyhow::Error`, unwrapping the
+/// inner [`SignError`] so the `--format json` error envelope's
+/// `context.identifier` is populated on every pipeline-stage failure — matching
+/// the pre-check paths (offline refusal, URL validation) that already surface a
+/// bare `SignError`.
+///
+/// `ocx_lib::Error::Sign` is `#[error(transparent)]`, so its `source()` forwards
+/// straight to the inner `SignErrorKind`, skipping the `SignError` node the
+/// envelope's context walk downcasts to. The exit code, `error.kind`, and
+/// `error.detail` are unchanged — all three reach the same `SignErrorKind`
+/// whether or not the `SignError` node is preserved.
+fn sign_error_into_anyhow(err: PackageError) -> anyhow::Error {
+    match err.kind {
+        PackageErrorKind::Internal(LibError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
+        kind => anyhow::Error::new(kind),
     }
 }
 
@@ -418,44 +434,36 @@ mod tests {
         }
     }
 
-    /// Phase 5c gate: `execute` reaches the pipeline placeholder *after* all
-    /// pre-checks pass — token resolution succeeded, offline policy did not
-    /// fire, endpoints validated. The placeholder must surface a structured
-    /// [`SignErrorKind::PipelinePending`] (exit 78, `ConfigError`) rather than
-    /// `unimplemented!()` panicking out of the `async fn`. This pins the
-    /// classify-able exit-code branch end-to-end (the bare `unimplemented!()`
-    /// would abort the runtime worker; this test catches a regression to that
-    /// shape).
+    /// A pipeline-stage `SignError` wrapped in a `PackageError` (the shape the
+    /// sign facade produces) must still surface `context.identifier` in the
+    /// `--format json` envelope.
     ///
-    /// The test mirrors `execute`'s final step on success of pre-checks: the
-    /// command builds an identifier (with the default registry), then routes
-    /// the placeholder error through the same `anyhow::Error::from(SignError)`
-    /// wrapping the CLI dispatcher consumes.
-    #[tokio::test]
-    async fn sign_command_returns_structured_error_when_pipeline_unimplemented() {
-        use ocx_lib::cli::{ClassifyExitCode, ExitCode};
+    /// Regression guard for the `sign_error_into_anyhow` unwrap — mirror of the
+    /// verify-side test. `PackageError` omits `#[source]` and `Error::Sign` is
+    /// `#[error(transparent)]`, so only the unwrap re-roots the chain on the bare
+    /// `SignError` the envelope's context walk downcasts to. If the unwrap
+    /// regresses the identifier vanishes and this fails.
+    #[test]
+    fn sign_error_wrapped_in_package_error_still_populates_envelope_identifier() {
+        use crate::error_envelope::render_error_envelope;
 
-        // Build the exact terminal error the `execute` fn now produces after
-        // pre-checks. Avoid full `Context::try_init` plumbing; verify the
-        // structural shape of the `anyhow::Error` it returns — the same shape
-        // `app::run` passes to `classify_error` in `main`.
-        let identifier = test_identifier();
-        let err = anyhow::Error::from(SignError::new(identifier.clone(), SignErrorKind::PipelinePending));
-
-        // Non-panic: arriving here at all proves the placeholder no longer
-        // uses `unimplemented!()` (which would have aborted the worker).
-        let sign_err = err
-            .downcast_ref::<SignError>()
-            .expect("PipelinePending must surface as SignError in the anyhow chain");
-        assert!(
-            matches!(sign_err.kind, SignErrorKind::PipelinePending),
-            "expected PipelinePending kind, got {:?}",
-            sign_err.kind
+        let id = test_identifier();
+        let package_error = PackageError::new(
+            id.clone(),
+            PackageErrorKind::Internal(LibError::Sign(Box::new(SignError::new(
+                id,
+                SignErrorKind::OidcTokenRejected,
+            )))),
         );
-        assert_eq!(sign_err.identifier, identifier);
+        let err = sign_error_into_anyhow(package_error);
+        let json = render_error_envelope("package sign", &err).expect("render envelope");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
 
-        // Exit-code branch: classify() must yield ConfigError (78). This is
-        // the contract the CLI dispatcher relies on via `classify_error`.
-        assert_eq!(sign_err.classify(), Some(ExitCode::ConfigError));
+        assert_eq!(parsed["exit_code"], 80);
+        assert_eq!(parsed["error"]["kind"], "auth_error");
+        assert_eq!(
+            parsed["error"]["context"]["identifier"], "registry.example/pkg:1.0",
+            "identifier must survive the PackageError wrap → sign_error_into_anyhow unwrap",
+        );
     }
 }

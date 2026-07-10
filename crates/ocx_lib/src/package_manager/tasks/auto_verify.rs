@@ -186,21 +186,31 @@ impl PackageManager {
         let trust_root = auto_verify
             .trust_root
             .get_or_try_init(|| async {
-                resolve_trust_root(
+                let root = resolve_trust_root(
                     auto_verify.tuf_root_env.as_deref(),
                     auto_verify.pem_root_env.as_deref(),
                     &auto_verify.state,
                     &cache_key_for_rekor(&auto_verify.rekor_url),
                     auto_verify.offline,
                 )
-                .await
+                .await?;
+                // Online with a bare Fulcio-CA PEM root (no pinned Rekor key):
+                // fetch the Rekor key ONCE here and pin it into the memoized
+                // root, so the N covered packages in a batch reuse it instead of
+                // each TOFU-fetching it inside the pipeline.
+                if !auto_verify.offline && root.rekor_public_key_pem().is_none() {
+                    let key = crate::oci::verify::pipeline::fetch_rekor_public_key_pem(&auto_verify.rekor_url).await?;
+                    Ok(TrustRoot::from_der_and_rekor(root.der_certs().to_vec(), Some(key)))
+                } else {
+                    Ok(root)
+                }
             })
             .await
             .map_err(|kind| verify_kind(resolved, kind))?;
 
         let options = VerifyOptions {
             policies: &policies,
-            transport: auto_verify.registry_client.transport(),
+            client: &auto_verify.registry_client,
             trust_root,
             rekor_url: &auto_verify.rekor_url,
             offline: auto_verify.offline,

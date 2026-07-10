@@ -90,12 +90,19 @@ pub mod keys {
     /// launcher-spawned child install.
     pub const OCX_NO_VERIFY: &str = "OCX_NO_VERIFY";
 
+    /// Short-lived OIDC bearer token for keyless Sigstore signing, read once by
+    /// `ocx package sign` (lowest precedence, after `--identity-token-file` /
+    /// `--identity-token-stdin`). A bearer credential: read directly via
+    /// `std::env::var` and never forwarded to child processes — see
+    /// [`CREDENTIAL_KEYS`] and the credential exemption table in `subsystem-cli.md`.
+    pub const OCX_IDENTITY_TOKEN: &str = "OCX_IDENTITY_TOKEN";
+
     /// Bearer-credential env vars that `apply_ocx_config` must actively scrub
     /// from a child env. Forwarding these to every subprocess would broaden
     /// the attack surface — the CLI command that needs the token reads it
     /// once via `std::env::var` and never propagates it. See the credential
     /// exemption table in `subsystem-cli.md`.
-    pub const CREDENTIAL_KEYS: &[&str] = &["OCX_IDENTITY_TOKEN"];
+    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN];
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed

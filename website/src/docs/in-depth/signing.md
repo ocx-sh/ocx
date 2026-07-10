@@ -28,22 +28,22 @@ So today, `ocx package verify` requires an explicit `--tuf-root` / `--trust-root
 
 Cache location: `$OCX_HOME/state/referrers/{registry_slug}.json`
 
-The `{registry_slug}` is the registry hostname with any character outside `[a-zA-Z0-9._-]` replaced by an underscore (`_`). For example, `ghcr.io` becomes `ghcr_io`.
+The `{registry_slug}` is the registry hostname with any character outside `[a-zA-Z0-9._-]` replaced by an underscore (`_`). Dots are preserved, so `ghcr.io` stays `ghcr.io` (cache file `ghcr.io.json`); a hostname carrying a port such as `localhost:5000` becomes `localhost_5000` (the `:` is replaced).
 
 Each cache file is a JSON object with four fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `registry` | string | Registry hostname |
-| `supported` | `"Supported"` \| `"Unsupported"` | Result of the last probe |
-| `probed_at` | UNIX timestamp | Wall-clock time of the probe (UTC) |
+| `supported` | `"supported"` \| `"unsupported"` | Result of the last probe (snake_case) |
+| `probed_at` | object `{ "secs_since_epoch", "nanos_since_epoch" }` | Wall-clock time of the probe, serialized as a serde `SystemTime` (seconds + nanoseconds since the UNIX epoch), not a bare integer |
 | `ttl_seconds` | integer | Seconds after `probed_at` the entry remains valid |
 
 The cache is advisory and fail-open: a missing or corrupt file triggers a fresh probe; the probe result then overwrites the file atomically (temp-file rename, mode `0600` on Unix). Entries are valid for **6 hours** (`TTL_SECS = 6 * 3600`); after that, the next sign or verify invocation re-probes automatically. Pass `--no-cache` to bypass the cache for a single invocation.
 
 ## OCI 1.1 Referrers Hard-Fail Policy {#referrers-hard-fail}
 
-OCX does not implement a fallback to the [cosign][cosign] tag scheme (`sha256-<digest>.sig`). If a registry returns a non-referrers error response (anything other than HTTP 200 or an explicit "unsupported referrers" status), the sign and verify operations exit 84 (`ReferrersUnsupported`).
+OCX does not implement a fallback to the [cosign][cosign] tag scheme (`sha256-<digest>.sig`). When a registry does not implement the Referrers API — the `GET /v2/{repo}/referrers/{digest}` endpoint returns HTTP 404 (or a `NOT_FOUND` / `NAME_UNKNOWN` error envelope) — the sign and verify operations fail hard with exit 84 (`ReferrersUnsupported`). Any other registry error (an auth failure, a 5xx, a transport error) surfaces under its own exit code, not as `ReferrersUnsupported`.
 
 This is an explicit design choice: a silent fallback would let signatures be published to a registry that cannot guarantee their discoverability, or let a verification path succeed against a stale or unreachable fallback tag. Hard-fail makes the dependency on OCI 1.1 explicit so operators know exactly which registries are compatible.
 

@@ -53,6 +53,21 @@ pub enum VerifyErrorKind {
     #[error("no usable Sigstore bundle among referrers")]
     NoUsableBundle,
 
+    /// The examination cap was reached with candidates still unexamined and
+    /// none of the examined candidates passed.
+    ///
+    /// Exit 65 (`DataError`). Fail-closed: the candidate order is by digest
+    /// (no trust significance), so a valid signature may sort past the cap. This
+    /// is reported distinctly instead of an examined candidate's error — which
+    /// would misleadingly attribute the failure to a specific (unrelated)
+    /// referrer. Not 79: candidates exist, so "no signatures found" would be
+    /// wrong; the operator must reduce the referrer count or raise the cap.
+    #[error("signature candidate limit reached: {unexamined} referrer(s) beyond the examination cap left unchecked")]
+    CandidateLimitExhausted {
+        /// Number of candidate referrers not examined before the cap was hit.
+        unexamined: usize,
+    },
+
     /// Cert SAN does not match `--certificate-identity`.
     ///
     /// Exit 77 (`PermissionDenied`).
@@ -86,6 +101,16 @@ pub enum VerifyErrorKind {
     /// transient failure.
     #[error("Rekor SET does not verify")]
     RekorSetInvalid,
+
+    /// The Rekor transparency-log entry body does not bind to this bundle.
+    ///
+    /// Exit 65 (`DataError`). The SET verifies over the log entry body, but that
+    /// body's hashed subject digest, signature, or certificate does not match the
+    /// bundle's — a previously-valid SET/body spliced onto a different subject
+    /// (GHSA-whqx-f9j3-ch6m class). Like [`Self::SignatureInvalid`] this is a
+    /// tampered-bundle failure, not a service fault: retrying never heals it.
+    #[error("Rekor transparency-log body does not bind to the bundle")]
+    TransparencyBodyMismatch,
 
     /// Rekor v2 transition: bundle has no SET but has an RFC 3161 TSA timestamp.
     ///
@@ -242,9 +267,15 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::CertChainInvalid
             | Self::SignatureInvalid
             | Self::BundleParseFailed
-            // RekorSetInvalid is a data integrity failure (tampered bundle), not a
-            // service-unavailability signal. Exit 65 so retry logic does not fire.
-            | Self::RekorSetInvalid => ExitCode::DataError,
+            // RekorSetInvalid and TransparencyBodyMismatch are data integrity
+            // failures (tampered/spliced bundle), not service-unavailability
+            // signals. Exit 65 so retry logic does not fire.
+            | Self::RekorSetInvalid
+            | Self::TransparencyBodyMismatch
+            // CandidateLimitExhausted is a fail-closed "could not examine all
+            // candidates" outcome, not "unsigned" (79) — keep it in the
+            // verification-failed bucket.
+            | Self::CandidateLimitExhausted { .. } => ExitCode::DataError,
             Self::RekorSetAbsentTsaPresent | Self::RekorUnavailable => ExitCode::RekorUnavailable,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
             Self::TrustRootUnavailable | Self::TrustRootLoad(_) | Self::TrustPolicyInvalid(_) => {
@@ -261,11 +292,13 @@ impl ClassifyErrorKind for VerifyErrorKind {
         match self {
             Self::NoSignaturesFound => "no_signatures_found",
             Self::NoUsableBundle => "no_usable_bundle",
+            Self::CandidateLimitExhausted { .. } => "candidate_limit_exhausted",
             Self::IdentityMismatch => "identity_mismatch",
             Self::IssuerMismatch => "issuer_mismatch",
             Self::CertChainInvalid => "cert_chain_invalid",
             Self::SignatureInvalid => "signature_invalid",
             Self::RekorSetInvalid => "rekor_set_invalid",
+            Self::TransparencyBodyMismatch => "transparency_body_mismatch",
             Self::RekorSetAbsentTsaPresent => "rekor_set_absent_tsa_present",
             Self::ReferrersUnsupported => "referrers_unsupported",
             Self::RekorUnavailable => "rekor_unavailable",
@@ -303,6 +336,17 @@ mod tests {
     }
 
     #[test]
+    fn candidate_limit_exhausted_maps_to_data_error() {
+        // Fail-closed: the cap was hit with candidates unexamined and none passed.
+        // 65 (DataError), not 79 (NotFound) — candidates exist, so "not signed"
+        // would misreport a possibly-signed artifact.
+        assert_eq!(
+            VerifyErrorKind::CandidateLimitExhausted { unexamined: 3 }.exit_code(),
+            ExitCode::DataError
+        );
+    }
+
+    #[test]
     fn identity_family_maps_to_permission_denied() {
         // 77 = "you verified, but not by the signer you expected".
         assert_eq!(
@@ -330,6 +374,16 @@ mod tests {
         // NOT exit 83 (RekorUnavailable). A `case $? in 83) retry` handler must not
         // retry a tampered SET.
         assert_eq!(VerifyErrorKind::RekorSetInvalid.exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn transparency_body_mismatch_maps_to_data_error() {
+        // A spliced SET/body (GHSA-whqx class) is a tampered-bundle failure — exit
+        // 65 (DataError), same class as SignatureInvalid. Never a retryable fault.
+        assert_eq!(
+            VerifyErrorKind::TransparencyBodyMismatch.exit_code(),
+            ExitCode::DataError
+        );
     }
 
     #[test]
@@ -481,11 +535,13 @@ mod tests {
         let pairs: &[(&'static str, VerifyErrorKind)] = &[
             ("no_signatures_found", NoSignaturesFound),
             ("no_usable_bundle", NoUsableBundle),
+            ("candidate_limit_exhausted", CandidateLimitExhausted { unexamined: 2 }),
             ("identity_mismatch", IdentityMismatch),
             ("issuer_mismatch", IssuerMismatch),
             ("cert_chain_invalid", CertChainInvalid),
             ("signature_invalid", SignatureInvalid),
             ("rekor_set_invalid", RekorSetInvalid),
+            ("transparency_body_mismatch", TransparencyBodyMismatch),
             ("rekor_set_absent_tsa_present", RekorSetAbsentTsaPresent),
             ("referrers_unsupported", ReferrersUnsupported),
             ("rekor_unavailable", RekorUnavailable),

@@ -120,7 +120,7 @@ impl FulcioClient {
             .url
             .join("api/v2/signingCert")
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        let response = reqwest::Client::new()
+        let response = crate::oci::endpoint::sigstore_http_client()
             .post(endpoint)
             .json(&body)
             .send()

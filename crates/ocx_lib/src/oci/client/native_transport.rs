@@ -194,7 +194,12 @@ fn filter_and_convert_referrers(
             digest: entry.digest,
             size: entry.size,
             urls: None,
-            artifact_type: None,
+            // Preserve the referrer's artifactType. The Referrers-API index
+            // carries it per descriptor; discarding it here blinds every
+            // consumer's client-side artifactType check (the verify pipeline
+            // re-filters to Sigstore bundles), which would drop server-matched
+            // referrers as if none existed.
+            artifact_type: entry.artifact_type,
             annotations: entry.annotations,
         })
         .collect()

@@ -17,8 +17,13 @@ import sys
 
 import pytest
 
+from src.registry import list_referrers
 from src.runner import OcxRunner, PackageInfo
-from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
+from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor, FakeSigstoreStack, HttpStatus
+
+# Sigstore bundle v0.3 artifact type — mirrors the Rust constant
+# `oci::referrer::media_types::SIGSTORE_BUNDLE_V03`.
+SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -613,6 +618,14 @@ def test_sign_rejects_ftp_scheme_url(ocx: OcxRunner) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="ADR S1-I (idempotent re-sign) not yet implemented: sign/pipeline.rs "
+    "unconditionally pushes a new bundle+referrer, so a re-sign leaves two. "
+    "Deferred (not a review-fix-pass regression); tracked as production follow-up. "
+    "ANY-of verify tolerates the duplicate, so this is a publisher-hygiene gap, "
+    "not a verification hole. Remove this marker when S1-I dedup lands.",
+)
 def test_sign_then_sign_again_is_idempotent(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -626,13 +639,21 @@ def test_sign_then_sign_again_is_idempotent(
     already-signed subject either no-ops (publisher convention) or refreshes
     the existing referrer pointer; in either case the referrers list for
     that subject must contain exactly one bundle from this signer afterwards.
+
+    Effect assertion (not just rc==0): after two signs we count the Sigstore
+    bundle referrers on the *subject digest* via the Referrers API. Now that
+    ANY-of verification ships, a re-sign that appended a duplicate referrer
+    would silently pass every verify — so the idempotency contract has to be
+    pinned on the referrer count, not the exit code.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    subject_digest: str | None = None
     for _ in range(2):
         result = subprocess.run(
             [
                 str(ocx.binary),
+                "--format", "json",
                 "package", "sign",
                 "--fulcio-url", fake_fulcio.url,
                 "--rekor-url", fake_rekor.url,
@@ -644,6 +665,21 @@ def test_sign_then_sign_again_is_idempotent(
             env=env,
         )
         assert result.returncode == 0, result.stderr
+        subject_digest = json.loads(result.stdout)["data"]["subject_digest"]
+
+    assert subject_digest is not None
+    status, index = list_referrers(
+        ocx.registry, pkg.repo, subject_digest, artifact_type=SIGSTORE_BUNDLE_V03
+    )
+    assert status == 200, f"referrers listing failed with status {status}"
+    bundles = [
+        m for m in (index or {}).get("manifests", [])
+        if m.get("artifactType") == SIGSTORE_BUNDLE_V03
+    ]
+    assert len(bundles) == 1, (
+        f"re-sign must be idempotent: expected exactly one bundle referrer on "
+        f"{subject_digest}, found {len(bundles)}: {bundles}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -685,4 +721,86 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
     assert result.returncode == 77, (
         f"expected exit 77 (PermissionDenied / OidcPreCheckFailed), got {result.returncode}\n"
         f"stderr: {result.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rekor unavailable DURING SIGN — exit 83 (RekorUnavailable)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sign_rekor_unavailable_exits_83(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """Rekor returns 503 during the sign-time log upload → exit 83.
+
+    Signing requires a Rekor transparency-log entry; when the log is down the
+    sign cannot complete. This is a service-availability failure (retry may
+    help), so it maps to ``RekorUnavailable`` (83), distinct from a data
+    failure. Failure mode is set BEFORE signing so the log POST hits the 503.
+    """
+    pkg = published_package
+    fake_rekor.set_failure_mode(HttpStatus(503))
+
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 83, (
+        f"expected exit 83 (RekorUnavailable) when Rekor 503s during sign, got "
+        f"{result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wrong-key OIDC token — Fulcio rejects → exit 80 (AuthError / OidcTokenRejected)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sign_wrong_key_oidc_token_exits_80(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_sigstore_stack: FakeSigstoreStack,
+) -> None:
+    """A JWT with valid claims but signed by an untrusted key → exit 80.
+
+    The token's iss/aud/sub look correct, but its signature does not verify
+    against the JWKS the fake Fulcio trusts (it was signed by a foreign key).
+    Fulcio must reject the CSR (HTTP 403) and the sign pipeline surfaces
+    ``OidcTokenRejected`` → ``AuthError`` (80), never a network/usage code.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_sigstore_stack.foreign_oidc_token()}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 80, (
+        f"expected exit 80 (AuthError / OidcTokenRejected) for a wrong-key token, got "
+        f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )

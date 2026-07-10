@@ -49,7 +49,7 @@ pub async fn resolve_trust_root(
 
     // 1. TUF trusted-root JSON override (Fulcio CA + pinned Rekor key).
     if let Some(path) = tuf_override {
-        let json_path = trusted_root_json_path(path);
+        let json_path = trusted_root_json_path(path).await;
         let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
         let root = TrustRoot::load_trusted_root_json(&bytes)?;
         return enforce_offline_rekor_key(root, offline);
@@ -94,8 +94,12 @@ fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot
 
 /// Resolve a `--tuf-root` value to the trusted-root JSON file: the path itself
 /// when it is a file, or `<dir>/trusted_root.json` when it names a directory.
-fn trusted_root_json_path(path: &Path) -> PathBuf {
-    if path.is_dir() {
+///
+/// Uses async `tokio::fs::metadata` — the sync `Path::is_dir` would block the
+/// runtime worker on every `--tuf-root`/`OCX_SIGSTORE_TUF_ROOT` resolution.
+async fn trusted_root_json_path(path: &Path) -> PathBuf {
+    let is_dir = tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false);
+    if is_dir {
         path.join("trusted_root.json")
     } else {
         path.to_path_buf()

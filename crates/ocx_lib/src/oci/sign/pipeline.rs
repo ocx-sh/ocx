@@ -21,8 +21,8 @@ use super::error::{SignError, SignErrorKind};
 use super::oidc::TokenProvider;
 use super::signer::Signer;
 use crate::file_structure::StateStore;
-use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
+use crate::oci::client::{Client, OciTransport};
 use crate::oci::index::{Index, IndexOperation, SelectResult};
 use crate::oci::referrer::ReferrerManifest;
 use crate::oci::referrer::capability::{ReferrersApiCapability, ReferrersSupport};
@@ -48,8 +48,6 @@ pub struct SignContext<'a> {
     pub token_provider: &'a dyn TokenProvider,
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
-    /// Registry transport.
-    pub transport: &'a dyn OciTransport,
     /// Index for resolving tag → per-platform manifest digest.
     pub index: &'a Index,
     /// Fulcio URL (validated at the CLI boundary).
@@ -81,14 +79,18 @@ pub struct SignPipeline;
 
 impl SignPipeline {
     /// Run the push-side sign state machine.
-    pub async fn run(ctx: SignContext<'_>) -> Result<SignResult, SignError> {
+    ///
+    /// The registry transport is derived from `client` internally, so the
+    /// public API never exposes `&dyn OciTransport` (ADR Amendment 1, Option 3).
+    pub async fn run(client: &Client, ctx: SignContext<'_>) -> Result<SignResult, SignError> {
         let identifier = ctx.identifier.clone();
-        Self::run_inner(ctx)
+        Self::run_inner(client, ctx)
             .await
             .map_err(|kind| SignError::new(identifier, kind))
     }
 
-    async fn run_inner(ctx: SignContext<'_>) -> Result<SignResult, SignErrorKind> {
+    async fn run_inner(client: &Client, ctx: SignContext<'_>) -> Result<SignResult, SignErrorKind> {
+        let transport = client.transport();
         // 1. Resolve the per-platform target manifest.
         let resolved = match ctx
             .index
@@ -112,14 +114,13 @@ impl SignPipeline {
 
         // Fetch the target manifest bytes for the subject descriptor's size.
         let subject_ref = native::Reference::with_digest(registry.clone(), repo.clone(), subject_digest.to_string());
-        let (subject_bytes, _) = ctx
-            .transport
+        let (subject_bytes, _) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
 
         // 2. Referrers-API capability (cache-first).
-        Self::ensure_referrers_supported(&ctx, &registry, &repo, &subject_digest).await?;
+        Self::ensure_referrers_supported(transport, &ctx, &registry, &repo, &subject_digest).await?;
 
         // 3. Acquire the OIDC token.
         let token = ctx.token_provider.acquire("sigstore").await?;
@@ -143,7 +144,7 @@ impl SignPipeline {
         let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
         let empty_config_digest =
             Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        ctx.transport
+        transport
             .push_blob(
                 &image,
                 EMPTY_CONFIG_PAYLOAD.to_vec(),
@@ -152,7 +153,7 @@ impl SignPipeline {
             )
             .await
             .map_err(map_client_error)?;
-        ctx.transport
+        transport
             .push_blob(&image, bundle.bytes.clone(), &bundle.digest, no_progress)
             .await
             .map_err(map_client_error)?;
@@ -172,8 +173,7 @@ impl SignPipeline {
         };
         let manifest = ReferrerManifest::build(subject_descriptor, SIGSTORE_BUNDLE_V03, bundle_descriptor);
         let manifest_bytes = manifest.to_canonical_json()?;
-        let referrer_descriptor = ctx
-            .transport
+        let referrer_descriptor = transport
             .push_referrer_manifest(&image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
             .await
             .map_err(map_client_error)?;
@@ -194,6 +194,7 @@ impl SignPipeline {
     /// refreshing) the per-registry capability cache. `Unsupported` →
     /// [`SignErrorKind::ReferrersUnsupported`] (exit 84).
     async fn ensure_referrers_supported(
+        transport: &dyn OciTransport,
         ctx: &SignContext<'_>,
         registry: &str,
         repo: &str,
@@ -211,7 +212,7 @@ impl SignPipeline {
         let capability = match cached {
             Some(hit) => hit,
             None => {
-                let probed = ReferrersApiCapability::probe(ctx.transport, registry, repo, subject_digest)
+                let probed = ReferrersApiCapability::probe(transport, registry, repo, subject_digest)
                     .await
                     .map_err(map_client_error)?;
                 // Best-effort cache write; a failure here must not fail the sign.

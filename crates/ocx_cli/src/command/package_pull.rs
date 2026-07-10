@@ -23,7 +23,7 @@ pub struct PackagePull {
     platform: options::PlatformOption,
 
     #[clap(flatten)]
-    verify: options::Verify,
+    verify: options::SignatureVerify,
 
     /// Package identifiers to pull.
     #[arg(required = true, num_args = 1..)]

@@ -17,7 +17,49 @@
 //! each caller wraps it into their own `InvalidEndpointUrl` variant so
 //! exit-code classification stays local to the sign or verify subsystem.
 
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use url::{Host, Url};
+
+/// Default public Rekor transparency-log endpoint.
+///
+/// Shared by `ocx package sign` / `ocx package verify` (as the `--rekor-url`
+/// clap default) and the policy-gated auto-verify hook, so the one public-Rekor
+/// literal lives in a single place. Overridable per-invocation via `--rekor-url`.
+pub const DEFAULT_REKOR_URL: &str = "https://rekor.sigstore.dev";
+
+/// Connect timeout for Sigstore trust-services HTTP calls (Fulcio, Rekor,
+/// ambient OIDC token exchange).
+const SIGSTORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Overall request timeout for Sigstore trust-services HTTP calls.
+const SIGSTORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Shared HTTP client for Sigstore trust-services calls.
+///
+/// `reqwest::Client::new()` carries no default timeout, so a stalled Fulcio or
+/// Rekor endpoint hangs verify forever — and via the policy-gated auto-verify
+/// hook, hangs every covered install, turning the fail-closed gate into
+/// fail-hung. A single process-wide client with bounded connect + request
+/// timeouts closes that, and its internal connection pool is reused across the
+/// sign and verify call sites instead of rebuilt per request.
+///
+/// Lives at `oci::endpoint` (a peer of `oci::sign`/`oci::verify`) so both
+/// pipelines share one HTTP seam without verify depending on sign.
+pub fn sigstore_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        // Fall back to a default client only if the timeouted builder fails to
+        // initialize (TLS backend init failure) — never worse than the prior
+        // per-site `reqwest::Client::new()`, and avoids a panic in library code.
+        reqwest::Client::builder()
+            .connect_timeout(SIGSTORE_CONNECT_TIMEOUT)
+            .timeout(SIGSTORE_REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// Reason why a user-supplied Sigstore endpoint URL was rejected.
 ///

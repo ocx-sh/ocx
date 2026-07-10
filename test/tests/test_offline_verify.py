@@ -99,6 +99,58 @@ def test_online_verify_populates_cache_then_offline_verify_succeeds(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# OFFLINE verify from a WARM cache still ENFORCES identity — never silently skips
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_offline_verify_from_warm_cache_still_enforces_identity(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """Warm the trust cache online, then OFFLINE verify with a WRONG identity → 77.
+
+    The failure mode this guards against is offline verify degrading into a
+    silent no-op (exit 0) once it cannot reach Sigstore. We prove it still runs
+    the full crypto + identity check: after an online verify warms the cache and
+    Rekor is forced to 503, an OFFLINE verify against a *different*
+    ``--certificate-identity`` must fail with ``IdentityMismatch`` (exit 77) —
+    the bundle verifies cryptographically from the cache, but the signer is not
+    the expected one. Exit 0 here would mean verification was skipped.
+    """
+    pkg = published_package
+    _sign(ocx, pkg, fake_fulcio, fake_rekor, fake_oidc_token)
+
+    online = _verify(ocx, pkg, fake_rekor, extra_env={"OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)})
+    assert online.returncode == 0, f"online verify (cache populate) failed: {online.stderr}"
+
+    # Kill Rekor: any later key fetch now 503s — so a pass can only come from cache.
+    fake_rekor.set_failure_mode(HttpStatus(503))
+
+    offline = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "verify",
+            "--certificate-identity", "someone-else@example.com",
+            "--certificate-oidc-issuer", "https://fake-oidc.test",
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_OFFLINE": "1"},
+    )
+    assert offline.returncode == 77, (
+        f"offline verify from a warm cache must still enforce identity (exit 77 on a "
+        f"wrong signer), not silently skip — got {offline.returncode}\n"
+        f"stderr: {offline.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # OFFLINE + no cached/supplied trust root → actionable fail, never skip
 # ──────────────────────────────────────────────────────────────────────────────
 

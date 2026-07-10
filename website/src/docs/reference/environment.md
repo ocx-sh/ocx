@@ -160,7 +160,7 @@ OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [
 
 OIDC identity token for [`ocx package sign`][cmd-package-sign]. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent. Useful in CI systems that inject OIDC tokens via environment rather than files.
 
-The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, Google Cloud, etc.). The token is consumed once and never logged or written to disk.
+The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, GitLab CI, CircleCI, etc.). The token is consumed once and never logged or written to disk.
 
 **NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside `ocx package sign` and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
 
@@ -169,7 +169,7 @@ Token precedence for `ocx package sign` (highest to lowest):
 1. `--identity-token-file <PATH>` — file must have mode `0600` or tighter
 2. `--identity-token-stdin`
 3. `OCX_IDENTITY_TOKEN`
-4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+4. Ambient CI detection — GitHub Actions (`ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), GitLab CI (`SIGSTORE_ID_TOKEN`), CircleCI (`CIRCLE_OIDC_TOKEN_V2`)
 5. Interactive browser OAuth (suppressed with `--no-tty`)
 
 ::: warning Short-lived tokens only

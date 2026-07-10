@@ -1968,6 +1968,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_pull": "package pull",
         "package_push": "package push",
         "package_sign": "package sign",
+        "package_verify": "package verify",
         "package_test": "package test",
         # Patch-group subcommands (file stem -> "patch <verb>").
         "patch_freeze": "patch freeze",
@@ -1992,9 +1993,6 @@ class TestSubsystemCliCommandsTableCoverage:
     # Commands intentionally absent from the public table (internal /
     # umbrella subcommands; `verify` is documented as `package verify`).
     _EXEMPT = {
-        # `verify.rs` ships as `package verify` — the docs cite "package verify"
-        # in the row label rather than "verify".
-        "verify",
         # Parent group dispatchers whose subcommands are documented individually
         # (the leaf subcommands live under nested directories, not globbed here):
         "package",

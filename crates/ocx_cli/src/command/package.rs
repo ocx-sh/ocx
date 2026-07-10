@@ -42,7 +42,7 @@ pub enum Package {
     /// Materialize a package locally (no registry round-trip) and run a command in its env.
     Test(super::package_test::PackageTest),
     /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
-    Verify(super::verify::Verify),
+    Verify(super::package_verify::PackageVerify),
     /// Runs installed packages.
     Exec(super::exec::Exec),
     /// Remove an installed candidate for one or more packages.

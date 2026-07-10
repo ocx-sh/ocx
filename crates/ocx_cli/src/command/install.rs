@@ -32,7 +32,7 @@ pub struct Install {
     platform: options::PlatformOption,
 
     #[clap(flatten)]
-    verify: options::Verify,
+    verify: options::SignatureVerify,
 
     /// Package identifiers to install.
     #[arg(required = true, num_args = 1..)]

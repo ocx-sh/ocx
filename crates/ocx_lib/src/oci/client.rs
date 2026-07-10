@@ -82,10 +82,12 @@ impl Client {
 
     /// Returns a reference to the inner transport.
     ///
-    /// Exposed for pipeline consumers (sign/verify) that need to issue
-    /// transport-level calls (e.g., capability probes) without going through
-    /// the higher-level `Client` methods.
-    pub fn transport(&self) -> &dyn OciTransport {
+    /// Crate-internal: the sign/verify pipelines take a `&Client` and derive
+    /// the transport through here for their transport-level calls (capability
+    /// probes, referrer manifest reads). The public API never exposes
+    /// `&dyn OciTransport` — pipelines are driven through the `PackageManager`
+    /// facade (`sign_one` / `verify_one`), not by handing callers a transport.
+    pub(crate) fn transport(&self) -> &dyn OciTransport {
         &*self.transport
     }
 

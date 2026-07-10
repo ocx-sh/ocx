@@ -23,7 +23,6 @@
 use url::Url;
 
 use crate::file_structure::StateStore;
-use crate::oci::client::OciTransport;
 use crate::oci::verify::pipeline::VerifyResult;
 use crate::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyPipeline};
 use crate::oci::{self};
@@ -34,14 +33,14 @@ use super::super::PackageManager;
 
 /// External dependencies forwarded to [`PackageManager::verify_one`].
 ///
-/// `transport` is the **registry** transport (present even under `--offline` —
-/// verify inherently reads the artifact + its signature referrer from the
-/// registry); the manager's own offline-gated client is not used here.
+/// `client` is the **registry** client (present even under `--offline` — verify
+/// inherently reads the artifact + its signature referrer from the registry);
+/// the manager's own offline-gated client is not used here.
 pub struct VerifyOptions<'a> {
     /// Resolved ANY-of policies the signing certificate must satisfy.
     pub policies: &'a [CompiledPolicy],
-    /// Registry transport (always available, unlike the manager's offline client).
-    pub transport: &'a dyn OciTransport,
+    /// Registry client (always available, unlike the manager's offline client).
+    pub client: &'a oci::Client,
     /// Trust root (Fulcio CA + optional pinned Rekor key); #196 seam.
     pub trust_root: &'a TrustRoot,
     /// Rekor transparency-log endpoint (default public Rekor).
@@ -86,14 +85,13 @@ impl PackageManager {
             platform,
             policies: opts.policies,
             no_cache: opts.no_cache,
-            transport: opts.transport,
             index: self.index(),
             trust_root: opts.trust_root,
             rekor_url: opts.rekor_url,
             state: opts.state,
             offline: opts.offline,
         };
-        let result = VerifyPipeline::run(context)
+        let result = VerifyPipeline::run(opts.client, context)
             .await
             .map_err(|err| map_verify_error(package.clone(), err))?;
         Ok(VerifyReport { result })

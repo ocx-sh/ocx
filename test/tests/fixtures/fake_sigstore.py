@@ -767,6 +767,40 @@ class FakeSigstoreStack:
         """Mint a fresh ES256 JWT valid for 10 minutes."""
         return self._oidc_key.sign_token(subject=subject, issuer=issuer, audience=audience)
 
+    def foreign_oidc_token(
+        self,
+        subject: str = FAKE_SUBJECT,
+        issuer: str = FAKE_ISSUER_URL,
+        audience: str = FAKE_AUDIENCE,
+    ) -> str:
+        """Mint an ES256 JWT with valid claims but signed by a key the fake OIDC
+        issuer's JWKS does NOT publish.
+
+        Models a token from a wrong-key issuer: the claims (iss/aud/sub) look
+        right, but the signature does not verify against the JWKS the fake Fulcio
+        trusts, so Fulcio rejects it (HTTP 403) and the sign pipeline surfaces
+        ``OidcTokenRejected`` (exit 80). Distinct from ``oidc_token`` which is
+        signed by the trusted session key.
+        """
+        foreign_key = ec.generate_private_key(SECP256R1())
+        now = int(time.time())
+        payload = {
+            "iss": issuer,
+            "sub": subject,
+            "aud": audience,
+            "email": subject,
+            "email_verified": True,
+            "iat": now,
+            "exp": now + 600,
+            "nbf": now,
+        }
+        private_pem = foreign_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        return pyjwt.encode(payload, private_pem, algorithm="ES256", headers={"kid": "foreign-key"})
+
     def trust_root_pem_path(self) -> Path:
         """Path to the fake Fulcio CA PEM (for TrustRoot::load_from_pem)."""
         return self._root_pem_path

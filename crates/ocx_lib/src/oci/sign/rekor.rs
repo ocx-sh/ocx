@@ -141,7 +141,7 @@ impl RekorClient {
             .url
             .join("api/v1/log/entries")
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        let response = reqwest::Client::new()
+        let response = crate::oci::endpoint::sigstore_http_client()
             .post(endpoint)
             .header("Content-Type", "application/json")
             .body(body.clone())

@@ -501,6 +501,17 @@ mod tests {
             max
         }
 
+        /// Detect a `C-S<digit>` design-clause label (e.g. `C-S1-3`,
+        /// `C-S1-4`). Lower-cased input, so `c-s` immediately followed by a
+        /// digit is the marker. These clause tags are signing-slice ADR
+        /// provenance and must never surface in `--help`.
+        fn has_clause_label(lower: &str) -> bool {
+            lower
+                .as_bytes()
+                .windows(4)
+                .any(|window| window[0] == b'c' && window[1] == b'-' && window[2] == b's' && window[3].is_ascii_digit())
+        }
+
         /// Detect an ISO-8601 calendar date `20dd-dd-dd` (e.g. `2026-05-19`).
         fn has_iso_date(text: &str) -> bool {
             text.as_bytes().windows(10).any(|w| {
@@ -530,6 +541,9 @@ mod tests {
             }
             if lower.contains("amended") {
                 return Some("`amended` (design history)");
+            }
+            if has_clause_label(&lower) {
+                return Some("`C-S<n>` design-clause label");
             }
             if has_iso_date(text) {
                 return Some("ISO date (YYYY-MM-DD)");

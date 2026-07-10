@@ -304,3 +304,84 @@ def test_package_env_is_policy_gated(
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
     _assert_no_partial_state(ocx, pkg)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Offline auto-verify still ENFORCES the policy — never silently skips
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_offline_auto_verify_bad_policy_still_enforced(
+    ocx: OcxRunner, published_package: PackageInfo,
+    fake_sigstore_stack: FakeSigstoreStack, fake_fulcio: FakeFulcio, fake_rekor: FakeRekor, fake_oidc_token: str,
+) -> None:
+    """An OFFLINE re-install under a BAD_IDENTITY policy must still abort (exit 77).
+
+    Complements ``test_offline_auto_verify_with_pinned_material`` (the GOOD-policy
+    pass): here we warm the index+content online under a GOOD policy, flip the
+    policy to a wrong identity, force Rekor to 503, then re-install OFFLINE. The
+    signature verifies cryptographically from the pinned key (no fetch), but the
+    signer is not the policy identity — so auto-verify must fail (77). Exit 0
+    would mean offline auto-verify silently skipped the identity check.
+    """
+    pkg = published_package
+    _sign(ocx, pkg, fake_fulcio, fake_rekor, fake_oidc_token)
+
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), GOOD_IDENTITY)
+    online = _run(ocx, "install", pkg.short, extra_env=_tuf(fake_sigstore_stack))
+    assert online.returncode == 0, f"online install (index+content warm) failed: {online.stderr.strip()}"
+
+    # Flip the policy to a wrong signer and kill Rekor: a later pass can only come
+    # from the pinned key + cache, and the identity check must now reject.
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), BAD_IDENTITY)
+    fake_rekor.set_failure_mode(HttpStatus(503))
+
+    offline = _run(ocx, "install", pkg.short, extra_env={"OCX_OFFLINE": "1", **_tuf(fake_sigstore_stack)})
+    assert offline.returncode == 77, (
+        f"offline auto-verify under a bad policy must still enforce identity (exit 77), "
+        f"not silently skip — got {offline.returncode}\nstderr: {offline.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# `ocx run` (toolchain-tier) is gated too — the 6th auto-verify surface
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_run_is_policy_gated(
+    ocx: OcxRunner, published_package: PackageInfo, fake_sigstore_stack: FakeSigstoreStack, tmp_path,
+) -> None:
+    """`ocx run` auto-installs the toolchain — a policy-covered unsigned tool must
+    abort (exit 79), not silently install and run the binary.
+
+    `ocx run` is the toolchain-tier auto-install surface (the sixth, alongside
+    install/pull/exec/env/`package env`). It resolves an `ocx.toml` binding to a
+    package and installs on demand; the auto-verify gate must fire there too. We
+    lock with `--no-pull` so the store stays empty and `run` is the surface that
+    triggers the install + gate.
+    """
+    pkg = published_package  # never signed
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), GOOD_IDENTITY)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text(
+        f'[tools]\n{pkg.repo} = "{ocx.registry}/{pkg.repo}:{pkg.tag}"\n'
+    )
+
+    tuf_env = _tuf(fake_sigstore_stack)
+    lock = subprocess.run(
+        [str(ocx.binary), "lock", "--no-pull"],
+        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env},
+    )
+    assert lock.returncode == 0, f"lock setup failed: rc={lock.returncode}\nstderr: {lock.stderr.strip()}"
+
+    result = subprocess.run(
+        [str(ocx.binary), "run", "--", "hello"],
+        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env},
+    )
+    assert result.returncode == 79, (
+        f"ocx run on a policy-covered unsigned tool must abort (79), not silently install "
+        f"and run — got {result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+    _assert_no_partial_state(ocx, pkg)

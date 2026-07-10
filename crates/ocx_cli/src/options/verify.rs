@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-/// Whether to verify an operation against the registry before committing it.
+/// Whether to verify credentials against the registry before storing them
+/// (the `ocx login` credential ping).
 ///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--verify` / `--no-verify` flags. Verification is the default: `--verify`
-/// is the affirmative form, `--no-verify` opts out. The two use POSIX
-/// last-wins semantics (`overrides_with`), matching the `--pull` / `--no-pull`
-/// convention. Resolve with [`Verify::enabled`].
+/// Flatten into `login` with `#[clap(flatten)]` to add the paired `--verify` /
+/// `--no-verify` flags. Verification is the default: `--verify` is the
+/// affirmative form, `--no-verify` opts out. The two use POSIX last-wins
+/// semantics (`overrides_with`), matching the `--pull` / `--no-pull`
+/// convention. Env-ignorant — resolve with [`Verify::enabled`]. For the
+/// install/pull Sigstore-signature gate, see [`SignatureVerify`].
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Verify {
     /// Verify the operation against the registry before committing it (default).
@@ -22,8 +24,11 @@ pub struct Verify {
 impl Verify {
     /// Resolve whether verification is enabled. Default is on; only an explicit
     /// (last-wins) `--no-verify` turns it off.
+    ///
+    /// Login is env-ignorant, so this resolves as if there is no `OCX_NO_VERIFY`
+    /// opt-out — equivalent to `resolve(false)`.
     pub fn enabled(&self) -> bool {
-        !self.no_verify
+        self.resolve(false)
     }
 
     /// Resolve verification against an env-var opt-out, with the flag winning
@@ -34,13 +39,58 @@ impl Verify {
     /// - explicit `--verify` → `true` (on, overriding an env opt-out)
     /// - neither flag → `!env_opt_out` (the env decides)
     pub fn resolve(&self, env_opt_out: bool) -> bool {
-        if self.no_verify {
-            false
-        } else if self.verify {
-            true
-        } else {
-            !env_opt_out
-        }
+        resolve_flag_over_env(self.verify, self.no_verify, env_opt_out)
+    }
+}
+
+/// Whether to verify the package's Sigstore signature before installing it
+/// (the policy-gated auto-verify gate on `ocx package install` / `pull`).
+///
+/// Flatten into `install` / `pull` with `#[clap(flatten)]` to add the paired
+/// `--verify` / `--no-verify` flags. When a `[[trust.policy]]` covers the
+/// package, its keyless Sigstore signature is verified before the package is
+/// installed and a failure aborts fail-closed. The flag wins over the
+/// `OCX_NO_VERIFY` environment variable; POSIX last-wins between the two forms
+/// (`overrides_with`). Resolve with [`SignatureVerify::resolve`]. Distinct from
+/// [`Verify`], which is the env-ignorant `ocx login` credential ping.
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct SignatureVerify {
+    /// Verify the package's Sigstore signature before installing (default).
+    ///
+    /// When a `[[trust.policy]]` covers the package, its keyless Sigstore
+    /// signature is verified before the package is installed; a failure aborts
+    /// the install fail-closed. Overrides an `OCX_NO_VERIFY` opt-out for this
+    /// invocation.
+    #[clap(long = "verify", overrides_with = "no_verify")]
+    verify: bool,
+
+    /// Skip Sigstore signature verification. Equivalent env var: `OCX_NO_VERIFY`.
+    #[clap(long = "no-verify", overrides_with = "verify")]
+    no_verify: bool,
+}
+
+impl SignatureVerify {
+    /// Resolve signature verification against the `OCX_NO_VERIFY` env opt-out,
+    /// with the flag winning over the env:
+    ///
+    /// - explicit `--no-verify` → `false` (off, regardless of env)
+    /// - explicit `--verify` → `true` (on, overriding an env opt-out)
+    /// - neither flag → `!env_opt_out` (the env decides)
+    pub fn resolve(&self, env_opt_out: bool) -> bool {
+        resolve_flag_over_env(self.verify, self.no_verify, env_opt_out)
+    }
+}
+
+/// Resolve a paired `--verify` / `--no-verify` against an env opt-out, with the
+/// flag winning over the env. Shared by [`Verify::resolve`] and
+/// [`SignatureVerify::resolve`] so the flag-over-env precedence lives once.
+fn resolve_flag_over_env(verify: bool, no_verify: bool, env_opt_out: bool) -> bool {
+    if no_verify {
+        false
+    } else if verify {
+        true
+    } else {
+        !env_opt_out
     }
 }
 

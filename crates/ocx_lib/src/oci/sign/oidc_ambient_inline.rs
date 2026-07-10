@@ -62,7 +62,7 @@ impl TokenProvider for InlineAmbientProvider {
         if let (Ok(url), Ok(bearer)) = (std::env::var(GHA_URL), std::env::var(GHA_TOKEN)) {
             let bearer = Zeroizing::new(bearer);
             let request_url = format!("{url}&audience={audience}");
-            let response = reqwest::Client::new()
+            let response = crate::oci::endpoint::sigstore_http_client()
                 .get(&request_url)
                 .header("Authorization", format!("Bearer {}", bearer.as_str()))
                 .send()
