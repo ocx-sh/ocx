@@ -15,13 +15,12 @@
 //! [`OciTransport`]. No fallback `sha256-<digest>.sig` tag is ever written
 //! (ADR S1-F) — signatures are OCI 1.1 referrers only.
 
-use std::path::Path;
-
 use url::Url;
 
 use super::error::{SignError, SignErrorKind};
 use super::oidc::TokenProvider;
 use super::signer::Signer;
+use crate::file_structure::StateStore;
 use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
 use crate::oci::index::{Index, IndexOperation, SelectResult};
@@ -57,8 +56,8 @@ pub struct SignContext<'a> {
     pub fulcio_url: &'a Url,
     /// Rekor URL (validated at the CLI boundary).
     pub rekor_url: &'a Url,
-    /// `$OCX_HOME` root for the referrers-capability cache.
-    pub cache_root: &'a Path,
+    /// State store owning the referrers-capability cache layout.
+    pub state: &'a StateStore,
 }
 
 /// Result emitted by a successful sign pipeline run.
@@ -203,7 +202,7 @@ impl SignPipeline {
         let cached = if ctx.no_cache {
             None
         } else {
-            ReferrersApiCapability::from_cache(registry, ctx.cache_root)
+            ReferrersApiCapability::from_cache(registry, ctx.state)
                 .await
                 .ok()
                 .flatten()
@@ -216,7 +215,7 @@ impl SignPipeline {
                     .await
                     .map_err(map_client_error)?;
                 // Best-effort cache write; a failure here must not fail the sign.
-                let _ = probed.write_cache(ctx.cache_root).await;
+                let _ = probed.write_cache(ctx.state).await;
                 probed
             }
         };

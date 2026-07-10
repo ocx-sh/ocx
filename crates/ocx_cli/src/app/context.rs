@@ -7,7 +7,7 @@ use ocx_lib::{
     ConfigInputs, ConfigLoader,
     cli::{ColorModeConfig, Printer, UserInterface},
     env,
-    file_structure::{self, BlobStore, TagStore},
+    file_structure::{self, BlobStore, StateStore, TagStore},
     log,
     oci::{self, index},
     package_manager,
@@ -385,7 +385,7 @@ impl Context {
             operator_policies,
             &registry_client,
             options.offline,
-            file_structure.root(),
+            file_structure.state.clone(),
         ));
 
         // Capture the absolute path of the running ocx so subprocess spawns
@@ -638,7 +638,7 @@ fn build_auto_verify(
     operator_policies: Vec<ocx_lib::trust::TrustPolicy>,
     registry_client: &oci::Client,
     offline: bool,
-    cache_root: &Path,
+    state: StateStore,
 ) -> Option<package_manager::AutoVerify> {
     if operator_policies.is_empty() {
         return None;
@@ -659,7 +659,7 @@ fn build_auto_verify(
         registry_client: registry_client.clone(),
         rekor_url,
         offline,
-        cache_root: cache_root.to_path_buf(),
+        state,
         tuf_root_env: std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(PathBuf::from),
         pem_root_env: std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(PathBuf::from),
         user_opted_out: env::flag(env::keys::OCX_NO_VERIFY, false),

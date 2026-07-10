@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::OnceCell;
 use url::Url;
 
+use crate::file_structure::StateStore;
 use crate::oci::verify::trust_cache::cache_key_for_rekor;
 use crate::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind, resolve_trust_root};
 use crate::oci::{self};
@@ -69,8 +70,8 @@ pub struct AutoVerify {
     rekor_url: Url,
     /// Sigstore-trust-services offline flag.
     offline: bool,
-    /// `$OCX_HOME` root for the capability + trust-root caches.
-    cache_root: PathBuf,
+    /// State store owning the capability + trust-root cache layouts.
+    state: StateStore,
     /// `OCX_SIGSTORE_TUF_ROOT` override captured at construction.
     tuf_root_env: Option<PathBuf>,
     /// `OCX_SIGSTORE_TRUST_ROOT` override captured at construction.
@@ -96,8 +97,8 @@ pub struct AutoVerifyInput {
     pub rekor_url: Url,
     /// Sigstore-trust-services offline flag.
     pub offline: bool,
-    /// `$OCX_HOME` root.
-    pub cache_root: PathBuf,
+    /// State store owning the capability + trust-root cache layouts.
+    pub state: StateStore,
     /// `OCX_SIGSTORE_TUF_ROOT` override, if set.
     pub tuf_root_env: Option<PathBuf>,
     /// `OCX_SIGSTORE_TRUST_ROOT` override, if set.
@@ -116,7 +117,7 @@ impl AutoVerify {
             registry_client: input.registry_client,
             rekor_url: input.rekor_url,
             offline: input.offline,
-            cache_root: input.cache_root,
+            state: input.state,
             tuf_root_env: input.tuf_root_env,
             pem_root_env: input.pem_root_env,
             user_opted_out: input.user_opted_out,
@@ -188,7 +189,7 @@ impl PackageManager {
                 resolve_trust_root(
                     auto_verify.tuf_root_env.as_deref(),
                     auto_verify.pem_root_env.as_deref(),
-                    &auto_verify.cache_root,
+                    &auto_verify.state,
                     &cache_key_for_rekor(&auto_verify.rekor_url),
                     auto_verify.offline,
                 )
@@ -203,7 +204,7 @@ impl PackageManager {
             trust_root,
             rekor_url: &auto_verify.rekor_url,
             offline: auto_verify.offline,
-            cache_root: &auto_verify.cache_root,
+            state: &auto_verify.state,
             no_cache: false,
         };
         self.verify_one(resolved, &oci::Platform::any(), options)

@@ -37,6 +37,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use ocx_lib::file_structure::StateStore;
 use ocx_lib::oci;
 use ocx_lib::oci::endpoint::validate_sigstore_url;
 use ocx_lib::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyErrorKind, VerifyPipeline};
@@ -145,7 +146,7 @@ impl Verify {
         // plain string and the CLI need not name `url::Url`.
         let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
         let trust_root = self
-            .resolve_trust_root(&identifier, context.file_structure().root(), &rekor_cache_key, offline)
+            .resolve_trust_root(&identifier, &context.file_structure().state, &rekor_cache_key, offline)
             .await?;
 
         // Resolve the identity constraints: flag override (exact pair), or the
@@ -162,7 +163,7 @@ impl Verify {
             index,
             trust_root: &trust_root,
             rekor_url: &rekor_url,
-            cache_root: context.file_structure().root(),
+            state: &context.file_structure().state,
             offline,
         };
         let result = VerifyPipeline::run(verify_context).await?;
@@ -249,7 +250,7 @@ impl Verify {
     async fn resolve_trust_root(
         &self,
         identifier: &oci::Identifier,
-        cache_root: &std::path::Path,
+        state: &StateStore,
         rekor_cache_key: &str,
         offline: bool,
     ) -> anyhow::Result<TrustRoot> {
@@ -264,7 +265,7 @@ impl Verify {
         ocx_lib::oci::verify::resolve_trust_root(
             tuf_override.as_deref(),
             pem_override.as_deref(),
-            cache_root,
+            state,
             rekor_cache_key,
             offline,
         )

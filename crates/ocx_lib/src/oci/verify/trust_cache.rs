@@ -17,14 +17,13 @@
 //! See [`adr_offline_verify_trust_cache.md`](../../../../../.claude/artifacts/adr_offline_verify_trust_cache.md).
 
 use std::io;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::trust_root::TrustRoot;
-use crate::prelude::StringExt;
+use crate::file_structure::StateStore;
 
 /// Cache TTL: 24 hours.
 ///
@@ -75,14 +74,15 @@ impl TrustRootCache {
         }
     }
 
-    /// Persist the record atomically to
-    /// `{cache_root}/state/trust_root/{rekor_authority_slug}.json`.
+    /// Persist the record atomically to [`StateStore::trust_root_file`].
     ///
-    /// Tempfile + rename (replace-existing on every platform) so a concurrent
-    /// reader never sees a partially-written file — identical to the referrers
-    /// capability cache write.
-    pub async fn write_cache(&self, cache_root: &Path) -> io::Result<()> {
-        let target = cache_path(cache_root, &self.rekor_authority);
+    /// Writes a `0o600` temp file, then publishes it via
+    /// [`crate::utility::fs::persist_temp_file`] (replace-existing on every
+    /// platform, Windows transient-lock retry) so a concurrent reader never sees
+    /// a partially-written file — identical to the referrers capability cache
+    /// write.
+    pub async fn write_cache(&self, state: &StateStore) -> io::Result<()> {
+        let target = state.trust_root_file(&self.rekor_authority);
         let dir = target
             .parent()
             .ok_or_else(|| io::Error::other("cache path has no parent"))?
@@ -92,19 +92,18 @@ impl TrustRootCache {
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         tokio::task::spawn_blocking(move || -> io::Result<()> {
+            use std::io::Write as _;
             #[cfg(unix)]
-            let tmp = {
+            let mut tmp = {
                 use std::os::unix::fs::PermissionsExt;
                 tempfile::Builder::new()
                     .permissions(std::fs::Permissions::from_mode(0o600))
                     .tempfile_in(&dir)?
             };
             #[cfg(not(unix))]
-            let tmp = tempfile::Builder::new().tempfile_in(&dir)?;
-            std::fs::write(tmp.path(), &bytes)?;
-            let tmp_path = tmp.into_temp_path().keep().map_err(io::Error::other)?;
-            std::fs::rename(&tmp_path, &target)?;
-            Ok(())
+            let mut tmp = tempfile::Builder::new().tempfile_in(&dir)?;
+            tmp.write_all(&bytes)?;
+            crate::utility::fs::persist_temp_file(tmp, &target)
         })
         .await
         .map_err(|e| io::Error::other(format!("trust-root cache tempfile+rename panicked: {e}")))??;
@@ -116,8 +115,8 @@ impl TrustRootCache {
     /// Returns `Ok(None)` when the file is missing, expired, corrupt, or belongs
     /// to a different authority (fail-open). Returns `Ok(Some(_))` for a fresh,
     /// matching entry.
-    pub async fn from_cache(rekor_authority: &str, cache_root: &Path) -> io::Result<Option<Self>> {
-        let path = cache_path(cache_root, rekor_authority);
+    pub async fn from_cache(rekor_authority: &str, state: &StateStore) -> io::Result<Option<Self>> {
+        let path = state.trust_root_file(rekor_authority);
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -159,18 +158,6 @@ impl TrustRootCache {
     }
 }
 
-/// Compute the on-disk cache path for a Rekor authority under `cache_root`.
-///
-/// Layout: `{cache_root}/state/trust_root/{rekor_authority_slug}.json`. The
-/// relaxed slug neutralises `/`, `:`, and other path-hostile characters so a
-/// hostile authority string cannot escape `cache_root`.
-fn cache_path(cache_root: &Path, rekor_authority: &str) -> PathBuf {
-    cache_root
-        .join("state")
-        .join("trust_root")
-        .join(format!("{}.json", rekor_authority.to_relaxed_slug()))
-}
-
 /// The trust-root cache key for a Rekor URL: its authority (`host[:port]`).
 ///
 /// Single source of truth so the pipeline (which writes the cache after a
@@ -196,13 +183,18 @@ mod tests {
         vec![vec![0x30, 0x03, 0x02, 0x01, 0x01], vec![0x30, 0x00]]
     }
 
+    fn state_in(tmp: &tempfile::TempDir) -> StateStore {
+        StateStore::new(tmp.path().join("state"))
+    }
+
     #[tokio::test]
     async fn write_then_read_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
         let entry = TrustRootCache::new("rekor.example:443".into(), certs(), "PEMKEY".into());
-        entry.write_cache(tmp.path()).await.expect("write");
+        entry.write_cache(&state).await.expect("write");
 
-        let loaded = TrustRootCache::from_cache("rekor.example:443", tmp.path())
+        let loaded = TrustRootCache::from_cache("rekor.example:443", &state)
             .await
             .expect("read")
             .expect("fresh entry present");
@@ -222,24 +214,26 @@ mod tests {
     #[tokio::test]
     async fn missing_file_is_a_miss_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = TrustRootCache::from_cache("absent.example", tmp.path()).await.unwrap();
+        let state = state_in(&tmp);
+        let result = TrustRootCache::from_cache("absent.example", &state).await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn corrupt_file_fails_open_to_miss() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("state").join("trust_root");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let path = dir.join(format!("{}.json", "rekor.example".to_relaxed_slug()));
+        let state = state_in(&tmp);
+        let path = state.trust_root_file("rekor.example");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         tokio::fs::write(&path, b"not json").await.unwrap();
-        let result = TrustRootCache::from_cache("rekor.example", tmp.path()).await.unwrap();
+        let result = TrustRootCache::from_cache("rekor.example", &state).await.unwrap();
         assert!(result.is_none(), "corrupt cache must fail open to a miss");
     }
 
     #[tokio::test]
     async fn expired_entry_is_a_miss() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
         let entry = TrustRootCache {
             rekor_authority: "rekor.example".into(),
             fulcio_der_certs: certs(),
@@ -247,34 +241,35 @@ mod tests {
             cached_at: SystemTime::UNIX_EPOCH,
             ttl_seconds: 1,
         };
-        entry.write_cache(tmp.path()).await.unwrap();
-        let result = TrustRootCache::from_cache("rekor.example", tmp.path()).await.unwrap();
+        entry.write_cache(&state).await.unwrap();
+        let result = TrustRootCache::from_cache("rekor.example", &state).await.unwrap();
         assert!(result.is_none(), "expired entry must be a miss");
     }
 
     #[tokio::test]
     async fn authority_mismatch_is_a_miss() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
         // Write an entry that claims a different authority than its filename slug.
-        let dir = tmp.path().join("state").join("trust_root");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let path = dir.join(format!("{}.json", "b.example".to_relaxed_slug()));
+        let path = state.trust_root_file("b.example");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         let entry = TrustRootCache::new("a.example".into(), certs(), "PEM".into());
         tokio::fs::write(&path, serde_json::to_vec(&entry).unwrap())
             .await
             .unwrap();
-        let result = TrustRootCache::from_cache("b.example", tmp.path()).await.unwrap();
+        let result = TrustRootCache::from_cache("b.example", &state).await.unwrap();
         assert!(result.is_none(), "authority mismatch must be a miss");
     }
 
     #[tokio::test]
     async fn hostile_authority_stays_under_cache_root() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = state_in(&tmp);
         for authority in ["../evil", "/etc/passwd", "..", "a/../b"] {
             let entry = TrustRootCache::new(authority.into(), certs(), "PEM".into());
-            entry.write_cache(tmp.path()).await.unwrap();
+            entry.write_cache(&state).await.unwrap();
         }
-        let dir = tmp.path().join("state").join("trust_root");
+        let dir = state.trust_root_file("x").parent().unwrap().to_path_buf();
         for file in std::fs::read_dir(&dir).unwrap() {
             let path = file.unwrap().path().canonicalize().unwrap();
             let root = tmp.path().canonicalize().unwrap();

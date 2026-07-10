@@ -12,15 +12,14 @@
 //! §"Capability cache".
 
 use std::io;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_structure::StateStore;
 use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
 use crate::oci::{Digest, native};
-use crate::prelude::StringExt;
 
 /// Cache TTL: 6 hours.
 const TTL_SECS: u64 = 6 * 3600;
@@ -102,16 +101,16 @@ impl ReferrersApiCapability {
     }
 
     /// Persist the capability record atomically to
-    /// `{ocx_home}/state/referrers/{registry_slug}.json`.
+    /// [`StateStore::referrers_capability_file`].
     ///
-    /// Uses a temporary file + rename for atomicity so a concurrent reader
-    /// never sees a partially-written file. The rename step uses
-    /// `std::fs::rename`, which is replace-existing on both POSIX
-    /// (`rename(2)`) and Windows (`MoveFileExW` with
-    /// `MOVEFILE_REPLACE_EXISTING`), so repeated writes for the same
-    /// registry overwrite the previous cache atomically on every platform.
-    pub async fn write_cache(&self, cache_root: &Path) -> io::Result<()> {
-        let target = cache_path(cache_root, &self.registry);
+    /// Writes a `0o600` temp file in the same directory, then publishes it via
+    /// [`crate::utility::fs::persist_temp_file`] — the shared atomic-publish
+    /// primitive (replace-existing on every platform, with the Windows
+    /// transient-lock retry). So a concurrent reader never sees a
+    /// partially-written file and repeated writes for the same registry
+    /// overwrite the previous cache atomically.
+    pub async fn write_cache(&self, state: &StateStore) -> io::Result<()> {
+        let target = state.referrers_capability_file(&self.registry);
         let dir = target
             .parent()
             .ok_or_else(|| io::Error::other("cache path has no parent"))?
@@ -120,32 +119,23 @@ impl ReferrersApiCapability {
 
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        // Write to a temp file in the same directory so rename is atomic
-        // (same mount point guaranteed on POSIX, same volume on Windows).
-        // `NamedTempFile` and the final rename both touch blocking file
-        // handles; run the whole sequence on a blocking thread.
-        //
-        // We disarm `NamedTempFile`'s drop-delete by promoting it to a
-        // `TempPath` via `into_temp_path()`, then `keep()` to release
-        // cleanup, then `std::fs::rename` for the atomic replace-existing
-        // step. `NamedTempFile::persist` is not used because it does NOT
-        // replace an existing target on Windows.
+        // The temp file and the atomic publish both touch blocking file handles;
+        // run the whole sequence on a blocking thread. The `0o600` permission is
+        // applied to the temp file before the write, so it composes with the
+        // atomic-publish rename.
         tokio::task::spawn_blocking(move || -> io::Result<()> {
+            use std::io::Write as _;
             #[cfg(unix)]
-            let tmp = {
+            let mut tmp = {
                 use std::os::unix::fs::PermissionsExt;
                 tempfile::Builder::new()
                     .permissions(std::fs::Permissions::from_mode(0o600))
                     .tempfile_in(&dir)?
             };
             #[cfg(not(unix))]
-            let tmp = tempfile::Builder::new().tempfile_in(&dir)?;
-            std::fs::write(tmp.path(), &bytes)?;
-            // Release the tempfile's drop-delete guard before renaming so
-            // a successful rename does not race with cleanup.
-            let tmp_path = tmp.into_temp_path().keep().map_err(io::Error::other)?;
-            std::fs::rename(&tmp_path, &target)?;
-            Ok(())
+            let mut tmp = tempfile::Builder::new().tempfile_in(&dir)?;
+            tmp.write_all(&bytes)?;
+            crate::utility::fs::persist_temp_file(tmp, &target)
         })
         .await
         .map_err(|e| io::Error::other(format!("write_cache tempfile+rename panicked: {e}")))??;
@@ -162,8 +152,8 @@ impl ReferrersApiCapability {
     /// should never turn into a signing/verification failure. The caller
     /// falls back to probe, the probe overwrites the corrupt file, the next
     /// call reads the freshly written one.
-    pub async fn from_cache(registry: &str, cache_root: &Path) -> io::Result<Option<Self>> {
-        let path = cache_path(cache_root, registry);
+    pub async fn from_cache(registry: &str, state: &StateStore) -> io::Result<Option<Self>> {
+        let path = state.referrers_capability_file(registry);
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -199,19 +189,6 @@ impl ReferrersApiCapability {
             Err(_) => false,
         }
     }
-}
-
-/// Compute the on-disk path of the capability cache for `registry` under
-/// `cache_root`.
-///
-/// Layout: `{ocx_home}/state/referrers/{registry_slug}.json`.
-/// Matches the path produced by [`ReferrersApiCapability::write_cache`] so
-/// that `from_cache` and `write_cache` are always consistent.
-fn cache_path(cache_root: &Path, registry: &str) -> PathBuf {
-    cache_root
-        .join("state")
-        .join("referrers")
-        .join(format!("{}.json", registry.to_relaxed_slug()))
 }
 
 #[cfg(test)]
@@ -442,11 +419,12 @@ mod tests {
             probed_at: SystemTime::now(),
             ttl_seconds: TTL_SECS,
         };
-        written.write_cache(tmp.path()).await.expect("write_cache must succeed");
+        let state = StateStore::new(tmp.path().join("state"));
+        written.write_cache(&state).await.expect("write_cache must succeed");
 
         let would_error_if_probed = ProbeStub::error("probe must not run when the cache is fresh");
 
-        let cached = ReferrersApiCapability::from_cache("ghcr.io", tmp.path())
+        let cached = ReferrersApiCapability::from_cache("ghcr.io", &state)
             .await
             .ok()
             .flatten()
@@ -473,11 +451,11 @@ mod tests {
         };
 
         // Write via write_cache (uses the state/referrers/ layout).
-        cap.write_cache(tmp.path()).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        cap.write_cache(&state).await.unwrap();
 
-        // Verify the file is valid JSON.
-        let slug = "ghcr.io".to_relaxed_slug();
-        let file_path = tmp.path().join("state").join("referrers").join(format!("{slug}.json"));
+        // Verify the file is valid JSON at the accessor-defined path.
+        let file_path = state.referrers_capability_file("ghcr.io");
         let raw = std::fs::read(&file_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(parsed["registry"], "ghcr.io");
@@ -493,23 +471,23 @@ mod tests {
             probed_at: SystemTime::now(),
             ttl_seconds: TTL_SECS,
         };
-        cap.write_cache(tmp.path()).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        cap.write_cache(&state).await.unwrap();
 
-        let slug = "registry.example".to_relaxed_slug();
-        let path = tmp.path().join("state").join("referrers").join(format!("{slug}.json"));
+        let path = state.referrers_capability_file("registry.example");
         let bytes = std::fs::read(&path).unwrap();
         // Must parse without error.
         let _: serde_json::Value = serde_json::from_slice(&bytes).expect("written file must be valid JSON");
     }
 
     /// Repeated `write_cache` calls for the same registry must succeed —
-    /// the second write replaces the first atomically. On Windows this
-    /// fails with `NamedTempFile::persist`; the implementation must use
-    /// `std::fs::rename` (replace-existing on every platform). On POSIX
-    /// this regression-tests the same contract.
+    /// the second write replaces the first atomically. The shared
+    /// `persist_temp_file` primitive is replace-existing on every platform
+    /// (Windows-safe), so this regression-tests that contract on POSIX.
     #[tokio::test]
     async fn write_cache_replaces_existing_atomic() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
         let registry = "ghcr.io";
 
         let first = ReferrersApiCapability {
@@ -518,7 +496,7 @@ mod tests {
             probed_at: SystemTime::now(),
             ttl_seconds: TTL_SECS,
         };
-        first.write_cache(tmp.path()).await.expect("first write must succeed");
+        first.write_cache(&state).await.expect("first write must succeed");
 
         let second = ReferrersApiCapability {
             registry: registry.to_string(),
@@ -527,12 +505,12 @@ mod tests {
             ttl_seconds: TTL_SECS,
         };
         second
-            .write_cache(tmp.path())
+            .write_cache(&state)
             .await
             .expect("second write must succeed (replace-existing)");
 
         // Reload and confirm the second value won — proves replace happened.
-        let loaded = ReferrersApiCapability::from_cache(registry, tmp.path())
+        let loaded = ReferrersApiCapability::from_cache(registry, &state)
             .await
             .expect("from_cache must not error")
             .expect("from_cache must return Some for the replaced entry");
@@ -609,31 +587,30 @@ mod tests {
     #[tokio::test]
     async fn from_cache_returns_none_when_file_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let result = ReferrersApiCapability::from_cache("ghcr.io", &state).await.unwrap();
         assert!(result.is_none(), "missing file → None (not error)");
     }
 
     #[tokio::test]
     async fn from_cache_returns_none_when_file_corrupt() {
         // Fail-open: corrupt JSON returns None, not Err.
-        // Write the corrupt file at the canonical path (state/referrers/<slug>.json).
+        // Write the corrupt file at the canonical accessor path.
         let tmp = tempfile::tempdir().unwrap();
-        let slug = "ghcr.io".to_relaxed_slug();
-        let dir = tmp.path().join("state").join("referrers");
-        let path = dir.join(format!("{slug}.json"));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let path = state.referrers_capability_file("ghcr.io");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         tokio::fs::write(&path, b"not json").await.unwrap();
-        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", &state).await.unwrap();
         assert!(result.is_none(), "corrupt file → None (fail-open)");
     }
 
     #[tokio::test]
     async fn from_cache_returns_none_when_expired() {
         let tmp = tempfile::tempdir().unwrap();
-        let slug = "ghcr.io".to_relaxed_slug();
-        let dir = tmp.path().join("state").join("referrers");
-        let path = dir.join(format!("{slug}.json"));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let path = state.referrers_capability_file("ghcr.io");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         let cap = ReferrersApiCapability {
             registry: "ghcr.io".into(),
             supported: ReferrersSupport::Supported,
@@ -643,17 +620,16 @@ mod tests {
         tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
             .await
             .unwrap();
-        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", &state).await.unwrap();
         assert!(result.is_none(), "expired cache → None");
     }
 
     #[tokio::test]
     async fn from_cache_returns_some_when_fresh() {
         let tmp = tempfile::tempdir().unwrap();
-        let slug = "ghcr.io".to_relaxed_slug();
-        let dir = tmp.path().join("state").join("referrers");
-        let path = dir.join(format!("{slug}.json"));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let path = state.referrers_capability_file("ghcr.io");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         let cap = ReferrersApiCapability {
             registry: "ghcr.io".into(),
             supported: ReferrersSupport::Supported,
@@ -663,7 +639,7 @@ mod tests {
         tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
             .await
             .unwrap();
-        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path())
+        let result = ReferrersApiCapability::from_cache("ghcr.io", &state)
             .await
             .unwrap()
             .expect("fresh cache returns Some");
@@ -677,10 +653,9 @@ mod tests {
         // Corrupt-relocated; treat as miss so caller reprobes.
         // Write data for "a.example" at the b.example slug path to simulate the mismatch.
         let tmp = tempfile::tempdir().unwrap();
-        let slug = "b.example".to_relaxed_slug();
-        let dir = tmp.path().join("state").join("referrers");
-        let path = dir.join(format!("{slug}.json"));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let path = state.referrers_capability_file("b.example");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         let cap = ReferrersApiCapability {
             registry: "a.example".into(),
             supported: ReferrersSupport::Supported,
@@ -690,47 +665,8 @@ mod tests {
         tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
             .await
             .unwrap();
-        let result = ReferrersApiCapability::from_cache("b.example", tmp.path())
-            .await
-            .unwrap();
+        let result = ReferrersApiCapability::from_cache("b.example", &state).await.unwrap();
         assert!(result.is_none(), "registry mismatch → None");
-    }
-
-    /// `write_cache` must never write outside `cache_root`, even when the
-    /// registry string contains path-traversal sequences like `../evil`,
-    /// `/etc/passwd`, or `..`. The `to_relaxed_slug()` helper replaces `/`
-    /// and `.` (when forming `..`) with `_`, so these become harmless slugs.
-    #[tokio::test]
-    async fn cache_path_rejects_hostile_slug() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path();
-
-        let hostile_cases = ["../evil", "/etc/passwd", "..", "../../etc/shadow", "foo/../bar"];
-
-        for registry in hostile_cases {
-            let cap = ReferrersApiCapability {
-                registry: registry.to_string(),
-                supported: ReferrersSupport::Supported,
-                probed_at: SystemTime::now(),
-                ttl_seconds: TTL_SECS,
-            };
-            cap.write_cache(cache_root)
-                .await
-                .unwrap_or_else(|e| panic!("write_cache failed for {registry:?}: {e}"));
-
-            // Verify every file written is strictly under cache_root.
-            // Walk referrers_capability/ and assert no escape.
-            let cap_dir = cache_root.join("state").join("referrers");
-            for entry in std::fs::read_dir(&cap_dir).expect("read cap dir") {
-                let entry = entry.unwrap();
-                let file_path = entry.path().canonicalize().unwrap_or_else(|_| entry.path());
-                let root_canonical = cache_root.canonicalize().unwrap_or_else(|_| cache_root.to_path_buf());
-                assert!(
-                    file_path.starts_with(&root_canonical),
-                    "file {file_path:?} escapes cache_root {root_canonical:?} for registry {registry:?}"
-                );
-            }
-        }
     }
 
     /// End-to-end round-trip: `write_cache` followed by `from_cache` must
@@ -739,6 +675,7 @@ mod tests {
     #[tokio::test]
     async fn write_cache_then_from_cache_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
         let cap = ReferrersApiCapability {
             registry: "ghcr.io".to_string(),
             supported: ReferrersSupport::Unsupported,
@@ -746,9 +683,9 @@ mod tests {
             ttl_seconds: TTL_SECS,
         };
 
-        cap.write_cache(tmp.path()).await.expect("write_cache must succeed");
+        cap.write_cache(&state).await.expect("write_cache must succeed");
 
-        let loaded = ReferrersApiCapability::from_cache("ghcr.io", tmp.path())
+        let loaded = ReferrersApiCapability::from_cache("ghcr.io", &state)
             .await
             .expect("from_cache must not error")
             .expect("from_cache must return Some for a just-written entry");

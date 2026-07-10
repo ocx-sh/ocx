@@ -151,7 +151,7 @@ impl PackageSign {
             index,
             fulcio_url: &fulcio_url,
             rekor_url: &rekor_url,
-            cache_root: context.file_structure().root(),
+            state: &context.file_structure().state,
         };
         let result = SignPipeline::run(sign_context).await?;
 

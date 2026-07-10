@@ -15,8 +15,6 @@
 //! (C-S1-3); the Rekor public key used for SET verification is fetched from
 //! [`VerifyContext::rekor_url`] `/api/v1/log/publicKey`.
 
-use std::path::Path;
-
 use p256::ecdsa::signature::{Verifier, hazmat::PrehashVerifier};
 use url::Url;
 
@@ -24,6 +22,7 @@ use super::error::{VerifyError, VerifyErrorKind};
 use super::identity::{oidc_issuer, parse_certificate, subject_identity, verify_policies};
 use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
+use crate::file_structure::StateStore;
 use crate::oci::client::OciTransport;
 use crate::oci::client::error::ClientError;
 use crate::oci::index::{Index, IndexOperation, SelectResult};
@@ -60,8 +59,8 @@ pub struct VerifyContext<'a> {
     pub trust_root: &'a TrustRoot,
     /// Rekor URL (C-S1-3 injection seam). Default: `https://rekor.sigstore.dev`.
     pub rekor_url: &'a Url,
-    /// `$OCX_HOME` root for the referrers-capability and trust-root caches.
-    pub cache_root: &'a Path,
+    /// State store owning the referrers-capability and trust-root cache layouts.
+    pub state: &'a StateStore,
     /// When true, no Sigstore trust-services network: the Rekor key must come
     /// from the (pinned/cached) trust root, never a fetch. The artifact registry
     /// is still used (verify inherently reads the signature from where it lives).
@@ -181,7 +180,7 @@ impl VerifyPipeline {
                 ctx.trust_root.der_certs().to_vec(),
                 rekor_key_pem,
             );
-            if let Err(e) = entry.write_cache(ctx.cache_root).await {
+            if let Err(e) = entry.write_cache(ctx.state).await {
                 tracing::debug!("trust-root cache write skipped: {e}");
             }
         }
@@ -218,7 +217,7 @@ impl VerifyPipeline {
         let cached = if ctx.no_cache {
             None
         } else {
-            ReferrersApiCapability::from_cache(registry, ctx.cache_root)
+            ReferrersApiCapability::from_cache(registry, ctx.state)
                 .await
                 .ok()
                 .flatten()
@@ -230,7 +229,7 @@ impl VerifyPipeline {
                 let probed = ReferrersApiCapability::probe(ctx.transport, registry, repo, subject_digest)
                     .await
                     .map_err(map_client_error)?;
-                let _ = probed.write_cache(ctx.cache_root).await;
+                let _ = probed.write_cache(ctx.state).await;
                 probed
             }
         };

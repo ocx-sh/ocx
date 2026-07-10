@@ -21,13 +21,14 @@ use std::path::{Path, PathBuf};
 use super::error::{TrustRootLoadReason, VerifyErrorKind};
 use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
+use crate::file_structure::StateStore;
 
 /// Resolve the trust root from the supplied overrides, then the trust-root
 /// cache, then the embedded root — enforcing the offline pinned-Rekor-key gate.
 ///
 /// `tuf_override` / `pem_override` are the already-resolved override paths (the
-/// CLI passes `flag.or(env)`, auto-verify passes the env value). `rekor_cache_key`
-/// keys the trust-root cache by Rekor authority.
+/// CLI passes `flag.or(env)`, auto-verify passes the env value). `state` owns the
+/// trust-root cache layout; `rekor_cache_key` keys it by Rekor authority.
 ///
 /// # Errors
 /// Returns the [`VerifyErrorKind`] describing the failure (asset read failure,
@@ -36,7 +37,7 @@ use super::trust_root::TrustRoot;
 pub async fn resolve_trust_root(
     tuf_override: Option<&Path>,
     pem_override: Option<&Path>,
-    cache_root: &Path,
+    state: &StateStore,
     rekor_cache_key: &str,
     offline: bool,
 ) -> Result<TrustRoot, VerifyErrorKind> {
@@ -65,7 +66,7 @@ pub async fn resolve_trust_root(
     //    A normal cache entry always carries a Rekor key, but route it through
     //    the same offline gate so a hand-edited keyless entry still yields the
     //    actionable error rather than a deeper Rekor failure.
-    if let Ok(Some(cached)) = TrustRootCache::from_cache(rekor_cache_key, cache_root).await {
+    if let Ok(Some(cached)) = TrustRootCache::from_cache(rekor_cache_key, state).await {
         return enforce_offline_rekor_key(cached.into_trust_root(), offline);
     }
 
@@ -111,7 +112,8 @@ mod tests {
     #[tokio::test]
     async fn offline_with_no_material_fails_closed_with_remedy() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_trust_root(None, None, tmp.path(), "rekor.example", true).await;
+        let state = StateStore::new(tmp.path().join("state"));
+        let result = resolve_trust_root(None, None, &state, "rekor.example", true).await;
         assert!(
             matches!(
                 result,
@@ -129,7 +131,8 @@ mod tests {
     #[tokio::test]
     async fn online_with_no_material_reaches_embedded_stub() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_trust_root(None, None, tmp.path(), "rekor.example", false).await;
+        let state = StateStore::new(tmp.path().join("state"));
+        let result = resolve_trust_root(None, None, &state, "rekor.example", false).await;
         assert!(
             matches!(result, Err(VerifyErrorKind::TrustRootUnavailable)),
             "online + no material must reach the embedded stub, got {result:?}"

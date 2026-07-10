@@ -20,10 +20,9 @@
 //! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
 //! and Spec A10 — the aggregator is `package_manager/tasks.rs`.
 
-use std::path::Path;
-
 use url::Url;
 
+use crate::file_structure::StateStore;
 use crate::oci::client::OciTransport;
 use crate::oci::verify::pipeline::VerifyResult;
 use crate::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyPipeline};
@@ -50,8 +49,8 @@ pub struct VerifyOptions<'a> {
     /// When true, no Sigstore-trust-services network — the Rekor key must come
     /// from pinned/cached trust material.
     pub offline: bool,
-    /// `$OCX_HOME` root for the referrers-capability and trust-root caches.
-    pub cache_root: &'a Path,
+    /// State store owning the referrers-capability and trust-root cache layouts.
+    pub state: &'a StateStore,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
 }
@@ -91,7 +90,7 @@ impl PackageManager {
             index: self.index(),
             trust_root: opts.trust_root,
             rekor_url: opts.rekor_url,
-            cache_root: opts.cache_root,
+            state: opts.state,
             offline: opts.offline,
         };
         let result = VerifyPipeline::run(context)
