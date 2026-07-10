@@ -119,26 +119,11 @@ impl ReferrersApiCapability {
 
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        // The temp file and the atomic publish both touch blocking file handles;
-        // run the whole sequence on a blocking thread. The `0o600` permission is
-        // applied to the temp file before the write, so it composes with the
-        // atomic-publish rename.
-        tokio::task::spawn_blocking(move || -> io::Result<()> {
-            use std::io::Write as _;
-            #[cfg(unix)]
-            let mut tmp = {
-                use std::os::unix::fs::PermissionsExt;
-                tempfile::Builder::new()
-                    .permissions(std::fs::Permissions::from_mode(0o600))
-                    .tempfile_in(&dir)?
-            };
-            #[cfg(not(unix))]
-            let mut tmp = tempfile::Builder::new().tempfile_in(&dir)?;
-            tmp.write_all(&bytes)?;
-            crate::utility::fs::persist_temp_file(tmp, &target)
-        })
-        .await
-        .map_err(|e| io::Error::other(format!("write_cache tempfile+rename panicked: {e}")))??;
+        // The temp write + atomic publish are blocking; run them on a blocking
+        // thread. `write_bytes_atomic` creates the temp `0o600` (private cache).
+        tokio::task::spawn_blocking(move || crate::utility::fs::write_bytes_atomic(&target, &bytes))
+            .await
+            .map_err(|e| io::Error::other(format!("write_cache tempfile+rename panicked: {e}")))??;
         Ok(())
     }
 

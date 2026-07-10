@@ -95,8 +95,6 @@ pub async fn read_pause(state: &StateStore) -> Option<ManagedConfigPause> {
 ///
 /// Any I/O failure while creating the directory or persisting the file.
 pub async fn write_pause(state: &StateStore, pause: &ManagedConfigPause) -> std::io::Result<()> {
-    use std::io::Write as _;
-
     let dir = state.managed_config_dir();
     let path = state.managed_config_pause_file();
     let bytes = serde_json::to_vec_pretty(pause)
@@ -104,9 +102,7 @@ pub async fn write_pause(state: &StateStore, pause: &ManagedConfigPause) -> std:
 
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-        tmp.write_all(&bytes)?;
-        crate::utility::fs::persist_temp_file(tmp, &path)
+        crate::utility::fs::write_bytes_atomic(&path, &bytes)
     })
     .await
     .map_err(|join_error| std::io::Error::other(join_error.to_string()))?

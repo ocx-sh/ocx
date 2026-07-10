@@ -91,22 +91,9 @@ impl TrustRootCache {
 
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        tokio::task::spawn_blocking(move || -> io::Result<()> {
-            use std::io::Write as _;
-            #[cfg(unix)]
-            let mut tmp = {
-                use std::os::unix::fs::PermissionsExt;
-                tempfile::Builder::new()
-                    .permissions(std::fs::Permissions::from_mode(0o600))
-                    .tempfile_in(&dir)?
-            };
-            #[cfg(not(unix))]
-            let mut tmp = tempfile::Builder::new().tempfile_in(&dir)?;
-            tmp.write_all(&bytes)?;
-            crate::utility::fs::persist_temp_file(tmp, &target)
-        })
-        .await
-        .map_err(|e| io::Error::other(format!("trust-root cache tempfile+rename panicked: {e}")))??;
+        tokio::task::spawn_blocking(move || crate::utility::fs::write_bytes_atomic(&target, &bytes))
+            .await
+            .map_err(|e| io::Error::other(format!("trust-root cache tempfile+rename panicked: {e}")))??;
         Ok(())
     }
 
