@@ -278,7 +278,7 @@ opt-out), see the [`[patches]`][config-patches] configuration reference and the
 
 ### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
 
-The OCI reference for the [`[managed]`][config-managed] corporate-configuration artifact. Overrides `[managed] source` for this invocation only — never written back to the seed. The only writer of the persistent seed is [`ocx self setup --managed-config`][cmd-self-setup].
+The OCI reference for the [`[managed]`][config-managed] corporate-configuration artifact. Overrides `[managed] source` for this invocation only — never written back to the seed. The persistent seed is written only by [`ocx config setup`][cmd-config-setup] and [`ocx self setup --managed-config`][cmd-self-setup].
 
 ```sh
 export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
@@ -630,6 +630,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-self-activate]: command-line.md#self-activate
 [cmd-self-setup]: command-line.md#self-setup
 [cmd-self-update]: command-line.md#self-update
+[cmd-config-setup]: command-line.md#config-setup
 [cmd-config-update]: command-line.md#config-update
 [cmd-shell-completion]: command-line.md#shell-completion
 [indices-routing]: ../user-guide.md#indices-routing

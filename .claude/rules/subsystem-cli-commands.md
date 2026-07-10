@@ -143,6 +143,16 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 - `publish`, `test`, `why` are registry/maintainer commands against the configured `[patches]` tier; none consult `ocx.toml`. `sync` re-checks whatever is installed locally, not scoped to one project.
 - `publish` and `test` accept `--registry <HOST/PATH>` (via shared `patch_common::effective_patches`) to override — or stand in for a missing — `[patches]` tier, so a maintainer can bootstrap a brand-new patch registry without a config block. No configured tier and no `--registry` → usage error (exit 64).
 
+### Managed-Config Commands (`ocx config`)
+
+| Command | Purpose | Key Flags |
+|---------|---------|-----------|
+| `config setup` | Adopt (or clear) the `[managed]` tier — config-only counterpart to `self setup --managed-config`; shares `ocx_lib::setup::apply_managed_config` + the CLI precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved → exit 64 (unlike `self setup`'s no-op); dirty fence → exit 82 | `--managed-config REF`, `--dry-run`, `--force` |
+| `config update [VERSION]` | Fetch + persist the managed-config snapshot (throttle-bypassing); `--check` probes only; `--pause`/`--resume` gate the background tick | `--check`, `--pause`, `--resume` |
+| `config push -i ID CONFIG` | Operator-side publish of a `config.toml` as a managed-config package | `-i`, `-c/--cascade`, `-n/--new`, `-p` |
+
+All `ConfigGroup` variants are exempt from the required-snapshot gate; `config setup`, `config update`, and `self setup` are the three onboarding commands that get a managed-fetch client with no seed present (`app.rs::is_managed_config_onboarding_command`).
+
 ### Other Commands
 
 | Command | Purpose | Key Flags |

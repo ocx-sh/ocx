@@ -202,6 +202,7 @@ pub enum ManagedConfigSetupOutcome {
 /// profiles touched), or if a shim / profile write fails.
 pub async fn run(
     options: &SetupOptions,
+    config: &crate::config::Config,
     manager: &PackageManager,
     file_structure: &FileStructure,
 ) -> Result<SetupOutcome, error::Error> {
@@ -214,6 +215,7 @@ pub async fn run(
     // resolve ref (flag>env>seed) → synchronous fetch+persist FIRST → fence
     // write only on success) ──────────────────────────────────────────────
     let managed_config = apply_managed_config(
+        config,
         options.managed_config.as_deref(),
         options.dry_run,
         options.force,
@@ -307,20 +309,32 @@ pub async fn run(
 ///
 /// Returns [`error::Error`] when the ref does not parse as an OCI identifier,
 /// the fetch+persist fails (no partial state — the fence is not written), or
-/// a filesystem write fails.
+/// a filesystem write fails. A system-locked tier (the merged `config`'s
+/// `[managed] required = true`) rejects an explicit clear or redirect with
+/// [`error::Error::ManagedConfigLocked`] (exit 78) before any write, so a
+/// direct library caller cannot bypass the lock.
 pub async fn apply_managed_config(
+    config: &crate::config::Config,
     managed_config: Option<&str>,
     dry_run: bool,
     force: bool,
     manager: &PackageManager,
     file_structure: &FileStructure,
 ) -> Result<ManagedConfigSetupOutcome, error::Error> {
-    use crate::config::managed::ManagedConfig;
+    use crate::config::managed::{ManagedConfig, check_locked_managed_override};
     use crate::setup::rc_block;
 
     let Some(flag_value) = managed_config else {
         return Ok(ManagedConfigSetupOutcome::NotConfigured);
     };
+
+    // Defense in depth: a system-locked tier may only be re-adopted with a
+    // matching ref — never cleared (`""`) or redirected to a different source.
+    // The CLI seam (`resolve_managed_config_arg`) enforces this before calling
+    // in, but the public library function re-checks against the merged config
+    // (which carries the system-tier `[managed] required = true` lock) so a
+    // direct caller cannot bypass the lock and corrupt the required tier.
+    check_locked_managed_override(config, flag_value)?;
 
     let config_path = file_structure.root().join("config.toml");
     let content = read_to_string_or_empty(&config_path).await?;
@@ -762,18 +776,32 @@ mod tests {
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
 
         // First adopt writes fence + snapshot.
-        let first = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("first adopt must succeed");
+        let first = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("first adopt must succeed");
         assert!(matches!(first, ManagedConfigSetupOutcome::Adopted { .. }));
         let fence_before = read(&home.path().join("config.toml"));
 
         // Wipe the snapshot dir (restored $OCX_HOME scenario).
         std::fs::remove_dir_all(file_structure.state.managed_config_dir()).unwrap();
 
-        let healed = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("re-run with a wiped snapshot must self-heal");
+        let healed = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("re-run with a wiped snapshot must self-heal");
         assert!(
             matches!(healed, ManagedConfigSetupOutcome::Adopted { .. }),
             "a Current fence with a missing snapshot must re-fetch, got {healed:?}"
@@ -789,6 +817,60 @@ mod tests {
         );
     }
 
+    /// A system-locked tier rejects an explicit redirect or clear at the
+    /// library boundary — a direct `apply_managed_config` caller cannot bypass
+    /// the lock the CLI seam also enforces (swarm-review W2). The check fires
+    /// before any store or filesystem access, so no fence is written.
+    #[tokio::test]
+    async fn apply_managed_config_rejects_locked_tier_override() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+        let locked_ref = "corp.example.com/ocx-config:user";
+        let manager = manager_with_stub(
+            home.path(),
+            &crate::oci::Identifier::parse(locked_ref).unwrap(),
+            "[registry]\ndefault = \"x\"\n",
+        );
+        let locked = crate::config::Config {
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some(locked_ref.to_string()),
+                system_locked: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Redirect to a different source → rejected.
+        let redirect = apply_managed_config(
+            &locked,
+            Some("corp.example.com/evil:v9"),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await;
+        assert!(
+            matches!(redirect, Err(error::Error::ManagedConfigLocked(_))),
+            "a locked tier must reject a redirect, got {redirect:?}"
+        );
+
+        // Clearing a locked tier → rejected.
+        let clear = apply_managed_config(&locked, Some(""), false, false, &manager, &file_structure).await;
+        assert!(
+            matches!(clear, Err(error::Error::ManagedConfigLocked(_))),
+            "a locked tier must reject a clear, got {clear:?}"
+        );
+
+        // Neither rejected call touched config.toml.
+        assert!(
+            !home.path().join("config.toml").exists(),
+            "a rejected locked-tier override must not write the fence"
+        );
+    }
+
     /// W3 matrix — `Current` fence + cross-repository snapshot: gate treats it
     /// as absent, self-heals by re-fetching.
     #[tokio::test]
@@ -801,9 +883,16 @@ mod tests {
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
 
-        apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("first adopt must succeed");
+        apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("first adopt must succeed");
 
         // Overwrite the snapshot with one recorded under a different repo
         // (metadata + payload sibling, so the gate sees a present-but-mismatched
@@ -824,9 +913,16 @@ mod tests {
         )
         .unwrap();
 
-        let healed = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("re-run with a mismatched snapshot must self-heal");
+        let healed = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("re-run with a mismatched snapshot must self-heal");
         assert!(
             matches!(healed, ManagedConfigSetupOutcome::Adopted { .. }),
             "a Current fence with a cross-repo snapshot must re-fetch, got {healed:?}"
@@ -852,16 +948,30 @@ mod tests {
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"adopted\"\n");
 
-        let first = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("first adopt must succeed");
+        let first = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("first adopt must succeed");
         let ManagedConfigSetupOutcome::Adopted { digest: adopted_digest } = first else {
             panic!("expected Adopted, got {first:?}");
         };
 
-        let second = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
-            .await
-            .expect("re-run must succeed");
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            &file_structure,
+        )
+        .await
+        .expect("re-run must succeed");
         match second {
             ManagedConfigSetupOutcome::AlreadyAdopted { digest } => {
                 assert_eq!(digest, adopted_digest, "AlreadyAdopted carries the verified digest");

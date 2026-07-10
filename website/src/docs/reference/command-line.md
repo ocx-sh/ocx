@@ -2845,8 +2845,70 @@ ocx config <SUBCOMMAND>
 
 | Sub-command | Purpose |
 |-------------|---------|
+| `setup` | Adopt (or clear) the `[managed]` tier — the configuration-only counterpart to [`ocx self setup --managed-config`][cmd-self-setup] (consumer side). |
 | `push` | Validate and publish a config file as a managed-config package (operator side). |
 | `update` | Fetch and persist the managed-config snapshot — optionally pinned to a VERSION — or pause/resume the background tick, or report status with `--check`. |
+
+#### `config setup` {#config-setup}
+
+Adopts (or clears) the corporate managed-config tier without touching anything else: no
+binary bootstrap, no env shims, no shell profiles. This is the configuration entry point
+for automation and CI environments, where OCX arrives as a plain binary and the only
+setup that matters is which managed configuration to apply.
+
+The command resolves its source with the same precedence as
+[`ocx self setup --managed-config`][cmd-self-setup] — the explicit `--managed-config`
+flag, then [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing
+`[managed]` seed — and runs the identical adoption sequence: synchronously fetch and
+persist the snapshot **first**, then write the `[managed]` seed fence in
+`$OCX_HOME/config.toml` only on success. A fetch failure leaves no partial state. A bare
+re-run re-adopts the configured seed, so a wiped or mismatched snapshot self-heals.
+
+Unlike `ocx self setup` — where an unresolved source is a no-op (setup has other phases
+to run) — a bare `ocx config setup` with nothing configured at any of the three levels is
+a usage error (exit 64): the command exists only to set up this tier.
+
+**Usage**
+
+```shell
+ocx config setup [--managed-config REF] [--dry-run] [--force]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--managed-config REF` | — | OCI reference of the managed-config artifact to adopt (published with [`config push`](#config-push)). Pass an empty string (`--managed-config ""`) to clear an existing seed and delete the snapshot. Omit to fall back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed. | *(env var, then seed)* |
+| `--dry-run` | — | Report the intended action without fetching or writing anything. | off |
+| `--force` | — | Overwrite a `[managed]` fence that carries user edits (the dirty state). | off |
+| `-h`, `--help` | | Print help information. | — |
+
+**Output** — the same `managed_config` entry [`ocx self setup`][cmd-self-setup] reports
+(`{"managed_config":{"status":"adopted","digest":"sha256:…"}}`), so fleet tooling parses
+both commands with one schema. Statuses: `adopted`, `already_adopted`, `cleared`,
+`dirty`, `would_adopt`.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Adopted, already adopted, cleared, or `--dry-run` reported. |
+| 64 | Nothing to set up — no `--managed-config`, no `OCX_MANAGED_CONFIG`, no existing seed. |
+| 65 | The fetched managed-config package is malformed — digest mismatch, no `any/any` entry, missing `config.toml`, over 64 KiB, or invalid TOML. |
+| 69 | Registry unreachable while fetching the snapshot. |
+| 74 | Writing the snapshot or the `[managed]` fence failed. |
+| 78 | The reference is not a valid OCI identifier, or a system-locked tier would be redirected or cleared. |
+| 79 | The managed-config package does not exist in the registry. |
+| 80 | Authentication failed while fetching the snapshot. |
+| 82 | The `[managed]` fence carries user edits and `--force` was not passed. Nothing was touched. |
+
+::: tip CI recipe
+`ocx config setup --managed-config <ref>` persists the seed, so every later `ocx`
+invocation on that machine resolves the managed tier with no further env plumbing. For
+ephemeral runners where persisting is pointless, the env-var pairing
+(`OCX_MANAGED_CONFIG=… ocx config update`) works without writing a seed — see
+[`OCX_MANAGED_CONFIG`][env-ocx-managed-config].
+:::
 
 #### `config push` {#config-push}
 

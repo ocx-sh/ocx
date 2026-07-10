@@ -237,17 +237,18 @@ fn should_enforce_managed_config_required(command: &Option<command::Command>) ->
     should_check_managed_config_refresh(command)
 }
 
-/// Names the two commands that can adopt a brand-new managed-config source
-/// with no seed present (`ocx config update`, `ocx self setup
-/// --managed-config <ref>`): only they get the managed-fetch client built
-/// when no source resolves yet. Deliberately narrower than the
+/// Names the three commands that can adopt a brand-new managed-config source
+/// with no seed present (`ocx config setup`, `ocx config update`, `ocx self
+/// setup --managed-config <ref>`): only they get the managed-fetch client
+/// built when no source resolves yet. Deliberately narrower than the
 /// required-gate exemption above — `ocx self activate` runs on every shell
 /// startup and must not pay the client-build cost for an unconfigured tier.
 fn is_managed_config_onboarding_command(command: &Option<command::Command>) -> bool {
     matches!(
         command,
         Some(
-            command::Command::Config(command::config::ConfigGroup::Update(_))
+            command::Command::Config(command::config::ConfigGroup::Setup(_))
+                | command::Command::Config(command::config::ConfigGroup::Update(_))
                 | command::Command::Self_(command::self_group::SelfGroup::Setup(_))
         )
     )

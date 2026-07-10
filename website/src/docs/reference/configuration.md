@@ -352,8 +352,9 @@ refresh  = "notify"
 interval = "1d"
 ```
 
-This block is normally written by [`ocx self setup --managed-config <ref>`][cmd-self-setup]
-rather than hand-edited — the flag re-serializes the same four fields with their
+This block is normally written by [`ocx config setup`][cmd-config-setup] (or
+[`ocx self setup --managed-config <ref>`][cmd-self-setup], which runs the same adoption)
+rather than hand-edited — both re-serialize the same four fields with their
 resolved values. Bootstrapping this way performs a synchronous fetch before the fence is
 written, so a network failure leaves no partial seed. See the
 [managed-configuration walkthrough][user-guide-managed-config] for the full onboarding
@@ -378,7 +379,7 @@ Fail posture when no local snapshot matches `source`.
 
 | Value | Behavior |
 |-------|----------|
-| `true` (default) | Every command fails closed with `SnapshotRequired` (exit 78) until [`ocx config update`][cmd-config-update] (or `ocx self setup --managed-config`) syncs a matching snapshot. Identical online and offline — the gate is on local disk state, not network reachability. |
+| `true` (default) | Every command fails closed with `SnapshotRequired` (exit 78) until [`ocx config update`][cmd-config-update] (or [`ocx config setup`][cmd-config-setup] / `ocx self setup --managed-config`) syncs a matching snapshot. Identical online and offline — the gate is on local disk state, not network reachability. |
 | `false` | The tier contributes nothing until synced. A throttle-gated stderr hint is printed instead of failing (no per-invocation warning). |
 
 #### `refresh` {#keys-managed-refresh}
@@ -409,7 +410,7 @@ Minimum spacing between background refresh probes. Governs only the automatic ti
 
 The managed tier folds in as priority 5 in the [precedence table](#precedence) — after the [`$OCX_HOME` config tier](#file-locations) and below [`OCX_CONFIG`][env-config]/[`--config`][arg-config]. Resolution reads a local snapshot only; no network access happens during ordinary config loading.
 
-The snapshot lives at `$OCX_HOME/state/managed-config/snapshot.json` and is written only by [`ocx config update`][cmd-config-update] or `ocx self setup --managed-config`. It records the source it was fetched from, the tag it tracked at that moment, the package's top-level manifest digest (the tier's drift identity), the fetch timestamp, and the payload text.
+The snapshot lives at `$OCX_HOME/state/managed-config/snapshot.json` and is written only by [`ocx config update`][cmd-config-update], [`ocx config setup`][cmd-config-setup], or `ocx self setup --managed-config`. It records the source it was fetched from, the tag it tracked at that moment, the package's top-level manifest digest (the tier's drift identity), the fetch timestamp, and the payload text.
 
 Before folding it in, OCX identity-gates the snapshot against the effective `source` (env override, then seed): the snapshot must come from the **same registry and repository**, and — when the seed pins a digest — carry exactly that digest. Tags float within a repository: a snapshot synced with `ocx config update user-1.4.1` still satisfies a seed tracking `:user`, which is what makes per-host version pins and rollbacks safe under a fleet-wide floating tag. A cross-repository or pin-violating snapshot is treated as entirely absent, regardless of `required`; this closes a CI cache-poisoning path where a stale `$OCX_HOME` carries a snapshot fetched for a different `source`.
 
@@ -525,6 +526,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec
 [cmd-package-env]: ./command-line.md#package-env
+[cmd-config-setup]: ./command-line.md#config-setup
 [cmd-self-setup]: ./command-line.md#self-setup
 [cmd-self-update]: ./command-line.md#self-update
 [cmd-config-update]: ./command-line.md#config-update

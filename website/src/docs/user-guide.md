@@ -732,7 +732,11 @@ On a fresh machine, adoption is this one line right after the [binary download][
 
 This resolves the reference, synchronously fetches and verifies the package, and only then writes the `[managed]` seed into `$OCX_HOME/config.toml`. A network failure during onboarding leaves no partial state — the seed is written only once the first snapshot is safely on disk. The reported `digest` is the adopted content's identity: record it once at onboarding (trust-on-first-use) and any later `ocx config update --check` can be compared against what the operator says they published.
 
-A bare `ocx self setup` re-run — no `--managed-config` flag at all — re-resolves and re-syncs whatever source is already active (the env override if one is set, otherwise the existing seed), so it also repairs a wiped or mismatched snapshot without repeating the onboarding command above.
+A machine that needs only the configuration — an automation host or CI image where installing shims and wiring shell profiles is beside the point — adopts with [`ocx config setup`][cmd-config-setup] instead. It runs the identical adoption sequence (same precedence, same fetch-first ordering, same seed fence) with no binary bootstrap and no profile writes:
+
+<<< @/_scripts/user-guide/config-setup.sh{sh}
+
+A bare re-run of either command — no `--managed-config` flag at all — re-resolves and re-syncs whatever source is already active (the env override if one is set, otherwise the existing seed), so it also repairs a wiped or mismatched snapshot without repeating the onboarding command above.
 
 CI runners skip the seed entirely — set the org-level environment variable and sync once at the top of the job:
 
@@ -937,6 +941,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-self-setup-managed-config]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
+[cmd-config-setup]: ./reference/command-line.md#config-setup
 [cmd-config-update]: ./reference/command-line.md#config-update
 [cmd-config-push]: ./reference/command-line.md#config-push
 [cmd-version]: ./reference/command-line.md#version

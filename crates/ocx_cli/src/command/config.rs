@@ -3,10 +3,12 @@
 
 //! `ocx config` — corporate managed-configuration commands.
 //!
-//! Two verbs: `update` (fetch + persist the managed-config snapshot, or
-//! `--check` for a probe-only report) and `push` (operator-side publish of a
-//! `config.toml` payload as an ordinary ocx package — managed-config v2, ADR
-//! `adr_managed_config_tier.md` v2 amendment).
+//! Three verbs: `setup` (adopt or clear the `[managed]` tier — the
+//! config-only counterpart to `ocx self setup --managed-config`, sharing the
+//! same lib implementation), `update` (fetch + persist the managed-config
+//! snapshot, or `--check` for a probe-only report) and `push` (operator-side
+//! publish of a `config.toml` payload as an ordinary ocx package —
+//! managed-config v2, ADR `adr_managed_config_tier.md` v2 amendment).
 
 use std::process::ExitCode;
 
@@ -18,6 +20,18 @@ use clap::Subcommand;
 /// `config.toml` artifact, not the ocx binary itself.
 #[derive(Subcommand)]
 pub enum ConfigGroup {
+    /// Adopt (or clear) the corporate managed-config tier.
+    ///
+    /// The configuration-only counterpart to `ocx self setup
+    /// --managed-config`: resolves the source (flag, then
+    /// `OCX_MANAGED_CONFIG`, then the existing seed), synchronously fetches
+    /// and persists a snapshot, then writes the `[managed]` seed fence.
+    /// Installs no binary and touches no shell profile - built for
+    /// automation and CI environments.
+    ///
+    /// Details: <https://ocx.sh/docs/reference/command-line#config-setup>
+    Setup(super::config_setup::ConfigSetupArgs),
+
     /// Refresh the managed-config snapshot from the registry.
     ///
     /// Syncs the configured source (or an explicit VERSION - tag, digest, or
@@ -41,6 +55,7 @@ pub enum ConfigGroup {
 impl ConfigGroup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
+            ConfigGroup::Setup(args) => args.execute(context).await,
             ConfigGroup::Update(args) => args.execute(context).await,
             ConfigGroup::Push(args) => args.execute(context).await,
         }

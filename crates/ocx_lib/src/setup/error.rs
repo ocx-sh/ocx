@@ -89,6 +89,13 @@ pub enum Error {
     /// caller sees zero partial state.
     #[error("failed to sync the managed-config snapshot")]
     ManagedConfigUpdateFailed(#[from] crate::managed_config::ManagedConfigUpdateError),
+    /// A system-locked managed tier refused an explicit override that would
+    /// clear or redirect it (locks only tighten — exit 78). The CLI seam
+    /// (`resolve_managed_config_arg`) rejects this before calling in, but
+    /// [`crate::setup::apply_managed_config`] re-checks so the public library
+    /// function cannot be bypassed by a direct caller.
+    #[error(transparent)]
+    ManagedConfigLocked(#[from] crate::config::managed::ManagedConfigError),
 }
 
 impl ClassifyExitCode for Error {
@@ -113,6 +120,8 @@ impl ClassifyExitCode for Error {
             // ladder decides (Unavailable/AuthError/DataError); `#[from]` exposes
             // it via `source()` for the chain walker, mirroring `Error::Bootstrap`.
             Error::ManagedConfigUpdateFailed(_) => None,
+            // A locked-tier override rejection is a configuration policy error.
+            Error::ManagedConfigLocked(_) => Some(ExitCode::ConfigError),
         }
     }
 }

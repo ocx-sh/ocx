@@ -145,8 +145,11 @@ impl BootstrapEntry {
 /// `{"status":"…"}` or, for `Adopted`/`AlreadyAdopted`,
 /// `{"status":"…","digest":"sha256:<hex>"}` (the digest is the operator's
 /// TOFU signal — always visible on adopt paths).
+///
+/// Shared with `api/data/config_setup.rs` — `ocx config setup` reports the
+/// same entry shape so fleet tooling parses both commands with one schema.
 #[derive(Serialize)]
-struct ManagedConfigEntry {
+pub struct ManagedConfigEntry {
     status: ManagedConfigStatusKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
@@ -165,7 +168,7 @@ enum ManagedConfigStatusKind {
 }
 
 impl ManagedConfigEntry {
-    fn from_outcome(outcome: &ManagedConfigSetupOutcome) -> Self {
+    pub fn from_outcome(outcome: &ManagedConfigSetupOutcome) -> Self {
         match outcome {
             ManagedConfigSetupOutcome::NotConfigured => Self {
                 status: ManagedConfigStatusKind::NotConfigured,
@@ -194,7 +197,8 @@ impl ManagedConfigEntry {
         }
     }
 
-    fn summary(&self) -> String {
+    /// Plain-text summary of the adoption outcome for the key/value table.
+    pub fn summary(&self) -> String {
         match (&self.status, &self.digest) {
             (ManagedConfigStatusKind::NotConfigured, _) => "not configured".to_string(),
             (ManagedConfigStatusKind::AlreadyAdopted, Some(digest)) => format!("already adopted ({digest})"),
