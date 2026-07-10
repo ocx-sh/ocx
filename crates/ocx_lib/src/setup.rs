@@ -213,7 +213,14 @@ pub async fn run(
     // ── Phase 1.5: managed-config adoption (ADR "Setup ordering (AMENDED)":
     // resolve ref (flag>env>seed) → synchronous fetch+persist FIRST → fence
     // write only on success) ──────────────────────────────────────────────
-    let managed_config = apply_managed_config(options, manager, file_structure).await?;
+    let managed_config = apply_managed_config(
+        options.managed_config.as_deref(),
+        options.dry_run,
+        options.force,
+        manager,
+        file_structure,
+    )
+    .await?;
 
     // ── Phase 2: env.* shims ─────────────────────────────────────────────────
     let ocx_home = file_structure.root();
@@ -269,11 +276,16 @@ pub async fn run(
     })
 }
 
-/// Adopt (or clear) the managed-config tier (phase 1.5) from the already-
-/// resolved `options.managed_config`.
+/// Adopt (or clear) the managed-config tier from an already-resolved
+/// managed-config value.
 ///
-/// `None` — nothing resolved (no flag, no `OCX_MANAGED_CONFIG`, no seed; the
-/// CLI applies that precedence before building the options) — short-circuits to
+/// The single implementation behind both adoption entry points: `ocx self
+/// setup` (phase 1.5 of [`run`]) and `ocx config setup` (config-only, no
+/// bootstrap/shims/profiles). The caller owns the precedence (flag >
+/// `OCX_MANAGED_CONFIG` > `[managed].source` seed) and passes the resolved
+/// value.
+///
+/// `None` — nothing resolved — short-circuits to
 /// [`ManagedConfigSetupOutcome::NotConfigured`] without touching the filesystem
 /// or network.
 ///
@@ -285,18 +297,28 @@ pub async fn run(
 /// (CWE-74 defense — the fence body below is real TOML serialization, never
 /// `format!` interpolation of the raw ref), then follows ADR "Setup ordering":
 /// synchronous fetch+persist FIRST, fence written only on success. A dirty
-/// fence (user-edited) is left untouched without `--force`
+/// fence (user-edited) is left untouched without `force`
 /// ([`ManagedConfigSetupOutcome::Dirty`]); a fence already `Current` for the
 /// same rendered body skips the fetch entirely (no re-adopt, no re-fetch).
-async fn apply_managed_config(
-    options: &SetupOptions,
+/// `dry_run` short-circuits to [`ManagedConfigSetupOutcome::WouldAdopt`]
+/// before any write.
+///
+/// # Errors
+///
+/// Returns [`error::Error`] when the ref does not parse as an OCI identifier,
+/// the fetch+persist fails (no partial state — the fence is not written), or
+/// a filesystem write fails.
+pub async fn apply_managed_config(
+    managed_config: Option<&str>,
+    dry_run: bool,
+    force: bool,
     manager: &PackageManager,
     file_structure: &FileStructure,
 ) -> Result<ManagedConfigSetupOutcome, error::Error> {
     use crate::config::managed::ManagedConfig;
     use crate::setup::rc_block;
 
-    let Some(flag_value) = options.managed_config.as_deref() else {
+    let Some(flag_value) = managed_config else {
         return Ok(ManagedConfigSetupOutcome::NotConfigured);
     };
 
@@ -304,7 +326,7 @@ async fn apply_managed_config(
     let content = read_to_string_or_empty(&config_path).await?;
 
     if flag_value.is_empty() {
-        if options.dry_run {
+        if dry_run {
             return Ok(ManagedConfigSetupOutcome::WouldAdopt);
         }
         return clear_managed_config(&config_path, &content, file_structure).await;
@@ -331,7 +353,7 @@ async fn apply_managed_config(
     );
 
     let state = rc_block::classify(&content, &body, rc_block::MANAGED_LABEL);
-    if state == rc_block::BlockState::Dirty && !options.force {
+    if state == rc_block::BlockState::Dirty && !force {
         return Ok(ManagedConfigSetupOutcome::Dirty);
     }
     if state == rc_block::BlockState::Current {
@@ -351,7 +373,7 @@ async fn apply_managed_config(
         }
         crate::log::info!("managed-config fence is current but the snapshot is absent or mismatched; re-syncing");
     }
-    if options.dry_run {
+    if dry_run {
         return Ok(ManagedConfigSetupOutcome::WouldAdopt);
     }
 
@@ -378,7 +400,7 @@ async fn apply_managed_config(
     };
 
     // Fence written only after the fetch+persist above succeeded.
-    if let Some(new_content) = rc_block::apply(&content, &body, options.force, rc_block::MANAGED_LABEL)? {
+    if let Some(new_content) = rc_block::apply(&content, &body, force, rc_block::MANAGED_LABEL)? {
         write_profile(&config_path, &new_content).await?;
     }
 
@@ -727,13 +749,6 @@ mod tests {
         PackageManager::new(fs, index, None, "localhost:5000").with_managed_config_client(Some(client))
     }
 
-    fn adopt_options(reference: &str) -> SetupOptions {
-        SetupOptions {
-            managed_config: Some(reference.to_string()),
-            ..SetupOptions::default()
-        }
-    }
-
     /// W3 matrix — `Current` fence + missing snapshot: self-heals by
     /// re-fetching (outcome `Adopted`), fence untouched.
     #[tokio::test]
@@ -745,10 +760,9 @@ mod tests {
         let identifier = crate::oci::Identifier::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
-        let options = adopt_options(reference);
 
         // First adopt writes fence + snapshot.
-        let first = apply_managed_config(&options, &manager, &file_structure)
+        let first = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("first adopt must succeed");
         assert!(matches!(first, ManagedConfigSetupOutcome::Adopted { .. }));
@@ -757,7 +771,7 @@ mod tests {
         // Wipe the snapshot dir (restored $OCX_HOME scenario).
         std::fs::remove_dir_all(file_structure.state.managed_config_dir()).unwrap();
 
-        let healed = apply_managed_config(&options, &manager, &file_structure)
+        let healed = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("re-run with a wiped snapshot must self-heal");
         assert!(
@@ -786,9 +800,8 @@ mod tests {
         let identifier = crate::oci::Identifier::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
-        let options = adopt_options(reference);
 
-        apply_managed_config(&options, &manager, &file_structure)
+        apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("first adopt must succeed");
 
@@ -811,7 +824,7 @@ mod tests {
         )
         .unwrap();
 
-        let healed = apply_managed_config(&options, &manager, &file_structure)
+        let healed = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("re-run with a mismatched snapshot must self-heal");
         assert!(
@@ -838,16 +851,15 @@ mod tests {
         let identifier = crate::oci::Identifier::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"adopted\"\n");
-        let options = adopt_options(reference);
 
-        let first = apply_managed_config(&options, &manager, &file_structure)
+        let first = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("first adopt must succeed");
         let ManagedConfigSetupOutcome::Adopted { digest: adopted_digest } = first else {
             panic!("expected Adopted, got {first:?}");
         };
 
-        let second = apply_managed_config(&options, &manager, &file_structure)
+        let second = apply_managed_config(Some(reference), false, false, &manager, &file_structure)
             .await
             .expect("re-run must succeed");
         match second {
