@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-07-10
+
+### Added
+
+- Ship unix archives as .tar.gz *(release)*
+- Strip symbols from dist binaries *(release)*
+- Publish official docker images to ghcr *(ci)*
+- Scope `ocx upgrade` by name and group *(cli)*
+- Rename upgrade to update, resolve against registry by default *(cli)* **BREAKING**
+- Env + direnv export install on miss by default, --no-pull opts out *(cli)*
+- Add ocx config setup for config-only managed-config adoption *(cli)*
+- Dependency manifest pinning — create resolves, push gates and fans out
+
+### Changed
+
+- Split snapshot into metadata + readable config.toml *(managed-config)*
+- Extract shared options::Pull flatten struct *(cli)*
+- Publish apply_managed_config with narrowed params *(lib)*
+
+### Documentation
+
+- Manual install uses .tar.gz assets *(website)*
+- Document reproducible container builds *(website)*
+- Document ocx update and the update family *(website)*
+
+### Fixed
+
+- Seed CA roots at the fork's ClientConfig::default *(oci)*
+- Resolve release archive with gz-then-xz fallback *(setup-ocx)*
+- Bump rust-oci-client to panic-free TLS Client::default *(deps)*
+- Resolve --dry-run previews concurrently *(pull)*
+- Auto-sync patches after a config update *(managed-config)*
+- Place Add and Supported Platforms side by side *(website)*
+
 ## [0.4.2] - 2026-07-05
 
 ### Added
@@ -16,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Bundle CA roots so TLS works without a system trust store *(oci)*
+
+### Release
+
+- V0.4.2
 
 ## [0.4.1] - 2026-07-03
 
@@ -619,6 +657,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.4.3]: https://github.com/ocx-sh/ocx/compare/v0.4.2..v0.4.3
 [0.4.2]: https://github.com/ocx-sh/ocx/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/ocx-sh/ocx/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/ocx-sh/ocx/compare/v0.3.12..v0.4.0
