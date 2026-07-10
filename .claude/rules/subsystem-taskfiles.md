@@ -15,6 +15,7 @@ paths:
 |---|---|---|
 | `taskfile.yml` | root | entry point -- `task verify`, `task default`, etc. |
 | `.taskrc.yml` | root | project config -- `failfast: true` |
+| `taskfiles/git.taskfile.yml` | cross-cutting | `git:` -- merge (fast-forward current branch onto main) |
 | `taskfiles/rust.taskfile.yml` | Rust subsystem | `rust:` -- format, clippy, license, build, test:unit |
 | `taskfiles/shell.taskfile.yml` | Shell subsystem | `shell:` -- shellcheck + shfmt called directly off the project toolchain |
 | `taskfiles/ci.taskfile.yml` | CI subsystem | `ci:` -- actionlint (workflow lint) off the project toolchain |

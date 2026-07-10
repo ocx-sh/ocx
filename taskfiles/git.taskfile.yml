@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  # Fast-forward the current branch onto main.
+  # Captures the current branch, switches to main, then `git merge --ff-only`.
+  # Fails if the working tree is dirty or already on main.
+  merge:
+    desc: Fast-forward current branch onto main (fails if tree dirty)
+    vars:
+      BRANCH:
+        sh: git rev-parse --abbrev-ref HEAD
+    preconditions:
+      - sh: test -z "$(git status --porcelain)"
+        msg: 'Working tree has pending changes; commit or stash first.'
+      - sh: test "{{.BRANCH}}" != "main"
+        msg: 'Already on main; nothing to merge.'
+    cmds:
+      - git switch main
+      - git merge --ff-only {{.BRANCH}}

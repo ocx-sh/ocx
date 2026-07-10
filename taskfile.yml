@@ -6,6 +6,7 @@ vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
 
 includes:
+  git: ./taskfiles/git.taskfile.yml
   rust: ./taskfiles/rust.taskfile.yml
   shell: ./taskfiles/shell.taskfile.yml
   ci: ./taskfiles/ci.taskfile.yml
