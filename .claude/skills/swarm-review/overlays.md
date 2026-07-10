@@ -104,6 +104,8 @@ Per-tier defaults:
 - high → `off` by default; auto-on when `classify.md` fires `--codex` for One-Way Door signals (breaking change, security-sensitive paths, protocol change, new crate, public API change)
 - max → `on` (mandatory — cross-model pass = final gate before verdict)
 
+**Codex model per tier** (passed to `codex-adversary` as `--model`): low → `luna` (`gpt-5.6-luna`, only if forced), high → `terra` (`gpt-5.6-terra`), max → `sol` (`gpt-5.6-sol`). Override with `--codex-model=luna|terra|sol`. Policy: `workflow-swarm.md` "Cross-model model tiers".
+
 Triage mirrors `codex-adversary`:
 
 - **Actionable** — reported in Cross-Model section of output; caller (human or `/swarm-execute`) acts on them. swarm-review itself never auto-fixes.
@@ -126,3 +128,4 @@ User-supplied flags always override classifier-inferred overlays. When `classify
 | doc-reviewer | sonnet | sonnet (→ haiku on narrow doc scope) | sonnet (→ haiku on narrow doc scope) |
 | rca | off | on (Block/High) | on (>Suggest) |
 | codex | off | off (auto-on for One-Way Door signals) | on (mandatory) |
+| codex-model | luna (if forced) | terra | sol |

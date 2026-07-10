@@ -116,8 +116,8 @@ findings. Stop when no actionable findings remain or after 2 rounds.
 **Codex plan review — mandatory final gate:**
 
 After Claude panel converges, invoke `codex-adversary` scope
-`plan-artifact` on plan file. One-shot, no loop. Triage per
-`overlays.md`:
+`plan-artifact --model sol` (`gpt-5.6-sol`; `--codex-model` overrides)
+on plan file. One-shot, no loop. Triage per `overlays.md`:
 
 - **Actionable** → orchestrator edit plan, re-run one
   `worker-reviewer` (spec-compliance) pass to validate

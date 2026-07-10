@@ -82,7 +82,7 @@ Each reviewer classify findings as:
 
 **Round 2 (selective):** Re-run only perspectives with actionable findings. Stop when no actionable findings remain or after 2 rounds total (plan reviews converge fast).
 
-**Codex plan review (optional at this tier):** if `--codex` overlay fires (user flag or classifier-inferred for One-Way Door signals), run single `codex-adversary` pass in `plan-artifact` scope mode against plan file *after* Claude panel converges. One-shot, no loop. Triage findings per `overlays.md`:
+**Codex plan review (optional at this tier):** if `--codex` overlay fires (user flag or classifier-inferred for One-Way Door signals), run single `codex-adversary` pass in `plan-artifact` scope mode (`--model terra`, `gpt-5.6-terra`; `--codex-model` overrides) against plan file *after* Claude panel converges. One-shot, no loop. Triage findings per `overlays.md`:
 
 - Actionable → orchestrator edit plan, re-run one `worker-reviewer` (spec-compliance) pass to validate
 - Deferred → add to handoff Deferred Findings

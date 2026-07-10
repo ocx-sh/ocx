@@ -121,8 +121,9 @@ after Claude loop converges.
 - **Preconditions**: loop exited, `task verify` green, working tree
   clean except intended diff.
 - **Invocation**: delegate to `codex-adversary` with `--scope code-diff
-  --base main`. Codex load `AGENTS.md` automatically — do not inject
-  project context.
+  --base main --model <tier model>` (high→`terra`, max→`sol`;
+  `--codex-model=luna|terra|sol` overrides — see `overlays.md`). Codex
+  load `AGENTS.md` automatically — do not inject project context.
 - **Triage**: Actionable → one-shot `worker-builder` fix pass, gate
   `task verify`. Deferred → summary. Stated-convention / trivia →
   dropped with count.

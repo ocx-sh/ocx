@@ -63,7 +63,7 @@ Stage 1 matches tier-high: `worker-reviewer` (spec-compliance, post-implementati
 
 Rounds 2–3 follow canonical selective re-review with oscillation-auto-defer (architect ↔ reviewer oscillation = known max-tier pattern — both perspectives captured in deferred entry).
 
-**Codex code-diff review — mandatory final gate.** After Claude loop converges, invoke `codex-adversary` with scope `code-diff` on branch diff. One-shot. Triage per `overlays.md`: Actionable → one-shot `worker-builder` (focus: `implementation`, model: opus) fix pass, gate `task verify`; Deferred → Deferred Findings; Stated-convention / trivia → dropped with counts. If one-shot fix pass fails `task verify`, revert and promote all Codex findings to deferred.
+**Codex code-diff review — mandatory final gate.** After Claude loop converges, invoke `codex-adversary` with scope `code-diff --model sol` (`gpt-5.6-sol`; `--codex-model` overrides) on branch diff. One-shot. Triage per `overlays.md`: Actionable → one-shot `worker-builder` (focus: `implementation`, model: opus) fix pass, gate `task verify`; Deferred → Deferred Findings; Stated-convention / trivia → dropped with counts. If one-shot fix pass fails `task verify`, revert and promote all Codex findings to deferred.
 
 Unavailable path: at max-tier this = **gate, not blocker** — surface skip prominently in commit summary.
 

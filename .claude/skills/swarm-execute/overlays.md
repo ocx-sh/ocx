@@ -136,6 +136,8 @@ Per-tier defaults:
 - high → `off` by default; auto-on when `classify.md` fires the `--codex` overlay for One-Way Door signals from the plan header
 - max → `on` (mandatory, final gate before commit)
 
+**Codex model per tier** (passed to `codex-adversary` as `--model`): high → `terra` (`gpt-5.6-terra`), max → `sol` (`gpt-5.6-sol`); `luna` (`gpt-5.6-luna`) if `--codex` forced at low. Override with `--codex-model=luna|terra|sol`. Policy: `workflow-swarm.md` "Cross-model model tiers".
+
 Triage mirrors existing cross-model pass triage in `codex-adversary`:
 
 - **Actionable** — one-shot `worker-builder` (focus: `implementation`) fix pass; gate: `task verify` passes

@@ -87,7 +87,7 @@ Classify each finding:
 
 **Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Skipped gracefully if Codex unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Codex model scales with tier (`low→luna`, `high→terra`, `max→sol`) — see "Cross-model model tiers" in `workflow-swarm.md`. Skipped gracefully if Codex unavailable.
 
 **Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
@@ -174,6 +174,23 @@ Both one-shot (no looping — prevents two-family stylistic thrash). Gating by t
 - `low`: skipped (Two-Way Door — cost > value)
 - `high`: off by default; auto-on when classifier detects One-Way Door signals (public API change, breaking change, novel algorithm); explicit via `--codex`
 - `max`: mandatory final gate
+
+### Cross-model model tiers
+
+When the pass fires, the Codex model scales with tier — heavier review
+earns a stronger reviewer (mirrors the Claude `--reviewer` haiku→sonnet→
+opus ladder). `/codex-adversary` resolves these aliases to slugs (see its
+"Model selection"); the GPT-5.6 tiers map onto the Claude analogues:
+
+| Tier | Codex model | Slug | Claude analogue |
+|---|---|---|---|
+| `low` (only when `--codex` forced) | `luna` | `gpt-5.6-luna` | Haiku |
+| `high` | `terra` | `gpt-5.6-terra` | Sonnet |
+| `max` | `sol` | `gpt-5.6-sol` | Opus |
+
+Override per run with `--codex-model=luna|terra|sol` (swarm skills) or
+`--model` (`/codex-adversary` direct); the user value wins over the tier
+default, exactly like every other overlay.
 
 Triage for plan-artifact scope mirrors code-diff pass: Actionable → orchestrator edits plan, re-runs one `worker-reviewer` (spec-compliance) pass; Deferred → handoff; Stated-convention / Trivia → dropped with count. Unavailable path (CLAUDE_PLUGIN_ROOT unset or companion non-zero): log `Cross-model plan review skipped: <reason>` and continue.
 

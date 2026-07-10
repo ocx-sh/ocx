@@ -87,6 +87,11 @@ Per-tier defaults:
   `--codex` overlay for One-Way Door signals; explicit via `--codex`
 - max → `on` (mandatory, final gate before handoff)
 
+**Codex model per tier** (passed to `codex-adversary` as `--model`):
+high → `terra` (`gpt-5.6-terra`), max → `sol` (`gpt-5.6-sol`). Override
+with `--codex-model=luna|terra|sol`. Policy: `workflow-swarm.md`
+"Cross-model model tiers".
+
 Triage mirror existing cross-model pass triage in main
 `codex-adversary` skill:
 

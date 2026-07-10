@@ -40,6 +40,8 @@ perspective execution lives in tier files.
   - `--doc-reviewer=haiku|sonnet` — model for `worker-doc-reviewer`
   - `--rca=on|off` — Five Whys systemic-fix analysis
   - `--codex` / `--no-codex` — cross-model adversarial pass (code-diff scope)
+  - `--codex-model=luna|terra|sol` — Codex model for cross-model pass
+    (default per tier: high=terra, max=sol; luna if forced at low)
   - `--dry-run` — meta-plan preview via `EnterPlanMode`
   - `--form` — structured `AskUserQuestion` form; implies `--dry-run`
 

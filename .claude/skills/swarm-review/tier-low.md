@@ -35,7 +35,7 @@ Two-Way Door scope. No security, performance, documentation, or architect perspe
 
 ## Phase 5: Cross-model — skipped
 
-`codex: off`. If user explicit pass `--codex`, run pass anyway (user override). Else log `Cross-model gate skipped: tier=low default` and continue.
+`codex: off`. If user explicit pass `--codex`, run pass anyway (user override) with `--model luna` (`gpt-5.6-luna`; `--codex-model` overrides). Else log `Cross-model gate skipped: tier=low default` and continue.
 
 ## Phase 6: Verdict & Output
 

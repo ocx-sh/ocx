@@ -98,7 +98,8 @@ those too).
 
 If `--codex` on (user flag or classifier-inferred from One-Way Door
 Medium signals), invoke `codex-adversary` with scope `code-diff --base
-<base>` against branch diff. One-shot, no looping.
+<base> --model terra` (`gpt-5.6-terra`; `--codex-model` overrides)
+against branch diff. One-shot, no looping.
 
 Triage per `overlays.md`:
 

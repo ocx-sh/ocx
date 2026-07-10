@@ -3,7 +3,7 @@ name: codex-adversary
 description: Use when the user says "codex review", "/codex-adversary", "adversarial review", "cross-model review", or asks for a different-model second opinion on a diff or plan artifact. Complements `/swarm-review` via Codex-CLI. Scopes: code-diff (default), plan-artifact (gate for `/swarm-plan`).
 user-invocable: true
 disable-model-invocation: false
-argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch|plan-artifact] [--target-file <path>] [focus text]"
+argument-hint: "[--wait|--background] [--model luna|terra|sol] [--base <ref>] [--scope auto|working-tree|branch|plan-artifact] [--target-file <path>] [focus text]"
 triggers:
   - "codex review"
   - "adversarial review"
@@ -28,6 +28,14 @@ drive Claude implementation of approved ones.
 Use both on big work — complement each other. `/swarm-review`
 first (cheaper, faster), then `/codex-adversary` for
 independent cross-model challenge before merge.
+
+## Model selection (tiered)
+
+Codex has three GPT-5.6 tiers (`luna`≈Haiku, `terra`≈Sonnet, `sol`≈Opus);
+match model weight to review weight. Callers pass `--model <alias>` per
+tier — full alias→slug table + resolution rules:
+[`references/model-selection.md`](./references/model-selection.md).
+Default when `--model` omitted → `gpt-5.6-terra`.
 
 ## Context for Codex
 
@@ -85,8 +93,10 @@ Use Codex companion script directly — same entry point plugin
 `/codex:adversarial-review` command uses. Keeps Codex context
 loading, auth, runtime identical to first-party command.
 
+Resolve the `--model` alias to its slug (Model selection; default `gpt-5.6-terra`), pass as `--model <slug>`:
+
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review --model "<slug>" "$ARGUMENTS"
 ```
 
 `CLAUDE_PLUGIN_ROOT` env var set by Claude Code harness when
@@ -152,6 +162,8 @@ read per item, but no forceful advocate — these user decisions.
 - `--scope auto|working-tree|branch|plan-artifact` — explicit scope
 - `--target-file <path>` — required when `--scope plan-artifact`;
   plan/ADR markdown file to hand to Codex
+- `--model <luna|terra|sol|slug>` — Codex model tier (see Model
+  selection). Alias or full slug; default `terra` (`gpt-5.6-terra`)
 - `--no-auto-fix` — skip auto-fix batch; treat every real finding as
   *needs confirmation*. Use on sensitive code or when
   want see everything before change lands.

@@ -62,7 +62,7 @@ Apply Five Whys to every Block, High, Warn finding. Max-tier coverage deliberate
 
 ## Phase 5: Cross-model — Codex (mandatory)
 
-Invoke `codex-adversary` with scope `code-diff --base <base>` against branch diff. One-shot, no looping.
+Invoke `codex-adversary` with scope `code-diff --base <base> --model sol` (`gpt-5.6-sol`; `--codex-model` overrides) against branch diff. One-shot, no looping.
 
 Triage per `overlays.md`:
 
