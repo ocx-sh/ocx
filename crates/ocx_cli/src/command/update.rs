@@ -35,21 +35,8 @@ pub struct Update {
     #[arg(long = "check", default_value_t = false)]
     pub check: bool,
 
-    /// Materialize packages into the object store after writing the lock (default).
-    ///
-    /// `--pull` is the affirmative form of the default behavior; `--no-pull`
-    /// opts out. Both flags use POSIX last-wins semantics (`overrides_with`):
-    /// `--pull --no-pull` resolves to no-pull; `--no-pull --pull` resolves
-    /// to pull. Combining the flags is not an error - git `--[no-]verify`
-    /// idiom.
-    #[arg(long, overrides_with = "no_pull")]
-    pub pull: bool,
-
-    /// Write the lock without downloading. Materialization is deferred to
-    /// `ocx pull` or first `ocx run` / direnv hit. Useful for CI flows that
-    /// batch lock changes and materialize separately.
-    #[arg(long = "no-pull", overrides_with = "pull")]
-    pub no_pull: bool,
+    #[clap(flatten)]
+    pub pull: options::Pull,
 
     #[clap(flatten)]
     pub platforms: options::Platforms,
@@ -177,7 +164,7 @@ impl Update {
         // the object-store population is deferred. Matches `add` semantics.
         // The `--check` early-return above ensures this line is never reached
         // on the verify-only path. `--no-pull` opts out.
-        let eager = !self.no_pull;
+        let eager = self.pull.enabled(true);
         materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
 
         let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
@@ -333,55 +320,15 @@ mod tests {
         Update::try_parse_from(args).unwrap()
     }
 
-    fn eager(update: &Update) -> bool {
-        !update.no_pull
-    }
-
     // ── cases ─────────────────────────────────────────────────────────────────
 
-    /// Neither `--pull` nor `--no-pull` → both fields false; default is eager.
+    /// `--pull`/`--no-pull` wire through the shared `options::Pull` flatten;
+    /// `update` defaults to eager. The full flag matrix is tested on the
+    /// flatten struct itself (`options/pull.rs`).
     #[test]
-    fn parse_no_flags_defaults_to_eager() {
-        let update = parse(&["update"]);
-        assert!(!update.pull, "pull must be false when neither flag is given");
-        assert!(!update.no_pull, "no_pull must be false when neither flag is given");
-        assert!(eager(&update), "default must be eager (eager = !no_pull)");
-    }
-
-    /// `--pull` alone → pull=true, no_pull=false; still eager.
-    #[test]
-    fn parse_only_pull_is_eager() {
-        let update = parse(&["update", "--pull"]);
-        assert!(update.pull, "pull must be true with --pull");
-        assert!(!update.no_pull, "no_pull must be false with --pull only");
-        assert!(eager(&update), "eager must be true when --pull is the last flag");
-    }
-
-    /// `--no-pull` alone → pull=false, no_pull=true; lazy.
-    #[test]
-    fn parse_only_no_pull_is_lazy() {
-        let update = parse(&["update", "--no-pull"]);
-        assert!(!update.pull, "pull must be false with --no-pull only");
-        assert!(update.no_pull, "no_pull must be true with --no-pull");
-        assert!(!eager(&update), "eager must be false when --no-pull is set");
-    }
-
-    /// `--pull --no-pull` → POSIX last-wins: no_pull wins, pull=false; lazy.
-    #[test]
-    fn parse_pull_then_no_pull_no_pull_wins() {
-        let update = parse(&["update", "--pull", "--no-pull"]);
-        assert!(update.no_pull, "no_pull must be true when --no-pull follows --pull");
-        assert!(!update.pull, "pull must be false when --no-pull overrides it");
-        assert!(!eager(&update), "eager must be false when --no-pull wins");
-    }
-
-    /// `--no-pull --pull` → POSIX last-wins: pull wins, no_pull=false; eager.
-    #[test]
-    fn parse_no_pull_then_pull_pull_wins() {
-        let update = parse(&["update", "--no-pull", "--pull"]);
-        assert!(update.pull, "pull must be true when --pull follows --no-pull");
-        assert!(!update.no_pull, "no_pull must be false when --pull overrides it");
-        assert!(eager(&update), "eager must be true when --pull wins");
+    fn pull_flags_flatten_with_eager_default() {
+        assert!(parse(&["update"]).pull.enabled(true), "default must be eager");
+        assert!(!parse(&["update", "--no-pull"]).pull.enabled(true), "--no-pull must defer");
     }
 
     // ── Scoped surface: `-g` and positional names now parse ─────────────

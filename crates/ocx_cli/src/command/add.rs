@@ -46,21 +46,8 @@ pub struct Add {
     #[arg(long = "group", short = 'g', value_name = "GROUP")]
     pub group: Option<String>,
 
-    /// Materialize packages into the object store after writing the lock (default).
-    ///
-    /// `--pull` is the affirmative form of the default behavior; `--no-pull`
-    /// opts out. Both flags use POSIX last-wins semantics (`overrides_with`):
-    /// `--pull --no-pull` resolves to no-pull; `--no-pull --pull` resolves
-    /// to pull. Combining the flags is not an error - git `--[no-]verify`
-    /// idiom.
-    #[arg(long, overrides_with = "no_pull")]
-    pub pull: bool,
-
-    /// Write the lock without downloading. Materialization is deferred to
-    /// `ocx pull` or first `ocx run` / direnv hit. Useful for CI flows that
-    /// batch lock changes and materialize separately.
-    #[arg(long = "no-pull", overrides_with = "pull")]
-    pub no_pull: bool,
+    #[clap(flatten)]
+    pub pull: options::Pull,
 
     #[clap(flatten)]
     pub platforms: options::Platforms,
@@ -185,7 +172,7 @@ impl Add {
         //
         // `--no-pull` opts out: lock write happens regardless; only the
         // object-store materialization is deferred.
-        let eager = !self.no_pull;
+        let eager = self.pull.enabled(true);
         materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
 
         // Report the full resulting lock to the user, keyed on the requested
@@ -215,55 +202,18 @@ mod tests {
         Add::try_parse_from(args).unwrap()
     }
 
-    fn eager(add: &Add) -> bool {
-        !add.no_pull
-    }
-
     // ── cases ─────────────────────────────────────────────────────────────────
 
-    /// Neither `--pull` nor `--no-pull` → both fields false; default is eager.
+    /// `--pull`/`--no-pull` wire through the shared `options::Pull` flatten;
+    /// `add` defaults to eager. The full flag matrix is tested on the
+    /// flatten struct itself (`options/pull.rs`).
     #[test]
-    fn parse_no_flags_defaults_to_eager() {
-        let add = parse(&["add", "tool:1"]);
-        assert!(!add.pull, "pull must be false when neither flag is given");
-        assert!(!add.no_pull, "no_pull must be false when neither flag is given");
-        assert!(eager(&add), "default must be eager (eager = !no_pull)");
-    }
-
-    /// `--pull` alone → pull=true, no_pull=false; still eager.
-    #[test]
-    fn parse_only_pull_is_eager() {
-        let add = parse(&["add", "--pull", "tool:1"]);
-        assert!(add.pull, "pull must be true with --pull");
-        assert!(!add.no_pull, "no_pull must be false with --pull only");
-        assert!(eager(&add), "eager must be true when --pull is the last flag");
-    }
-
-    /// `--no-pull` alone → pull=false, no_pull=true; lazy.
-    #[test]
-    fn parse_only_no_pull_is_lazy() {
-        let add = parse(&["add", "--no-pull", "tool:1"]);
-        assert!(!add.pull, "pull must be false with --no-pull only");
-        assert!(add.no_pull, "no_pull must be true with --no-pull");
-        assert!(!eager(&add), "eager must be false when --no-pull is set");
-    }
-
-    /// `--pull --no-pull` → POSIX last-wins: no_pull wins, pull=false; lazy.
-    #[test]
-    fn parse_pull_then_no_pull_no_pull_wins() {
-        let add = parse(&["add", "--pull", "--no-pull", "tool:1"]);
-        assert!(add.no_pull, "no_pull must be true when --no-pull follows --pull");
-        assert!(!add.pull, "pull must be false when --no-pull overrides it");
-        assert!(!eager(&add), "eager must be false when --no-pull wins");
-    }
-
-    /// `--no-pull --pull` → POSIX last-wins: pull wins, no_pull=false; eager.
-    #[test]
-    fn parse_no_pull_then_pull_pull_wins() {
-        let add = parse(&["add", "--no-pull", "--pull", "tool:1"]);
-        assert!(add.pull, "pull must be true when --pull follows --no-pull");
-        assert!(!add.no_pull, "no_pull must be false when --pull overrides it");
-        assert!(eager(&add), "eager must be true when --pull wins");
+    fn pull_flags_flatten_with_eager_default() {
+        assert!(parse(&["add", "tool:1"]).pull.enabled(true), "default must be eager");
+        assert!(
+            !parse(&["add", "--no-pull", "tool:1"]).pull.enabled(true),
+            "--no-pull must defer"
+        );
     }
 
     /// A single positional still parses (back-compat with the pre-plural form).
