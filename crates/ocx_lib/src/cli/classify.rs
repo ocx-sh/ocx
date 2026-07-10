@@ -92,11 +92,13 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::layer_layout::LayerLayoutError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
+    use crate::package::dependency_pinning::DependencyPinningError;
     use crate::package::error::Error as PackageError;
+    use crate::package::metadata::authoring::AuthoringError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::patch::PatchError;
     use crate::project::error::Error as ProjectError;
-    use crate::publisher::LayerRefParseError;
+    use crate::publisher::{LayerRefParseError, PublishGateError};
     use crate::setup::error::Error as SetupError;
     use crate::utility::fs::path::PathEscapeError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
@@ -140,12 +142,15 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(CompressionError);
     try_downcast!(CiError);
     try_downcast!(PackageError);
+    try_downcast!(AuthoringError);
+    try_downcast!(DependencyPinningError);
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
     // Per-layer layout errors: publish-side layer-ref parse → UsageError (64);
     // read-side annotation resolution + containment checks → DataError (65).
     try_downcast!(LayerRefParseError);
+    try_downcast!(PublishGateError);
     try_downcast!(LayerLayoutError);
     try_downcast!(PathEscapeError);
 

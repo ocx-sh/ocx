@@ -463,12 +463,12 @@ def test_auto_installs_deps(
     declares ``lib`` as a dependency. Running ``package test`` on the root
     package must auto-install ``lib`` into ``$OCX_HOME/packages/``.
     """
-    from src.registry import fetch_manifest_digest
+    from src.registry import fetch_platform_manifest_digest
 
     lib_repo = f"{unique_repo}-lib"
     lib_pkg = make_package(ocx, lib_repo, "1.0.0", tmp_path, new=True)
 
-    lib_digest = fetch_manifest_digest(ocx.registry, lib_repo, "1.0.0")
+    lib_digest = fetch_platform_manifest_digest(ocx.registry, lib_repo, "1.0.0")
     dep_entry = {
         "identifier": f"{lib_pkg.fq}@{lib_digest}",
         "name": "mylib",

@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod authoring;
 pub mod bundle;
 pub mod dependency;
 pub mod entrypoint;

@@ -3,6 +3,7 @@
 
 pub mod bundle;
 pub mod cascade;
+pub mod dependency_pinning;
 pub mod description;
 pub mod error;
 pub mod info;

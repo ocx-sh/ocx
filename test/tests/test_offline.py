@@ -5,7 +5,7 @@ import pytest
 
 from src import OcxRunner, PackageInfo
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 
 # Basic offline find/exec behaviour (with and without cache purge) lives in
 # `test/scenarios/offline/*.sh`. This file covers offline assertions that
@@ -22,7 +22,7 @@ def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageIn
 
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None) -> dict:
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
     if visibility is not None:
         entry["visibility"] = visibility

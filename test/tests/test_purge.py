@@ -8,7 +8,7 @@ import pytest
 
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from tests.test_assembly import _make_two_packages_sharing_layer
 
 
@@ -22,7 +22,7 @@ def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageIn
 
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo) -> dict:
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     return {"identifier": f"{pkg.fq}@{digest}"}
 
 

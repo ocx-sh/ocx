@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::oci;
 
 use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
@@ -80,6 +81,38 @@ impl schemars::JsonSchema for DependencyName {
     }
 }
 
+/// Derives a dependency's default interpolation name from an OCI repository
+/// basename (the last path segment, [`crate::oci::Identifier::name`]).
+///
+/// OCI repository grammar is a strict superset of the slug grammar
+/// (`^[a-z0-9][a-z0-9_-]*$`, see [`SLUG_PATTERN`]): it also permits `.`
+/// (e.g. a repository named `open.jdk`), which the slug pattern rejects.
+/// Disallowed characters are mapped to `-` and the result is truncated to
+/// [`SLUG_MAX_LEN`]. If the sanitized basename still cannot form a valid
+/// [`DependencyName`] (empty, or a leading character the slug pattern
+/// disallows), falls back to the fixed default `"dep"`.
+///
+/// Infallible by design — callers deriving a *default* name never need to
+/// propagate a name-derivation error; an explicit `name` field remains the
+/// escape hatch for publishers who want a specific interpolation name.
+pub(crate) fn default_dependency_name(basename: &str) -> DependencyName {
+    let mut sanitized: String = basename
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    sanitized.truncate(SLUG_MAX_LEN);
+    DependencyName::try_from(sanitized).unwrap_or_else(|_| {
+        DependencyName::try_from("dep").expect("'dep' satisfies the slug pattern (compile-time constant literal)")
+    })
+}
+
 /// A pinned dependency descriptor.
 ///
 /// The digest references either an OCI Image Index (for platform-aware
@@ -109,17 +142,16 @@ pub struct Dependency {
 impl Dependency {
     /// Returns the interpolation name for this dependency.
     ///
-    /// Returns the explicit `name` when set; otherwise the last path segment of the OCI
-    /// repository (e.g. `"cmake"` for `"myorg/cmake"`).
+    /// Returns the explicit `name` when set; otherwise a slugified form of the last path
+    /// segment of the OCI repository (e.g. `"cmake"` for `"myorg/cmake"`, `"open-jdk"` for
+    /// `"myorg/open.jdk"`). OCI repository grammar permits characters (notably `.`) the slug
+    /// grammar does not, so the basename is sanitized via [`default_dependency_name`] rather
+    /// than asserted — this never panics.
     pub fn name(&self) -> DependencyName {
         if let Some(n) = &self.name {
             return n.clone();
         }
-        let basename = self.identifier.name();
-        // SAFETY-invariant: OCI repository basenames are already guaranteed by the OCI
-        // identifier parser to be lowercase alphanumeric with dashes/underscores — they
-        // satisfy the slug pattern by construction.
-        DependencyName::try_from(basename).expect("repository basename is a valid slug")
+        default_dependency_name(self.identifier.name())
     }
 }
 
@@ -216,6 +248,29 @@ pub enum DependencyError {
     /// Two dependencies share the same explicit name.
     #[error("duplicate dependency name '{name}'")]
     DuplicateName { name: String },
+    /// Two dependencies share the same `(registry, repository)` pair.
+    ///
+    /// Authoring-form counterpart of [`DependencyError::DuplicateIdentifier`]:
+    /// an authoring duplicate may be digest-less, so it cannot carry a
+    /// [`oci::PinnedIdentifier`].
+    #[error("duplicate dependency repository '{repository}'")]
+    DuplicateRepository { repository: String },
+    /// The dependency count exceeds the maximum allowed.
+    ///
+    /// Bounds push-time network fan-out: `ocx package push`'s pre-push gate
+    /// (`verify_dependency_pins`) issues one authenticated registry GET per
+    /// unique dependency pin, driven by an externally-editable sidecar. An
+    /// unbounded dependency list is an SSRF/DoS vector for a maliciously (or
+    /// accidentally) edited sidecar sweeping internal hosts/ports.
+    #[error("too many dependencies: {count} exceeds the maximum of {max}")]
+    TooManyDependencies { count: usize, max: usize },
+}
+
+impl ClassifyExitCode for DependencyError {
+    fn classify(&self) -> Option<ExitCode> {
+        // Every variant is malformed/oversized input data: DataError (65).
+        Some(ExitCode::DataError)
+    }
 }
 
 impl schemars::JsonSchema for Dependencies {
@@ -527,6 +582,17 @@ mod tests {
     fn name_returns_single_segment_repo_basename() {
         let dep = make_dep("python", None);
         assert_eq!(dep.name().as_str(), "python");
+    }
+
+    // ── H3: name() must not panic on OCI-legal but slug-illegal basenames ─────
+
+    #[test]
+    fn name_derives_valid_slug_from_dotted_repository_basename() {
+        // "open.jdk" is a legal OCI repository name (`.` is an allowed
+        // segment byte) but fails the DependencyName slug regex. `name()`
+        // must sanitize, not panic.
+        let dep = make_dep("open.jdk", None);
+        assert_eq!(dep.name().as_str(), "open-jdk");
     }
 
     #[test]

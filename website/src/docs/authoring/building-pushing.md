@@ -7,7 +7,7 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 
 ## The First Push {#first-push}
 
-[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest in the order you give. `--platform` is required for every push: a single-platform push lands a single manifest under the tag. To attach more platforms to the same tag, push them one at a time — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index].
+[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest in the order you give. `--platform` selects which platform this push publishes; passing a concrete platform is required unless the metadata sidecar already carries a target-platform set (written by [`ocx package create --platform any`][cmd-package-create] — see [Resolving Dependency Pins][dependency-pins] below), in which case omitting `--platform` fans out to every platform in that set. The hand-driven flow below publishes one platform at a time — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across pushes.
 
 ```sh
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
@@ -29,6 +29,32 @@ Before pushing, verify the package works locally with [`ocx package test`][autho
 ::: warning Zero-layer pushes need explicit `--metadata`
 A push with zero file layers is valid: it produces a config-only OCI artefact (the same shape OCX uses internally for the `__ocx.desc` description tag written by [`ocx package describe`][cmd-package-describe]). With no file layer next to which to look for `<stem>-metadata.json`, `--metadata` is mandatory — the same rule applies whenever every layer is a `sha256:…` digest reference.
 :::
+
+## Resolving Dependency Pins {#dependency-pins}
+
+A package that [declares dependencies][authoring-dependencies] needs each one pinned to a manifest digest before [`ocx package push`][cmd-package-push] will publish it — an unpinned dependency is rejected (exit 65). Writing that digest by hand does not scale past one dependency, and pinning the wrong kind of digest breaks silently later: it is tempting to pin a dependency's [OCI Image Index][oci-image-index] digest so a single identifier could resolve per-platform at install time, but a tag's index is rewritten on every platform push — the old index digest becomes untagged and the registry eventually garbage-collects it, so an index-pinned dependency 404s the moment that happens. See [Manifest Pins, Never Index Pins][reference-manifest-pins] for the full hazard.
+
+[`ocx package create`][cmd-package-create] is the compiler for this problem. Write each dependency tag-only in the `metadata.json` sidecar, then resolve with `--platform`:
+
+```sh
+ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
+```
+
+`create` resolves every unpinned dependency against the selected index and rewrites the sidecar in place with the resolved manifest pin — the rewritten file, not the one you hand-wrote, is what you push. Index selection follows the same [`--remote`][arg-remote] / [`--offline`][arg-offline] / [`--frozen`][arg-frozen] routing as every other resolution: the default checks the local index first and fetches on a miss; `--offline`/`--frozen` refuse to resolve a dependency tag that is not already cached (exit 81); a dependency tag absent from the selected index entirely fails with exit 79.
+
+[`ocx package push`][cmd-package-push] then makes no resolution decisions of its own — it is a gate. It reads the sidecar `create` wrote, verifies every dependency carries a manifest pin covering the platform(s) being published, and verifies each unique pin actually resolves in its registry:
+
+| Failure | Exit code | Meaning |
+|---|---|---|
+| Dependency still tag-only | 65 | Re-run `ocx package create --platform` to pin it. |
+| Pin map missing a fan-out platform | 65 | The dependency has no pin covering one of the platforms being published. |
+| Pin resolves to an image index | 65 | The dependency was pinned by hand against an index digest — re-run `create`. |
+| Pinned manifest not found in the registry | 79 | The dependency's manifest was deleted, or the digest is wrong. |
+| Registry authentication failed | 80 | Refresh credentials for the dependency's registry. |
+
+A package with no dependencies, or one whose sidecar is already fully pinned, skips all of this — `create` does not touch the network when `--platform` is omitted and every dependency already carries a digest.
+
+When a dependency itself ships platform-specific builds and you build with `--platform any`, `create` writes a per-dependency pin map instead of a single digest, and narrows your own package's target-platform set to whatever every dependency covers. See [Multi-Platform Packages][authoring-multi-platform].
 
 ## Cascading Rolling Tags {#cascade}
 
@@ -67,6 +93,7 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 - [`ocx package push` reference][cmd-package-push]
 - [Versioning in depth — cascades][in-depth-versioning-cascades]
 - [Storage in depth — layers][in-depth-storage-layers]
+- [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
 - [Multi-platform packages][authoring-multi-platform]
 - [Bundle anatomy][authoring-bundle-anatomy]
 
@@ -78,6 +105,15 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-describe]: ../reference/command-line.md#package-describe
+[arg-remote]: ../reference/command-line.md#arg-remote
+[arg-offline]: ../reference/command-line.md#arg-offline
+[arg-frozen]: ../reference/command-line.md#arg-frozen
+
+<!-- reference -->
+[reference-manifest-pins]: ../reference/metadata.md#dependencies-manifest-pins
+
+<!-- in-page -->
+[dependency-pins]: #dependency-pins
 
 <!-- in-depth -->
 [in-depth-storage-layers]: ../in-depth/storage.md#layers
@@ -86,5 +122,6 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 <!-- authoring -->
 [authoring-bundle-anatomy]: ./bundle-anatomy.md
 [authoring-bundle-anatomy-stable]: ./bundle-anatomy.md#stable
+[authoring-dependencies]: ./dependencies.md
 [authoring-multi-platform]: ./multi-platform.md
 [authoring-testing]: ./testing.md

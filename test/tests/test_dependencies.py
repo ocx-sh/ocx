@@ -8,7 +8,7 @@ import pytest
 
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package, make_package_with_entrypoints
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); ocx maps clap errors here
@@ -49,7 +49,7 @@ def _push_with_deps(
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None) -> dict:
     """Build a dependency descriptor from a published PackageInfo."""
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
     if visibility is not None:
         entry["visibility"] = visibility
@@ -232,16 +232,44 @@ def test_diamond_dep_deduplicates(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
 
 def test_install_with_missing_dep_reports_error(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """Installing a package whose dependency doesn't exist should fail with a clear error."""
+    """Installing a package whose dependency doesn't exist should fail with a clear error.
+
+    The push gate refuses to publish a dangling dep pin, so the broken package
+    is published via raw registry HTTP — mirroring a dep that was GC'd or
+    deleted AFTER a legitimate publish.
+    """
+    import io
+    import tarfile
+
+    from src.registry import push_raw_package
+    from src.runner import current_platform
+
     app_repo = f"{unique_repo}_app"
 
     # Build a dep entry referencing a non-existent package (fabricated digest)
     fake_fq = f"{ocx.registry}/{unique_repo}_ghost:1.0.0"
     fake_digest = "sha256:" + "a" * 64
-    bad_dep = {"identifier": f"{fake_fq}@{fake_digest}"}
-    app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[bad_dep])
 
-    result = ocx.run("package", "install", app.short, check=False)
+    layer_buffer = io.BytesIO()
+    with tarfile.open(fileobj=layer_buffer, mode="w:xz") as tar:
+        body = b"#!/bin/sh\necho app\n"
+        info = tarfile.TarInfo(name="bin/app")
+        info.size = len(body)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(body))
+    metadata = {
+        "type": "bundle",
+        "version": 1,
+        "dependencies": [{"identifier": f"{fake_fq}@{fake_digest}"}],
+    }
+    os_name, arch = current_platform().split("/")
+    push_raw_package(
+        ocx.registry, app_repo, "1.0.0", metadata, layer_buffer.getvalue(),
+        platform=(os_name, arch),
+    )
+    ocx.plain("index", "update", f"{app_repo}:1.0.0")
+
+    result = ocx.run("package", "install", f"{app_repo}:1.0.0", check=False)
     assert result.returncode != 0, "expected non-zero exit for missing dependency"
 
     stderr = result.stderr.lower()
@@ -1481,7 +1509,7 @@ def test_public_dep_entrypoints_appear_in_consumer_path(
         file_prefix="b",
     )
 
-    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_digest = fetch_platform_manifest_digest(ocx.registry, b_repo, "1.0.0")
     dep_entry = {
         "identifier": f"{pkg_b.fq}@{dep_digest}",
         "visibility": "public",
@@ -1518,7 +1546,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
         file_prefix="b",
     )
 
-    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_digest = fetch_platform_manifest_digest(ocx.registry, b_repo, "1.0.0")
     dep_entry = {
         "identifier": f"{pkg_b.fq}@{dep_digest}",
         "visibility": "sealed",

@@ -65,6 +65,42 @@ def fetch_manifest_digest(registry: str, repo: str, tag: str) -> str:
     raise RuntimeError(f"Could not fetch manifest digest for {registry}/{repo}:{tag}")
 
 
+def fetch_platform_manifest_digest(
+    registry: str, repo: str, tag: str, *, platform: str | None = None
+) -> str:
+    """Fetch the digest of a tag's platform MANIFEST (never the image index).
+
+    Dependency metadata must pin platform manifest digests: a tag's image
+    index is rewritten on every platform push and its old digest is
+    garbage-collected (adr_dependency_manifest_pinning.md), so an index digest
+    is not a durable pin. This helper resolves the tag and returns:
+
+    - a flat image manifest's own digest, or
+    - the single child's digest for a single-entry index, or
+    - the child matching ``platform`` (``"os/arch"`` or ``"any"``) for a
+      multi-entry index.
+    """
+    manifest = fetch_manifest_from_registry(registry, repo, tag)
+    media_type = manifest.get("mediaType", "")
+    if "image.manifest" in media_type:
+        return fetch_manifest_digest(registry, repo, tag)
+
+    entries = manifest.get("manifests", [])
+    if platform is None:
+        assert len(entries) == 1, (
+            f"{registry}/{repo}:{tag} index has {len(entries)} children; "
+            "pass platform= to select one"
+        )
+        return entries[0]["digest"]
+
+    for entry in entries:
+        plat = entry.get("platform") or {}
+        key = f"{plat.get('os')}/{plat.get('architecture')}"
+        if key == platform or (platform == "any" and plat.get("os") in (None, "any")):
+            return entry["digest"]
+    raise RuntimeError(f"no child for platform {platform} in {registry}/{repo}:{tag}")
+
+
 def index_platforms(manifest: dict[str, Any]) -> set[str]:
     """Extract the set of 'os/architecture' strings from an OCI image index."""
     platforms: set[str] = set()
@@ -101,6 +137,92 @@ def index_platforms_with_features(manifest: dict[str, Any]) -> list[dict[str, An
                 "os.features": plat.get("os.features"),
             })
     return result
+
+
+def push_raw_package(
+    registry: str,
+    repo: str,
+    tag: str,
+    metadata: dict[str, Any],
+    layer_tar_xz: bytes,
+    *,
+    platform: tuple[str, str],
+) -> str:
+    """Pushes an ocx PACKAGE directly via the registry HTTP API.
+
+    Mirrors the `ocx package push` wire shape — image index with a platform
+    entry -> image manifest (config blob = metadata JSON) -> tar+xz layer —
+    WITHOUT invoking ocx, so tests can publish legacy shapes the push gate
+    now rejects (e.g. index-pinned dependencies) and assert the read path
+    stays backward compatible.
+
+    Returns the pushed image index digest.
+    """
+    import json
+
+    import requests
+
+    layer_digest = _push_blob(registry, repo, layer_tar_xz)
+    config_bytes = json.dumps(metadata).encode()
+    config_digest = _push_blob(registry, repo, config_bytes)
+
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/vnd.sh.ocx.package.v1",
+        "config": {
+            "mediaType": "application/vnd.sh.ocx.package.v1+json",
+            "digest": config_digest,
+            "size": len(config_bytes),
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+xz",
+                "digest": layer_digest,
+                "size": len(layer_tar_xz),
+            }
+        ],
+    }
+    manifest_body = json.dumps(manifest).encode()
+    manifest_digest = _sha256_digest(manifest_body)
+    requests.put(
+        f"http://{registry}/v2/{repo}/manifests/{manifest_digest}",
+        data=manifest_body,
+        headers={"Content-Type": "application/vnd.oci.image.manifest.v1+json"},
+        timeout=10,
+    ).raise_for_status()
+
+    index = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "artifactType": "application/vnd.sh.ocx.package.v1",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": manifest_digest,
+                "size": len(manifest_body),
+                "platform": {"os": platform[0], "architecture": platform[1]},
+            }
+        ],
+    }
+    index_body = json.dumps(index).encode()
+    response = requests.put(
+        f"http://{registry}/v2/{repo}/manifests/{tag}",
+        data=index_body,
+        headers={"Content-Type": "application/vnd.oci.image.index.v1+json"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.headers.get("Docker-Content-Digest") or _sha256_digest(index_body)
+
+
+def fetch_blob(registry: str, repo: str, digest: str) -> bytes:
+    """Fetch a raw blob (e.g. a package config blob) from the registry."""
+    import urllib.request
+
+    url = f"http://{registry}/v2/{repo}/blobs/{digest}"
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        return resp.read()
 
 
 # ---------------------------------------------------------------------------

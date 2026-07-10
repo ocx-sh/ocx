@@ -9,8 +9,10 @@
 //! which handles local-store operations.
 
 mod layer_ref;
+pub mod publish_gate;
 
 pub use layer_ref::{ArchiveMediaType, LayerRef, LayerRefParseError};
+pub use publish_gate::{PublishGateError, verify_dependency_pins};
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -36,11 +38,15 @@ pub struct Publisher {
 /// Surfaced so callers (notably the `ocx package push` command) can emit a
 /// structured report; `ocx-mirror pipeline push` parses this report to record
 /// the cascade tags written and to distinguish a real publish from a no-op.
+#[derive(Debug)]
 pub struct PushOutcome {
-    /// Digest of the pushed multi-platform image index.
+    /// Digest of the pushed multi-platform image index. For a multi-platform
+    /// fan-out this is the primary tag's index digest after the LAST platform
+    /// merge — the final state of the tag.
     pub manifest_digest: oci::Digest,
     /// Rolling cascade tags written in addition to the primary version tag
-    /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push.
+    /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push. For a
+    /// multi-platform fan-out this is the ordered union across platforms.
     pub cascade_tags: Vec<String>,
 }
 
@@ -61,48 +67,77 @@ impl Publisher {
         self.client.ensure_auth(identifier, oci::RegistryOperation::Push).await
     }
 
-    /// Push a package with one or more layers to the registry.
+    /// Push a package — one [`Info`] per target platform — with one or more
+    /// layers to the registry.
     ///
     /// Each `LayerRef::File` is uploaded as a new blob. Each `LayerRef::Digest`
     /// is verified to exist via HEAD. The manifest contains one descriptor per
-    /// layer in the order provided.
+    /// layer in the order provided. Platforms are pushed **sequentially**:
+    /// the per-tag index merge is a read-modify-write, so concurrent merges
+    /// would race.
     ///
-    /// When `build_meta` is `Some`, the identifier's tag is parsed as a
-    /// [`Version`] and the build segment is attached before push. Errors if
-    /// the tag does not parse, lacks `X.Y.Z` form, or already carries build
-    /// metadata.
-    pub async fn push(&self, info: Info, layers: &[LayerRef], build_meta: Option<&str>) -> Result<PushOutcome> {
-        let info = apply_build_meta(info, build_meta)?;
-        log::info!("pushing package with identifier {}", info.identifier);
-        let (manifest_digest, _manifest) = self.client.push_package(info, layers).await?;
+    /// When `build_meta` is `Some`, each identifier's tag is parsed as a
+    /// [`Version`] and the build segment is attached before push (the infos
+    /// share one identifier by construction, so every platform lands on the
+    /// same tag). Errors if the tag does not parse, lacks `X.Y.Z` form, or
+    /// already carries build metadata.
+    pub async fn push(&self, infos: Vec<Info>, layers: &[LayerRef], build_meta: Option<&str>) -> Result<PushOutcome> {
+        let infos = apply_build_meta_all(infos, build_meta)?;
+        let mut manifest_digest: Option<oci::Digest> = None;
+        for info in infos {
+            log::info!(
+                "pushing package with identifier {} (platform {})",
+                info.identifier,
+                info.platform
+            );
+            let (digest, _manifest) = self.client.push_package(info, layers).await?;
+            manifest_digest = Some(digest);
+        }
         Ok(PushOutcome {
-            manifest_digest,
+            manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags: Vec::new(),
         })
     }
 
-    /// Push a package with cascade tag management.
+    /// Push a package — one [`Info`] per target platform — with cascade tag
+    /// management.
     ///
     /// `existing_versions` is the set of versions already in the registry,
-    /// used to compute which rolling tags this push should update. The same
-    /// `build_meta` semantics as [`Self::push`] apply; cascade derived tags
-    /// always operate on the version core regardless of build segment.
+    /// used to compute which rolling tags each platform's push should update
+    /// (cascade blocker checks are platform-aware). The same `build_meta`
+    /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
+    /// ordered union across platforms.
     pub async fn push_cascade(
         &self,
-        info: Info,
+        infos: Vec<Info>,
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
     ) -> Result<PushOutcome> {
-        let info = apply_build_meta(info, build_meta)?;
-        log::info!("pushing package with identifier {} (cascade)", info.identifier);
-        let version = Version::parse(info.identifier.tag_or_latest())
-            .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
-
-        let (manifest_digest, cascade_tags) =
-            package::cascade::push_with_cascade(&self.client, info, layers, existing_versions, &version).await?;
+        let infos = apply_build_meta_all(infos, build_meta)?;
+        let mut manifest_digest: Option<oci::Digest> = None;
+        let mut cascade_tags: Vec<String> = Vec::new();
+        for info in infos {
+            log::info!(
+                "pushing package with identifier {} (cascade, platform {})",
+                info.identifier,
+                info.platform
+            );
+            let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
+                crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string())
+            })?;
+            let (digest, tags) =
+                package::cascade::push_with_cascade(&self.client, info, layers, existing_versions.clone(), &version)
+                    .await?;
+            manifest_digest = Some(digest);
+            for tag in tags {
+                if !cascade_tags.contains(&tag) {
+                    cascade_tags.push(tag);
+                }
+            }
+        }
         Ok(PushOutcome {
-            manifest_digest,
+            manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags,
         })
     }
@@ -134,6 +169,18 @@ impl Publisher {
     pub fn parse_versions(tags: &[String]) -> BTreeSet<Version> {
         tags.iter().filter_map(|t| Version::parse(t)).collect()
     }
+}
+
+/// Apply [`apply_build_meta`] to every [`Info`] of a fan-out set.
+///
+/// The infos share one identifier (only metadata + platform differ), and the
+/// build segment is a fixed string computed once by the caller — every
+/// platform therefore lands on the same tag.
+fn apply_build_meta_all(infos: Vec<Info>, build_meta: Option<&str>) -> Result<Vec<Info>> {
+    infos
+        .into_iter()
+        .map(|info| apply_build_meta(info, build_meta))
+        .collect()
 }
 
 /// If `build_meta` is `Some`, parse the identifier's tag, attach the build
@@ -216,5 +263,71 @@ mod tests {
         let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject X.Y tag");
         let msg = err.to_string();
         assert!(msg.contains("X.Y.Z"), "unexpected error: {msg}");
+    }
+
+    // ── Multi-platform fan-out — adr_dependency_manifest_pinning.md ──────
+
+    #[test]
+    fn build_meta_all_lands_every_platform_on_the_same_tag() {
+        let mut mac = test_info("0.3.0");
+        mac.platform = "darwin/arm64".parse().expect("platform parses");
+        let infos =
+            apply_build_meta_all(vec![test_info("0.3.0"), mac], Some("20260514120000")).expect("attach succeeds");
+        let tags: Vec<_> = infos.iter().map(|info| info.identifier.tag_or_latest()).collect();
+        assert_eq!(tags, vec!["0.3.0_20260514120000", "0.3.0_20260514120000"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_fan_out_set_is_an_error() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(
+            StubTransportData::new(),
+        ))));
+        let err = publisher.push(Vec::new(), &[], None).await.expect_err("empty set");
+        assert!(err.to_string().contains("at least one target platform"), "got: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fan_out_merges_every_platform_into_the_primary_index() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        let mut mac = test_info("1.0.0");
+        mac.platform = "darwin/arm64".parse().expect("platform parses");
+        let outcome = publisher
+            .push(vec![test_info("1.0.0"), mac], &[], None)
+            .await
+            .expect("fan-out push succeeds");
+
+        // The captured primary-tag index must carry BOTH platform entries —
+        // the second (sequential) merge read the first platform back and
+        // appended, never clobbered.
+        let inner = data.read();
+        let (index_bytes, digest) = inner
+            .manifests
+            .get("ocx.sh/ocx:1.0.0")
+            .expect("primary tag index captured");
+        let index: serde_json::Value = serde_json::from_slice(index_bytes).expect("index parses");
+        let platforms: Vec<String> = index["manifests"]
+            .as_array()
+            .expect("manifests array")
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}/{}",
+                    entry["platform"]["os"].as_str().unwrap_or("?"),
+                    entry["platform"]["architecture"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        assert_eq!(platforms, vec!["linux/amd64", "darwin/arm64"]);
+        assert_eq!(
+            outcome.manifest_digest.to_string(),
+            *digest,
+            "outcome digest must be the final (last-merge) index digest"
+        );
     }
 }

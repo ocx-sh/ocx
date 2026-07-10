@@ -33,7 +33,7 @@ from uuid import uuid4
 import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 # The global descriptor lives at a FIXED, registry-wide repository
@@ -130,7 +130,7 @@ def _unique_repo(label: str) -> str:
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str) -> dict:
     """Build a dependency descriptor for `make_package(dependencies=...)`."""
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     return {"identifier": f"{pkg.fq}@{digest}", "visibility": visibility}
 
 

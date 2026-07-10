@@ -28,6 +28,10 @@ pub enum Error {
     #[error("required path does not exist: {}", .0.display())]
     RequiredPathMissing(PathBuf),
 
+    /// A push was invoked with an empty platform set.
+    #[error("push requires at least one target platform")]
+    EmptyPushSet,
+
     /// Env var template interpolation failed.
     #[error("env var '{var_key}' {source}")]
     EnvVarInterpolation {
@@ -49,7 +53,9 @@ pub enum Error {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) => Some(ExitCode::DataError),
+            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) | Self::EmptyPushSet => {
+                Some(ExitCode::DataError)
+            }
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointArgInterpolation { source, .. } => source.classify(),

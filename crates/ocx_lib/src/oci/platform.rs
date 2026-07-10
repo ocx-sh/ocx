@@ -442,6 +442,94 @@ impl Platform {
         }
     }
 
+    /// Reconstructs a [`Platform`] from a [`lock_key`](Self::lock_key) string.
+    ///
+    /// It is an exact inverse for every platform whose base is
+    /// `os/arch[/variant[/os_version]]` filled left-to-right (the shape every
+    /// real index candidate and every `--platform any` map key carries). It
+    /// shares one pre-existing positional ambiguity with
+    /// [`FromStr`](std::str::FromStr): a `Specific` with `variant: None` but
+    /// `os_version: Some(_)` encodes to a 3-segment base identical to one with
+    /// `variant: Some(_)` and no `os_version`, so it reconstructs the value into
+    /// the `variant` slot. That shape does not occur in the dependency-pinning
+    /// path, and the sole caller only reads the result back through
+    /// `lock_key`/`base_lock_key` string matching (blind to which slot holds the
+    /// value). See `from_lock_key_positional_ambiguity_for_os_version_without_variant`.
+    ///
+    /// `"any"` maps to [`Platform::Any`]. Otherwise the encoding is
+    /// `os/arch[/variant[/os_version]][;osf=feat,...][;feat=feat,...]`: the
+    /// `;osf=` and `;feat=` marker suffixes are peeled off (their values escape
+    /// `;` as `%3B`, so the literal markers are unambiguous separators), the
+    /// base is split on unescaped `/` into positional `os`/`arch`/`variant`/
+    /// `os_version` segments, and every base segment and feature value is
+    /// percent-unescaped — the reverse of [`escape_feature_component`]. `os`
+    /// and `arch` are parsed through the same [`OperatingSystem`] /
+    /// [`Architecture`] parsers as [`FromStr`](std::str::FromStr).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] with [`PlatformErrorKind::InvalidFormat`] for a
+    /// malformed structure or escape, and the OS/architecture parser's error
+    /// kind for an unsupported `os`/`arch`.
+    pub fn from_lock_key(key: &str) -> std::result::Result<Self, PlatformError> {
+        let invalid = || PlatformError {
+            input: key.to_string(),
+            kind: PlatformErrorKind::InvalidFormat,
+        };
+
+        if key == ANY_STR {
+            return Ok(Self::Any);
+        }
+
+        // Peel `;feat=` first (the trailing marker), then `;osf=`. Marker values
+        // escape `;` (`%3B`) and `=` (`%3D`), so `split_once` on the literal
+        // marker text can only land on a genuine marker.
+        let (without_features, features) = match key.split_once(";feat=") {
+            Some((head, joined)) => (head, Some(split_marker_values(joined).ok_or_else(invalid)?)),
+            None => (key, None),
+        };
+        let (base, os_features) = match without_features.split_once(";osf=") {
+            Some((base, joined)) => (base, split_marker_values(joined).ok_or_else(invalid)?),
+            None => (without_features, Vec::new()),
+        };
+
+        // Base segments are `/`-separated; any `/` inside a `variant`/`os_version`
+        // value was escaped to `%2F`, so a literal `/` is always a separator.
+        let parts: Vec<&str> = base.split('/').collect();
+        if parts.len() < 2 || parts.len() > 4 {
+            return Err(invalid());
+        }
+
+        let os_str = unescape_feature_component(parts[0]).ok_or_else(invalid)?;
+        let arch_str = unescape_feature_component(parts[1]).ok_or_else(invalid)?;
+        let os: OperatingSystem = os_str.parse().map_err(|kind| PlatformError {
+            input: key.to_string(),
+            kind,
+        })?;
+        let arch: Architecture = arch_str.parse().map_err(|kind| PlatformError {
+            input: key.to_string(),
+            kind,
+        })?;
+
+        let variant = match parts.get(2) {
+            Some(segment) => Some(unescape_feature_component(segment).ok_or_else(invalid)?),
+            None => None,
+        };
+        let os_version = match parts.get(3) {
+            Some(segment) => Some(unescape_feature_component(segment).ok_or_else(invalid)?),
+            None => None,
+        };
+
+        Ok(Self::Specific {
+            os,
+            arch,
+            variant,
+            os_version,
+            os_features,
+            features,
+        })
+    }
+
     /// Returns the default supported-platform list for the current host.
     ///
     /// The list always contains at most two entries:
@@ -582,6 +670,45 @@ fn escape_feature_component(value: &str) -> String {
         }
     }
     out
+}
+
+/// Reverses [`escape_feature_component`]: decodes the five percent-escapes it
+/// emits (`%25 %2F %2C %3B %3D`) back to their literal bytes and passes every
+/// other character through verbatim.
+///
+/// Returns `None` on a malformed escape (`%` not followed by one of the five
+/// known two-character codes) — the input is not a value this codec produced.
+fn unescape_feature_component(value: &str) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let decoded = match (chars.next(), chars.next()) {
+                (Some('2'), Some('5')) => '%',
+                (Some('2'), Some('F')) => '/',
+                (Some('2'), Some('C')) => ',',
+                (Some('3'), Some('B')) => ';',
+                (Some('3'), Some('D')) => '=',
+                _ => return None,
+            };
+            out.push(decoded);
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
+/// Splits a `;osf=` / `;feat=` marker's joined value on unescaped `,` and
+/// unescapes each component — the inverse of [`join_feature_values`].
+///
+/// An empty joined string yields an empty vector (the marker carried no
+/// values). Returns `None` when any component fails to unescape.
+fn split_marker_values(joined: &str) -> Option<Vec<String>> {
+    if joined.is_empty() {
+        return Some(Vec::new());
+    }
+    joined.split(',').map(unescape_feature_component).collect()
 }
 
 impl std::fmt::Display for Platform {
@@ -1505,6 +1632,99 @@ mod tests {
             platforms.len(),
             "every distinct platform must get a distinct key"
         );
+    }
+
+    // --- from_lock_key (exact inverse of lock_key) ---
+
+    /// `from_lock_key` is the exact inverse of `lock_key` in both directions:
+    /// `from_lock_key(p.lock_key()) == p` (value round-trip) AND
+    /// `from_lock_key(k).lock_key() == k` (key round-trip). Covers every
+    /// supported platform plus crafted feature-bearing platforms whose
+    /// `variant`/`os_version`/feature values carry the escaped structural
+    /// characters `;`, `,`, and `/`.
+    #[test]
+    fn from_lock_key_is_exact_inverse_of_lock_key() {
+        let linux = |variant: Option<&str>,
+                     os_version: Option<&str>,
+                     os_features: Vec<&str>,
+                     features: Option<Vec<&str>>| Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: variant.map(str::to_string),
+            os_version: os_version.map(str::to_string),
+            os_features: os_features.into_iter().map(str::to_string).collect(),
+            features: features.map(|values| values.into_iter().map(str::to_string).collect()),
+        };
+
+        let mut cases = Platform::all_supported();
+        cases.extend([
+            // Single + multiple os.features.
+            linux(None, None, vec!["libc.glibc"], None),
+            linux(None, None, vec!["libc.glibc", "libc.musl"], None),
+            // Feature values carrying every escaped structural character.
+            linux(None, None, vec!["a;b", "c,d", "e/f"], None),
+            // Escaped `/` in variant and `;` in os_version (base-segment escapes).
+            linux(Some("v8/10"), Some("10;x"), vec![], None),
+            // CPU `features` with an escaped `,` in a value.
+            linux(None, None, vec![], Some(vec!["sse4", "a,b"])),
+            // All fields populated at once.
+            linux(
+                Some("v3"),
+                Some("10.0.14393"),
+                vec!["win32k"],
+                Some(vec!["sse4", "aes"]),
+            ),
+        ]);
+
+        for platform in &cases {
+            let key = platform.lock_key();
+            let parsed = Platform::from_lock_key(&key).expect("lock key round-trips");
+            assert_eq!(&parsed, platform, "value round-trip failed for key '{key}'");
+            assert_eq!(parsed.lock_key(), key, "key round-trip failed for '{key}'");
+        }
+    }
+
+    /// A malformed base structure is rejected as an invalid format rather than
+    /// silently producing a bogus platform.
+    #[test]
+    fn from_lock_key_rejects_malformed_input() {
+        assert!(Platform::from_lock_key("linux").is_err(), "single segment must fail");
+        assert!(
+            Platform::from_lock_key("linux/amd64/v8/10/extra").is_err(),
+            "too many base segments must fail"
+        );
+        assert!(
+            Platform::from_lock_key("linux/amd64;osf=%ZZ").is_err(),
+            "malformed percent-escape must fail"
+        );
+        assert!(
+            Platform::from_lock_key("nope/amd64").is_err(),
+            "unsupported os must fail"
+        );
+    }
+
+    #[test]
+    fn from_lock_key_positional_ambiguity_for_os_version_without_variant() {
+        // Documented limitation (shared with FromStr): the base is positional,
+        // so a `variant: None, os_version: Some(_)` platform round-trips into the
+        // `variant` slot. This shape never occurs in the dependency-pinning path;
+        // this test pins the KNOWN behavior so a future change is deliberate, not
+        // accidental.
+        let original = linux_amd64_with_os_version();
+        let key = original.lock_key();
+        assert_eq!(key, "linux/amd64/10.0.14393", "os_version fills base slot 3");
+        let reconstructed = Platform::from_lock_key(&key).expect("valid base parses");
+        let Platform::Specific {
+            variant, os_version, ..
+        } = &reconstructed
+        else {
+            panic!("expected Specific");
+        };
+        assert_eq!(variant.as_deref(), Some("10.0.14393"), "value lands in variant slot");
+        assert_eq!(os_version.as_deref(), None, "os_version slot stays empty");
+        // The value is preserved even though the slot differs, so lock_key (the
+        // only way the result is consumed) still round-trips string-for-string.
+        assert_eq!(reconstructed.lock_key(), key, "lock_key round-trips despite slot swap");
     }
 
     #[test]

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 # ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ def _dep_entry(
     ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None
 ) -> dict:
     """Build a dependency descriptor for `make_package(dependencies=...)`."""
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
     if visibility is not None:
         entry["visibility"] = visibility

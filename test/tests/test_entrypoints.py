@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -28,7 +28,7 @@ from src.runner import OcxRunner, PackageInfo
 
 def _dep_entry_ep(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str) -> dict:
     """Build a dependency descriptor with explicit visibility (no default fallback)."""
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     return {"identifier": f"{pkg.fq}@{digest}", "visibility": visibility}
 
 
@@ -533,7 +533,7 @@ def test_exec_dep_launcher_via_path(
         file_prefix="b",
     )
 
-    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_digest = fetch_platform_manifest_digest(ocx.registry, b_repo, "1.0.0")
     dep_entry = {
         "identifier": f"{pkg_b.fq}@{dep_digest}",
         "visibility": "public",
@@ -711,7 +711,7 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
     declarations and aborts. The aborted install must leave no candidate symlink
     behind for pkg_b — the collision is detected before the temp→final atomic move.
     """
-    from src.registry import fetch_manifest_digest  # noqa: PLC0415
+    from src.registry import fetch_platform_manifest_digest  # noqa: PLC0415
     from src.runner import registry_dir  # noqa: PLC0415
 
     repo_a = f"{unique_repo}-sa"
@@ -724,7 +724,7 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
         tag="1.0.0",
         file_prefix="a",
     )
-    dep_digest = fetch_manifest_digest(ocx.registry, repo_a, "1.0.0")
+    dep_digest = fetch_platform_manifest_digest(ocx.registry, repo_a, "1.0.0")
     dep_entry = {
         "identifier": f"{pkg_a.fq}@{dep_digest}",
         "visibility": "public",
@@ -774,7 +774,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
     across C and D and abort before the temp→final atomic move — i.e. before the
     root candidate symlink is written to disk.
     """
-    from src.registry import fetch_manifest_digest  # noqa: PLC0415
+    from src.registry import fetch_platform_manifest_digest  # noqa: PLC0415
     from src.runner import registry_dir  # noqa: PLC0415
 
     repo_c = f"{unique_repo}-tc"
@@ -791,7 +791,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         tag="1.0.0",
         file_prefix="c",
     )
-    c_digest = fetch_manifest_digest(ocx.registry, repo_c, "1.0.0")
+    c_digest = fetch_platform_manifest_digest(ocx.registry, repo_c, "1.0.0")
 
     # D — leaf with conflicting `cmake` entrypoint.
     pkg_d = make_package_with_entrypoints(
@@ -801,7 +801,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         tag="1.0.0",
         file_prefix="d",
     )
-    d_digest = fetch_manifest_digest(ocx.registry, repo_d, "1.0.0")
+    d_digest = fetch_platform_manifest_digest(ocx.registry, repo_d, "1.0.0")
 
     # A — intermediate, no entrypoint, depends publicly on C.
     c_dep_entry = {
@@ -812,7 +812,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         ocx, repo_a, "1.0.0", tmp_path,
         dependencies=[c_dep_entry],
     )
-    a_digest = fetch_manifest_digest(ocx.registry, repo_a, "1.0.0")
+    a_digest = fetch_platform_manifest_digest(ocx.registry, repo_a, "1.0.0")
 
     # B — intermediate, no entrypoint, depends publicly on D.
     d_dep_entry = {
@@ -823,7 +823,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         ocx, repo_b, "1.0.0", tmp_path,
         dependencies=[d_dep_entry],
     )
-    b_digest = fetch_manifest_digest(ocx.registry, repo_b, "1.0.0")
+    b_digest = fetch_platform_manifest_digest(ocx.registry, repo_b, "1.0.0")
 
     # root — depends publicly on A and B; no entrypoint of its own.
     a_dep_entry = {
@@ -1003,7 +1003,7 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
         tag="1.0.0",
         file_prefix="ec",
     )
-    c_digest = fetch_manifest_digest(ocx.registry, repo_c, "1.0.0")
+    c_digest = fetch_platform_manifest_digest(ocx.registry, repo_c, "1.0.0")
 
     # D — leaf with conflicting ``cmake`` entrypoint.
     pkg_d = make_package_with_entrypoints(
@@ -1013,17 +1013,17 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
         tag="1.0.0",
         file_prefix="ed",
     )
-    d_digest = fetch_manifest_digest(ocx.registry, repo_d, "1.0.0")
+    d_digest = fetch_platform_manifest_digest(ocx.registry, repo_d, "1.0.0")
 
     # A — depends on C with PRIVATE edge (C sealed from R's interface projection).
     c_dep_private = {"identifier": f"{pkg_c.fq}@{c_digest}", "visibility": "private"}
     pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, dependencies=[c_dep_private])
-    a_digest = fetch_manifest_digest(ocx.registry, repo_a, "1.0.0")
+    a_digest = fetch_platform_manifest_digest(ocx.registry, repo_a, "1.0.0")
 
     # B — depends on D with PUBLIC edge (D visible in R's interface projection).
     d_dep_public = {"identifier": f"{pkg_d.fq}@{d_digest}", "visibility": "public"}
     pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, dependencies=[d_dep_public])
-    b_digest = fetch_manifest_digest(ocx.registry, repo_b, "1.0.0")
+    b_digest = fetch_platform_manifest_digest(ocx.registry, repo_b, "1.0.0")
 
     # Root — depends on A and B both publicly.
     a_dep = {"identifier": f"{pkg_a.fq}@{a_digest}", "visibility": "public"}

@@ -112,10 +112,14 @@ impl PackageTest {
         // Step 2: Load metadata.
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
+        // Read the authoring sidecar (superset: create may have written
+        // per-platform pin maps) and project it for the tested platform —
+        // the same projection `ocx package push` publishes.
         let metadata = package::metadata::ValidMetadata::try_from(
-            package::metadata::Metadata::read_json(&metadata_path)
+            package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path)
                 .await
-                .with_context(|| format!("reading metadata from {}", metadata_path.display()))?,
+                .with_context(|| format!("reading metadata from {}", metadata_path.display()))?
+                .to_published(&self.platform)?,
         )?;
         let info = package::info::Info {
             identifier: identifier.clone(),

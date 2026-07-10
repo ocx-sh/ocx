@@ -2010,6 +2010,28 @@ Bundles a local directory into a compressed package archive ready for publishing
 metadata includes [dependencies][ug-dependencies], the declared dependency graph is
 validated for cycles at this stage — catching errors before the package reaches the registry.
 
+When `--metadata` is given, `create` is also the compiler for [dependency pins][reference-manifest-pins]:
+it validates the sidecar and always rewrites it, in canonical form, next to the output bundle — never a
+byte copy of the input file.
+
+- `--platform` omitted: every dependency in the sidecar must already carry a manifest digest (else
+  usage error, exit 64, hinting `--platform`); no network access.
+- `--platform <PLATFORM>` (a concrete platform): each dependency without a digest is resolved against
+  the selected index to the one manifest compatible with `<PLATFORM>`. Zero compatible candidates
+  fails with exit 65 (lists what is available); more than one is ambiguous (exit 65). The sidecar is
+  rewritten with the resolved pins and a target-platform set of `[<PLATFORM>]`.
+- `--platform any`: a dependency whose tag resolves to a single platform-agnostic manifest collapses
+  to a plain pin; a dependency that ships platform-specific manifests gets a per-dependency pin map
+  instead. The rewritten sidecar's target-platform set becomes the intersection of platforms covered
+  by every dependency (an empty intersection fails with exit 65). See [Multi-Platform Packages][authoring-multi-platform].
+
+Resolution honors [`--remote`][arg-remote], [`--offline`][arg-offline], and [`--frozen`][arg-frozen]
+exactly like every other tag resolution: the default checks the local index first and fetches on a
+miss; `--offline`/`--frozen` refuse to resolve a dependency tag not already cached (exit 81); a
+dependency tag absent from the selected index fails with exit 79. See
+[Resolving Dependency Pins][authoring-building-pushing-dependency-pins] for the full workflow and the
+[Dependencies reference][reference-dependencies] for the sidecar field shapes.
+
 **Usage**
 
 ```shell
@@ -2023,10 +2045,10 @@ ocx package create [OPTIONS] <PATH>
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
-- `-p`, `--platform <PLATFORM>`: Platform of the package, used to infer the output filename.
+- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content). Used to infer the output filename, and required whenever `--metadata` declares a dependency without a digest (see above).
 - `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
-- `-m`, `--metadata <PATH>`: Path to a metadata file to bundle with the package. When provided, it is copied as a sidecar file next to the output archive. If omitted, no metadata sidecar is written.
+- `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Dependencies without a digest are pinned to platform manifest digests (requires `--platform`, see above); the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
 - `-h`, `--help`: Print help information.
@@ -2066,12 +2088,22 @@ lockfile directly and ignores the index.
 
 #### `push` {#package-push}
 
-Publishes a package to the registry as zero or more layers. Each layer is uploaded as an OCI blob and recorded in a single image manifest, in the order given on the command line. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`.
+Publishes a package to the registry as zero or more layers. Each layer is uploaded as an OCI blob and recorded in one image manifest per target platform, in the order given on the command line — the same layers back every platform published in one invocation. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`.
+
+`push` makes no dependency-resolution decisions — it is a gate. If the metadata sidecar declares [dependencies][ug-dependencies], every one of them must already carry a manifest digest pin covering every platform this invocation publishes ([`ocx package create`][cmd-package-create] is what resolves them; see [Resolving Dependency Pins][authoring-building-pushing-dependency-pins]). `push` fails before uploading anything if:
+
+| Condition | Exit code |
+|---|---|
+| A dependency has no digest and no pin map | 65 |
+| A dependency's pin map has no entry covering a platform being published | 65 |
+| A dependency's pin resolves to an OCI Image Index instead of a manifest | 65 |
+| A dependency's pinned manifest does not exist in its registry | 79 |
+| Authentication to a dependency's registry fails | 80 |
 
 **Usage**
 
 ```shell
-ocx package push [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> <LAYERS>...
+ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 ```
 
 **Arguments**
@@ -2086,7 +2118,7 @@ ocx package push [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> <LAYE
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000` (required).
-- `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
+- `-p`, `--platform <PLATFORM>`: Target platform to publish. **Required** unless the metadata sidecar carries a target-platform set written by [`ocx package create --platform`][cmd-package-create]: in that case, omitting `-p` publishes every platform in the set (one manifest per platform, same layers); passing `-p` narrows the push to that one platform, which must already be a member of the set (a non-member fails with exit 64). A sidecar without an embedded set — hand-authored, or built by `create` without `--platform` — always requires `-p`, publishing that single platform. See [Multi-Platform Packages][authoring-multi-platform].
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
@@ -3164,6 +3196,14 @@ or a registry error) — the report then degrades to a local-state-only summary
 [cmd-package-deselect]: #package-deselect
 [cmd-package-exec]: #package-exec
 [cmd-package-env]: #package-env
+[cmd-package-create]: #package-create
+
+<!-- global flags (package-create/package-push dependency pins) -->
+[arg-frozen]: #arg-frozen
+
+<!-- reference (package-create/package-push dependency pins) -->
+[reference-manifest-pins]: ./metadata.md#dependencies-manifest-pins
+[reference-dependencies]: ./metadata.md#dependencies
 
 <!-- global flag -->
 [global-flag]: #global-flag
@@ -3181,6 +3221,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [authoring-testing-scripted]: ../authoring/testing.md#scripted-tests
 [authoring-testing-scripted-exit-codes]: ../authoring/testing.md#scripted-tests-exit-codes
 [authoring-libc]: ../authoring/multi-platform.md#libc
+[authoring-multi-platform]: ../authoring/multi-platform.md
+[authoring-building-pushing-dependency-pins]: ../authoring/building-pushing.md#dependency-pins
 
 <!-- faq -->
 [faq-gcompat]: ../faq.md#linux-gcompat

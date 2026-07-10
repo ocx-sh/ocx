@@ -27,7 +27,7 @@ from typing import Any, ClassVar
 from uuid import uuid4
 
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 SCENARIOS: dict[str, type["Scenario"]] = {}
@@ -85,7 +85,9 @@ class Scenario:
         dep_entries: list[dict[str, Any]] = []
         for key, visibility in deps or []:
             dep_pkg = self.packages[key]
-            digest = fetch_manifest_digest(self.ocx.registry, dep_pkg.repo, dep_pkg.tag)
+            # Dependency pins must be platform MANIFEST digests — the push
+            # gate rejects index digests (adr_dependency_manifest_pinning.md).
+            digest = fetch_platform_manifest_digest(self.ocx.registry, dep_pkg.repo, dep_pkg.tag)
             entry: dict[str, Any] = {"identifier": f"{dep_pkg.fq}@{digest}"}
             if visibility is not None:
                 entry["visibility"] = visibility

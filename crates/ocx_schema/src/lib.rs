@@ -8,7 +8,7 @@
 //! shelling out to the compiled binary.
 
 use ocx_lib::Config;
-use ocx_lib::package::metadata::Metadata;
+use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::patch::PatchDescriptor;
 use ocx_lib::project::{ProjectConfig, ProjectLockV2};
 use schemars::generate::SchemaSettings;
@@ -38,7 +38,13 @@ pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         // Per-layer strip/prefix layout lives in manifest layer-descriptor annotations
         // (`sh.ocx.layer.*`), not on `Bundle` — do not add a `layers` field here.
-        "metadata" => Some(generate_schema::<Metadata>(
+        //
+        // The metadata schema describes the AUTHORING form (the sidecar a
+        // publisher edits): a superset of the published wire form — dependency
+        // digests optional, sidecar-only `platforms` fields allowed. Published
+        // blobs remain a valid subset, so the same v1 URL keeps covering both.
+        // ADR: adr_dependency_manifest_pinning.md.
+        "metadata" => Some(generate_schema::<AuthoringMetadata>(
             "https://ocx.sh/schemas/metadata/v1.json",
             None,
         )),
@@ -81,4 +87,43 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>) -> 
     // SAFETY: `value` is an in-memory `serde_json::Value` we just built;
     // pretty-printing it cannot fail (no I/O, no fallible serializers).
     serde_json::to_string_pretty(&value).expect("serde_json::Value is always serializable to a JSON string")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The metadata schema describes the authoring superset: dependency
+    /// identifiers are digest-optional (plain `Identifier`, not
+    /// `PinnedIdentifier`) and the sidecar-only `platforms` fields exist on
+    /// both the bundle and each dependency.
+    #[test]
+    fn metadata_schema_is_the_authoring_superset() {
+        let schema = schema_for("metadata").expect("metadata schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+        let defs = value.get("$defs").expect("schema has $defs");
+
+        let dependency = defs.get("AuthoringDependency").expect("authoring dependency def");
+        assert!(
+            dependency.pointer("/properties/platforms").is_some(),
+            "dependency must document the per-platform pin map"
+        );
+        // Digest-optional identifier: the plain Identifier type, and required
+        // fields do not force a digest-bearing PinnedIdentifier.
+        assert_eq!(
+            dependency
+                .pointer("/properties/identifier/$ref")
+                .and_then(|v| v.as_str()),
+            Some("#/$defs/Identifier"),
+            "authoring dependency identifier must be the digest-optional Identifier"
+        );
+        assert!(
+            defs.get("TargetPlatforms").is_some(),
+            "bundle target-platform set must be documented"
+        );
+        assert!(
+            defs.get("PinnedIdentifier").is_none(),
+            "authoring schema must not define the digest-required PinnedIdentifier"
+        );
+    }
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -19,7 +19,7 @@ from src.runner import OcxRunner, PackageInfo
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, name: str | None = None) -> dict:
     """Build a dependency descriptor from a published PackageInfo."""
-    digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
     if name is not None:
         entry["name"] = name

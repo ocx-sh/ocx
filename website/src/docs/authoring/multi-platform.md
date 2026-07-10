@@ -159,13 +159,72 @@ Libc       libc.glibc
 
 When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent and the supported set contains only the bare `os/arch` entries — install then falls back to entries with empty `os_features`. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected).
 
+## Dependencies with Platform-Specific Builds {#dependency-platforms}
+
+A package built once with `--platform any` — a shell script, a Python entry point, anything without native code of its own — can still depend on a package that ships different manifests per platform, such as the native binary the script wraps. A single dependency identifier can only carry one digest, so which platform's build does that digest name?
+
+[`ocx package create --platform any`][cmd-package-create] answers this by resolving each unpinned dependency's advertised platforms into a per-dependency pin map instead of a single digest, and deriving your own package's target-platform set as the intersection of what every dependency actually covers — a package cannot claim to run on a platform one of its dependencies doesn't ship.
+
+### Pin Maps and the Target-Platform Set {#dependency-platforms-target-set}
+
+Write the dependency tag-only, same as any other:
+
+```json
+{ "dependencies": [{ "identifier": "ocx.sh/cmake:3.28" }] }
+```
+
+If `ocx.sh/cmake:3.28` ships `linux/amd64` and `darwin/arm64` manifests, `ocx package create -p any` rewrites the sidecar with a pin map and a bundle-level target set:
+
+```json
+{
+  "dependencies": [
+    {
+      "identifier": "ocx.sh/cmake:3.28",
+      "platforms": { "linux/amd64": "sha256:aaaa...", "darwin/arm64": "sha256:bbbb..." }
+    }
+  ],
+  "platforms": ["linux/amd64", "darwin/arm64"]
+}
+```
+
+A dependency that ships only a platform-agnostic build (its own tag resolves to a single `any` manifest) collapses to a plain digest pin instead — no map noise for the common case. When more than one dependency is platform-specific, the target set is the intersection across all of them: a dependency available only on `linux/amd64` limits the whole package to `linux/amd64`, no matter how broadly the others reach. An intersection with no member at all fails `create` (exit 65) rather than publish a package nobody can install.
+
+[`ocx package push`][cmd-package-push] reads the embedded target set and decides the fan-out for you:
+
+```sh
+# Publishes one manifest per platform in the embedded set (linux/amd64 and darwin/arm64).
+ocx package push -i mytool:1.0.0 mytool.tar.xz
+
+# Narrows the push to the linux/amd64 member only.
+ocx package push -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz
+
+# Fails (exit 64): windows/amd64 is not a member of the embedded set.
+ocx package push -p windows/amd64 -i mytool:1.0.0 mytool.tar.xz
+```
+
+A sidecar with no embedded target set — one built without `--platform`, or hand-authored with every dependency already pinned — keeps requiring `--platform` on push, exactly as [described earlier][authoring-building-pushing-dependency-pins].
+
+### Snapshot Semantics {#dependency-platforms-snapshot}
+
+A pin map is a snapshot of the dependency's platform coverage at `create` time, not a live query. If `ocx.sh/cmake:3.28`'s publisher later adds a `windows/amd64` manifest, your already-published package does not retroactively gain `windows/amd64` support — the pin map still lists only the platforms that existed when you ran `create`. Re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to widen your package's own target set to match.
+
+### libc-Tagged Dependencies {#dependency-platforms-libc}
+
+The three-tier lookup that projects a pin map onto a specific platform — exact match, then the same platform with `os.features` stripped, then `any` — treats a plain `linux/amd64` dependency pin as covering a libc-tagged package platform like `linux/amd64+libc.glibc`, but not the reverse: a dependency pinned only at a `libc.glibc`-tagged key does not cover the plain `linux/amd64` platform. This mirrors the fail-closed `can_run` subset rule [described above][libc-selection] — a consumer that only advertises the bare platform should not silently receive a build resolved against a libc it never declared.
+
+::: info Two encodings, one platform
+The pin map's keys use the same key format as [`ocx.lock`'s per-platform table][in-depth-project-lock-format] — `;osf=libc.glibc` — while the bundle-level `platforms` target set (and the `--platform` flag itself) use the `+libc.glibc` form seen throughout this page. Both name the same platform; see the [Per-Platform Pins reference][reference-per-platform-pins] for the full encoding rule.
+:::
+
 ## See Also {#see-also}
 
 - [`ocx about` reference][cmd-about]
 - [`ocx package push` reference][cmd-package-push]
 - [Storage in depth — multi-layer packages][in-depth-storage-multi-layer]
 - [Versioning in depth — platforms][in-depth-versioning-platforms]
-- [Building & pushing][authoring-building-pushing] — cascade, layer reuse, BYO archives
+- [Building & pushing][authoring-building-pushing] — cascade, layer reuse, BYO archives, dependency pin resolution
+- [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
+- [Per-Platform Pins reference][reference-per-platform-pins] — pin map shape, lookup rule, target-set derivation
 - [Migration patterns][authoring-migration] — `ocx_mirror` per-platform spec
 
 <!-- external -->
@@ -198,14 +257,23 @@ When the host provides more than one libc family, the `Libc` row lists each one 
 [cmd-install]: ../reference/command-line.md#package-install
 [cmd-about]: ../reference/command-line.md#about
 
+<!-- reference -->
+[reference-per-platform-pins]: ../reference/metadata.md#dependencies-per-platform-pins
+
+<!-- in-page -->
+[libc-selection]: #libc-selection
+
 <!-- in-depth -->
 [in-depth-storage-multi-layer]: ../in-depth/storage.md#multi-layer
 [in-depth-versioning-platforms]: ../in-depth/versioning.md#platforms
+[in-depth-project-lock-format]: ../in-depth/project.md#lock-format
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md
 [authoring-building-pushing-cascade]: ./building-pushing.md#cascade
+[authoring-building-pushing-dependency-pins]: ./building-pushing.md#dependency-pins
 [authoring-bundle-anatomy-stable]: ./bundle-anatomy.md#stable
+[authoring-dependencies]: ./dependencies.md
 [authoring-migration]: ./migration.md
 [authoring-bundle-sidecars]: ./bundle-anatomy.md#sidecars
 

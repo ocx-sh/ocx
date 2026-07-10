@@ -8,7 +8,7 @@ use ocx_lib::{
     log, oci, package,
     package::version::{BuildTimestampFormat, build_timestamp},
     prelude::*,
-    publisher::{LayerRef, Publisher},
+    publisher::{self, LayerRef, Publisher},
 };
 
 use crate::{conventions, options};
@@ -52,9 +52,15 @@ pub struct PackagePush {
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
 
-    /// Target platform (e.g. `linux/amd64`). Required.
-    #[clap(short, long, required = true)]
-    platform: oci::Platform,
+    /// Target platform (e.g. `linux/amd64`)
+    ///
+    /// When the metadata sidecar carries a target-platform set (written by
+    /// `ocx package create --platform`), omitting this flag pushes EVERY
+    /// platform in the set; passing it narrows the push to that platform,
+    /// which must be a member of the set. Without an embedded set the flag
+    /// is required and selects the single platform to publish.
+    #[clap(short, long)]
+    platform: Option<oci::Platform>,
 
     /// Identifier under which the package is published (e.g. `repo:2.0.0`).
     #[clap(short = 'i', long = "identifier", required = true)]
@@ -105,16 +111,34 @@ impl PackagePush {
             self.layers.len(),
             metadata_path.display()
         );
-        let metadata =
-            package::metadata::ValidMetadata::try_from(package::metadata::Metadata::read_json(&metadata_path).await?)?;
-        let info = package::info::Info {
-            identifier: identifier.clone(),
-            metadata: metadata.into(),
-            platform: self.platform.clone(),
-        };
+        let metadata = package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path).await?;
+        let platforms = self.select_platforms(&metadata)?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;
+
+        // Gate: every dependency must project to an existing platform
+        // MANIFEST digest for every fan-out platform — push makes no
+        // resolution decisions (run `ocx package create` for that).
+        {
+            let _spin = context.progress().spinner("Verifying dependency pins");
+            publisher::verify_dependency_pins(publisher.client(), &metadata, &platforms).await?;
+        }
+
+        // One Info per target platform, each carrying the published
+        // projection of the metadata for that platform.
+        let infos = platforms
+            .iter()
+            .map(|platform| {
+                let published = metadata.to_published(platform)?;
+                let valid = package::metadata::ValidMetadata::try_from(published)?;
+                Ok(package::info::Info {
+                    identifier: identifier.clone(),
+                    metadata: valid.into(),
+                    platform: platform.clone(),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
 
@@ -136,10 +160,10 @@ impl PackagePush {
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher
-                .push_cascade(info, &self.layers, existing_versions, build_meta.as_deref())
+                .push_cascade(infos, &self.layers, existing_versions, build_meta.as_deref())
                 .await?
         } else {
-            publisher.push(info, &self.layers, build_meta.as_deref()).await?
+            publisher.push(infos, &self.layers, build_meta.as_deref()).await?
         };
 
         // Emit the structured push report. Plain output is a one-row table
@@ -152,5 +176,39 @@ impl PackagePush {
         ))?;
 
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Decide the fan-out platform set (decision D1 of
+    /// `adr_dependency_manifest_pinning.md`): an embedded target set wins;
+    /// `--platform` is a member-filter/assert against it. A legacy sidecar
+    /// without an embedded set keeps requiring `--platform`.
+    fn select_platforms(
+        &self,
+        metadata: &ocx_lib::package::metadata::authoring::AuthoringMetadata,
+    ) -> anyhow::Result<Vec<oci::Platform>> {
+        use ocx_lib::cli::UsageError;
+
+        match metadata.target_platforms() {
+            Some(set) => match &self.platform {
+                None => Ok(set.iter().cloned().collect()),
+                Some(platform) if set.contains(platform) => Ok(vec![platform.clone()]),
+                Some(platform) => {
+                    let members = set.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                    Err(UsageError::new(format!(
+                        "--platform '{platform}' is not in the package target set [{members}]; \
+                         drop --platform to push the whole set or re-run ocx package create for '{platform}'"
+                    ))
+                    .into())
+                }
+            },
+            None => match &self.platform {
+                Some(platform) => Ok(vec![platform.clone()]),
+                None => Err(UsageError::new(
+                    "the metadata sidecar carries no target-platform set; pass --platform (-p) \
+                     or re-run ocx package create --platform to embed one",
+                )
+                .into()),
+            },
+        }
     }
 }

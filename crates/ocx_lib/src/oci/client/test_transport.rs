@@ -38,6 +38,12 @@ pub(crate) struct StubTransportInner {
     /// When set, `pull_manifest_raw` returns a `Registry` error with this
     /// message for any image not in `manifests` (instead of `ManifestNotFound`).
     pub pull_manifest_error_override: Option<String>,
+    /// When set, `ensure_auth` returns `ClientError::Authentication` with this
+    /// message instead of succeeding. Drives a genuine authentication-failure
+    /// path through any transport method that calls `ensure_auth` first (e.g.
+    /// `Client::pull_manifest`) — distinct from `pull_manifest_error_override`,
+    /// which simulates a generic (non-auth) registry error.
+    pub ensure_auth_error_override: Option<String>,
 }
 
 /// Shared data handle for [`StubTransport`].
@@ -115,6 +121,10 @@ impl OciTransport for StubTransport {
             .write()
             .auth_calls
             .push((image.resolve_registry().to_string(), operation));
+        let override_message = self.data.read().ensure_auth_error_override.clone();
+        if let Some(message) = override_message {
+            return Err(ClientError::Authentication(Box::new(std::io::Error::other(message))));
+        }
         Ok(())
     }
 

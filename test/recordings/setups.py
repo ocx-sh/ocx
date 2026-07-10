@@ -187,7 +187,7 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
 
     Dependency graph: webapp -> {nodejs, bun}
     """
-    from src.registry import fetch_manifest_digest
+    from src.registry import fetch_platform_manifest_digest
 
     node_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
@@ -217,8 +217,8 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
         outputs={"bun": {"--version": "1.3.10"}},
     )
 
-    node_digest = fetch_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
-    bun_digest = fetch_manifest_digest(ocx.registry, bun.repo, bun.tag)
+    node_digest = fetch_platform_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
+    bun_digest = fetch_platform_manifest_digest(ocx.registry, bun.repo, bun.tag)
     node_dep = {"identifier": f"{nodejs.fq}@{node_digest}"}
     bun_dep = {"identifier": f"{bun.fq}@{bun_digest}"}
 
@@ -257,7 +257,7 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     Flat view: visibility column with all levels.
     Why view: two paths from webapp to nodejs.
     """
-    from src.registry import fetch_manifest_digest
+    from src.registry import fetch_platform_manifest_digest
 
     path_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
@@ -286,9 +286,9 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
         outputs={"tpl": {"--version": "templates 1.0.0"}},
     )
 
-    node_digest = fetch_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
-    bun_digest = fetch_manifest_digest(ocx.registry, bun.repo, bun.tag)
-    templates_digest = fetch_manifest_digest(ocx.registry, templates.repo, templates.tag)
+    node_digest = fetch_platform_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
+    bun_digest = fetch_platform_manifest_digest(ocx.registry, bun.repo, bun.tag)
+    templates_digest = fetch_platform_manifest_digest(ocx.registry, templates.repo, templates.tag)
 
     # Intermediate packages (depend on nodejs)
     server = make_package(
@@ -302,8 +302,8 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
         outputs={"render": {"--version": "renderer 1.0.0"}},
     )
 
-    server_digest = fetch_manifest_digest(ocx.registry, server.repo, server.tag)
-    renderer_digest = fetch_manifest_digest(ocx.registry, renderer.repo, renderer.tag)
+    server_digest = fetch_platform_manifest_digest(ocx.registry, server.repo, server.tag)
+    renderer_digest = fetch_platform_manifest_digest(ocx.registry, renderer.repo, renderer.tag)
 
     # Root: webapp depends on server (public), bun (public), renderer (private)
     webapp = make_package(

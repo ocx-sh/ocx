@@ -263,14 +263,14 @@ pub async fn publish_managed_config(
         };
         let existing_versions = Publisher::parse_versions(&existing_tags);
         publisher
-            .push_cascade(info, &layers, existing_versions, None)
+            .push_cascade(vec![info], &layers, existing_versions, None)
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),
             })?
     } else {
         publisher
-            .push(info, &layers, None)
+            .push(vec![info], &layers, None)
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),

@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{compression, log, oci, package, prelude::*};
+use ocx_lib::{compression, log, oci, package, package::metadata::authoring::AuthoringMetadata, prelude::*};
 
 use crate::options;
 
@@ -15,7 +15,14 @@ pub struct PackageCreate {
     /// Optional identifier for the package, used to infer the output filename if not specified
     #[clap(short, long)]
     identifier: Option<options::Identifier>,
-    /// Optional platform of the package, used to infer the output filename if not specified
+    /// Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)
+    ///
+    /// When metadata declares dependencies without a digest, this flag is
+    /// required: create resolves each one against the selected index to a
+    /// platform manifest digest and rewrites the metadata sidecar with the
+    /// pins plus the package's target-platform set (consumed by
+    /// `ocx package push` to fan out). Resolution honors `--remote`,
+    /// `--offline`, and `--frozen`. Also used to infer the output filename.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -24,7 +31,11 @@ pub struct PackageCreate {
     /// Force overwrite of output file if it already exists
     #[clap(short, long)]
     force: bool,
-    /// Path to a `metadata.json` file to validate and copy alongside the output bundle
+    /// Path to a `metadata.json` file to validate, resolve, and write alongside the output bundle
+    ///
+    /// Dependencies without a digest are pinned to platform manifest digests
+    /// (requires `--platform`); the resolved sidecar is written next to the
+    /// output bundle in canonical form.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -56,6 +67,26 @@ impl PackageCreate {
                 output.display()
             );
         }
+
+        // Resolve + validate the sidecar BEFORE writing the output bundle:
+        // dependency resolution can fail (network / policy / missing tag /
+        // empty platform intersection), and a failure must leave no orphan
+        // bundle on disk (Codex #3). Only after the metadata is fully validated
+        // do we build the archive and, last, write the resolved sidecar.
+        let resolved_metadata = match &self.metadata {
+            Some(metadata_source) => {
+                let metadata = AuthoringMetadata::read_json(metadata_source.as_path()).await?;
+                let metadata = self.resolve_dependency_pins(metadata, &context).await?;
+                // Validate the projection the publisher will actually push:
+                // project for a platform every dependency covers and run the
+                // publish-time env/entrypoint checks.
+                let validation_platform = Self::validation_platform(&metadata);
+                package::metadata::ValidMetadata::try_from(metadata.to_published(&validation_platform)?)?;
+                Some(metadata)
+            }
+            None => None,
+        };
+
         if let Some(parent) = output.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -79,14 +110,58 @@ impl PackageCreate {
             output.display()
         );
 
-        if let Some(metadata_source) = &self.metadata {
-            let metadata = package::metadata::Metadata::read_json(metadata_source.as_path()).await?;
-            package::metadata::ValidMetadata::try_from(metadata)?;
+        if let Some(metadata) = resolved_metadata {
+            // Always rewrite the sidecar canonically (never a byte copy): the
+            // file next to the bundle is the compiled, pin-resolved form.
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
-            tokio::fs::copy(metadata_source, &metadata_target).await?;
+            metadata.write_json(&metadata_target).await?;
         }
 
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Pick the platform to run publish-time validation against.
+    ///
+    /// Prefer the embedded target set's first entry (present whenever
+    /// `--platform` resolved a set). Otherwise — an already-pinned legacy
+    /// sidecar with no embedded set — derive a platform covered by every
+    /// dependency, so a specific-only pin map is not validated against bare
+    /// `any` (which would wrongly fail with `MissingPlatformPin`). Falls back to
+    /// `any` only when no dependency advertises a specific platform (all
+    /// direct-digest pins), where `any` projects correctly.
+    fn validation_platform(metadata: &AuthoringMetadata) -> oci::Platform {
+        if let Some(set) = metadata.target_platforms() {
+            return set.first().clone();
+        }
+        package::dependency_pinning::covered_platforms(metadata.dependencies())
+            .into_iter()
+            .next()
+            .unwrap_or_else(oci::Platform::any)
+    }
+
+    /// Resolve unpinned dependencies against the selected index.
+    ///
+    /// - `--platform` given: resolve + embed the target-platform set (pinned
+    ///   dependencies pass through untouched, no network).
+    /// - `--platform` omitted: metadata must already be fully pinned (usage
+    ///   error otherwise); passes through for canonical rewrite only.
+    async fn resolve_dependency_pins(
+        &self,
+        metadata: AuthoringMetadata,
+        context: &crate::app::Context,
+    ) -> anyhow::Result<AuthoringMetadata> {
+        let Some(platform) = &self.platform else {
+            if !metadata.is_fully_pinned() {
+                return Err(ocx_lib::cli::UsageError::new(
+                    "metadata declares dependencies that are not pinned to a manifest digest; \
+                     pass --platform (-p) so ocx package create can resolve them",
+                )
+                .into());
+            }
+            return Ok(metadata);
+        };
+        let _spin = context.progress().spinner("Resolving dependency pins");
+        Ok(package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
