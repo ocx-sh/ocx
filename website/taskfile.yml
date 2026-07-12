@@ -65,7 +65,13 @@ tasks:
       - rsync -avz --delete --exclude=/licensed/ .vitepress/dist/ "{{.DEPLOY_HOST}}:"
 
   deploy:licensed:
-    desc: Push licensed assets (icons8 etc.) to server (TARGET=dev|prod, default dev)
+    desc: Push licensed assets (icons8 etc.) to the R2 bucket + legacy server (TARGET=dev|prod, default dev)
+    # Canonical store: R2 bucket `ocx-licensed` (CI overlays it into every Pages
+    # deploy). The bucket is target-independent — dev and prod serve the same
+    # assets. The rsync push is the legacy ocx.sh server path; drop it at
+    # server retirement. Credentials: ~/.config/ocx-infra/r2.env (gitignored,
+    # R2 S3 keys + CF_ACCOUNT_ID).
+    dotenv: ['{{.HOME}}/.config/ocx-infra/r2.env']
     vars:
       TARGET: '{{.TARGET | default "dev"}}'
       DEPLOY_HOST: '{{if eq .TARGET "prod"}}ocx.sh{{else}}dev.ocx.sh{{end}}'
@@ -73,8 +79,19 @@ tasks:
       vars:
         - name: TARGET
           enum: [dev, prod]
+    env:
+      # aws-cli v2.23+ default integrity checksums are not fully R2-compatible.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      AWS_DEFAULT_REGION: auto
     preconditions:
       - sh: '[ -d src/public/licensed ]'
         msg: "No licensed assets found in src/public/licensed/"
+      - sh: '[ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ] && [ -n "$CF_ACCOUNT_ID" ]'
+        msg: "R2 credentials missing — expected R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, CF_ACCOUNT_ID in ~/.config/ocx-infra/r2.env"
     cmds:
+      - >-
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+        aws s3 sync src/public/licensed/ s3://ocx-licensed/
+        --endpoint-url "https://$CF_ACCOUNT_ID.r2.cloudflarestorage.com" --delete
       - rsync -avz src/public/licensed/ "{{.DEPLOY_HOST}}:licensed/"

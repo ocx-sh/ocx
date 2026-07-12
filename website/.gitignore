@@ -11,6 +11,10 @@ src/.vitepress/dist
 .task/
 src/public/casts
 src/public/data
+# Icons8-licensed assets — must never enter git (license forbids repo
+# redistribution). Canonical store: R2 bucket ocx-licensed; local copy is
+# the editing workspace, pushed via `task website:deploy:licensed`.
+src/public/licensed/
 # Schema artifacts are regenerated on every build (see website/schema.taskfile.yml).
 src/public/schemas/
 src/docs/reference/dependencies.md
