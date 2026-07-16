@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Cloudflare infra plumbing for the ocx.sh migration (server → Pages/Workers).
+# Credentials: ~/.config/ocx-infra/cf.env (gitignored) — CLOUDFLARE_API_TOKEN.
+# All tasks are idempotent check-then-act against the Cloudflare v4 API.
+
+version: '3'
+
+vars:
+  CF_API: https://api.cloudflare.com/client/v4
+
+tasks:
+  cf:zones:
+    desc: Verify API token — list visible zones (ids + status only)
+    dotenv: ['{{.HOME}}/.config/ocx-infra/cf.env']
+    preconditions:
+      - sh: '[ -n "$CLOUDFLARE_API_TOKEN" ]'
+        msg: 'CLOUDFLARE_API_TOKEN missing — expected in ~/.config/ocx-infra/cf.env'
+    cmds:
+      - >-
+        curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "{{.CF_API}}/zones"
+        | jq '{success, zones: [.result[] | {name, id, status}]}'
+
+  # One-off record tasks live and die with their migration step — add a task,
+  # run it, remove it in the same change. Only durable helpers stay here.
