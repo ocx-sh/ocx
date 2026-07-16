@@ -19,6 +19,14 @@ Auto-load on every Rust file edit. Provide stable architectural context — "why
 
 Patched dep: `oci-client` at `external/rust-oci-client` (local git submodule).
 
+## Core vs Plugin Boundary (owner doctrine, 2026-07-16)
+
+- **`ocx` core is self-contained**: complete primitive set (`ocx package *`, toolchain tier) stays in the one binary. No verb extraction to slim the binary.
+- **Add-ons are `ocx-<name>` plugins** (git/cargo-style dispatch, shipped — `app/plugin_dispatch.rs`). No plugin ABI, ever.
+- **Boundary is behavioral, not link-level**: package/store/registry *operations* go through the CLI surface (`ocx package create/push/test`, …) — CLI = the stable contract. Linking *vocabulary/utility* crates (version, identifier, slug, platform types) is fine.
+- **Long-term**: split `ocx_lib` into smaller, cleanly layered crates (future `ocx-lib` repo); plugins link foundation crates, drive operations via CLI.
+- Known drift: `ocx-mirror` reaches into operational internals — migration target is CLI for operations (pending refactor).
+
 ## Design Principles
 
 | Principle | Where | Why |
@@ -95,6 +103,7 @@ CLI command (clap parse)
 | `adr_progress_architecture.md` | Span-free progress: `cli::progress::ProgressManager` owns `indicatif::MultiProgress`; RAII guards (`Spinner`/`BytesBar`) instead of `tracing-indicatif` span-attached bars. Kills the concurrent sharded-registry clone-after-close panic by construction. `tracing-indicatif` dropped; fmt logs route through `ProgressManager::writer()` (suspend-coordinated). |
 | `adr_ci_env_export_flag.md` | Realize handshake §6 CI export as `--ci[=provider]` flag on `ocx env`/`ocx package env` (not a command); GitHub autodetected two-file sink (rejects `--export-file`); GitLab JSON-lines, stdout default / `--export-file`; `--ci` ⟂ `--shell`; GitLab flavor added. |
 | `adr_self_setup.md` | `ocx self setup` — bare-binary install complement to the install script: bootstrap + env shim write + managed RC-block (`# >>> ocx v1 <hash> >>>`) in user shell profiles; `ExitCode::DirtyRcBlock` (82) for user-edited blocks; `ocx self update` refreshes shims post-swap (4C). |
+| `adr_cli_plugin_pattern.md` | Git-style `ocx <name>` → `ocx-<name>` PATH dispatch; plugins inherit parent env (trust boundary); built-ins always shadow |
 | `adr_managed_config_tier.md` | Corporate managed configuration tier (`[managed]`) — scope: One-Way-Door Medium. Seed pointer in `config.toml` resolves to an operator-published `config.toml` package (v2: config-as-package, superseding the v1 custom-artifact wire shape), identity-gated snapshot merged as a synthetic 5th precedence tier, `ocx config push`/`ocx config update` reuse ordinary package machinery (versioning, cascade, rollback). |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
