@@ -34,9 +34,12 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 ```bash
 task website:serve              # Dev server (localhost:5173)
 task website:build              # Full build (generates schema, recordings, sbom, catalog, then VitePress)
-task website:deploy               # rsync to dev (default; SSH host alias `dev.ocx.sh`)
-task website:deploy TARGET=prod   # rsync to prod (SSH host alias `ocx.sh`)
+task website:deploy:licensed    # Push licensed assets to the R2 bucket (canonical store)
 ```
+
+Site deploys ride CI (`deploy-website.yml` → Cloudflare Pages project `ocx-website`);
+the hetzner nginx reverse-proxies `ocx.sh`/`dev.ocx.sh` to the Pages deployment and
+keeps `/v2` (Artifactory) on the same hostnames until the package migration retires it.
 
 Build chain: `schema:generate` → `recordings:build` → `sbom:generate:page` → `catalog:generate` → `vitepress build`.
 

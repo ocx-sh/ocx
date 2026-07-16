@@ -291,8 +291,8 @@ jobs:
     needs: website
     runs-on: ubuntu-latest
     environment:
-      name: ${{ (inputs.target || 'dev') == 'prod' && 'ocx.rs' || 'preview.ocx.rs' }}
-      url: ${{ (inputs.target || 'dev') == 'prod' && 'https://ocx.rs' || 'https://dev.ocx-website.pages.dev' }}
+      name: ${{ (inputs.target || 'dev') == 'prod' && 'ocx.sh' || 'dev.ocx.sh' }}
+      url: ${{ (inputs.target || 'dev') == 'prod' && 'https://ocx.sh' || 'https://dev.ocx.sh' }}
     steps:
       - name: Download site artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -327,75 +327,16 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler pages project create ocx-website --production-branch=main
-      # prod → production deployment (serves ocx.rs); dev → branch alias
-      # dev.ocx-website.pages.dev. Mirrors the rsync job's dev/prod split.
+      # prod → production deployment (nginx proxies ocx.sh → ocx-website.pages.dev);
+      # dev → branch alias (nginx proxies dev.ocx.sh → dev.ocx-website.pages.dev).
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           WRANGLER_BRANCH: ${{ (inputs.target || 'dev') == 'prod' && 'main' || 'dev' }}
         run: npx --yes wrangler pages deploy dist --project-name=ocx-website --branch="$WRANGLER_BRANCH"
-      # Apex flip (prod only): evict the bootstrap-era apex attachment from the
-      # index project, attach ocx.rs here, repoint the apex CNAME. All
-      # check-then-act idempotent; the eviction is a no-op once flipped.
-      - name: Point ocx.rs at the website
-        if: ${{ (inputs.target || 'dev') == 'prod' }}
-        env:
-          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ZONE: e7e05c1d7edc241e4a7fde08e423483f # ocx.rs zone id
-        run: |
-          set -euo pipefail
-          api="https://api.cloudflare.com/client/v4"
-          auth="Authorization: Bearer $CF_TOKEN"
-          json="Content-Type: application/json"
-          # 1. Evict apex from the index project (bootstrap leftover; 404 = already gone).
-          curl -sS -X DELETE -H "$auth" \
-            "$api/accounts/$CF_ACCOUNT/pages/projects/ocx-index/domains/ocx.rs" >/dev/null || true
-          # 2. Attach apex to this project.
-          domains="$api/accounts/$CF_ACCOUNT/pages/projects/ocx-website/domains"
-          if ! curl -sS -H "$auth" "$domains" | jq -e 'any(.result[]?; .name=="ocx.rs")' >/dev/null; then
-            curl -sS -X POST -H "$auth" -H "$json" "$domains" --data '{"name":"ocx.rs"}' | jq -e '.success'
-          fi
-          # 3. Repoint the apex CNAME (create if absent, patch if wrong target).
-          recs="$api/zones/$CF_ZONE/dns_records"
-          existing=$(curl -sS -H "$auth" "$recs?type=CNAME&name=ocx.rs")
-          rec_id=$(echo "$existing" | jq -r '.result[0].id // empty')
-          content=$(echo "$existing" | jq -r '.result[0].content // empty')
-          if [ -z "$rec_id" ]; then
-            curl -sS -X POST -H "$auth" -H "$json" "$recs" \
-              --data '{"type":"CNAME","name":"ocx.rs","content":"ocx-website.pages.dev","proxied":true,"comment":"OCX website apex to Pages"}' \
-              | jq -e '.success'
-          elif [ "$content" != "ocx-website.pages.dev" ]; then
-            curl -sS -X PATCH -H "$auth" -H "$json" "$recs/$rec_id" \
-              --data '{"content":"ocx-website.pages.dev"}' | jq -e '.success'
-          fi
-
-  deploy:
-    name: Deploy
-    needs: website
-    runs-on: ubuntu-latest
-    environment:
-      name: ${{ (inputs.target || 'dev') == 'prod' && 'ocx.sh' || 'dev.ocx.sh' }}
-      url: ${{ (inputs.target || 'dev') == 'prod' && 'https://ocx.sh' || 'https://dev.ocx.sh' }}
-    steps:
-      - name: Download site artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: website-dist
-          path: dist/
-      - name: Setup SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
-      - name: Deploy to server
-        run: rsync -avz --delete --exclude=/licensed/ dist/ "$DEPLOY_HOST:"
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          RSYNC_RSH: "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=yes"
+      # No apex management here: ocx.sh is served by the hetzner nginx, which
+      # reverse-proxies to (dev.)ocx-website.pages.dev — Pages is the file
+      # host, nginx keeps /v2 (Artifactory) on the same hostnames until the
+      # package migration retires it. ocx.rs is parked (ADR Amendment A1);
+      # its lingering Pages attachment is disposed manually, not re-ensured.
