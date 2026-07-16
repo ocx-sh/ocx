@@ -234,7 +234,7 @@ one deploy artifact; combining would couple index refreshes to website rebuilds:
 | Surface | Pages project | Domain | Deployed by |
 |---|---|---|---|
 | Website (human) | `ocx-website` | apex `ocx.rs` | ocx repo `deploy-website.yml` (`deploy-cloudflare` job; rsync-to-server job retired at migration step 6) |
-| Index (machine) | `ocx-index` | `index.ocx.rs` | `ocx-rs/index` `deploy.yml` |
+| Index (machine) | `ocx-index` | `index.ocx.rs` (bootstrap; canonical `index.ocx.sh` per A1) | `ocx-sh/index` `deploy.yml` |
 
 Plane separation (clears the "index.ocx.rs is long" confusion): the **logical name**
 users type stays `ocx.rs/<pkg>` — a config key. The **endpoint URL** the client fetches
@@ -347,7 +347,8 @@ nightly: reconcile cron regenerates all entries (drift self-heal)
 
 ### GitHub
 
-- [x] Org `ocx-rs`: index repo created — **`ocx-rs/index`** (public, auto-merge enabled).
+- [x] Org `ocx-rs`: index repo created — **`ocx-rs/index`** (public, auto-merge enabled);
+      **since transferred to `ocx-sh/index`** (2026-07-12, A1 — ocx-rs org parked).
       Name `index` chosen over `registry` (registry = GHCR's job; this is the sparse index).
       Seeded with `public/config.json` (format_version 1 placeholder), `public/index.html`
       landing, and `.github/workflows/deploy.yml` (Cloudflare Pages deploy substrate).
@@ -409,8 +410,41 @@ stays on GitHub Pages; ocx.sh sunset criteria.
 
 ---
 
+## Amendment A1 — D14 reversed: canonical stays `ocx.sh`, `ocx.rs` parked (2026-07-12)
+
+Owner decision after the ocx.rs infra went live: **stay with `ocx.sh` for now, park
+`ocx.rs` fully.**
+
+- **Canonical logical registry: `ocx.sh`.** `DEFAULT_REGISTRY` does not flip. Entry names
+  are `ocx.sh/<ns>/<pkg>`. Baked known-registries map ships a **single key**:
+  `ocx.sh → index+https://index.ocx.sh`. No `ocx.rs` alias in the map.
+- **Why the reversal is cheap:** the two-plane separation (D10/D15 — logical name is a
+  config key, endpoint URL is plumbing) makes the name↔endpoint binding a one-line map
+  change. Better: the 42 published packages already embed `ocx.sh/...` identifiers, so
+  the republish step loses the identifier-rewrite requirement entirely and the D6
+  ownership check matches existing manifests as-is. D14's original "rename early before
+  publish cost compounds" argument now cuts the other way — NOT renaming is the
+  cost-avoiding move.
+- **`ocx.rs` disposition:** domain + Cloudflare zone retained but idle (renewal optional).
+  Index repo transferred to **`ocx-sh/index`** (2026-07-12; GitHub auto-redirects old
+  URLs, secrets travel with the repo); `ocx-rs` org parked empty. Re-activating `ocx.rs`
+  later = additive alias row in the baked map + Pages custom domain attach — two-way door.
+- **Endpoint moves:** `index.ocx.sh` becomes the index endpoint; website canonical host is
+  `ocx.sh` on Cloudflare Pages. Requires onboarding the `ocx.sh` zone to Cloudflare
+  (nameserver change; inventory existing records first — mail, Hetzner A records for
+  prod/dev/setup). This work was already implied by server retirement; it moves ahead of
+  the migration instead of after. Until the zone moves, `index.ocx.rs` keeps serving as
+  the bootstrap endpoint (the baked map is not yet shipped in any release — no client
+  breaks).
+- **Design fallout** recorded in `design_spec_registry_indirection.md` §12; plan updated
+  in place. Transitional-alias machinery (old S9) is dropped from v1 scope; E7
+  (two-aliases-share-storage) stays as a contract for the future re-activation case.
+
+---
+
 ## Changelog
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-11 | Michael + Claude | Initial record from design discussion (2026-07-10/11) |
+| 2026-07-12 | Michael + Claude | Amendment A1: D14 reversed — canonical stays ocx.sh, ocx.rs parked fully |
