@@ -98,9 +98,7 @@ multiple triggers may fire. Axis defs live in `overlays.md`.
 |---|---|
 | `--breadth=full` | tier=high (default); `.github/workflows/**`, `Cargo.toml`, or dependency paths touched at tier=low (escalation) |
 | `--breadth=adversarial` | tier=max (default); `package_manager/` touched at tier=high; `security` label; `--rca=on` together with ≥2 subsystems |
-| `--reviewer=haiku` | tier=low AND NO structural markers from `classify.md:48-61` present in diff |
 | `--reviewer=opus` | tier=max AND `--breadth=adversarial` |
-| `--doc-reviewer=haiku` | Diff touches ≤2 doc files (`website/**/*.md` or `CHANGELOG.md`) AND does not touch `website/src/docs/user-guide.md` |
 | `--rca=on` | tier=high+ (default) — scope differs per tier (see overlays.md) |
 | `--codex` | One-Way Door structural marker; `breaking-change` or `security` label; public API change; new crate; protocol change |
 
@@ -109,8 +107,8 @@ Defaults per tier (before overlays apply):
 | Axis | low | high | max |
 |---|---|---|---|
 | breadth | minimal | full | adversarial |
-| reviewer | haiku (→ sonnet on structural markers) | sonnet | sonnet (→ opus on adversarial breadth) |
-| doc-reviewer | sonnet | sonnet (→ haiku on narrow doc scope) | sonnet (→ haiku on narrow doc scope) |
+| reviewer | sonnet | sonnet | sonnet (→ opus on adversarial breadth) |
+| doc-reviewer | sonnet | sonnet | sonnet |
 | rca | off | on (Block/High) | on (>Suggest) |
 | codex | off | off (auto-on for One-Way Door signals) | on (mandatory) |
 

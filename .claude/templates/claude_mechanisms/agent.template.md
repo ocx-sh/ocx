@@ -2,7 +2,7 @@
 name: worker-[type]
 description: [Brief description of worker purpose. Used for parallel [task type].]
 tools: Read, Glob, Grep
-model: haiku
+model: sonnet
 # permissionMode: default
 # skills: skill-name-1, skill-name-2
 ---
@@ -16,7 +16,7 @@ Required fields:
 
 Optional fields:
   - tools: Comma-separated list (inherits all if omitted)
-  - model: haiku (fast), sonnet (balanced), opus (complex)
+  - model: sonnet (default), opus (multi-subsystem), haiku (explicit cheap override only)
   - permissionMode: default|acceptEdits|bypassPermissions|plan
   - skills: Comma-separated skill names to auto-load
 

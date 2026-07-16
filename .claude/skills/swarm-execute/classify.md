@@ -72,9 +72,7 @@ multiple triggers may fire. Axis defs in `overlays.md`.
 |---|---|
 | `--builder=opus` | Plan "Subsystems Touched" lists ≥2; plan or prompt mentions "novel algorithm", "new trait hierarchy", "cross-subsystem", "protocol change" |
 | `--tester=opus` | tier=max (mandatory — reflects the exhaustive edge-case coverage work documented in `tier-max.md` Phase 4) |
-| `--reviewer=haiku` | tier=low AND NO structural markers from `swarm-review/classify.md:48-61` present in the diff |
 | `--reviewer=opus` | tier=max AND `--breadth=adversarial` |
-| `--doc-reviewer=haiku` | Diff touches ≤2 doc files (`website/**/*.md` or `CHANGELOG.md`) AND does not touch `website/src/docs/user-guide.md` |
 | `--loop-rounds=1` | tier=low; or plan tags the feature as Two-Way Door |
 | `--loop-rounds=3` | tier=high or tier=max (default) |
 | `--review=adversarial` | Security-sensitive paths (`oci/`, `auth`, `crypto/`, `signing/`); plan labels `security`; diff touches `package_manager/` |
@@ -86,8 +84,8 @@ Defaults per tier (before overlays):
 |---|---|---|---|
 | builder | sonnet | sonnet | opus |
 | tester | sonnet | sonnet | opus |
-| reviewer | haiku (→ sonnet on structural markers) | sonnet | sonnet (→ opus on adversarial breadth) |
-| doc-reviewer | sonnet | sonnet (→ haiku on narrow doc scope) | sonnet (→ haiku on narrow doc scope) |
+| reviewer | sonnet | sonnet | sonnet (→ opus on adversarial breadth) |
+| doc-reviewer | sonnet | sonnet | sonnet |
 | loop-rounds | 1 | 3 | 3 |
 | review | minimal | full | adversarial |
 | codex | off | off (auto-on for One-Way Door) | on (mandatory) |

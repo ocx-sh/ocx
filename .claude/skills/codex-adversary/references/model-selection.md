@@ -8,8 +8,8 @@ lives in [`workflow-swarm.md`](../../../rules/workflow-swarm.md)
 
 | Alias | Slug | Claude analogue | Codex description | Use |
 |---|---|---|---|---|
-| `luna` | `gpt-5.6-luna` | Haiku | Fast and affordable | tier `low` (when `--codex` forced), light inline passes. Codex CLI default. |
-| `terra` | `gpt-5.6-terra` | Sonnet | Balanced everyday | tier `high`; **this skill's default when `--model` omitted**. |
+| `luna` | `gpt-5.6-luna` | Haiku | Fast and affordable | explicit cheap override; light inline passes. Codex CLI default. |
+| `terra` | `gpt-5.6-terra` | Sonnet | Balanced everyday | default (tier `low` opt-in + tier `high` default-on); **this skill's default when `--model` omitted**. |
 | `sol` | `gpt-5.6-sol` | Opus | Frontier agentic coding | tier `max`; security / protocol / breaking-API One-Way-Door diffs. |
 
 ## Resolution rules

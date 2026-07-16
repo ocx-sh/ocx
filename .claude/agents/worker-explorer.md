@@ -2,7 +2,7 @@
 name: worker-explorer
 description: Lightweight exploration worker. Use for parallel codebase research.
 tools: Read, Glob, Grep
-model: haiku
+model: sonnet
 ---
 
 # Explorer Worker

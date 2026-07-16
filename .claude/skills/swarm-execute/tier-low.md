@@ -38,7 +38,7 @@ Launch **1** `worker-builder` (focus: `implementation`, model: sonnet) to fill s
 
 Protocol: see canonical in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). Tier-low overrides: `loop-rounds=1`; Stage 2 minimal (quality only); no Codex.
 
-> **Reviewer model**: every `worker-reviewer` launch this tier uses resolved `--reviewer` overlay value (tier=low default `haiku`; escalated to `sonnet` when structural markers from `swarm-review/classify.md:48-61` present). See `overlays.md` reviewer axis.
+> **Reviewer model**: every `worker-reviewer` launch this tier uses resolved `--reviewer` overlay value (tier=low default `sonnet`). See `overlays.md` reviewer axis.
 
 Stage 1 launches **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`); if actionable, one builder fix pass + subsystem verify. Stage 2 launches **1** `worker-reviewer` (focus: `quality`); if actionable, one builder fix pass + subsystem verify. No Round 2 — `--loop-rounds=1` means one pass.
 

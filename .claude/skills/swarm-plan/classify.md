@@ -29,7 +29,6 @@ Overlays adjust single axis on top of chosen tier. Stack — multiple triggers m
 |---|---|
 | `--architect=opus` | "new trait hierarchy", "novel algorithm", "cross-subsystem", "protocol change", "content-addressed storage layout change" |
 | `--research=3` | "new dependency category", "SOTA comparison", "compliance requirement", "security-sensitive area", "cryptographic primitive" |
-| `--researcher=haiku` | `--research=1` (single-axis) AND prompt is narrow single-concept factual lookup (e.g., "check if crate X has a CVE", "find the current version of tool Y", "does library Z support feature W"); NO cross-subsystem keywords; NO multi-source synthesis signal. Context-cap guard: if projected research prompt + sources exceeds 150k tokens, stay `sonnet`. |
 | `--codex` (plan review) | One-Way Door Medium/High; "public API change"; "breaking change"; "security-sensitive"; "novel algorithm"; label `breaking-change`; label `security`; any One-Way Door costly to reverse |
 
 Defaults per tier (before overlays apply):
@@ -38,7 +37,7 @@ Defaults per tier (before overlays apply):
 |---|---|---|---|
 | architect | inline | inline (Two-Way) / sonnet (One-Way) | opus |
 | research | skip | 1 | 3 |
-| researcher | sonnet | sonnet (→ haiku on narrow-scope trigger) | sonnet |
+| researcher | sonnet | sonnet | sonnet |
 | codex plan review | off | off (auto-on for One-Way Door) | on (mandatory) |
 
 ## GitHub context as a classification input

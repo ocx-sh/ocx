@@ -57,7 +57,7 @@ Stage 1 matches tier-high: `worker-reviewer` (spec-compliance, post-implementati
 - `worker-reviewer` (focus: `quality`) — CLI-UX lens when touching command surface
 - `worker-reviewer` (focus: `security`)
 - `worker-reviewer` (focus: `performance`)
-- `worker-doc-reviewer` — model per resolved `--doc-reviewer` overlay (`sonnet` default; `haiku` when narrow-scope doc trigger fires — see `overlays.md` doc-reviewer axis)
+- `worker-doc-reviewer` — model per resolved `--doc-reviewer` overlay (`sonnet` default; `haiku` only via explicit override — see `overlays.md` doc-reviewer axis)
 - **`worker-architect`** — ADR-compliance perspective
 - **`worker-researcher`** — SOTA gap check
 

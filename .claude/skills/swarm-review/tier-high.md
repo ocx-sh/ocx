@@ -58,7 +58,7 @@ Launch **in single message with multiple Agent tool calls** so run concurrently 
 - `worker-doc-reviewer` — **fires when** documentation trigger
   matrix matches changed files (CLI commands, env vars, schema fields,
   installation, changelog); model per resolved `--doc-reviewer` overlay
-  (`sonnet` default; `haiku` when narrow-scope doc trigger fires — see
+  (`sonnet` default; `haiku` only via explicit override — see
   `overlays.md` doc-reviewer axis)
 
 Each reviewer classifies findings:

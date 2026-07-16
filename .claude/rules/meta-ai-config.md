@@ -102,7 +102,7 @@ See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
 
 ### Agents (`.claude/agents/worker-{name}.md`)
 
-- `model`: haiku (exploration), sonnet (implementation/review), opus (architecture)
+- `model`: sonnet (default — exploration, research, review, implementation), opus (multi-subsystem architecture); haiku only as explicit cheap override; never fable
 - `tools`: minimum need for role
 - Keep concise — agents inherit project rules auto
 - **Minimal anchored preamble + catalog pointer.** Agents point at `.claude/rules.md` for full rule catalog, then inline short "Always Apply" preamble (≤5 block-tier anchors, each tag with source rule file). Preamble fire at attention even when path-scoped auto-load no trigger yet. Anchors must cite source file so drift visible at review. Replace earlier "deliberate redundancy" pattern where entire rule checklists duplicate into agent bodies — that approach cause drift and heavy maintenance cost.

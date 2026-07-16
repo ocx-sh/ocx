@@ -18,7 +18,7 @@ tokens burn.
 Same as tier-high:
 - **1** `worker-architecture-explorer` (sonnet) — map current
   architecture, trace deps, find reusable code/patterns
-- **2–4** `worker-explorer` agents (haiku) — each scoped to relevant
+- **2–4** `worker-explorer` agents (sonnet) — each scoped to relevant
   subsystem
 
 **Parallel, read direct:**

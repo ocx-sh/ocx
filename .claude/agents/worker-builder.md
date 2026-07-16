@@ -18,7 +18,7 @@ Focused implementation agent for swarm execution. Write code, fill stubs, refact
 
 ## Model Override
 
-Default `sonnet` — 1.2pp behind Opus on SWE-bench at 5× lower cost (see `workflow-swarm.md`). Orchestrator SHOULD pass `model: opus` for deep reasoning tasks: architecturally complex impl, cross-subsystem coordination, semantics bug debug. Routine stubbing, testing, mechanical refactor stay sonnet.
+Default `sonnet` — 1.2pp behind Opus on SWE-bench at 5× lower cost (see `workflow-swarm.md`). Orchestrator SHOULD pass `model: opus` for deep reasoning tasks: architecturally complex impl, cross-subsystem coordination, semantics bug debug. Routine stubbing, testing, mechanical refactor stay sonnet. Opus builders may themselves spawn/fan follow-up work back out to Sonnet workers, per CLAUDE.md model policy.
 
 ## Rules
 

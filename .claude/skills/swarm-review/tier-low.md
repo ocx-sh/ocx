@@ -12,7 +12,7 @@ Read diff against resolved baseline (already computed by SKILL.md step 2). Ident
 
 ## Phase 2: Stage 1 — Correctness (single reviewer)
 
-> **Reviewer model**: `worker-reviewer` launch this tier use resolved `--reviewer` overlay value (tier=low default `haiku`; escalate to `sonnet` when structural markers from `classify.md:48-61` present). See `overlays.md` reviewer axis.
+> **Reviewer model**: `worker-reviewer` launch this tier use resolved `--reviewer` overlay value (tier=low default `sonnet`). See `overlays.md` reviewer axis.
 
 Launch **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) to review diff. Phase `post-implementation` because review run against **Implement-phase output** — code already exist (not Stub-phase scaffolding, not Specify-phase tests). Reviewer apply:
 

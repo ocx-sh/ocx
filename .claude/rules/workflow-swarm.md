@@ -13,7 +13,7 @@ Rules for efficient multi-agent swarm execution.
 1. **Workers inherit session context** - CLAUDE.md and rules loaded, workers use focused tool sets
 2. **Narrow scope** - Each worker one task
 3. **Minimal tools** - Only tools needed
-4. **Right-sized models** - Haiku exploration, Sonnet implementation, Opus architecture
+4. **Sonnet is the model floor everywhere** — exploration, research, review, implementation. Opus for multi-subsystem / one-way-door work (may fan back out to Sonnet workers). Fable (near-)never a subagent — main-loop synthesis only. Haiku only as an explicit user override
 
 ## Universal Worker Protocol (Critical Steps for Every Build/Test/Review Worker)
 
@@ -29,7 +29,7 @@ Rules for efficient multi-agent swarm execution.
 | Worker | Model | Tools | Use |
 |--------|-------|-------|-----|
 | `worker-architecture-explorer` | sonnet | Read, Glob, Grep | Architecture discovery |
-| `worker-explorer` | haiku | Read, Glob, Grep | Fast codebase search |
+| `worker-explorer` | sonnet | Read, Glob, Grep | Fast codebase search |
 | `worker-builder` | sonnet (opus override for complex implementation) | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring (see model rationale below) |
 | `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Specification tests and validation |
 | `worker-reviewer` | sonnet (default) | Read, Glob, Grep, Bash | Code review/security/spec-compliance (diff-scoped; model scales per tier via `--reviewer` overlay — see `.claude/artifacts/adr_tier_model_correlation.md`) |
@@ -48,7 +48,7 @@ Orchestrators specialize workers via focus mode in prompt.
 - `testing`: Write tests, cover happy path + edge cases, ensure deterministic. Sonnet default.
 - `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see quality-core.md). Sonnet default.
 
-**Model selection rationale:** Opus 4.7 leads Sonnet 4.6 by 8.0pp on SWE-bench Verified at 1.67× input cost, lower throughput. Gap shows on multi-step agentic chains and novel-reasoning; narrows to near-parity on single-pass review. OCX policy: Opus for one-way-door architecture and max-tier complex implementation; Sonnet for standard review / testing / implementation; Haiku only for read-only exploration and narrow single-pass tasks. Per-tier overrides in `.claude/artifacts/adr_tier_model_correlation.md` and per-skill `overlays.md` files. Source benchmark data: `.claude/artifacts/research_model_capability_matrix.md`.
+**Model selection rationale:** Opus 4.7 leads Sonnet 4.6 by 8.0pp on SWE-bench Verified at 1.67× input cost, lower throughput. Gap shows on multi-step agentic chains and novel-reasoning; narrows to near-parity on single-pass review. OCX policy: Sonnet 5 is the capability floor for every subagent — exploration, research, review, testing, implementation, all planning workers; Opus for one-way-door architecture and multi-subsystem work, and may itself fan work back out to Sonnet workers; Fable is the main-loop/last-instance decider that synthesizes pre-digested multi-agent results, (near-)never spawned as a subagent; Haiku is no longer an automatic default anywhere — legal only as an explicit user override. Per-tier overrides in `.claude/artifacts/adr_tier_model_correlation.md` and per-skill `overlays.md` files. Source benchmark data: `.claude/artifacts/research_model_capability_matrix.md` (owner policy 2026-07-16 supersedes haiku auto-routing).
 
 **worker-tester focus modes:**
 - `specification`: Write tests from design record BEFORE implementation. Tests encode expected behavior as executable spec. Must fail against stubs.
@@ -87,7 +87,7 @@ Classify each finding:
 
 **Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Codex model scales with tier (`low→luna`, `high→terra`, `max→sol`) — see "Cross-model model tiers" in `workflow-swarm.md`. Skipped gracefully if Codex unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Codex model scales with tier (`low→terra` opt-in, `high→terra` default-on, `max→sol`) — see "Cross-model model tiers" in `workflow-swarm.md`. Skipped gracefully if Codex unavailable.
 
 **Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
@@ -171,8 +171,8 @@ Extends cross-model adversarial pass up lifecycle. Same entry point (`/codex-adv
 
 Both one-shot (no looping — prevents two-family stylistic thrash). Gating by tier:
 
-- `low`: skipped (Two-Way Door — cost > value)
-- `high`: off by default; auto-on when classifier detects One-Way Door signals (public API change, breaking change, novel algorithm); explicit via `--codex`
+- `low`: skipped (Two-Way Door — cost > value); runs when `--codex` forced by user
+- `high`: **default ON** — one-shot `terra` pass; `--codex=off` or user override disables
 - `max`: mandatory final gate
 
 ### Cross-model model tiers
@@ -184,8 +184,8 @@ opus ladder). `/codex-adversary` resolves these aliases to slugs (see its
 
 | Tier | Codex model | Slug | Claude analogue |
 |---|---|---|---|
-| `low` (only when `--codex` forced) | `luna` | `gpt-5.6-luna` | Haiku |
-| `high` | `terra` | `gpt-5.6-terra` | Sonnet |
+| `low` (only when `--codex` forced) | `terra` (`luna` = explicit cheap override) | `gpt-5.6-terra` | Sonnet |
+| `high` (default-on) | `terra` | `gpt-5.6-terra` | Sonnet |
 | `max` | `sol` | `gpt-5.6-sol` | Opus |
 
 Override per run with `--codex-model=luna|terra|sol` (swarm skills) or

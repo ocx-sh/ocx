@@ -37,7 +37,7 @@ Launch **in single message with multiple Agent tool calls** so they run concurre
 - `worker-reviewer` (focus: `quality`) — include CLI-UX lens when diff touches command surface
 - `worker-reviewer` (focus: `security`) — always at max (assume security-sensitive until proven otherwise)
 - `worker-reviewer` (focus: `performance`) — always at max
-- `worker-doc-reviewer` — always at max (doc drift at scale is default failure mode); model per resolved `--doc-reviewer` overlay (`sonnet` default; `haiku` when narrow-scope doc trigger fires — see `overlays.md` doc-reviewer axis)
+- `worker-doc-reviewer` — always at max (doc drift at scale is default failure mode); model per resolved `--doc-reviewer` overlay (`sonnet` default; `haiku` only via explicit override — see `overlays.md` doc-reviewer axis)
 - `worker-architect` — SOLID, subsystem boundary respect, dependency direction, trade-off honesty; check diff against any ADR covering area
 - `worker-researcher` — SOTA gap: how do leading tools (Cargo, npm, pip/uv, Go modules, Helm) solve same problem? Algorithm choice current? Known pitfalls unaddressed?
 

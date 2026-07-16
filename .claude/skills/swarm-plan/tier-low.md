@@ -6,7 +6,7 @@ Load file via `Read` from `SKILL.md` after config announced.
 
 ## Phase 1: Discover (single worker)
 
-Launch **1** `worker-explorer` (haiku) scoped to single subsystem target touches. No `worker-architecture-explorer` — scope small, one focused explorer enough.
+Launch **1** `worker-explorer` (sonnet) scoped to single subsystem target touches. No `worker-architecture-explorer` — scope small, one focused explorer enough.
 
 **In parallel, read directly:**
 - Relevant `subsystem-*.md` rule for feature area

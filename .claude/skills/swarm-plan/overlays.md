@@ -54,19 +54,19 @@ Per-tier defaults:
 
 ### researcher axis
 
-Control model for each `worker-researcher` launched during Research phase. Mirror Claude Code own pattern — Explore use Haiku for narrow codebase search; Plan use inherit for synthesis. At OCX, narrow single-axis factual lookups run on Haiku; multi-axis synthesis and any research touching web at scale stay on Sonnet.
+Control model for each `worker-researcher` launched during Research phase. Sonnet 5 is the floor for every researcher — narrow lookups, multi-axis synthesis, and web-scale research all default to Sonnet.
 
 | Value | Effect |
 |---|---|
-| `haiku` | `worker-researcher` with model=haiku. Trigger when `--research=1` AND research target is single narrow factual lookup (no cross-subsystem keywords, no multi-source synthesis signal). |
-| `sonnet` | `worker-researcher` with model=sonnet. Default at all tiers where research runs; use whenever haiku trigger no fire. |
+| `haiku` | `worker-researcher` with model=haiku. Explicit user override only — never an automatic default or auto-trigger. |
+| `sonnet` | `worker-researcher` with model=sonnet. Default at all tiers where research runs. |
 
 Per-tier defaults:
 - low → `sonnet` (moot: research=skip at tier=low — no researcher launches)
-- high → `sonnet` (→ `haiku` when `--research=1` AND narrow-scope trigger fires)
-- max → `sonnet` (research=3 is synthesis — never haiku at max)
+- high → `sonnet`
+- max → `sonnet`
 
-**Context-cap guard**: Haiku 4.5's 200k context window is hard constraint. If research prompt project to exceed 150k tokens (e.g., WebFetch on >5 sources, reading >5 large files), escalate to `sonnet` regardless of narrow-scope trigger. See `.claude/artifacts/research_model_capability_matrix.md` for context-cap rationale.
+Haiku stays available for a trivially narrow single-fact lookup, but only when the user passes `--researcher=haiku` explicitly.
 
 ### codex axis (plan-artifact scope)
 

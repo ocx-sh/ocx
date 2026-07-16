@@ -10,6 +10,19 @@ OCX = Rust package manager. OCI registries (Docker Hub, GHCR, private) as storag
 
 Early stage. Core lib + CLI implemented. No stable API/CLI/config — refactors often delete-all-restart. Exception: metadata + OCI manifest must stay backward compatible for published packages.
 
+## ⛔ MODEL POLICY — NON-NEGOTIABLE
+
+Applies to EVERY subagent spawn (Agent tool, Workflow `agent()` incl. ultracode, swarm skills). Always set `model` explicitly — never rely on inherit (a Fable main loop would silently spawn Fable workers).
+
+| Task | Model |
+|---|---|
+| **Default** — implementation, research, web fetch, review, docs, tests, exploration, ALL planning workers | **Sonnet 5** (`sonnet`) |
+| Task stretches multiple subsystems, or Sonnet demonstrably falls short | Opus (`opus`) — justify in spawn prompt; Opus may itself fan work back out to Sonnet workers |
+| Final synthesis/decision over results multiple agents prepared (research + context pre-digested) | Fable — main loop / last instance only; (near-)NEVER as subagent; prefer Opus even here |
+
+- **Never** Fable for review, research, implementation. Scale **out** (more parallel Sonnet workers with crisp handovers: goal, inputs, output contract), not **up**.
+- **Cross-model (Codex) reviews**: `luna` (trivial) / `terra` (**default** — cost-efficient, use in small review loops too, not just high tiers) / `sol` (max-tier one-way-door gates). One-shot adversarial pass, no cross-family looping. See "Cross-model model tiers" in [workflow-swarm.md](./.claude/rules/workflow-swarm.md).
+
 ## Project Identity
 
 Vision/positioning/competitors/users/use cases → [`product-context.md`](./.claude/rules/product-context.md). Canonical product context — keep current (update protocol at bottom of same file).
