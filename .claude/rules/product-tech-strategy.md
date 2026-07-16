@@ -38,7 +38,7 @@
 
 | Component | Choice |
 |-----------|--------|
-| Static/Frontend | GitHub Pages |
+| Static/Frontend | Cloudflare Pages (behind owner nginx: ocx.sh, dev.ocx.sh) |
 | Edge/CDN | Cloudflare |
 | Secrets | GitHub Secrets |
 

@@ -39,5 +39,5 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 ## Infra / CI
 
 - GitHub Actions (`.github/workflows/`), OIDC auth, Trivy security scans.
-- Static frontend on GitHub Pages, CDN via Cloudflare, secrets via GitHub Secrets.
+- Static frontend on Cloudflare Pages (owner nginx proxies ocx.sh/dev.ocx.sh; /v2 stays local), secrets via GitHub Secrets.
 - Release tooling: `cargo-dist` (`dist-workspace.toml`), `git-cliff` (`cliff.toml`).
