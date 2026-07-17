@@ -447,8 +447,13 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
             "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
         )}},
     )
+    # Published `any`: a binary-free, env-only cert bundle is the canonical
+    # `any`-published companion (adr_platform_model_unification.md D1) — it
+    # runs unmodified on every platform, so `ocx patch sync`'s concrete-
+    # platform fan-out resolves it on each ship target without needing a
+    # per-platform republish.
     companion = make_package(
-        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env,
+        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env, platform="any",
     )
 
     # Configure the [patches] tier in the data-dir config; the recorder shell

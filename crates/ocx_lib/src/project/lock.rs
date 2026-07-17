@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
-use crate::oci::{Digest, Identifier, PinnedIdentifier};
+use crate::oci::{Digest, Identifier, Platform};
 
 /// Derive the canonical `ocx.lock` data-file path for a given config file path.
 ///
@@ -40,14 +40,17 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
 
 /// Lock file version discriminant.
 ///
-/// Serialized as a bare integer via `serde_repr`. Unknown values fail
-/// deserialization with a structured error (no silent fallback). An older
-/// ocx meeting a `V2` lock sees an unknown discriminant and rejects it
-/// cleanly (the loader surfaces "lock written by a newer ocx; upgrade
-/// ocx").
+/// Serialized as a bare integer via `serde_repr`. `V3` is the only version
+/// this build accepts — a lock written by an older OCX (V1 or V2) is
+/// rejected with an actionable [`ProjectErrorKind::UnsupportedLockVersion`]
+/// error (`ocx lock` regenerates it) rather than a bridged read. Per
+/// `adr_platform_model_unification.md` D3/D5: no migration code, the
+/// regenerate hint is the entire migration story.
 ///
-/// `V2` is the only shape the writer emits; `V1` is read-only (legacy
-/// locks migrate forward on the next write — there is no `V1` writer).
+/// The version-peek loader ([`ProjectLock::from_str_with_path`]) reads
+/// `metadata.lock_version` as a raw integer — not through this enum's derived
+/// `Deserialize` — so it can surface the found value explicitly rather than
+/// relying on `serde_repr`'s generic "unknown variant" failure.
 ///
 /// Intentionally NOT `#[non_exhaustive]` — this is an internal on-disk
 /// discriminant, not a public library enum, and the project convention
@@ -56,13 +59,11 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum LockVersion {
-    /// Version 1 of the `ocx.lock` on-disk format (read-only legacy shape:
-    /// a single `pinned` image-index digest per tool).
-    V1 = 1,
-    /// Version 2 of the `ocx.lock` on-disk format (the only written shape:
-    /// bare `repository` coordinates plus an available-only per-platform
-    /// leaf-digest map).
-    V2 = 2,
+    /// Version 3 of the `ocx.lock` on-disk format — the only version this
+    /// build reads or writes: canonical-grammar platform keys (D2), bare
+    /// `repository` coordinates, an available-only per-platform leaf-digest
+    /// map.
+    V3 = 3,
 }
 
 // `serde_repr` integer enums need a hand-written `JsonSchema` impl because
@@ -76,59 +77,17 @@ impl schemars::JsonSchema for LockVersion {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "integer",
-            "description": "OCX lock format version (lock-format version 2). Written locks are always 2.",
-            "enum": [2]
+            "description": "OCX lock format version (lock-format version 3). Written locks are always 3.",
+            "enum": [3]
         })
     }
 }
 
-/// Top-level `ocx.lock` document (in-memory model).
-///
-/// Serialization to the V2 on-disk shape is handled by
-/// [`Self::to_toml_string`] via the borrowed-view projection; deserialization
-/// is handled by the version-peek loader [`Self::from_str_with_path`]. The
-/// JSON Schema is generated from the on-disk V2 projection [`ProjectLockV2`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectLock {
-    /// Lock metadata header (version, declaration hash, generator, etc.).
-    pub metadata: LockMetadata,
-
-    /// All locked tools in the project. Sorted by (group, name) at write
-    /// time for byte-stable output.
-    pub tools: Vec<LockedTool>,
-}
-
-/// Owned V2 on-disk projection of [`ProjectLock`], used only for JSON Schema
-/// generation (`ocx_schema`) and as the V2 deserialize target.
-///
-/// The runtime serializer projects [`ProjectLock`] through the borrowed
-/// [`SerializableView`] rather than this owned type (to avoid cloning); this
-/// type exists so `schemars::JsonSchema` and the V2 read path have a concrete
-/// owned shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectLockV2 {
-    /// Lock metadata header.
-    pub metadata: LockMetadata,
-    /// All locked tools in V2 on-disk shape.
-    #[serde(default, rename = "tool")]
-    pub tools: Vec<LockedToolV2>,
-}
-
-/// Owned V1 on-disk projection of [`ProjectLock`], used only as the V1 read
-/// target (never serialized).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectLockV1 {
-    /// Lock metadata header.
-    pub metadata: LockMetadata,
-    /// All locked tools in V1 on-disk shape.
-    #[serde(default, rename = "tool")]
-    pub tools: Vec<LockedToolV1>,
-}
-
-/// Minimal header-only projection used to peek `metadata.lock_version`
-/// before committing to a full V1 or V2 deserialize.
+/// Minimal header-only projection used to peek `metadata.lock_version` before
+/// committing to a full deserialize. Reads the version as a raw `u8` (not
+/// [`LockVersion`]) so an unsupported value surfaces the actionable
+/// [`ProjectErrorKind::UnsupportedLockVersion`] error naming the found value,
+/// rather than `serde_repr`'s generic "unknown variant" failure.
 #[derive(Debug, Clone, Deserialize)]
 struct LockVersionPeek {
     metadata: LockVersionPeekMetadata,
@@ -137,15 +96,18 @@ struct LockVersionPeek {
 /// The single field the version peek needs from `[metadata]`.
 #[derive(Debug, Clone, Deserialize)]
 struct LockVersionPeekMetadata {
-    lock_version: LockVersion,
+    lock_version: u8,
 }
+
+/// The only `lock_version` this build accepts.
+const SUPPORTED_LOCK_VERSION: u8 = 3;
 
 /// Lock metadata header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockMetadata {
-    /// On-disk schema version. Written locks are always [`LockVersion::V2`];
-    /// [`LockVersion::V1`] is accepted on read (legacy locks).
+    /// On-disk schema version. `V3` is the only version this build reads or
+    /// writes.
     pub lock_version: LockVersion,
     /// Canonicalization contract version for [`Self::declaration_hash`].
     /// Currently always `1` — see [`super::DECLARATION_HASH_VERSION`].
@@ -157,88 +119,48 @@ pub struct LockMetadata {
     pub generated_by: String,
     /// ISO-8601 UTC timestamp. Preserved verbatim when the resolved
     /// content (registry, repository, digest) of every tool is unchanged
-    /// between two `ocx lock` runs; updated otherwise. The advisory tag
-    /// inside [`PinnedIdentifier`] is ignored by the comparison via
-    /// [`PinnedIdentifier::eq_content`].
+    /// between two `ocx lock` runs; updated otherwise.
     pub generated_at: String,
 }
 
-/// One locked tool entry — identified by the local binding `(group,
-/// name)`.
+/// Top-level `ocx.lock` document — both the in-memory model and the on-disk
+/// wire shape (the `tool` TOML array name is the only difference, via
+/// `#[serde(rename = "tool")]`).
 ///
-/// This is the **in-memory** model. `name` is the TOML key used in the
-/// developer's `ocx.toml` (the local binding); `group` is `"default"` for
-/// entries from the top-level `[tools]` table or the named
-/// `[group.<name>]` key. `resolution` carries either a legacy V1 index
-/// pin or the V2 per-platform leaf map (see [`LockedResolution`]).
-///
-/// The on-disk shapes are [`LockedToolV1`] (read-only) and
-/// [`LockedToolV2`] (the only written shape); the version-peek loader
-/// normalizes both into this type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockedTool {
-    /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).
-    pub name: String,
-    /// Owning group. `"default"` for entries from the top-level
-    /// `[tools]` table; otherwise the named `[group.*]` key.
-    pub group: String,
-    /// The resolved coordinates, normalized from whichever on-disk shape
-    /// the loader read.
-    pub resolution: LockedResolution,
+/// All locked tools are sorted by `(group, name)` at write time for
+/// byte-stable output; [`Self::to_toml_string`] serializes through a
+/// borrowed, pre-sorted view rather than cloning the whole document.
+/// [`Self::from_str_with_path`] is the version-peek read path: it rejects any
+/// `lock_version` other than [`SUPPORTED_LOCK_VERSION`] before attempting the
+/// full deserialize, and validates the bare-`repository` and
+/// canonical-platform-key invariants (D3) on every tool afterward.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLock {
+    /// Lock metadata header (version, declaration hash, generator, etc.).
+    pub metadata: LockMetadata,
+
+    /// All locked tools in the project. Sorted by (group, name) at write
+    /// time for byte-stable output. On disk this is the `[[tool]]` array.
+    #[serde(default, rename = "tool")]
+    pub tools: Vec<LockedTool>,
 }
 
-/// In-memory resolution shape for a [`LockedTool`].
+/// One locked tool entry — identified by the local binding `(group, name)`.
 ///
-/// The loader reads both on-disk formats into this enum; read-path
-/// consumers branch on it. The writer serializes **only** the
-/// [`PerPlatform`](Self::PerPlatform) arm — a [`LegacyIndex`](Self::LegacyIndex)
-/// reaching the writer is a bug (write commands transcribe V1 → V2 first).
-///
-/// Intentionally NOT `#[non_exhaustive]` — internal on-disk discriminant,
-/// per the project convention for non-error enums.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LockedResolution {
-    /// Read from a V1 lock (legacy on-disk `pinned`). Only the outer
-    /// image-index digest is known → install/run/GC use the legacy
-    /// index-digest + `Index::select` path. Never serialized: upgraded to
-    /// [`PerPlatform`](Self::PerPlatform) (pin-preserving) before any write.
-    LegacyIndex(PinnedIdentifier),
-    /// V2 — the only written shape. Bare repository coordinates plus an
-    /// available-only per-platform leaf-digest map.
-    PerPlatform {
-        /// Registry/repo coordinates shared by every platform leaf — a
-        /// bare [`Identifier`] with no tag and no digest. The per-platform
-        /// pull id is reconstructed as `repository.clone_with_digest(leaf)`.
-        repository: Identifier,
-        /// Per-platform leaf digests for shipped platforms only. Key = a
-        /// lossless, injective `Platform` key string (see
-        /// [`crate::oci::Platform::lock_key`]); a platform the publisher
-        /// does not ship is encoded by absence of its key.
-        platforms: BTreeMap<String, Digest>,
-    },
-}
-
-impl LockedResolution {
-    /// `true` for a V1 [`LegacyIndex`](Self::LegacyIndex) resolution.
-    ///
-    /// Read paths that special-case legacy locks (multi-platform rejection,
-    /// read-path mtime bump) call this instead of open-coding a `matches!`.
-    #[must_use]
-    pub fn is_legacy(&self) -> bool {
-        matches!(self, Self::LegacyIndex(_))
-    }
-}
-
-/// V2 on-disk shape (read + write). The only format the writer emits.
-///
-/// `repository` is a bare [`Identifier`] (no tag, no digest); the outer
-/// image-index digest is intentionally NOT stored. `platforms` records one
-/// leaf digest per shipped platform, keyed by a lossless, injective
-/// `Platform` string. Absence of a key means the publisher ships no such
-/// leaf — there is no `Unavailable` marker.
+/// `name` is the TOML key used in the developer's `ocx.toml` (the local
+/// binding); `group` is `"default"` for entries from the top-level `[tools]`
+/// table or the named `[group.<name>]` key. `repository` is the bare
+/// registry/repo coordinate (no tag, no digest) shared by every platform
+/// leaf — the outer image-index digest is intentionally not stored (the lock
+/// unit is the platform-manifest digest, uniform with dependency pins); the
+/// per-platform pull id is reconstructed as `repository.clone_with_digest(leaf)`.
+/// `platforms` records one leaf digest per shipped platform, keyed by the
+/// canonical grammar string ([`Platform`] `Display` — D2); a platform the
+/// publisher does not ship is encoded by absence of its key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct LockedToolV2 {
+pub struct LockedTool {
     /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).
     pub name: String,
     /// Owning group. `"default"` for entries from the top-level
@@ -246,27 +168,44 @@ pub struct LockedToolV2 {
     pub group: String,
     /// Bare registry/repo coordinates shared by every platform leaf.
     pub repository: Identifier,
-    /// Available-only per-platform leaf digests, keyed by a lossless,
-    /// injective `Platform` key string. `BTreeMap` for byte-stable output
+    /// Available-only per-platform leaf digests, keyed by the canonical
+    /// grammar [`Platform`] string. `BTreeMap` for byte-stable output
     /// without requiring `Ord` on `Platform`.
     pub platforms: BTreeMap<String, Digest>,
 }
 
-/// V1 on-disk shape (legacy locks; never written).
+/// Content equality for two [`LockedTool`]s, ignoring `name`/`group` —
+/// `repository` and the full `platforms` map. Shared by the lock writer's
+/// `generated_at`-preservation check ([`tools_content_equal`]) and the
+/// duplicate-across-selected-groups gate in `project::compose`.
+pub fn locked_tool_content_equal(left: &LockedTool, right: &LockedTool) -> bool {
+    left.repository == right.repository && left.platforms == right.platforms
+}
+
+/// Validates that every key in `platforms` is the canonical grammar spelling
+/// of the [`Platform`] it parses to (`Platform::from_str(key)?.to_string()
+/// == key`) — D3's canonical-key validation, applied at V3 lock load and at
+/// every platform-map write site.
 ///
-/// Retained only so the loader can read a committed V1 lock and normalize
-/// it into [`LockedResolution::LegacyIndex`]. No code path serializes this
-/// type — write commands transcribe forward to [`LockedToolV2`] first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LockedToolV1 {
-    /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).
-    pub name: String,
-    /// Owning group. `"default"` for entries from the top-level
-    /// `[tools]` table; otherwise the named `[group.*]` key.
-    pub group: String,
-    /// Resolved registry/repo + content (image-index) digest.
-    pub pinned: PinnedIdentifier,
+/// Because [`Platform`]'s `Display` is injective (`adr_platform_model_
+/// unification.md` D2), two DISTINCT canonical keys can never parse to the
+/// same `Platform` — a second key resolving to the same `Platform` would
+/// itself have to equal the first key's canonical spelling, which `BTreeMap`
+/// key uniqueness already rules out. So this single canonicalization check
+/// also enforces D3 rule 2 (canonical-platform uniqueness) for free; no
+/// separate uniqueness pass is needed. Digest-*value* aliasing (two distinct
+/// platform keys sharing a digest — e.g. Rosetta 2) stays legal: this checks
+/// keys only, never values (R6).
+pub(super) fn validate_canonical_platform_keys(platforms: &BTreeMap<String, Digest>) -> Result<(), ProjectErrorKind> {
+    for key in platforms.keys() {
+        let parsed: Platform = key
+            .parse()
+            .map_err(|_| ProjectErrorKind::NoncanonicalPlatformKey { key: key.clone() })?;
+        if &parsed.to_string() != key {
+            return Err(ProjectErrorKind::NoncanonicalPlatformKey { key: key.clone() });
+        }
+    }
+    Ok(())
 }
 
 impl ProjectLock {
@@ -341,117 +280,107 @@ impl ProjectLock {
 
     /// Version-peek loader.
     ///
-    /// Peeks `metadata.lock_version` (lenient header parse) and deserializes
-    /// the matching per-tool on-disk shape ([`ProjectLockV1`] or
-    /// [`ProjectLockV2`]), normalizing both into the in-memory
-    /// [`LockedResolution`] model. An unknown `lock_version` is rejected by
-    /// `serde_repr` at the peek (clean "upgrade ocx").
+    /// Peeks `metadata.lock_version` as a raw integer and rejects any value
+    /// other than [`SUPPORTED_LOCK_VERSION`] with
+    /// [`ProjectErrorKind::UnsupportedLockVersion`] — an explicit,
+    /// actionable error (naming the found version and the `ocx lock`
+    /// regenerate remedy) rather than `serde_repr`'s generic "unknown
+    /// variant" failure. Only then does it commit to the full deserialize,
+    /// followed by the bare-`repository` and canonical-platform-key
+    /// invariants (D3) on every tool.
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
-        // Peek the version first so a V1 lock no longer trips a raw
-        // `TomlParse` against the V2 shape.
         let peek: LockVersionPeek =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
-
-        let lock = match peek.metadata.lock_version {
-            LockVersion::V1 => Self::from_v1_str(s, &path)?,
-            LockVersion::V2 => Self::from_v2_str(s, &path)?,
-        };
-
-        // Canonicalization contract gate: a lock file whose hash was
-        // produced by a newer algorithm version cannot be interpreted by
-        // this build. Refuse rather than silently compare against a hash
-        // our `declaration_hash` would compute differently.
-        if lock.metadata.declaration_hash_version != super::hash::DECLARATION_HASH_VERSION {
+        if peek.metadata.lock_version != SUPPORTED_LOCK_VERSION {
             return Err(ProjectError::new(
                 path,
-                ProjectErrorKind::UnsupportedDeclarationHashVersion {
-                    version: lock.metadata.declaration_hash_version,
+                ProjectErrorKind::UnsupportedLockVersion {
+                    found: peek.metadata.lock_version,
                 },
             )
             .into());
         }
 
+        let lock: ProjectLock =
+            toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
+
+        // Every remaining V3 structural invariant (declaration-hash
+        // canonicalization contract version, per-tool bare-repository +
+        // canonical-platform-key) is shared with the write path — see
+        // `Self::validate`. `toml::from_str` already rejects a duplicate
+        // `[[tool]]` platform TOML key and a malformed leaf digest as
+        // parse-class errors before we reach this point.
+        lock.validate(&path)?;
+
         Ok(lock)
     }
 
-    /// Deserialize the V1 on-disk shape and normalize into the in-memory
-    /// model ([`LockedResolution::LegacyIndex`] per tool).
-    fn from_v1_str(s: &str, path: &Path) -> Result<Self, super::Error> {
-        let doc: ProjectLockV1 =
-            toml::from_str(s).map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
-        let tools = doc
-            .tools
-            .into_iter()
-            .map(|t| LockedTool {
-                name: t.name,
-                group: t.group,
-                resolution: LockedResolution::LegacyIndex(t.pinned),
-            })
-            .collect();
-        Ok(Self {
-            metadata: doc.metadata,
-            tools,
-        })
-    }
+    /// Validates every V3 structural invariant this lock format enforces,
+    /// beyond what `toml::from_str`'s `Deserialize` impls already reject
+    /// (duplicate `[[tool]]` platform keys, malformed digests): the
+    /// declaration-hash canonicalization contract version
+    /// ([`ProjectErrorKind::UnsupportedDeclarationHashVersion`]), and per-tool
+    /// bare-`repository` ([`ProjectErrorKind::LockRepositoryNotBare`]) +
+    /// canonical-platform-key ([`validate_canonical_platform_keys`])
+    /// invariants (D3).
+    ///
+    /// Called by **both** the load path ([`Self::from_str_with_path`]) and
+    /// every write path ([`Self::to_toml_string`], transitively [`Self::save`])
+    /// — a public struct's fields can be hand-assembled by any library
+    /// caller, so validating only on read would let `save` silently write a
+    /// lock every subsequent `load` rejects. `path` is used only for error
+    /// context; `to_toml_string` (which has no path) passes an empty one.
+    fn validate(&self, path: &Path) -> Result<(), super::Error> {
+        // Canonicalization contract gate: a lock file whose hash was
+        // produced by a newer algorithm version cannot be interpreted by
+        // this build. Refuse rather than silently compare against a hash
+        // our `declaration_hash` would compute differently.
+        if self.metadata.declaration_hash_version != super::hash::DECLARATION_HASH_VERSION {
+            return Err(ProjectError::new(
+                path.to_path_buf(),
+                ProjectErrorKind::UnsupportedDeclarationHashVersion {
+                    version: self.metadata.declaration_hash_version,
+                },
+            )
+            .into());
+        }
 
-    /// Deserialize the V2 on-disk shape and normalize into the in-memory
-    /// model ([`LockedResolution::PerPlatform`] per tool). Enforces the
-    /// bare-`repository` invariant and rejects malformed/duplicate platform
-    /// keys (Codex C6).
-    fn from_v2_str(s: &str, path: &Path) -> Result<Self, super::Error> {
-        // `toml::from_str` rejects duplicate table keys (Codex C6 duplicate
-        // platform entry) and a malformed leaf digest (Digest deserialize
-        // fails) as parse-class errors before we ever see the document.
-        let doc: ProjectLockV2 =
-            toml::from_str(s).map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
-        let mut tools = Vec::with_capacity(doc.tools.len());
-        for t in doc.tools {
-            // Bare-repository invariant: `repository` deserializes through
-            // `Identifier::parse`, which accepts a tag or digest. A V2 lock
-            // must carry only registry/repo coordinates.
-            if t.repository.tag().is_some() || t.repository.digest().is_some() {
+        for tool in &self.tools {
+            if tool.repository.tag().is_some() || tool.repository.digest().is_some() {
                 return Err(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::LockRepositoryNotBare {
-                        value: t.repository.to_string(),
+                        value: tool.repository.to_string(),
                     },
                 )
                 .into());
             }
-            tools.push(LockedTool {
-                name: t.name,
-                group: t.group,
-                resolution: LockedResolution::PerPlatform {
-                    repository: t.repository,
-                    platforms: t.platforms,
-                },
-            });
+            validate_canonical_platform_keys(&tool.platforms)
+                .map_err(|kind| ProjectError::new(path.to_path_buf(), kind))?;
         }
-        Ok(Self {
-            metadata: doc.metadata,
-            tools,
-        })
+
+        Ok(())
     }
 
     /// Serialize to TOML bytes. Deterministic by construction: the
     /// `tools` vector is sorted by `(group, name)` at save time and
     /// `toml::to_string_pretty` emits fields in struct-definition order.
-    ///
-    /// Advisory tags are stripped from `tools[*].pinned` for the
-    /// canonical on-disk representation — `registry/repo@digest` is the
-    /// only shape the writer emits. Callers may construct a
-    /// [`ProjectLock`] whose pinned identifiers carry tags (e.g. for
-    /// in-memory testing); those tags simply do not survive a round
-    /// trip through this method.
     pub fn to_toml_string(&self) -> Result<String, super::Error> {
+        // Defense-in-depth (D3 write-site validation): every invariant
+        // `Self::validate` checks must already hold for the document the
+        // writer is about to emit. In practice this never fires — every
+        // producer (`build_lock`, `build_platforms_map`, authoring
+        // `pin_for`) already builds a compliant document — but a caller
+        // could in principle hand-assemble a `ProjectLock`/`LockedTool` that
+        // violates one of these invariants (a tagged `repository`, a stale
+        // `declaration_hash_version`, a noncanonical platform key), and the
+        // writer must not silently persist a lock the loader would then
+        // reject.
+        self.validate(Path::new(""))?;
+
         // Sort by (group, name) for byte-stable output. Build a
         // reference-based view (`Vec<&LockedTool>`) to sort without cloning
-        // the entire `ProjectLock` document; the serialization wrapper
-        // (`SerializableView`) borrows the metadata and the sorted tool
-        // slice and projects each tool's `PerPlatform` arm into a
-        // `LockedToolV2` on the wire. A `LegacyIndex` reaching the writer is
-        // a bug (write commands transcribe V1 → V2 first); the projection
-        // hits `unreachable!()`.
+        // the entire `ProjectLock` document.
         let mut sorted_refs: Vec<&LockedTool> = self.tools.iter().collect();
         sorted_refs.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
@@ -468,16 +397,9 @@ impl ProjectLock {
     /// rename + parent-dir fsync.
     ///
     /// Preserves `metadata.generated_at` from `previous` when every
-    /// tool's pinned content (registry, repository, digest) is
-    /// unchanged; updates it otherwise. `previous` is `None` on first
-    /// write. The advisory tag inside [`PinnedIdentifier`] is ignored
-    /// by the comparison via [`PinnedIdentifier::eq_content`] — a tag
-    /// rewrite that still resolves to the same digest does not bust
-    /// `generated_at`.
+    /// tool's resolved content (repository, platforms) is unchanged;
+    /// updates it otherwise. `previous` is `None` on first write.
     ///
-    /// The advisory tag is stripped from every locked tool's pinned
-    /// identifier on the wire (see [`Self::to_toml_string`]) —
-    /// `registry/repo@digest` is the canonical on-disk form.
     /// Save the lock file and register its path in the per-user project registry.
     ///
     /// `ocx_home` is the OCX data-home directory (e.g., `~/.ocx`) used to
@@ -530,15 +452,8 @@ impl ProjectLock {
 }
 
 /// Restore a previously-captured `ocx.lock` to disk **byte-for-byte**, used by
-/// the [`MutationGuard`](super::mutation::MutationGuard) rollback path.
-///
-/// When a partial mutation fails after the new lock has been renamed into
-/// place, the predecessor must be restored verbatim — including a V1
-/// (`LegacyIndex`) lock, which the V2 writer
-/// ([`ProjectLock::to_toml_string`]) refuses to serialize (`unreachable!()`).
-/// Writing the captured original bytes back sidesteps the V2 serializer
-/// entirely, so a rolled-back mutation leaves a committed V1 lock exactly as
-/// it was on disk (still V1).
+/// the [`MutationGuard`](super::mutation::MutationGuard) rollback path when a
+/// partial mutation fails after the new lock has been renamed into place.
 ///
 /// Uses the same atomic tempfile + rename + parent-fsync primitive as
 /// [`ProjectLock::save`], so the restore is crash-durable.
@@ -554,7 +469,7 @@ pub async fn restore_lock_bytes_verbatim(path: &Path, bytes: Vec<u8>) -> Result<
 /// directory, preserving prior permissions and fsyncing the parent dir.
 ///
 /// Done on a blocking thread so the sync filesystem calls do not block the
-/// async runtime. Shared by [`ProjectLock::save`] (serialized V2 bytes) and
+/// async runtime. Shared by [`ProjectLock::save`] (serialized bytes) and
 /// [`restore_lock_bytes_verbatim`] (captured predecessor bytes).
 async fn write_lock_bytes_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), super::Error> {
     let path = path.to_path_buf();
@@ -620,64 +535,15 @@ async fn write_lock_bytes_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), supe
 
 /// Borrowed-view serialization wrapper used by [`ProjectLock::to_toml_string`].
 ///
-/// Mirrors the V2 on-disk shape (`#[serde(rename = "tool")]` for the array
-/// name) but borrows the metadata header and a pre-sorted slice of
-/// `&LockedTool` references — this avoids cloning the entire `ProjectLock`
-/// just to produce byte-stable output. The `tool` field projects each
-/// reference through [`LockedToolV2View`], which emits the bare `repository`
-/// plus the available-only `platforms` map. A [`LockedResolution::LegacyIndex`]
-/// reaching the projection is a bug (`unreachable!()`).
+/// Borrows the metadata header and a pre-sorted slice of `&LockedTool`
+/// references — this avoids cloning the entire `ProjectLock` just to produce
+/// byte-stable output.
 #[derive(Serialize)]
 struct SerializableView<'a> {
     metadata: &'a LockMetadata,
-    /// Renamed to match the V2 on-disk `tool` array name. Wrapped via a
-    /// custom `serialize_with` so we can project each in-memory `LockedTool`
-    /// onto the V2 wire shape.
-    #[serde(rename = "tool", serialize_with = "serialize_tool_views")]
+    /// Renamed to match the on-disk `tool` array name.
+    #[serde(rename = "tool")]
     tools: &'a [&'a LockedTool],
-}
-
-/// Projection of a [`LockedTool`] for the V2 on-disk wire format: borrows the
-/// `name`/`group` strings and the bare `repository`, and borrows the
-/// available-only `platforms` leaf map.
-#[derive(Serialize)]
-struct LockedToolV2View<'a> {
-    name: &'a str,
-    group: &'a str,
-    repository: &'a Identifier,
-    platforms: &'a BTreeMap<String, Digest>,
-}
-
-/// Serialize the `&[&LockedTool]` slice as a TOML array of [`LockedToolV2View`]s.
-///
-/// Only the [`LockedResolution::PerPlatform`] arm is serializable; a
-/// [`LockedResolution::LegacyIndex`] reaching the writer is a bug — write
-/// commands transcribe V1 → V2 before any save.
-fn serialize_tool_views<S>(tools: &&[&LockedTool], serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeSeq;
-
-    // Project each tool's `PerPlatform` arm onto a `LockedToolV2View`; a
-    // `LegacyIndex` reaching the writer is a bug (write commands transcribe
-    // V1 → V2 first).
-    let mut seq = serializer.serialize_seq(Some(tools.len()))?;
-    for t in *tools {
-        let view = match &t.resolution {
-            LockedResolution::PerPlatform { repository, platforms } => LockedToolV2View {
-                name: &t.name,
-                group: &t.group,
-                repository,
-                platforms,
-            },
-            LockedResolution::LegacyIndex(_) => {
-                unreachable!("LegacyIndex reached the V2 writer; write commands transcribe V1 → V2 first")
-            }
-        };
-        seq.serialize_element(&view)?;
-    }
-    seq.end()
 }
 
 /// Return `iso` bumped by exactly one second, preserving the canonical
@@ -696,17 +562,12 @@ fn bump_timestamp_one_second(iso: &str) -> Option<String> {
 }
 
 /// Compare two [`LockedTool`] lists for "resolved content unchanged"
-/// equality.
-///
-/// For V2 [`LockedResolution::PerPlatform`] entries this compares `name`,
-/// `group`, `repository`, and the full `platforms` map — `BTreeMap`
-/// equality detects key add, key remove, and value change (the platform
-/// drop/appear signal counts as content-changed and advances
-/// `generated_at`). For legacy V1 [`LockedResolution::LegacyIndex`]
-/// entries the comparison excludes the advisory tag via
-/// [`PinnedIdentifier::eq_content`]. Callers may pass tools in any order;
-/// the comparison sorts both sides by `(group, name)` before checking
-/// pairwise equality so the preservation decision is order-independent.
+/// equality: `name`, `group`, `repository`, and the full `platforms` map —
+/// `BTreeMap` equality detects key add, key remove, and value change (the
+/// platform drop/appear signal counts as content-changed and advances
+/// `generated_at`). Callers may pass tools in any order; the comparison sorts
+/// both sides by `(group, name)` before checking pairwise equality so the
+/// preservation decision is order-independent.
 fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -720,49 +581,9 @@ fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
     a_sorted.sort_by_key(sort_key);
     b_sorted.sort_by_key(sort_key);
 
-    a_sorted
-        .iter()
-        .zip(b_sorted.iter())
-        .all(|(left, right)| resolution_content_equal(left, right))
-}
-
-/// Compare two [`LockedTool`]s for content equality (name + group +
-/// resolution). Delegates the resolution comparison to
-/// [`resolutions_content_equal`].
-fn resolution_content_equal(left: &LockedTool, right: &LockedTool) -> bool {
-    left.name == right.name
-        && left.group == right.group
-        && resolutions_content_equal(&left.resolution, &right.resolution)
-}
-
-/// Resolved-content equality for two [`LockedResolution`]s, ignoring advisory
-/// metadata.
-///
-/// For `PerPlatform`, the `repository` and the full `platforms` `BTreeMap` are
-/// compared (`BTreeMap` equality detects key add, key remove, and value change
-/// — the platform drop/appear signal counts as content-changed). For
-/// `LegacyIndex`, the advisory tag is excluded via
-/// [`PinnedIdentifier::eq_content`]. A `PerPlatform`/`LegacyIndex` shape
-/// mismatch is never content-equal.
-///
-/// Single source of the resolution-equality predicate shared by the lock
-/// writer's `generated_at`-preservation check ([`tools_content_equal`]) and
-/// the `ocx update --check` verify-only path.
-pub fn resolutions_content_equal(left: &LockedResolution, right: &LockedResolution) -> bool {
-    match (left, right) {
-        (LockedResolution::LegacyIndex(a), LockedResolution::LegacyIndex(b)) => a.eq_content(b),
-        (
-            LockedResolution::PerPlatform {
-                repository: ra,
-                platforms: pa,
-            },
-            LockedResolution::PerPlatform {
-                repository: rb,
-                platforms: pb,
-            },
-        ) => ra == rb && pa == pb,
-        _ => false,
-    }
+    a_sorted.iter().zip(b_sorted.iter()).all(|(left, right)| {
+        left.name == right.name && left.group == right.group && locked_tool_content_equal(left, right)
+    })
 }
 
 #[cfg(test)]
@@ -772,7 +593,7 @@ mod tests {
     //!
     //! Assertions prefer typed
     //! [`super::super::error::ProjectErrorKind`] matches over string matches.
-    //! Determinism + the strip-advisory write rule are permanent contracts.
+    //! Determinism is a permanent contract.
     use super::*;
     use crate::oci::{Digest, Identifier};
     use crate::project::error::ProjectErrorKind;
@@ -813,81 +634,27 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
-    /// Build a [`PinnedIdentifier`] for `registry/repo:tag@sha256:<byte * 64>`.
-    fn pinned(registry: &str, repo: &str, tag: Option<&str>, digest_byte: char) -> PinnedIdentifier {
-        let mut id = Identifier::new_registry(repo, registry);
-        if let Some(t) = tag {
-            id = id.clone_with_tag(t);
-        }
-        let id = id.clone_with_digest(Digest::Sha256(sha256_of(digest_byte)));
-        PinnedIdentifier::try_from(id).expect("identifier carries a digest")
-    }
-
     /// Construct a 64-hex sha256 [`Digest`] filled with the given byte.
     fn digest_of(byte: char) -> Digest {
         Digest::Sha256(sha256_of(byte))
     }
 
     /// Construct a bare `registry/repo` [`Identifier`] (no tag, no digest) —
-    /// the V2 `repository` coordinate shape.
+    /// the `repository` coordinate shape.
     fn bare_repo(registry: &str, repo: &str) -> Identifier {
         Identifier::new_registry(repo, registry)
     }
 
-    /// A V1-shaped [`LockedTool`] carrying a [`LockedResolution::LegacyIndex`].
-    ///
-    /// Used by legacy-read assertions and by `tools_content_equal` /
-    /// `generated_at`-preservation tests that exercise the
-    /// `PinnedIdentifier::eq_content` comparison path.
-    fn locked_tool(name: &str, group: &str, pinned_id: PinnedIdentifier) -> LockedTool {
-        LockedTool {
-            name: name.to_string(),
-            group: group.to_string(),
-            resolution: LockedResolution::LegacyIndex(pinned_id),
-        }
-    }
-
-    /// A V2-shaped [`LockedTool`] carrying a [`LockedResolution::PerPlatform`]
-    /// with a single `"linux/amd64"` leaf keyed by its lossless platform key.
-    ///
-    /// The writer only serializes this arm; write/round-trip tests use it.
-    fn locked_tool_v2(name: &str, group: &str, registry: &str, repo: &str, leaf_byte: char) -> LockedTool {
+    /// Build a [`LockedTool`] pinning `default/<name>` to one
+    /// `linux/amd64` leaf digest.
+    fn locked_tool(name: &str, group: &str, registry: &str, repo: &str, leaf_byte: char) -> LockedTool {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), digest_of(leaf_byte));
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: bare_repo(registry, repo),
-                platforms,
-            },
-        }
-    }
-
-    /// Read a [`LockedTool`]'s legacy index pin, panicking if it is V2.
-    /// Keeps legacy-read assertions terse.
-    fn legacy_pin(tool: &LockedTool) -> &PinnedIdentifier {
-        match &tool.resolution {
-            LockedResolution::LegacyIndex(pinned) => pinned,
-            LockedResolution::PerPlatform { .. } => {
-                panic!(
-                    "expected LegacyIndex resolution, got PerPlatform for tool '{}'",
-                    tool.name
-                )
-            }
-        }
-    }
-
-    /// Read a [`LockedTool`]'s V2 per-platform map, panicking if it is V1.
-    fn per_platform(tool: &LockedTool) -> (&Identifier, &BTreeMap<String, Digest>) {
-        match &tool.resolution {
-            LockedResolution::PerPlatform { repository, platforms } => (repository, platforms),
-            LockedResolution::LegacyIndex(_) => {
-                panic!(
-                    "expected PerPlatform resolution, got LegacyIndex for tool '{}'",
-                    tool.name
-                )
-            }
+            repository: bare_repo(registry, repo),
+            platforms,
         }
     }
 
@@ -905,11 +672,9 @@ mod tests {
         cfg
     }
 
-    /// V2 metadata header — the only shape the writer emits, so every
-    /// serialize/save/round-trip test uses it.
     fn sample_metadata() -> LockMetadata {
         LockMetadata {
-            lock_version: LockVersion::V2,
+            lock_version: LockVersion::V3,
             declaration_hash_version: 1,
             declaration_hash: format!("sha256:{}", sha256_of('d')),
             generated_by: "ocx 0.3.0".to_string(),
@@ -919,55 +684,14 @@ mod tests {
 
     // --- Fixtures -----------------------------------------------------------
 
-    fn minimal_lock_toml() -> String {
-        format!(
-            r#"
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "sha256:{abc}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-"#,
-            abc = sha256_of('a'),
-        )
-    }
-
-    fn full_lock_toml() -> String {
-        // Two tools across two groups, three different digests.
-        format!(
-            r#"
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "sha256:{cafe}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-
-[[tool]]
-name = "cmake"
-group = "default"
-pinned = "ocx.sh/cmake@sha256:{aaa}"
-
-[[tool]]
-name = "shellcheck"
-group = "ci"
-pinned = "ocx.sh/shellcheck@sha256:{bbb}"
-"#,
-            cafe = sha256_of('c'),
-            aaa = sha256_of('1'),
-            bbb = sha256_of('2'),
-        )
-    }
-
-    /// A V2 on-disk fixture: one tool, bare `repository`, two shipped
-    /// platform leaves keyed by their lossless platform key. `windows/amd64`
+    /// A V3 on-disk fixture: one tool, bare `repository`, two shipped
+    /// platform leaves keyed by their canonical grammar key. `windows/amd64`
     /// is deliberately absent (publisher ships no such leaf).
-    fn v2_lock_toml() -> String {
+    fn v3_lock_toml() -> String {
         format!(
             r#"
 [metadata]
-lock_version = 2
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:{cafe}"
 generated_by = "ocx 0.3.0"
@@ -988,35 +712,115 @@ repository = "ocx.sh/cmake"
         )
     }
 
-    // --- Parsing ------------------------------------------------------------
+    // --- Version rejection ---------------------------------------------------
 
     #[test]
-    fn parse_minimal_lock_ok() {
-        let lock = ProjectLock::from_toml_str(&minimal_lock_toml()).expect("minimal lock parses");
-        assert_eq!(lock.metadata.lock_version, LockVersion::V1);
-        assert_eq!(lock.metadata.declaration_hash_version, 1);
+    fn read_rejects_v1() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+"#,
+            abc = sha256_of('a'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("V1 lock must reject");
+        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 1 });
+    }
+
+    #[test]
+    fn read_rejects_v2() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 2
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+"#,
+            abc = sha256_of('a'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("V2 lock must reject");
+        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 2 });
+    }
+
+    #[test]
+    fn read_rejects_unknown_future_version() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 4
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 99.0.0"
+generated_at = "2099-01-01T00:00:00Z"
+"#,
+            abc = sha256_of('a'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("unknown future version must reject");
+        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 4 });
+    }
+
+    #[test]
+    fn read_rejects_unsupported_version_with_regenerate_hint() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+"#,
+            abc = sha256_of('a'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("V1 lock must reject");
+        assert!(
+            err.to_string().contains("ocx lock"),
+            "message must name the `ocx lock` regenerate remedy; got {err}"
+        );
+    }
+
+    // --- Parsing --------------------------------------------------------------
+
+    #[test]
+    fn parse_empty_v3_lock_ok() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+"#,
+            abc = sha256_of('a'),
+        );
+        let lock = ProjectLock::from_toml_str(&toml_str).expect("empty V3 lock parses");
+        assert_eq!(lock.metadata.lock_version, LockVersion::V3);
         assert!(lock.tools.is_empty());
     }
 
     #[test]
-    fn parse_full_lock_ok() {
-        // `full_lock_toml` is a V1 fixture (`lock_version = 1`, `pinned`
-        // field), so every tool normalizes to `LockedResolution::LegacyIndex`.
-        let lock = ProjectLock::from_toml_str(&full_lock_toml()).expect("full lock parses");
-        assert_eq!(lock.tools.len(), 2);
-
-        let cmake = lock.tools.iter().find(|t| t.name == "cmake").expect("cmake present");
+    fn parse_full_v3_lock_ok() {
+        let lock = ProjectLock::from_toml_str(&v3_lock_toml()).expect("V3 lock parses");
+        assert_eq!(lock.tools.len(), 1);
+        let cmake = &lock.tools[0];
+        assert_eq!(cmake.name, "cmake");
         assert_eq!(cmake.group, "default");
-        let cmake_pin = legacy_pin(cmake);
-        assert_eq!(cmake_pin.repository(), "cmake");
-        assert_eq!(cmake_pin.registry(), "ocx.sh");
-
-        let sc = lock
-            .tools
-            .iter()
-            .find(|t| t.name == "shellcheck")
-            .expect("shellcheck present");
-        assert_eq!(sc.group, "ci");
+        assert_eq!(cmake.repository.registry(), "ocx.sh");
+        assert_eq!(cmake.repository.repository(), "cmake");
+        assert!(cmake.repository.tag().is_none() && cmake.repository.digest().is_none());
+        assert_eq!(cmake.platforms.get("linux/amd64"), Some(&digest_of('1')));
+        assert_eq!(cmake.platforms.get("darwin/arm64"), Some(&digest_of('2')));
+        assert!(
+            !cmake.platforms.contains_key("windows/amd64"),
+            "an unshipped platform must be absent from the map"
+        );
     }
 
     #[test]
@@ -1027,7 +831,7 @@ repository = "ocx.sh/cmake"
 unknown = "key"
 
 [metadata]
-lock_version = 1
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:{abc}"
 generated_by = "ocx 0.3.0"
@@ -1036,28 +840,6 @@ generated_at = "2026-04-19T00:00:00Z"
         );
         let err = ProjectLock::from_toml_str(&toml_str).expect_err("unknown top-level must reject");
         assert_kind!(err, ProjectErrorKind::TomlParse(_));
-    }
-
-    #[test]
-    fn parse_empty_v2_lock_ok() {
-        // `lock_version = 2` is now a known discriminant: a V2 lock carrying
-        // only `[metadata]` (no `[[tool]]`) parses to an empty tool list.
-        // (`lock_version = 3` is the unknown-discriminant case — covered by
-        // `read_rejects_unknown_lock_version`.)
-        let abc = sha256_of('a');
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 2
-declaration_hash_version = 1
-declaration_hash = "sha256:{abc}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-"#
-        );
-        let lock = ProjectLock::from_toml_str(&toml_str).expect("empty V2 lock parses");
-        assert_eq!(lock.metadata.lock_version, LockVersion::V2);
-        assert!(lock.tools.is_empty());
     }
 
     #[test]
@@ -1072,7 +854,7 @@ generated_at = "2026-04-19T00:00:00Z"
         let toml_str = format!(
             r#"
 [metadata]
-lock_version = 1
+lock_version = 3
 declaration_hash_version = 2
 declaration_hash = "sha256:{abc}"
 generated_by = "ocx 0.99.0"
@@ -1102,13 +884,142 @@ generated_at = "2099-01-01T00:00:00Z"
         assert_kind!(err, ProjectErrorKind::TomlParse(_));
     }
 
+    // --- Canonical-key validation (D3) -----------------------------------
+
+    /// An unsorted `os_features` list (`+b,a` instead of the canonical
+    /// `+a,b`) is a noncanonical spelling of a valid `Platform` — rejected,
+    /// never silently normalized.
+    #[test]
+    fn read_rejects_unsorted_feature_list_key() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{cafe}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"
+
+[tool.platforms]
+"linux/amd64+b,a" = "sha256:{leaf}"
+"#,
+            cafe = sha256_of('c'),
+            leaf = sha256_of('1'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("unsorted feature-list key must reject");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::NoncanonicalPlatformKey { key } = &pe.kind else {
+            panic!("expected NoncanonicalPlatformKey, got {:?}", pe.kind);
+        };
+        assert_eq!(key, "linux/amd64+b,a");
+    }
+
+    /// A redundant duplicate feature (`+a,a` instead of the canonical `+a`)
+    /// is likewise a noncanonical spelling — rejected.
+    #[test]
+    fn read_rejects_duplicate_feature_key() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{cafe}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"
+
+[tool.platforms]
+"linux/amd64+a,a" = "sha256:{leaf}"
+"#,
+            cafe = sha256_of('c'),
+            leaf = sha256_of('1'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("duplicate-feature key must reject");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::NoncanonicalPlatformKey { key } = &pe.kind else {
+            panic!("expected NoncanonicalPlatformKey, got {:?}", pe.kind);
+        };
+        assert_eq!(key, "linux/amd64+a,a");
+    }
+
+    /// A key that fails to parse as a `Platform` at all is also
+    /// `NoncanonicalPlatformKey`, not a bare `TomlParse`.
+    #[test]
+    fn read_rejects_unparseable_platform_key() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{cafe}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"
+
+[tool.platforms]
+"not-a-platform" = "sha256:{leaf}"
+"#,
+            cafe = sha256_of('c'),
+            leaf = sha256_of('1'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("unparseable key must reject");
+        assert_kind!(err, ProjectErrorKind::NoncanonicalPlatformKey { .. });
+    }
+
+    /// R6: two distinct platform keys mapping to the SAME digest (the
+    /// Rosetta 2 case — a publisher pushes the `darwin/amd64` binary under
+    /// `darwin/arm64` too) is legitimate and must load + resolve normally.
+    /// Only key-level canonical-platform uniqueness is enforced, never
+    /// digest-value uniqueness.
+    #[test]
+    fn read_accepts_shared_digest_aliasing_across_distinct_platform_keys() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{cafe}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:{shared}"
+"darwin/arm64" = "sha256:{shared}"
+"#,
+            cafe = sha256_of('c'),
+            shared = sha256_of('1'),
+        );
+        let lock = ProjectLock::from_toml_str(&toml_str).expect("shared-digest aliasing must load normally");
+        let platforms = &lock.tools[0].platforms;
+        assert_eq!(platforms.get("darwin/amd64"), Some(&digest_of('1')));
+        assert_eq!(platforms.get("darwin/arm64"), Some(&digest_of('1')));
+    }
+
     // --- Serialization + determinism ---------------------------------------
 
     #[test]
     fn roundtrip_deterministic() {
         let lock = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", '1')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
         };
         let first = lock.to_toml_string().expect("first serialization");
         let reparsed = ProjectLock::from_toml_str(&first).expect("first reparse");
@@ -1116,7 +1027,7 @@ generated_at = "2099-01-01T00:00:00Z"
         assert_eq!(first, second, "second pass must be byte-identical");
     }
 
-    /// Idempotent re-lock must be byte-identical: serializing the same V2
+    /// Idempotent re-lock must be byte-identical: serializing the same
     /// content twice (with the same `generated_at`) yields identical bytes.
     /// This is the cross-OS reproducibility + "no `generated_at` churn"
     /// contract (ADR Validation: "an unchanged re-lock is byte-identical").
@@ -1125,27 +1036,192 @@ generated_at = "2099-01-01T00:00:00Z"
         let build = || ProjectLock {
             metadata: sample_metadata(),
             tools: vec![
-                locked_tool_v2("cmake", "default", "ocx.sh", "cmake", '1'),
-                locked_tool_v2("ninja", "default", "ocx.sh", "ninja", '2'),
+                locked_tool("cmake", "default", "ocx.sh", "cmake", '1'),
+                locked_tool("ninja", "default", "ocx.sh", "ninja", '2'),
             ],
         };
         let first = build().to_toml_string().expect("first serialization");
         let second = build().to_toml_string().expect("second serialization");
-        assert_eq!(first, second, "two identical V2 locks must serialize byte-identically");
+        assert_eq!(first, second, "two identical locks must serialize byte-identically");
+    }
+
+    // --- Canonical-key validation (D3), write site ---------------------
+
+    /// F5: `to_toml_string` runs the same canonicalization check as load —
+    /// an unsorted `os_features` list built directly in memory (bypassing
+    /// any parser) must still be rejected at write time.
+    #[test]
+    fn write_rejects_unsorted_feature_list_key() {
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64+b,a".to_string(), digest_of('1'));
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![LockedTool {
+                name: "cmake".to_string(),
+                group: "default".to_string(),
+                repository: bare_repo("ocx.sh", "cmake"),
+                platforms,
+            }],
+        };
+        let err = lock
+            .to_toml_string()
+            .expect_err("unsorted feature-list key must reject at write");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::NoncanonicalPlatformKey { key } = &pe.kind else {
+            panic!("expected NoncanonicalPlatformKey, got {:?}", pe.kind);
+        };
+        assert_eq!(key, "linux/amd64+b,a");
+    }
+
+    /// F5: a redundant duplicate feature (`+a,a`) is likewise noncanonical
+    /// and must be rejected at write time, not just on load.
+    #[test]
+    fn write_rejects_duplicate_feature_key() {
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64+a,a".to_string(), digest_of('1'));
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![LockedTool {
+                name: "cmake".to_string(),
+                group: "default".to_string(),
+                repository: bare_repo("ocx.sh", "cmake"),
+                platforms,
+            }],
+        };
+        let err = lock
+            .to_toml_string()
+            .expect_err("duplicate-feature key must reject at write");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::NoncanonicalPlatformKey { key } = &pe.kind else {
+            panic!("expected NoncanonicalPlatformKey, got {:?}", pe.kind);
+        };
+        assert_eq!(key, "linux/amd64+a,a");
+    }
+
+    // --- Structural invariants shared by load and write (T2 terra-gate fix) --
+    //
+    // `Self::validate` runs identically on the load path
+    // (`from_str_with_path`) and every write path (`to_toml_string`, hence
+    // `save`). Before this fix, only the platform-key invariant above ran on
+    // both sides — a hand-assembled `LockedTool` with a tagged `repository`
+    // or a `LockMetadata` with a stale `declaration_hash_version` would
+    // serialize successfully via `to_toml_string`/`save`, then be rejected
+    // by every later `load` of the very file `save` just wrote.
+
+    /// (a) Round-trip property: several structurally distinct, VALID locks
+    /// all serialize successfully and reload without error. Proven by
+    /// re-serializing the reload and comparing bytes (extends
+    /// `roundtrip_deterministic` to more shapes: empty tool list, multiple
+    /// tools across groups, and R6 shared-digest aliasing across two
+    /// platform keys).
+    #[test]
+    fn every_valid_lock_that_serializes_also_loads() {
+        let shared_digest_platforms = {
+            let mut platforms = BTreeMap::new();
+            platforms.insert("darwin/amd64".to_string(), digest_of('4'));
+            platforms.insert("darwin/arm64".to_string(), digest_of('4'));
+            platforms
+        };
+        let cases: Vec<ProjectLock> = vec![
+            ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![],
+            },
+            ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
+            },
+            ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![
+                    locked_tool("cmake", "default", "ocx.sh", "cmake", '1'),
+                    locked_tool("cmake", "ci", "ocx.sh", "cmake", '2'),
+                    locked_tool("ninja", "default", "ocx.sh", "ninja", '3'),
+                ],
+            },
+            ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![LockedTool {
+                    name: "rosetta".to_string(),
+                    group: "default".to_string(),
+                    repository: bare_repo("ocx.sh", "rosetta"),
+                    platforms: shared_digest_platforms,
+                }],
+            },
+        ];
+
+        for (index, lock) in cases.into_iter().enumerate() {
+            let serialized = lock
+                .to_toml_string()
+                .unwrap_or_else(|e| panic!("case {index}: a valid lock must serialize, got {e}"));
+            let reparsed = ProjectLock::from_toml_str(&serialized)
+                .unwrap_or_else(|e| panic!("case {index}: a lock that serialized must also load, got {e}"));
+            let reserialized = reparsed
+                .to_toml_string()
+                .unwrap_or_else(|e| panic!("case {index}: a reparsed lock must re-serialize, got {e}"));
+            assert_eq!(serialized, reserialized, "case {index}: round-trip must be byte-stable");
+        }
+    }
+
+    /// (b) A tagged `repository` is unreachable via any producer in this
+    /// codebase (`build_lock`, authoring `pin_for`), but nothing at the type
+    /// level stops a library caller from hand-assembling a `LockedTool` with
+    /// one. Must reject at write, not just at load.
+    #[test]
+    fn write_rejects_tagged_repository() {
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64".to_string(), digest_of('1'));
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![LockedTool {
+                name: "cmake".to_string(),
+                group: "default".to_string(),
+                repository: bare_repo("ocx.sh", "cmake").clone_with_tag("3.28"),
+                platforms,
+            }],
+        };
+        let err = lock
+            .to_toml_string()
+            .expect_err("a tagged repository must reject at write, not just at load");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::LockRepositoryNotBare { value } = &pe.kind else {
+            panic!("expected LockRepositoryNotBare, got {:?}", pe.kind);
+        };
+        assert_eq!(value, "ocx.sh/cmake:3.28");
+    }
+
+    /// (c) `LockMetadata.declaration_hash_version` is a plain `u8` — nothing
+    /// at the type level stops a caller from setting it to a value other
+    /// than `super::hash::DECLARATION_HASH_VERSION`. Must reject at write,
+    /// mirroring `load_rejects_future_hash_version`.
+    #[test]
+    fn write_rejects_declaration_hash_version_mismatch() {
+        let mut metadata = sample_metadata();
+        metadata.declaration_hash_version = 2;
+        let lock = ProjectLock {
+            metadata,
+            tools: vec![],
+        };
+        let err = lock
+            .to_toml_string()
+            .expect_err("a mismatched declaration_hash_version must reject at write, not just at load");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::UnsupportedDeclarationHashVersion { version } = &pe.kind else {
+            panic!("expected UnsupportedDeclarationHashVersion, got {:?}", pe.kind);
+        };
+        assert_eq!(*version, 2);
     }
 
     #[test]
     fn tools_written_sorted_by_name_then_group() {
         // Input order is intentionally unsorted. Output must be:
-        // cmake/ci, cmake/default, zlib/default. The plan §1 sort key
-        // is `(group, name)`; the test name predates the rename and is
-        // preserved verbatim per the migration map.
+        // cmake/ci, cmake/default, zlib/default.
         let lock = ProjectLock {
             metadata: sample_metadata(),
             tools: vec![
-                locked_tool_v2("zlib", "default", "ocx.sh", "zlib", '3'),
-                locked_tool_v2("cmake", "ci", "ocx.sh", "cmake", '1'),
-                locked_tool_v2("cmake", "default", "ocx.sh", "cmake", '2'),
+                locked_tool("zlib", "default", "ocx.sh", "zlib", '3'),
+                locked_tool("cmake", "ci", "ocx.sh", "cmake", '1'),
+                locked_tool("cmake", "default", "ocx.sh", "cmake", '2'),
             ],
         };
         let out = lock.to_toml_string().expect("serialization");
@@ -1187,7 +1263,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
 
         // `self.tools` is content-equal to `prev.tools` (same repository +
@@ -1220,7 +1296,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
 
         let next = ProjectLock {
@@ -1229,7 +1305,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 ..sample_metadata()
             },
             // Different leaf digest byte ⇒ different content.
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'b')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'b')],
         };
 
         let cfg = stage_sibling_ocx_toml(&path);
@@ -1242,37 +1318,10 @@ generated_at = "2099-01-01T00:00:00Z"
     }
 
     #[tokio::test]
-    async fn generated_at_preserved_when_only_legacy_tag_changes() {
-        // The advisory `tag` carried inside a V1 [`PinnedIdentifier`]
-        // ([`LockedResolution::LegacyIndex`]) must NOT bust `generated_at`
-        // preservation: only the resolved content (registry, repository,
-        // digest) — surfaced via [`PinnedIdentifier::eq_content`] —
-        // contributes to the "content unchanged" signal. This exercises
-        // `tools_content_equal` directly (no writer round-trip, since the
-        // writer never serializes a LegacyIndex).
-        let prev = vec![locked_tool(
-            "cmake",
-            "default",
-            pinned("ocx.sh", "cmake", Some("3.28"), 'a'),
-        )];
-        // Same registry/repo/digest — only the advisory tag moved.
-        let next = vec![locked_tool(
-            "cmake",
-            "default",
-            pinned("ocx.sh", "cmake", Some("3.29"), 'a'),
-        )];
-        assert!(
-            tools_content_equal(&prev, &next),
-            "legacy entries differing only in advisory tag must compare content-equal"
-        );
-    }
-
-    #[tokio::test]
-    async fn generated_at_preserved_when_v2_platforms_unchanged() {
-        // The V2 content-equality signal is `repository` + the full
-        // `platforms` map. A re-lock that produces the identical map keeps
-        // `generated_at` frozen (ADR Validation: unchanged re-lock is
-        // byte-identical, no `generated_at` churn).
+    async fn generated_at_preserved_when_platforms_unchanged() {
+        // A re-lock that produces the identical map keeps `generated_at`
+        // frozen (ADR Validation: unchanged re-lock is byte-identical, no
+        // `generated_at` churn).
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("ocx.lock");
 
@@ -1281,7 +1330,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
         // Rebuilt independently with the same repository + leaf digest.
         let next = ProjectLock {
@@ -1289,7 +1338,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 generated_at: "2099-12-31T23:59:59Z".to_string(),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
 
         let cfg = stage_sibling_ocx_toml(&path);
@@ -1297,7 +1346,7 @@ generated_at = "2099-01-01T00:00:00Z"
         let reloaded = ProjectLock::load(&path).await.expect("reload ok");
         assert_eq!(
             reloaded.metadata.generated_at, "2026-01-01T00:00:00Z",
-            "generated_at must be preserved when the V2 platforms map is unchanged"
+            "generated_at must be preserved when the platforms map is unchanged"
         );
     }
 
@@ -1310,8 +1359,8 @@ generated_at = "2099-01-01T00:00:00Z"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("ocx.lock");
 
-        let tool_a = locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a');
-        let tool_b = locked_tool_v2("ninja", "default", "ocx.sh", "ninja", 'b');
+        let tool_a = locked_tool("cmake", "default", "ocx.sh", "cmake", 'a');
+        let tool_b = locked_tool("ninja", "default", "ocx.sh", "ninja", 'b');
 
         let prev = ProjectLock {
             metadata: LockMetadata {
@@ -1375,7 +1424,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 declaration_hash: format!("sha256:{}", sha256_of('1')),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
         let cfg = stage_sibling_ocx_toml(&path);
         seed.save(&path, None, tmp.path(), &cfg).await.expect("seed save ok");
@@ -1397,7 +1446,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 declaration_hash: format!("sha256:{}", sha256_of('2')),
                 ..sample_metadata()
             },
-            tools: vec![locked_tool_v2("ninja", "default", "ocx.sh", "ninja", 'b')],
+            tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
         };
         let cfg_clobber = stage_sibling_ocx_toml(&path);
         let err = clobber
@@ -1424,7 +1473,7 @@ generated_at = "2099-01-01T00:00:00Z"
 
         let lock = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
         let cfg = stage_sibling_ocx_toml(&path);
         lock.save(&path, None, tmp.path(), &cfg).await.expect("save ok");
@@ -1457,7 +1506,7 @@ generated_at = "2099-01-01T00:00:00Z"
 
         let seed = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
         let cfg = stage_sibling_ocx_toml(&path);
         seed.save(&path, None, tmp.path(), &cfg).await.expect("seed save ok");
@@ -1470,7 +1519,7 @@ generated_at = "2099-01-01T00:00:00Z"
         // Overwrite with a fresh save — mode must survive.
         let next = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("ninja", "default", "ocx.sh", "ninja", 'b')],
+            tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
         };
         let cfg2 = stage_sibling_ocx_toml(&path);
         next.save(&path, None, tmp.path(), &cfg2).await.expect("save ok");
@@ -1497,7 +1546,7 @@ generated_at = "2099-01-01T00:00:00Z"
         let padding: String = "# padding comment line to exceed the size cap\n".repeat(2200);
         let oversized = format!(
             "{padding}\n[metadata]\n\
-             lock_version = 1\n\
+             lock_version = 3\n\
              declaration_hash_version = 1\n\
              declaration_hash = \"sha256:{abc}\"\n\
              generated_by = \"ocx 0.3.0\"\n\
@@ -1514,23 +1563,23 @@ generated_at = "2099-01-01T00:00:00Z"
         assert_kind!(err, ProjectErrorKind::FileTooLarge { .. });
     }
 
-    // ── V2 write shape ─────────────────────────────────────────────────────
+    // ── On-disk shape ──────────────────────────────────────────────────────
 
-    /// Structural guard (ADR Validation: "No V2 lock contains an index
-    /// digest"). A V2 lock serializes the bare `repository` (no tag, no
+    /// Structural guard (ADR Validation: "No lock contains an index
+    /// digest"). A lock serializes the bare `repository` (no tag, no
     /// digest) plus the per-platform leaf map — the outer image-index digest
     /// is never written. We assert the on-disk form carries the repository
     /// coordinate, the per-platform key, and the leaf digest, and that the
     /// `[tool.platforms]` table shape (not a `pinned = "..."` line) is used.
     #[tokio::test]
-    async fn save_v2_writes_repository_and_platforms_no_index_digest() {
+    async fn save_writes_repository_and_platforms_no_index_digest() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let lock_path = tmp.path().join("ocx.lock");
 
         let leaf = digest_of('a');
         let lock = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
 
         let cfg = stage_sibling_ocx_toml(&lock_path);
@@ -1541,268 +1590,43 @@ generated_at = "2099-01-01T00:00:00Z"
         let on_disk = tokio::fs::read_to_string(&lock_path).await.expect("read");
         assert!(
             on_disk.contains("repository = \"ocx.sh/cmake\""),
-            "V2 lock must record the bare repository coordinate; got:\n{on_disk}"
+            "lock must record the bare repository coordinate; got:\n{on_disk}"
         );
         assert!(
             on_disk.contains("\"linux/amd64\""),
-            "V2 lock must record the per-platform key; got:\n{on_disk}"
+            "lock must record the per-platform key; got:\n{on_disk}"
         );
         assert!(
             on_disk.contains(&leaf.to_string()),
-            "V2 lock must record the leaf digest; got:\n{on_disk}"
+            "lock must record the leaf digest; got:\n{on_disk}"
         );
         assert!(
             !on_disk.contains("pinned ="),
-            "V2 lock must NOT carry a legacy `pinned` index-digest line; got:\n{on_disk}"
+            "lock must NOT carry a legacy `pinned` index-digest line; got:\n{on_disk}"
         );
 
-        // Round-trips back into a PerPlatform entry with the same leaf.
+        // Round-trips back into an identical entry with the same leaf.
         let reloaded = ProjectLock::load(&lock_path).await.expect("reload succeeds");
         assert_eq!(reloaded.tools.len(), 1);
-        let (repo, platforms) = per_platform(&reloaded.tools[0]);
-        assert_eq!(repo.registry(), "ocx.sh");
-        assert_eq!(repo.repository(), "cmake");
-        assert!(repo.tag().is_none(), "V2 repository must be bare (no tag)");
-        assert!(repo.digest().is_none(), "V2 repository must be bare (no digest)");
-        assert_eq!(platforms.get("linux/amd64"), Some(&leaf));
-    }
-
-    /// The writer serializes only the `PerPlatform` arm. Handing it a
-    /// `LegacyIndex` (a V1 entry that reached the writer without being
-    /// transcribed first) is a contract violation that must panic, not
-    /// silently emit a malformed/legacy lock (ADR: writer only emits V2;
-    /// write commands transcribe V1 → V2 first).
-    #[test]
-    #[should_panic(expected = "LegacyIndex")]
-    fn serializer_panics_when_handed_legacy_index() {
-        let lock = ProjectLock {
-            metadata: sample_metadata(),
-            tools: vec![locked_tool("cmake", "default", pinned("ocx.sh", "cmake", None, 'a'))],
-        };
-        // The `LegacyIndex` arm hits `unreachable!()` in the V2 projection.
-        let _ = lock.to_toml_string();
-    }
-
-    /// Reading a V1 lock normalizes every tool to
-    /// [`LockedResolution::LegacyIndex`] (ADR: read-both-V1/V2). The
-    /// committed V1 lock keeps working on read paths without a forced
-    /// upgrade.
-    #[test]
-    fn read_v1_normalizes_to_legacy_index() {
-        let lock = ProjectLock::from_toml_str(&full_lock_toml()).expect("V1 lock parses");
-        for tool in &lock.tools {
-            assert!(
-                matches!(tool.resolution, LockedResolution::LegacyIndex(_)),
-                "V1 lock entry '{}' must normalize to LegacyIndex; got {:?}",
-                tool.name,
-                tool.resolution
-            );
-        }
-    }
-
-    /// Finding 3a — reading a V1 lock must NOT silently upgrade or mutate it.
-    /// The in-memory `lock_version` stays [`LockVersion::V1`] (the upgrade
-    /// happens only on the next *write*, not on read), and each entry's
-    /// [`LockedResolution::LegacyIndex`] carries the exact on-disk `pinned`
-    /// digest verbatim. A committed V1 lock keeps working on read paths with no
-    /// forced upgrade and no read-path mutation (ADR: read-both-V1/V2).
-    #[test]
-    fn read_v1_preserves_version_and_pins_without_mutation() {
-        let lock = ProjectLock::from_toml_str(&full_lock_toml()).expect("V1 lock parses");
-
-        // The version metadata must remain V1 on read — no silent forward bump.
-        assert_eq!(
-            lock.metadata.lock_version,
-            LockVersion::V1,
-            "reading a V1 lock must keep lock_version V1 (upgrade happens on write, not read)"
-        );
-
-        // The carried pins must be the exact on-disk digests, unmutated.
-        let cmake = lock
-            .tools
-            .iter()
-            .find(|t| t.name == "cmake" && t.group == "default")
-            .expect("cmake/default entry present");
-        let LockedResolution::LegacyIndex(pinned) = &cmake.resolution else {
-            panic!("V1 entry must normalize to LegacyIndex; got {:?}", cmake.resolution);
-        };
-        assert_eq!(
-            pinned.digest(),
-            Digest::Sha256(sha256_of('1')),
-            "the V1 pinned digest must be read verbatim, not re-resolved or mutated"
-        );
-    }
-
-    /// Reading a V2 lock normalizes every tool to
-    /// [`LockedResolution::PerPlatform`] with the bare repository + leaf map
-    /// (ADR: read-both-V1/V2; V2 reads the per-platform leaf directly).
-    #[test]
-    fn read_v2_normalizes_to_per_platform() {
-        let lock = ProjectLock::from_toml_str(&v2_lock_toml()).expect("V2 lock parses");
-        assert_eq!(lock.tools.len(), 1);
-        let tool = &lock.tools[0];
-        let (repo, platforms) = per_platform(tool);
-        assert_eq!(repo.repository(), "cmake");
+        let tool = &reloaded.tools[0];
+        assert_eq!(tool.repository.registry(), "ocx.sh");
+        assert_eq!(tool.repository.repository(), "cmake");
+        assert!(tool.repository.tag().is_none(), "repository must be bare (no tag)");
         assert!(
-            repo.tag().is_none() && repo.digest().is_none(),
-            "repository must be bare"
+            tool.repository.digest().is_none(),
+            "repository must be bare (no digest)"
         );
-        assert_eq!(platforms.get("linux/amd64"), Some(&digest_of('1')));
-        assert_eq!(platforms.get("darwin/arm64"), Some(&digest_of('2')));
-        // A platform the publisher does not ship is encoded by absence.
-        assert!(
-            !platforms.contains_key("windows/amd64"),
-            "an unshipped platform must be absent from the map"
-        );
-    }
-
-    /// `lock_version = 3` is an unknown discriminant. `serde_repr` rejects it
-    /// structurally at the version peek, surfacing the clean "upgrade ocx"
-    /// signal as a parse-class error (ADR: older ocx reading a V2 lock fails
-    /// with a clean upgrade message; the same machinery rejects any future
-    /// discriminant).
-    #[test]
-    fn read_rejects_unknown_lock_version() {
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 3
-declaration_hash_version = 1
-declaration_hash = "sha256:{abc}"
-generated_by = "ocx 99.0.0"
-generated_at = "2099-01-01T00:00:00Z"
-"#,
-            abc = sha256_of('a'),
-        );
-        let err = ProjectLock::from_toml_str(&toml_str).expect_err("unknown lock_version must reject");
-        assert_kind!(err, ProjectErrorKind::TomlParse(_));
-    }
-
-    /// A V2 `repository` carrying a tag is non-bare and must be rejected at
-    /// parse (Codex C6 bare-repository invariant) — never a panic.
-    #[test]
-    fn read_v2_rejects_non_bare_repository_with_tag() {
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 2
-declaration_hash_version = 1
-declaration_hash = "sha256:{cafe}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-
-[[tool]]
-name = "cmake"
-group = "default"
-repository = "ocx.sh/cmake:3.28"
-
-[tool.platforms]
-"linux/amd64" = "sha256:{leaf}"
-"#,
-            cafe = sha256_of('c'),
-            leaf = sha256_of('1'),
-        );
-        let err = ProjectLock::from_toml_str(&toml_str).expect_err("non-bare repository (tag) must reject");
-        // Parse-class rejection; the exact kind may be TomlParse (deny_unknown
-        // / invariant rejection) — assert it is an error, not a panic.
-        let crate::project::Error::Project(_) = err;
-    }
-
-    /// A V2 `repository` carrying a digest is non-bare and must be rejected
-    /// at parse (Codex C6) — never a panic.
-    #[test]
-    fn read_v2_rejects_non_bare_repository_with_digest() {
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 2
-declaration_hash_version = 1
-declaration_hash = "sha256:{cafe}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-
-[[tool]]
-name = "cmake"
-group = "default"
-repository = "ocx.sh/cmake@sha256:{idx}"
-
-[tool.platforms]
-"linux/amd64" = "sha256:{leaf}"
-"#,
-            cafe = sha256_of('c'),
-            idx = sha256_of('9'),
-            leaf = sha256_of('1'),
-        );
-        let err = ProjectLock::from_toml_str(&toml_str).expect_err("non-bare repository (digest) must reject");
-        let crate::project::Error::Project(_) = err;
-    }
-
-    /// A malformed platform leaf value (not a valid digest) must surface as a
-    /// parse-class error, never a panic (Codex C6 parse invariants).
-    #[test]
-    fn read_v2_rejects_malformed_platform_digest() {
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 2
-declaration_hash_version = 1
-declaration_hash = "sha256:{cafe}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-
-[[tool]]
-name = "cmake"
-group = "default"
-repository = "ocx.sh/cmake"
-
-[tool.platforms]
-"linux/amd64" = "not-a-digest"
-"#,
-            cafe = sha256_of('c'),
-        );
-        let err = ProjectLock::from_toml_str(&toml_str).expect_err("malformed platform digest must reject");
-        let crate::project::Error::Project(_) = err;
-    }
-
-    /// A duplicate platform key in the `[tool.platforms]` table must surface
-    /// as a parse-class error, never a silent last-write-wins or panic
-    /// (Codex C6: reject duplicate platform entry).
-    #[test]
-    fn read_v2_rejects_duplicate_platform_key() {
-        let toml_str = format!(
-            r#"
-[metadata]
-lock_version = 2
-declaration_hash_version = 1
-declaration_hash = "sha256:{cafe}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-04-19T00:00:00Z"
-
-[[tool]]
-name = "cmake"
-group = "default"
-repository = "ocx.sh/cmake"
-
-[tool.platforms]
-"linux/amd64" = "sha256:{a}"
-"linux/amd64" = "sha256:{b}"
-"#,
-            cafe = sha256_of('c'),
-            a = sha256_of('1'),
-            b = sha256_of('2'),
-        );
-        let err = ProjectLock::from_toml_str(&toml_str).expect_err("duplicate platform key must reject");
-        let crate::project::Error::Project(_) = err;
+        assert_eq!(tool.platforms.get("linux/amd64"), Some(&leaf));
     }
 
     // ── tools_content_equal: drop / appear / value-change ──────────────────
 
-    /// `tools_content_equal` over V2 entries must treat a key ADD (publisher
-    /// ships a new platform) as content-changed (ADR: the drop/appear signal
-    /// counts as content-changed and advances `generated_at`).
+    /// `tools_content_equal` must treat a key ADD (publisher ships a new
+    /// platform) as content-changed (ADR: the drop/appear signal counts as
+    /// content-changed and advances `generated_at`).
     #[test]
     fn tools_content_equal_detects_platform_key_add() {
-        let prev = vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')];
+        let prev = vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')];
 
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), digest_of('a'));
@@ -1810,10 +1634,8 @@ repository = "ocx.sh/cmake"
         let next = vec![LockedTool {
             name: "cmake".to_string(),
             group: "default".to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: bare_repo("ocx.sh", "cmake"),
-                platforms,
-            },
+            repository: bare_repo("ocx.sh", "cmake"),
+            platforms,
         }];
 
         assert!(
@@ -1832,13 +1654,11 @@ repository = "ocx.sh/cmake"
         let prev = vec![LockedTool {
             name: "cmake".to_string(),
             group: "default".to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: bare_repo("ocx.sh", "cmake"),
-                platforms,
-            },
+            repository: bare_repo("ocx.sh", "cmake"),
+            platforms,
         }];
         // Only the amd64 leaf survives.
-        let next = vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')];
+        let next = vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')];
 
         assert!(
             !tools_content_equal(&prev, &next),
@@ -1850,19 +1670,20 @@ repository = "ocx.sh/cmake"
     /// new digest) as content-changed.
     #[test]
     fn tools_content_equal_detects_leaf_value_change() {
-        let prev = vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')];
-        let next = vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'b')];
+        let prev = vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')];
+        let next = vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'b')];
         assert!(
             !tools_content_equal(&prev, &next),
             "a changed leaf digest must register as content-changed"
         );
     }
 
-    /// Two identical V2 maps built in different key-insertion order compare
-    /// content-equal — `BTreeMap` canonicalizes ordering, so an unchanged
-    /// re-lock is detected regardless of how the resolver assembled the map.
+    /// Two identical platform maps built in different key-insertion order
+    /// compare content-equal — `BTreeMap` canonicalizes ordering, so an
+    /// unchanged re-lock is detected regardless of how the resolver
+    /// assembled the map.
     #[test]
-    fn tools_content_equal_identical_v2_maps_any_order_are_equal() {
+    fn tools_content_equal_identical_maps_any_order_are_equal() {
         let mut a = BTreeMap::new();
         a.insert("linux/amd64".to_string(), digest_of('1'));
         a.insert("darwin/arm64".to_string(), digest_of('2'));
@@ -1874,22 +1695,18 @@ repository = "ocx.sh/cmake"
         let lhs = vec![LockedTool {
             name: "cmake".to_string(),
             group: "default".to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: bare_repo("ocx.sh", "cmake"),
-                platforms: a,
-            },
+            repository: bare_repo("ocx.sh", "cmake"),
+            platforms: a,
         }];
         let rhs = vec![LockedTool {
             name: "cmake".to_string(),
             group: "default".to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: bare_repo("ocx.sh", "cmake"),
-                platforms: b,
-            },
+            repository: bare_repo("ocx.sh", "cmake"),
+            platforms: b,
         }];
         assert!(
             tools_content_equal(&lhs, &rhs),
-            "identical V2 maps must compare content-equal regardless of insertion order"
+            "identical maps must compare content-equal regardless of insertion order"
         );
     }
 
@@ -1898,14 +1715,11 @@ repository = "ocx.sh/cmake"
         // The function must compare two tool lists by *content* regardless of
         // input order — `save()` relies on this to preserve `generated_at`
         // even when prior and current locks differ only in iteration order.
-        let a = pinned("ocx.sh", "cmake", None, '1');
-        let b = pinned("ocx.sh", "ninja", None, '2');
+        let a = locked_tool("cmake", "default", "ocx.sh", "cmake", '1');
+        let b = locked_tool("ninja", "default", "ocx.sh", "ninja", '2');
 
-        let lhs = vec![
-            locked_tool("cmake", "default", a.clone()),
-            locked_tool("ninja", "default", b.clone()),
-        ];
-        let rhs = vec![locked_tool("ninja", "default", b), locked_tool("cmake", "default", a)];
+        let lhs = vec![a.clone(), b.clone()];
+        let rhs = vec![b, a];
 
         assert!(tools_content_equal(&lhs, &rhs));
         assert!(tools_content_equal(&rhs, &lhs));
@@ -2072,7 +1886,7 @@ repository = "ocx.sh/cmake"
         // Seed with initial save.
         let seed = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("cmake", "default", "ocx.sh", "cmake", 'a')],
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
         };
         let cfg = stage_sibling_ocx_toml(&path);
         seed.save(&path, None, tmp.path(), &cfg).await.expect("seed save ok");
@@ -2083,7 +1897,7 @@ repository = "ocx.sh/cmake"
         // Save again — the mode must be capped to 0o644.
         let next = ProjectLock {
             metadata: sample_metadata(),
-            tools: vec![locked_tool_v2("ninja", "default", "ocx.sh", "ninja", 'b')],
+            tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
         };
         let cfg2 = stage_sibling_ocx_toml(&path);
         next.save(&path, None, tmp.path(), &cfg2).await.expect("save ok");

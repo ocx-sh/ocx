@@ -38,7 +38,7 @@ from pathlib import Path
 import pytest
 
 from src import OcxRunner, current_platform
-from src.helpers import make_package
+from src.helpers import make_package, resolved_metadata_path
 from src.runner import PackageInfo
 
 pytestmark = pytest.mark.skipif(
@@ -121,7 +121,12 @@ def script_test_package(
         cascade=False,
     )
     bundle = tmp_path / f"bundle-{unique_repo}-{tag}.tar.xz"
-    metadata_path = tmp_path / f"metadata-{unique_repo}-{tag}.json"
+    # `make_package` (above) already pushed using the sidecar `create` wrote
+    # next to `bundle` — not the pre-`create` input — so reconstruct that
+    # same resolved path here; it carries `create`'s recorded platform (D5),
+    # which `package test -m` below must read to satisfy the new push/test
+    # platform-binding contract.
+    metadata_path = resolved_metadata_path(bundle)
     return bundle, metadata_path, pkg
 
 

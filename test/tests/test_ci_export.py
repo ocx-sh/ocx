@@ -390,49 +390,44 @@ def test_toolchain_env_ci_conflicts_with_shell(
 
 
 # ---------------------------------------------------------------------------
-# V2 lock: ``ocx env --ci=gitlab`` resolves the V2 host leaf for the export
+# ``ocx env --ci=gitlab`` resolves the host leaf for the export
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_CI = _re_ci.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def test_toolchain_env_ci_gitlab_resolves_v2_host_leaf(
+def test_toolchain_env_ci_gitlab_resolves_host_leaf(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Root toolchain-tier ``ocx env --ci=gitlab`` resolves the tool's host-leaf
-    digest from a V2 ``ocx.lock``'s ``[tool.platforms]`` table and emits the
+    digest from ``ocx.lock``'s ``[tool.platforms]`` table and emits the
     correct environment to the CI export file.
 
-    ADR §compose.rs: "V2: dedup + resolve on the host-platform leaf."
-
-    Scenario: publish, ``ocx lock`` (V2), ``ocx pull``, then ``ocx env
+    Scenario: publish, ``ocx lock``, ``ocx pull``, then ``ocx env
     --ci=gitlab --export-file=<f>``.  Assert:
-    1. The project lock is V2 (``lock_version = 2``, ``[tool.platforms]`` with
-       at least one leaf digest, no ``pinned =`` line).
+    1. The project lock carries ``[tool.platforms]`` with at least one leaf
+       digest, no ``pinned =`` line.
     2. The CI export file contains at least one JSON-line with ``name``+``value``
-       keys (proves the V2 leaf was resolved and the env was computed).
+       keys (proves the leaf was resolved and the env was computed).
 
     The comment at test_ci_export.py:168 ("two pinned keys") refers to JSON
     object keys ``{"name", "value"}`` in GitLab export lines — NOT to the lock
     ``pinned`` field.  That comment is unrelated to the lock format and is
     intentionally left unmodified.
     """
-    project = _make_toolchain_project(ocx, tmp_path, "tc_ci_v2_leaf", bin_name="citool")
+    project = _make_toolchain_project(ocx, tmp_path, "tc_ci_v3_leaf", bin_name="citool")
 
     lock_text = (project / "ocx.lock").read_text()
-    assert "lock_version = 2" in lock_text, (
-        "project lock must be V2 (lock_version = 2); got:\n" + lock_text[:400]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "V2 project lock must carry a [tool.platforms] table"
+        "project lock must carry a [tool.platforms] table"
     )
     leaf_digests = _LEAF_RE_CI.findall(lock_text)
-    assert leaf_digests, "V2 lock must record at least one leaf digest"
+    assert leaf_digests, "lock must record at least one leaf digest"
     assert "pinned =" not in lock_text, (
-        "V2 lock must not carry a legacy `pinned` line"
+        "lock must not carry a legacy `pinned` line"
     )
 
-    export = tmp_path / "ci_v2_export.env"
+    export = tmp_path / "ci_v3_export.env"
     result = subprocess.run(
         [str(ocx.binary), "env", "--ci=gitlab", f"--export-file={export}"],
         cwd=project,
@@ -441,7 +436,7 @@ def test_toolchain_env_ci_gitlab_resolves_v2_host_leaf(
         env=ocx.env,
     )
     assert result.returncode == 0, (
-        f"ocx env --ci=gitlab on a V2 lock must exit 0 (V2 host-leaf resolved); "
+        f"ocx env --ci=gitlab must exit 0 (host-leaf resolved); "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     assert export.exists(), (
@@ -449,7 +444,7 @@ def test_toolchain_env_ci_gitlab_resolves_v2_host_leaf(
     )
     lines = [ln for ln in export.read_text().splitlines() if ln.strip()]
     assert lines, (
-        "CI export file must contain at least one JSON-line (V2 env resolved)"
+        "CI export file must contain at least one JSON-line (env resolved)"
     )
     for raw_line in lines:
         obj = json.loads(raw_line)

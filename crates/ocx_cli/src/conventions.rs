@@ -67,45 +67,14 @@ pub fn resolve_metadata_path(
     }
 }
 
-/// List of platforms supported by the current system.
-/// This is used as default for package installation, but can be overridden by the user.
+/// Resolves an explicit `--platform` value, falling back to the current host
+/// platform when the flag was omitted.
 ///
-/// Delegates to [`oci::Platform::supported_set`] — the canonical source of truth.
-pub fn supported_platforms() -> Vec<oci::Platform> {
-    oci::Platform::supported_set()
-}
-
-pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
-    if platforms.is_empty() {
-        supported_platforms()
-    } else {
-        platforms.to_vec()
-    }
-}
-
-/// Full supported-platform matrix (all five OS/architecture combinations),
-/// used by `ocx patch sync` when the user passes no `--platform`.
-///
-/// Delegates to [`oci::Platform::all_supported`] — the canonical source of
-/// truth. Distinct from [`supported_platforms`], which is host-scoped.
-pub fn all_supported_platforms() -> Vec<oci::Platform> {
-    oci::Platform::all_supported()
-}
-
-/// Like [`platforms_or_default`], but an empty `--platform` list expands to
-/// the full supported-platform matrix instead of the host platform.
-///
-/// A synced patch descriptor/companion set must be shareable across a team
-/// (like `ocx lock`): it pins multi-platform manifests, not a single
-/// GC-prone per-arch index, so a host-only default would silently miss
-/// non-host companions and break an offline or required-patch launch on a
-/// teammate's machine running a different platform.
-pub fn platforms_or_all_supported(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
-    if platforms.is_empty() {
-        all_supported_platforms()
-    } else {
-        platforms.to_vec()
-    }
+/// The single source of truth for "which platform does this command resolve
+/// against" — every resolution command (`ocx package install/pull/exec`,
+/// `ocx run`, `ocx env`, ...) applies the same default.
+pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
+    platform.unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
 }
 
 /// Emit shell-sourceable export lines for a slice of env entries.

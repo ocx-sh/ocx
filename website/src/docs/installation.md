@@ -28,7 +28,7 @@ curl -fsSL https://setup.ocx.sh/elvish | elvish
 ```
 :::
 
-Open a new terminal and verify with [`ocx about`][cmd-about], which prints the installed version, supported platforms, and detected shell:
+Open a new terminal and verify with [`ocx about`][cmd-about], which prints the installed version, detected platform, and detected shell:
 
 ```sh
 ocx about

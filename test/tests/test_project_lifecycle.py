@@ -106,32 +106,29 @@ def test_init_add_update_pull_remove_roundtrip(
 
 
 # ---------------------------------------------------------------------------
-# V2 lock shape: lifecycle writes V2; V1 lock installs without forced upgrade
+# Lock shape: the init->add lifecycle
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_LC = _re_lc.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def test_lifecycle_writes_v2_lock_shape(
+def test_lifecycle_writes_v3_lock_shape(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """After ``ocx init`` + ``ocx add``, the ``ocx.lock`` file is written in V2
-    shape: ``lock_version = 2``, bare ``repository`` coordinate (no tag, no
-    digest), ``[tool.platforms]`` table with per-platform leaf digests, and no
-    legacy ``pinned =`` line.
-
-    ADR: "Write only V2.  No code path emits V1."
+    """After ``ocx init`` + ``ocx add``, the ``ocx.lock`` file carries a bare
+    ``repository`` coordinate (no tag, no digest), a ``[tool.platforms]``
+    table with per-platform leaf digests, and no legacy ``pinned =`` line.
 
     This is a structural assertion that the full init→add lifecycle delivers
-    the V2 wire format — independent of whether any particular platform key is
-    present (platform availability is registry-side, not asserted here).
+    the lock wire format — independent of whether any particular platform key
+    is present (platform availability is registry-side, not asserted here).
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_lc_v2"
+    repo = f"t_{short}_lc_v3"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
-    project_dir = tmp_path / "proj_lc_v2"
+    project_dir = tmp_path / "proj_lc_v3"
     project_dir.mkdir()
 
     init_r = _run(ocx, project_dir, "init")
@@ -149,100 +146,16 @@ def test_lifecycle_writes_v2_lock_shape(
     lock_text = lock_path.read_text()
 
     assert "ocx.lock" in str(lock_path), "sanity: lock path must end in ocx.lock"
-    assert "lock_version = 2" in lock_text, (
-        "lifecycle must produce a V2 lock (lock_version = 2); got:\n" + lock_text[:400]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "V2 lock must carry a [tool.platforms] table"
+        "lock must carry a [tool.platforms] table"
     )
     leaf_digests = _LEAF_RE_LC.findall(lock_text)
     assert leaf_digests, (
-        "V2 lock must record at least one per-platform leaf digest"
+        "lock must record at least one per-platform leaf digest"
     )
     assert f'repository = "{ocx.registry}/{repo}"' in lock_text, (
-        "V2 lock must carry the bare repository coordinate; got:\n" + lock_text[:400]
+        "lock must carry the bare repository coordinate; got:\n" + lock_text[:400]
     )
     assert "pinned =" not in lock_text, (
-        "V2 lock must NOT carry a legacy `pinned` line"
-    )
-
-
-def test_lifecycle_v1_lock_pull_installs_without_forced_upgrade(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """A V1 ``ocx.lock`` committed before the V2 migration allows ``ocx pull``
-    to install the tool via the legacy index-digest path — no forced upgrade,
-    no read-path mutation.
-
-    ADR: "A committed V1 lock keeps installing/running offline with no forced
-    upgrade and no read-path mutation."
-
-    Flow:
-    1. Publish the package; run ``ocx lock`` (V2) to get real coordinates.
-    2. Overwrite the lock with a hand-authored V1 form (real pinned identifier
-       built from the V2 bare-repo + one leaf).
-    3. ``ocx pull`` must succeed (registry still has the index manifest).
-    4. The ``ocx.lock`` file must NOT have been mutated by ``ocx pull``
-       (legacy read path, no forced write).
-    """
-    short = uuid4().hex[:8]
-    repo = f"t_{short}_lc_v1"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
-    fq = f"{ocx.registry}/{repo}:1.0.0"
-
-    project_dir = tmp_path / "proj_lc_v1"
-    project_dir.mkdir()
-
-    # Step 1: init + lock to get a real V2 lock with live coordinates.
-    init_r = _run(ocx, project_dir, "init")
-    assert init_r.returncode == EXIT_SUCCESS, (
-        f"ocx init failed: rc={init_r.returncode}"
-    )
-    add_r = _run(ocx, project_dir, "add", "--no-pull", fq)
-    # ``add --no-pull`` writes the lock without downloading; gives us V2 coords.
-    assert add_r.returncode == EXIT_SUCCESS, (
-        f"ocx add --no-pull failed: rc={add_r.returncode}"
-    )
-
-    lock_path = project_dir / "ocx.lock"
-    v2_text = lock_path.read_text()
-
-    repo_match = _re_lc.search(r'repository\s*=\s*"([^"]+)"', v2_text)
-    leaf_match = _LEAF_RE_LC.search(v2_text)
-    decl_match = _re_lc.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
-    assert repo_match and leaf_match and decl_match, (
-        "V2 lock must carry repository + leaf + declaration_hash; got:\n" + v2_text[:400]
-    )
-    bare_repo = repo_match.group(1)
-    leaf_hex = leaf_match.group(1)
-    decl_hash = decl_match.group(1)
-
-    # Step 2: overwrite with a V1 lock.
-    v1_content = f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "{repo}"
-group = "default"
-pinned = "{bare_repo}@sha256:{leaf_hex}"
-"""
-    lock_path.write_text(v1_content)
-
-    # Step 3: ``ocx pull`` on the V1 lock must succeed.
-    pull_r = _run(ocx, project_dir, "pull")
-    assert pull_r.returncode == EXIT_SUCCESS, (
-        f"ocx pull on V1 lock must succeed via legacy index-digest path; "
-        f"rc={pull_r.returncode}\nstderr:\n{pull_r.stderr}"
-    )
-
-    # Step 4: the V1 lock must NOT have been mutated by ``ocx pull``.
-    after_text = lock_path.read_text()
-    assert after_text == v1_content, (
-        "ocx pull must NOT mutate a V1 ocx.lock (no forced upgrade on read); "
-        "lock content changed unexpectedly"
+        "lock must NOT carry a legacy `pinned` line"
     )

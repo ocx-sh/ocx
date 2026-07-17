@@ -39,7 +39,7 @@ impl PatchFreezeArgs {
         let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
         let roots = context
             .manager()
-            .resolve_site_patch_roots(&[host])
+            .resolve_site_patch_roots(&host)
             .await
             .map_err(anyhow::Error::new)?;
 

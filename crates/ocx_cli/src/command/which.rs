@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 /// Resolve one or more packages and print their package root paths.
 ///
@@ -29,7 +29,7 @@ use crate::{api, conventions::platforms_or_default, options};
 #[derive(Parser)]
 pub struct Which {
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -61,8 +61,8 @@ impl Which {
                 })
                 .collect()
         } else {
-            let platforms = platforms_or_default(self.platforms.as_slice());
-            let infos = manager.find_all(identifiers, platforms).await?;
+            let platform = conventions::platform_or_default(self.platform.platform.clone());
+            let infos = manager.find_all(identifiers, platform).await?;
             self.packages
                 .iter()
                 .zip(infos)

@@ -369,7 +369,7 @@ ocx add [OPTIONS] <IDENTIFIER>...
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. |
-| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Values use `os/arch[/variant][+feature[+feature...]]` — the optional `+feature` suffix (e.g. `linux/amd64+libc.glibc`) filters by [`os.features`][authoring-libc]. Repeatable and comma-separated (e.g. `-p linux/amd64,linux/arm64`). The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
 | `--help` | `-h` | Print help information. |
 
 ::: tip Target the global toolchain
@@ -382,12 +382,12 @@ See [`--global`][global-flag] for the full root-flag reference.
 | Code | Meaning |
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
-| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
+| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx update` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
+| 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
 
@@ -484,7 +484,7 @@ ocx package deps [OPTIONS] <PACKAGE>...
 - `--why <DEP>`: Explain why a dependency is pulled in. Shows all paths from the given root
   packages to `<DEP>`. Mutually exclusive with `--flat`.
 - `--depth <N>`: Limit tree depth. `--depth 1` shows direct dependencies only.
-- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `-p`, `--platform`: Target platform to consider when resolving packages.
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
 
@@ -657,7 +657,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `-p`, `--platform`: Target platform to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`.
@@ -696,7 +696,7 @@ ocx exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 **Options**
 
-- `-p`, `--platform`: Specify the platforms to use.
+- `-p`, `--platform`: Specify the platform to use.
 - `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment. Resolution-affecting `OCX_*` variables (binary path, offline, remote, config file, index) are still written explicitly from the running ocx's parsed state — see [OCX Configuration Forwarding][env-composition-forwarding].
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries. Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
@@ -738,7 +738,7 @@ ocx package which [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Platforms to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
+- `-p`, `--platform`: Platform to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `-h`, `--help`: Print help information.
 
@@ -894,9 +894,9 @@ keep their updated tags.
 
 ### `about` {#about}
 
-Prints environment information: the ocx version, default registry, supported platforms, detected libc family (on Linux), detected shell, and home directory. When build provenance was baked in at compile time, two optional rows appear: `Commit` (short SHA and clean/dirty status) and `Channel` (e.g. `dev`). These rows are absent on local builds and on stable releases without a channel override.
+Prints environment information: the ocx version, default registry, the detected host platform, detected libc family (on Linux), detected shell, and home directory. When build provenance was baked in at compile time, two optional rows appear: `Commit` (short SHA and clean/dirty status) and `Channel` (e.g. `dev`). These rows are absent on local builds and on stable releases without a channel override.
 
-The `Libc` row appears only when libc was detected — it is absent on non-Linux hosts and on hosts with no readable dynamic loader (a truly minimal or static-only container). Non-FHS layouts such as [Gentoo Prefix][gentoo-prefix] and Homebrew-on-Linux *are* detected: OCX reads the loader path from a present system binary rather than guessing fixed paths. [NixOS][nixos] is detected when [nix-ld][nix-ld] is active (nix-ld installs an FHS shim the probe finds); without nix-ld the probe binaries are statically linked and detection yields an empty set, so the `Libc` row is absent. The `Platform` row lists the `os.features`-tagged supported set derived from that detection.
+The `Libc` row appears only when libc was detected — it is absent on non-Linux hosts and on hosts with no readable dynamic loader (a truly minimal or static-only container). Non-FHS layouts such as [Gentoo Prefix][gentoo-prefix] and Homebrew-on-Linux *are* detected: OCX reads the loader path from a present system binary rather than guessing fixed paths. [NixOS][nixos] is detected when [nix-ld][nix-ld] is active (nix-ld installs an FHS shim the probe finds); without nix-ld the probe binaries are statically linked and detection yields an empty set, so the `Libc` row is absent. The `Platform` row shows the bare `os/arch` of the detected host — see [Platforms][reference-platforms] for how that value and the `Libc` row combine into the platform OCX resolves against.
 
 In a terminal, `ocx about` renders an isometric logo alongside the info table. In non-interactive contexts (piped output without `--color always`), the plain key-value fallback is used instead.
 
@@ -916,7 +916,7 @@ Version    0.3.2-dev+20260528143045
 Commit     a1b2c3d4 (clean)
 Channel    dev
 Registry   ocx.sh
-Platform   linux/amd64, any
+Platform   linux/amd64
 Libc       libc.glibc
 Shell      bash
 Home       /home/user/.ocx
@@ -930,7 +930,7 @@ Home       /home/user/.ocx
 {
   "version": "0.3.2",
   "registry": "ocx.sh",
-  "platforms": ["linux/amd64", "any"],
+  "platforms": ["linux/amd64"],
   "libc": ["libc.glibc"],
   "shell": "bash",
   "home": "/home/user/.ocx",
@@ -984,7 +984,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider.
+- `-p`, `--platform`: Target platform to consider.
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current`.
 - `-h`, `--help`: Print help information.
 
@@ -1150,7 +1150,7 @@ ocx lock [OPTIONS]
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
-| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Use `-p linux/amd64 -p linux/arm64` to validate that a lock satisfies multiple targets. Defaults to the current host. | *(current host)* |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1162,11 +1162,11 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written (or preserved if content was unchanged). |
-| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `--check` reported drift. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
-| 78 | Existing `ocx.lock` is malformed (parse error), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a tool. |
+| 78 | Existing `ocx.lock` is malformed (parse error) or uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
@@ -1213,7 +1213,7 @@ ocx update [OPTIONS] [NAME...]
 | `--group <NAME>` | `-g` | Advance every binding in one or more named groups; freeze the rest. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to advance only those bindings within the named groups. | *(whole file)* |
 | `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
 | `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
-| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--remote` | | Redundant — resolution already talks to the registry by default. Still accepted. | false |
 | `-h`, `--help` | | Print help information. | |
 
@@ -1226,12 +1226,12 @@ Pass `--global` **before** the subcommand: `ocx --global update`. See [`--global
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, `--global` combined with `--project`, multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate), or an unknown `-g` group or unknown binding `NAME` in a scoped update. |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, more than one `--platform` value (single-valued flag), or an unknown `-g` group or unknown binding `NAME` in a scoped update. |
 | 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream), or a scoped update whose `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
-| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
+| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1273,7 +1273,7 @@ ocx pull [OPTIONS]
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; the reserved name `all` expands to `default` + every declared `[group.*]`. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
-| `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for each named platform instead of the host. Repeatable and comma-separated (e.g. `-p linux/arm64`). Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
+| `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1285,9 +1285,9 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 | Code | Meaning |
 |------|---------|
 | 0 | Success (or empty group filter — nothing to pull). |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `--global` combined with `--project`, or multiple `--platform` values against a legacy (V1) lock (run `ocx lock` to migrate). |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
-| 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
+| 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. Also: an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`). |
 | 78 | No leaf digest for the host (or requested `--platform`) at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — the publisher does not ship that platform. |
 
 **Lock mtime touch**
@@ -1467,7 +1467,7 @@ ocx package select [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `-p`, `--platform`: Target platform to consider when resolving packages.
 - `-h`, `--help`: Print help information.
 
 
@@ -2016,14 +2016,18 @@ byte copy of the input file.
 
 - `--platform` omitted: every dependency in the sidecar must already carry a manifest digest (else
   usage error, exit 64, hinting `--platform`); no network access.
-- `--platform <PLATFORM>` (a concrete platform): each dependency without a digest is resolved against
-  the selected index to the one manifest compatible with `<PLATFORM>`. Zero compatible candidates
-  fails with exit 65 (lists what is available); more than one is ambiguous (exit 65). The sidecar is
-  rewritten with the resolved pins and a target-platform set of `[<PLATFORM>]`.
-- `--platform any`: a dependency whose tag resolves to a single platform-agnostic manifest collapses
-  to a plain pin; a dependency that ships platform-specific manifests gets a per-dependency pin map
-  instead. The rewritten sidecar's target-platform set becomes the intersection of platforms covered
-  by every dependency (an empty intersection fails with exit 65). See [Multi-Platform Packages][authoring-multi-platform].
+- `--platform <PLATFORM>` (a concrete platform): each dependency without a digest is resolved
+  against the selected index to the one manifest [compatible][reference-platforms-compatibility]
+  with `<PLATFORM>`. Zero compatible candidates fails with exit 65 (lists what is available); more
+  than one is ambiguous (exit 65). The sidecar is rewritten with the resolved digest pinned
+  directly on each dependency's identifier.
+- `--platform any`: every unpinned dependency must itself offer an `any` manifest — an `any`
+  requirement is satisfied only by an `any` offer, so a dependency with no `any` build fails
+  `create` (exit 65), naming it. The resolved digest is recorded in the dependency's `platforms`
+  pin map under a single `"any"` key, never a bare digest pin (a leaf manifest carries no platform
+  descriptor, so an unmapped digest could never be verified as `any`-offered). `create` also
+  rejects a direct digest pin anywhere in an `any`-targeted bundle's dependency list, including one
+  already present before `create` ran (exit 65). See [Multi-Platform Packages][authoring-multi-platform].
 
 Resolution honors [`--remote`][arg-remote], [`--offline`][arg-offline], and [`--frozen`][arg-frozen]
 exactly like every other tag resolution: the default checks the local index first and fetches on a
@@ -2073,7 +2077,7 @@ ocx package pull [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider. Defaults to the current platform.
+- `-p`, `--platform`: Target platform to consider. Defaults to the current platform.
 - `-h`, `--help`: Print help information.
 
 ::: tip
@@ -2088,12 +2092,14 @@ lockfile directly and ignores the index.
 
 #### `push` {#package-push}
 
-Publishes a package to the registry as zero or more layers. Each layer is uploaded as an OCI blob and recorded in one image manifest per target platform, in the order given on the command line — the same layers back every platform published in one invocation. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`.
+Publishes a package to the registry as zero or more layers, all recorded in one image manifest for the single target platform this invocation publishes. Each layer is uploaded as an OCI blob, in the order given on the command line. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`. Publishing a package for more than one platform means running `push` once per platform under the same tag — see [Multi-Platform Packages][authoring-multi-platform] for the full pattern; OCX merges each push into the existing image index rather than replacing it.
 
 `push` makes no dependency-resolution decisions — it is a gate. If the metadata sidecar declares [dependencies][ug-dependencies], every one of them must already carry a manifest digest pin covering every platform this invocation publishes ([`ocx package create`][cmd-package-create] is what resolves them; see [Resolving Dependency Pins][authoring-building-pushing-dependency-pins]). `push` fails before uploading anything if:
 
 | Condition | Exit code |
 |---|---|
+| The metadata sidecar has no recorded platform (predates `create`, or hand-authored) | 65 |
+| An explicit `--platform` disagrees with the sidecar's recorded platform | 65 |
 | A dependency has no digest and no pin map | 65 |
 | A dependency's pin map has no entry covering a platform being published | 65 |
 | A dependency's pin resolves to an OCI Image Index instead of a manifest | 65 |
@@ -2118,7 +2124,7 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000` (required).
-- `-p`, `--platform <PLATFORM>`: Target platform to publish. **Required** unless the metadata sidecar carries a target-platform set written by [`ocx package create --platform`][cmd-package-create]: in that case, omitting `-p` publishes every platform in the set (one manifest per platform, same layers); passing `-p` narrows the push to that one platform, which must already be a member of the set (a non-member fails with exit 64). A sidecar without an embedded set — hand-authored, or built by `create` without `--platform` — always requires `-p`, publishing that single platform. See [Multi-Platform Packages][authoring-multi-platform].
+- `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; an explicit value must equal that recorded platform or the push is rejected (exit 65, naming both) — this flag is a checked assertion, not an override. Every dependency is projected for this platform (see the gate table above).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
@@ -2180,10 +2186,10 @@ Materializes a package locally without a registry round-trip and runs a command 
 
 ```shell
 # Trailing-command form
-ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... -- <CMD> [ARGS]...
+ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... -- <CMD> [ARGS]...
 
 # Script form
-ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... --script <PATH|->
+ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... --script <PATH|->
 ```
 
 **Arguments**
@@ -2196,7 +2202,7 @@ ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYE
 | Name | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--identifier <IDENTIFIER>` | `-i` | Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers). | — |
-| `--platform <PLATFORM>` | `-p` | Target platform — required. | — |
+| `--platform <PLATFORM>` | `-p` | Target platform. Defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; an explicit value must equal that recorded platform or the command is rejected (exit 65, naming both). | recorded platform |
 | `--script <PATH\|->` | — | Path to a [Starlark][starlark-lang] test script, or `-` to read the script source from stdin. Mutually exclusive with the trailing `-- CMD` form. | — |
 | `--metadata <PATH>` | `-m` | Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided. | auto-detected |
 | `--keep` | — | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`. | false |
@@ -2459,7 +2465,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `-p`, `--platform` | | Target platform in `os/arch[/variant][+feature[+feature...]]` format (e.g. `linux/amd64`, `linux/amd64+libc.glibc`, `linux/amd64+libc.musl`, `darwin/arm64`). Defaults to the auto-detected current platform. When a feature-tagged value is supplied, OCX selects the manifest whose `os.features` are a subset of the supplied features — use this to force a specific libc variant when you know it will run on the host. If the package ships for the host os/arch but no candidate's `os.features` are a subset of the resolved features (e.g. a glibc-only host against a musl-only entry), install exits [`65`](#exit-codes) (`DataError`) and the error lists the available platforms to override with. |
+| `-p`, `--platform` | | Target platform — see [Platforms][reference-platforms] for the grammar (e.g. `linux/amd64`, `linux/amd64+libc.glibc`, `linux/amd64+libc.musl`, `darwin/arm64`). Defaults to the auto-detected current platform. When a feature-tagged value is supplied, OCX selects the manifest whose `os.features` are a subset of the supplied features — use this to force a specific libc variant when you know it will run on the host. If the package ships for the host os/arch but no candidate's `os.features` are a subset of the resolved features (e.g. a glibc-only host against a musl-only entry), install exits [`65`](#exit-codes) (`DataError`) and the error lists the available platforms to override with. |
 | `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
 | `-h`, `--help` | | Print help information. |
 
@@ -2515,7 +2521,7 @@ ocx package select [OPTIONS] <PACKAGE>...
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `-p`, `--platform` | | Target platforms to consider. |
+| `-p`, `--platform` | | Target platform to consider. |
 | `-h`, `--help` | | Print help information. |
 
 ::: tip
@@ -2564,7 +2570,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `-p`, `--platform` | | Target platforms to consider. |
+| `-p`, `--platform` | | Target platform to consider. |
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
 | `-h`, `--help` | | Print help information. |
@@ -2595,7 +2601,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `-p`, `--platform` | | Target platforms to consider. |
+| `-p`, `--platform` | | Target platform to consider. |
 | `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
 | `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). |
 | `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |
@@ -2679,12 +2685,13 @@ This command also picks up patches for packages installed before the `[patches]`
 configured. All states are re-checked regardless of what was previously recorded. Running
 `patch sync` is equivalent to `ocx index update` for the patch tier.
 
-Without `--platform`, `patch sync` resolves **every supported platform**
+Without `--platform`, `patch sync` resolves **every concrete ship platform**
 (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) — not just the
-host platform. A synced descriptor/companion set is shared across a team the same way
-[`ocx lock`](#lock) is: it must cover every platform a teammate might run, or an offline or
-required-patch launch on their machine silently breaks. Pass `--platform` (repeatable) to
-narrow to a subset.
+host platform. This is `patch sync`'s one sanctioned multi-platform fan-out: an explicit
+enumeration over the concrete matrix, not a selection among candidates. A synced
+descriptor/companion set is shared across a team the same way [`ocx lock`](#lock) is: it must
+cover every platform a teammate might run, or an offline or required-patch launch on their machine
+silently breaks. Pass a single `--platform` to narrow to just that one platform instead.
 
 **Usage**
 
@@ -2696,7 +2703,7 @@ ocx patch sync [OPTIONS]
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--platform PLATFORM` | `-p` | Target platform for companion resolution. Repeatable. Defaults to all supported platforms when omitted. |
+| `--platform PLATFORM` | `-p` | Target platform for companion resolution. Single-valued: passing more than one exits 64. Bare (omitted) fans out to the full five-platform concrete ship matrix; an explicit value narrows to that one platform. |
 | `-h`, `--help` | | Print help information. |
 
 **Exit codes**
@@ -2821,7 +2828,7 @@ ocx patch why [OPTIONS] <BASE-ID>
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--platform <PLATFORM>` | `-p` | Target platform for resolving the base. Repeatable. Defaults to the host platform. |
+| `--platform <PLATFORM>` | `-p` | Target platform for resolving the base. Single-valued: passing more than one exits 64. Defaults to the host platform. |
 | `-h`, `--help` | | Print help information. |
 
 Output follows the root [`--format`][arg-format] flag like every other command — there is no
@@ -2968,7 +2975,7 @@ ocx config push -i <IDENTIFIER> [--cascade] [--new] [--platform PLATFORM] <CONFI
 | `--identifier ID` | `-i` | Identifier to publish under (e.g. `corp/ocx-config:user-1.4.2`). Required. | — |
 | `--cascade` | `-c` | Update rolling variant tags derived from the version tag. | off |
 | `--new` | `-n` | The repository does not exist yet; tolerate a failing tag listing during `--cascade`. | off |
-| `--platform` | `-p` | Platform entry written into the package index. `ocx config update` only consumes the platform-independent `any/any` entry — keep the default. | `any/any` |
+| `--platform` | `-p` | Platform entry written into the package index. `ocx config update` only consumes the platform-independent `any` entry — keep the default. | `any` |
 | `-h`, `--help` | | Print help information. | — |
 
 **Output** — the same push report as [`ocx package push`][cmd-package-push]
@@ -3204,6 +3211,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- reference (package-create/package-push dependency pins) -->
 [reference-manifest-pins]: ./metadata.md#dependencies-manifest-pins
 [reference-dependencies]: ./metadata.md#dependencies
+[reference-platforms]: ./platforms.md
 
 <!-- global flag -->
 [global-flag]: #global-flag

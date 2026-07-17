@@ -18,9 +18,9 @@ cat >metadata.json <<'EOF'
   ] }
 EOF
 
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 
-out="$(ocx package test -p linux/amd64 -m metadata.json -i "$REGISTRY"/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool)"
+out="$(ocx package test -i "$REGISTRY"/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool)"
 if [[ "$out" != *"mytool-ok"* ]]; then
     echo "expected 'mytool-ok' in output, got: $out" >&2
     exit 1

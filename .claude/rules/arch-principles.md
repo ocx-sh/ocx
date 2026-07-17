@@ -71,7 +71,7 @@ CLI command (clap parse)
 | **Digest** | SHA-256 content hash — immutable identity of package version |
 | **Tag** | Mutable alias to digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
-| **Platform** | OS/arch pair (e.g., `linux/amd64`) for multi-platform manifest resolution; optionally carries ABI features (libc family on Linux via `os.features`, e.g. `libc.glibc`). Resolution uses subset semantics via `can_run()` — not strict equality. Host libc detected per-host by `HostCapabilities::detect` via discovery-then-identify (a system binary's `PT_INTERP` + arch-filtered loader scan + allowlist fallback, then `--version` banner classification). ADR: `adr_platform_libc_os_features.md`. |
+| **Platform** | OS/arch pair (e.g., `linux/amd64`) for multi-platform manifest resolution; optionally refined by `variant` and ABI features (libc family on Linux via `os.features`, e.g. `libc.glibc`). Canonical grammar: `os/arch[/variant][+feature[,feature...]]` \| `any` — single, injective, round-tripping string shared by `--platform`, `ocx.lock` keys, and dependency pin-map keys. Resolution is the directed relation `is_compatible(required, offered)` + lexicographic `select_best` scoring — not strict equality; one shared helper across fresh-resolve, lock-read, and authoring pinning. One platform per authoring invocation (no bundle-level target set); `patch sync`'s bare-invocation concrete-ship-matrix fan-out is the one sanctioned exception. Host libc detected per-host by `HostCapabilities::detect` via discovery-then-identify (a system binary's `PT_INTERP` + arch-filtered loader scan + allowlist fallback, then `--version` banner classification). ADRs: `adr_platform_model_unification.md` (relation, grammar, lock V3, single-platform authoring), `adr_platform_libc_os_features.md` (libc namespace + host detection). |
 | **Slug** | Filesystem-safe encoding: `to_relaxed_slug()` preserves `[a-zA-Z0-9._-]`, replaces rest with `_` |
 | **Identifier** | Parsed OCI reference: `registry/repo:tag@digest` with default registry fallback |
 | **Manifest** | OCI image manifest or image index (multi-platform) |
@@ -83,7 +83,8 @@ CLI command (clap parse)
 | ADR | Decision |
 |-----|----------|
 | `adr_cascade_platform_aware_push.md` | Per-platform version filtering + index merging |
-| `adr_platform_libc_os_features.md` | libc family differentiation via `os.features` + `libc.*` namespace; `can_run()` subset matcher |
+| `adr_platform_libc_os_features.md` | libc family differentiation via `os.features` + `libc.*` namespace; `can_run()` subset matcher (superseded by `adr_platform_model_unification.md` D1's `is_compatible`/`select_best`) |
+| `adr_platform_model_unification.md` | Directed compatibility relation (`is_compatible`/`compatibility_score`/`select_best`, one shared helper across fresh-resolve, lock-read, authoring pinning); canonical single-grammar platform string (`os/arch[/variant][+feature[,feature...]]` \| `any`); `ocx.lock` V3 (only supported version, canonical-key validation, no digest-value uniqueness); single-platform resolution + authoring (`TargetPlatforms` deleted, `patch sync` keeps the one sanctioned multi-platform fan-out) |
 | `adr_codesign_inside_out_signing.md` | Recursive inside-out Mach-O signing |
 | `adr_codesign_per_file_signing.md` | Per-file signing replace bundle signing |
 | `adr_custom_oci_identifier.md` | Custom identifier parser replace `oci_spec::Reference` |

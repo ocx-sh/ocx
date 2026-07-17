@@ -943,34 +943,31 @@ def test_env_nushell_dollar_env_home_is_escaped_in_output(
 
 
 # ---------------------------------------------------------------------------
-# V2 lock shape: ``ocx env`` (global path) resolves per-platform leaf digest
+# Lock shape: ``ocx env`` (global path) resolves per-platform leaf digest
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_TE = _re_te.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def test_env_global_v2_lock_resolves_host_leaf_digest(
+def test_env_global_resolves_host_leaf_digest(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx --global env`` on a V2 ``$OCX_HOME/ocx.lock`` resolves the
-    host-platform leaf digest from ``[tool.platforms]`` — not a legacy
-    ``pinned`` index digest.
+    """``ocx --global env`` resolves the host-platform leaf digest from
+    ``$OCX_HOME/ocx.lock``'s ``[tool.platforms]`` — not a legacy ``pinned``
+    index digest.
 
-    ADR §toolchain_env.rs: "V2: host-platform leaf; V1: legacy index-digest path."
-
-    Scenario: ``ocx --global add`` writes a V2 global lock and installs the
-    package blobs.  Assert:
-    1. The global lock is V2 (``lock_version = 2``, ``[tool.platforms]``
-       present, no ``pinned =`` line, at least one leaf digest recorded).
-    2. ``ocx --global env --shell=sh`` exits 0 and emits ``export`` lines,
-       proving the V2 host-leaf was resolved successfully.
+    Scenario: ``ocx --global add`` writes the global lock and installs the
+    package blobs. Assert:
+    1. The global lock carries ``[tool.platforms]``, no ``pinned =`` line,
+       at least one leaf digest recorded.
+    2. ``ocx --global env --shell=sh`` exits 0 and emits ``export`` lines.
 
     This is a distinct concern from the ``corrupt-lock`` lenient-path tests
     that exercise the empty-env degradation path; this test verifies the
-    *happy* path through the V2 code branch.
+    *happy* path.
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_te_v2leaf"
+    repo = f"t_{short}_te_v3leaf"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["genv"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
@@ -989,28 +986,23 @@ def test_env_global_v2_lock_resolves_host_leaf_digest(
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
 
-    # Verify the global lock is V2.
     ocx_home = Path(ocx.env["OCX_HOME"])
     global_lock = ocx_home / "ocx.lock"
     assert global_lock.is_file(), "$OCX_HOME/ocx.lock must exist after add --global"
     lock_text = global_lock.read_text()
 
-    assert "lock_version = 2" in lock_text, (
-        "global lock must be V2 (lock_version = 2) after add --global; "
-        "got:\n" + lock_text[:400]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "global V2 lock must carry a [tool.platforms] table"
+        "global lock must carry a [tool.platforms] table"
     )
     leaf_digests = _LEAF_RE_TE.findall(lock_text)
     assert leaf_digests, (
-        "global V2 lock must record at least one per-platform leaf digest"
+        "global lock must record at least one per-platform leaf digest"
     )
     assert "pinned =" not in lock_text, (
-        "global V2 lock must NOT carry a legacy `pinned` line"
+        "global lock must NOT carry a legacy `pinned` line"
     )
 
-    # ``ocx --global env --shell=sh`` must resolve the V2 host-leaf and emit export lines.
+    # ``ocx --global env --shell=sh`` must resolve the host-leaf and emit export lines.
     env_result = subprocess.run(
         [str(ocx.binary), "--global", "env", "--shell=sh"],
         cwd=empty,
@@ -1019,99 +1011,11 @@ def test_env_global_v2_lock_resolves_host_leaf_digest(
         env=dict(ocx.env),
     )
     assert env_result.returncode == EXIT_SUCCESS, (
-        "ocx --global env --shell=sh on a V2 global lock must exit 0 "
-        "(resolves host-leaf from [tool.platforms]); "
-        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
+        "ocx --global env --shell=sh must exit 0 (resolves host-leaf from "
+        f"[tool.platforms]); rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
     )
     assert "export" in env_result.stdout, (
-        "V2 --global env --shell=sh must emit export lines; "
-        f"got:\n{env_result.stdout!r}"
-    )
-
-
-def test_env_global_v1_lock_still_resolves_via_legacy_path(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """A V1 ``$OCX_HOME/ocx.lock`` (``lock_version = 1``, ``pinned`` field)
-    still lets ``ocx --global env`` succeed via the legacy index-digest path —
-    no forced upgrade required.
-
-    ADR: "A committed V1 lock keeps installing/running offline with no forced
-    upgrade and no read-path mutation."
-
-    This test is the global-lock counterpart to the lenient corrupt-lock test
-    above: the corrupt-lock test exercises a *bad* lock → empty env degradation;
-    this test exercises a *syntactically-valid* V1 lock → legacy path success.
-    """
-    short = uuid4().hex[:8]
-    repo = f"t_{short}_te_v1leg"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["genv"])
-    fq = f"{ocx.registry}/{repo}:1.0.0"
-
-    empty = tmp_path / "no_proj_te2"
-    empty.mkdir()
-
-    # Step 1: run add --global to warm blobs and get a real V2 lock.
-    add = subprocess.run(
-        [str(ocx.binary), "--global", "add", fq],
-        cwd=empty,
-        capture_output=True,
-        text=True,
-        env=dict(ocx.env),
-    )
-    assert add.returncode == EXIT_SUCCESS, (
-        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
-    )
-
-    # Step 2: read the real V2 lock and synthesise a V1 replacement.
-    ocx_home = Path(ocx.env["OCX_HOME"])
-    global_lock = ocx_home / "ocx.lock"
-    v2_text = global_lock.read_text()
-
-    repo_match = _re_te.search(r'repository\s*=\s*"([^"]+)"', v2_text)
-    leaf_match = _LEAF_RE_TE.search(v2_text)
-    decl_match = _re_te.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
-    assert repo_match and leaf_match and decl_match, (
-        "V2 global lock must carry repository + leaf + declaration_hash; "
-        "got:\n" + v2_text[:400]
-    )
-    bare_repo = repo_match.group(1)
-    leaf_hex = leaf_match.group(1)
-    decl_hash = decl_match.group(1)
-
-    # Overwrite the global lock with a V1 form using the real pinned identifier.
-    global_lock.write_text(
-        f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "{repo}"
-group = "default"
-pinned = "{bare_repo}@sha256:{leaf_hex}"
-"""
-    )
-
-    # Step 3: ``ocx --global env --shell=sh`` must still resolve (blobs cached).
-    env_result = subprocess.run(
-        [str(ocx.binary), "--global", "env", "--shell=sh"],
-        cwd=empty,
-        capture_output=True,
-        text=True,
-        env=dict(ocx.env),
-    )
-    assert env_result.returncode == EXIT_SUCCESS, (
-        "V1 global lock must allow ocx --global env --shell=sh to succeed via the "
-        "legacy index-digest path (blobs cached from add --global); "
-        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
-    )
-    assert "export" in env_result.stdout, (
-        "V1 global lock: --global env --shell=sh must emit export lines; "
-        f"got:\n{env_result.stdout!r}"
+        f"--global env --shell=sh must emit export lines; got:\n{env_result.stdout!r}"
     )
 
 

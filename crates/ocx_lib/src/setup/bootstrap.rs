@@ -167,7 +167,7 @@ pub async fn ensure_self_installed(
             manager
                 .install_all(
                     vec![identifier],
-                    oci::Platform::supported_set(),
+                    oci::Platform::current().unwrap_or_else(oci::Platform::any),
                     candidate,
                     select,
                     Concurrency::default(),
@@ -261,7 +261,7 @@ async fn ensure_pinned(
     manager
         .install_all(
             vec![install_id],
-            oci::Platform::supported_set(),
+            oci::Platform::current().unwrap_or_else(oci::Platform::any),
             candidate,
             select,
             Concurrency::default(),
@@ -313,7 +313,7 @@ async fn resolve_pinned_digest(
     };
 
     let chain = manager
-        .resolve(&resolve_id, oci::Platform::supported_set())
+        .resolve(&resolve_id, oci::Platform::current().unwrap_or_else(oci::Platform::any))
         .await
         .map_err(|kind| match kind {
             // A tag/digest that genuinely does not exist (a source was consulted)

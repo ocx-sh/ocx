@@ -29,9 +29,12 @@ pub struct PackageTest {
     #[clap(short, long)]
     metadata: Option<PathBuf>,
 
-    /// Target platform (e.g. `linux/amd64`). Required - parity with `package push`.
-    #[clap(short, long, required = true)]
-    platform: oci::Platform,
+    /// Target platform (e.g. `linux/amd64`). Defaults to the platform `ocx
+    /// package create` recorded in the metadata sidecar; an explicit value
+    /// must equal that recorded platform or the command is rejected.
+    /// Parity with `package push`.
+    #[clap(short, long)]
+    platform: Option<oci::Platform>,
 
     /// Materialize into DIR instead of an auto-managed temp dir. DIR must not
     /// exist (created by ocx) or be empty. Implies keep - the dir is never
@@ -113,18 +116,19 @@ impl PackageTest {
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
         // Read the authoring sidecar (superset: create may have written
-        // per-platform pin maps) and project it for the tested platform —
-        // the same projection `ocx package push` publishes.
-        let metadata = package::metadata::ValidMetadata::try_from(
-            package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path)
-                .await
-                .with_context(|| format!("reading metadata from {}", metadata_path.display()))?
-                .to_published(&self.platform)?,
-        )?;
+        // per-platform pin maps). Bind the tested platform to the platform
+        // `ocx package create` recorded in the sidecar — same contract as
+        // `ocx package push` — then project it for that platform, the same
+        // projection `ocx package push` publishes.
+        let authoring_metadata = package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path)
+            .await
+            .with_context(|| format!("reading metadata from {}", metadata_path.display()))?;
+        let platform = authoring_metadata.resolve_platform(self.platform.as_ref())?;
+        let metadata = package::metadata::ValidMetadata::try_from(authoring_metadata.to_published(&platform)?)?;
         let info = package::info::Info {
             identifier: identifier.clone(),
             metadata: metadata.into(),
-            platform: self.platform.clone(),
+            platform: platform.clone(),
         };
 
         let manager = context.manager();
@@ -313,7 +317,7 @@ impl PackageTest {
                 &label,
                 &dest_path,
                 &scratch_root,
-                &self.platform,
+                &platform,
                 process_env,
             )
             .await;

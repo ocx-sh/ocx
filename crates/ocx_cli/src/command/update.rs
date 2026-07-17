@@ -8,12 +8,13 @@ use clap::Parser;
 use ocx_lib::cli;
 use ocx_lib::project::{
     ALL_GROUP, DEFAULT_GROUP, LockedTool, ProjectConfig, ProjectLock, ResolveLockOptions, expand_all_keyword,
-    resolutions_content_equal, resolve_lock, resolve_lock_touched,
+    locked_tool_content_equal, resolve_lock, resolve_lock_touched,
 };
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock};
+use crate::conventions;
 use crate::options;
 
 /// Arguments for `ocx update` (whole-file or scoped lock re-resolve).
@@ -39,7 +40,7 @@ pub struct Update {
     pub pull: options::Pull,
 
     #[clap(flatten)]
-    pub platforms: options::Platforms,
+    pub platform: options::PlatformOption,
 
     /// Advance every binding in the named group(s); freeze the rest.
     ///
@@ -165,9 +166,10 @@ impl Update {
         // The `--check` early-return above ensures this line is never reached
         // on the verify-only path. `--no-pull` opts out.
         let eager = self.pull.enabled(true);
-        materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
+        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
-        let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
+        let report_platform = platform;
         let entries: Vec<LockEntry> = new_lock
             .tools
             .iter()
@@ -306,7 +308,7 @@ fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
     b.sort_by(|x, y| (x.group.as_str(), x.name.as_str()).cmp(&(y.group.as_str(), y.name.as_str())));
     a.iter()
         .zip(b.iter())
-        .all(|(x, y)| x.name == y.name && x.group == y.group && resolutions_content_equal(&x.resolution, &y.resolution))
+        .all(|(x, y)| x.name == y.name && x.group == y.group && locked_tool_content_equal(x, y))
 }
 
 #[cfg(test)]
@@ -446,14 +448,23 @@ mod tests {
         assert_eq!(exit_code(&err), Some(cli::ExitCode::UsageError));
     }
 
-    /// `--platform` is repeatable and parses into the flattened `Platforms`.
+    /// `--platform` accepts a single value.
     #[test]
-    fn parses_repeatable_platform_flag() {
-        let update = parse(&["update", "--platform", "linux/arm64", "-p", "linux/amd64"]);
+    fn parses_platform_flag() {
+        let update = parse(&["update", "--platform", "linux/arm64"]);
         assert_eq!(
-            update.platforms.as_slice().len(),
-            2,
-            "two --platform values must parse into two entries"
+            update.platform.platform.map(|p| p.to_string()),
+            Some("linux/arm64".to_owned())
+        );
+    }
+
+    /// A second `--platform` occurrence is a usage error (D4 of
+    /// `adr_platform_model_unification.md`).
+    #[test]
+    fn rejects_repeated_platform_flag() {
+        assert!(
+            Update::try_parse_from(["update", "--platform", "linux/arm64", "-p", "linux/amd64"]).is_err(),
+            "repeated --platform must be rejected"
         );
     }
 }

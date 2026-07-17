@@ -192,7 +192,7 @@ impl PackageManager {
             self,
             &pinned,
             chain,
-            vec![info.platform.clone()],
+            info.platform.clone(),
             SetupGroups::new(),
             dest_override,
             Some(validated_metadata),
@@ -592,9 +592,7 @@ mod tests {
             os: oci::OperatingSystem::Linux,
             arch: oci::Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: Vec::new(),
-            features: None,
         };
         Info {
             identifier,

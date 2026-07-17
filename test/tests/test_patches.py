@@ -71,7 +71,18 @@ def _make_companion(
     env_key: str,
     env_value: str,
 ) -> PackageInfo:
-    """Publish an env-only companion package with INTERFACE-visible env var."""
+    """Publish an env-only companion package with INTERFACE-visible env var.
+
+    Always published `platform="any"`: a binary-free, env-only companion is
+    the canonical `any`-published package (adr_platform_model_unification.md
+    D1's `Any`-offer rule) — it survives `ocx patch sync`'s default 5-platform
+    fan-out regardless of which concrete platform(s) a consumer actually runs
+    on. A companion pinned to the current host platform instead fails closed
+    the moment any `required` rule referencing it (especially a `--global`
+    wildcard rule, published to the registry's single reserved, cross-session
+    `global` repo slot) is fanned out against a platform it was never
+    published for.
+    """
     return make_package(
         ocx,
         repo,
@@ -88,6 +99,7 @@ def _make_companion(
         ],
         new=True,
         cascade=True,
+        platform="any",
     )
 
 
@@ -545,6 +557,10 @@ def test_patch_sync_refreshes_descriptor_and_companion(
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
 
     # ── Run patch sync ──
+    #
+    # No `--platform`: fans out over the full concrete ship matrix (D4
+    # exception, `adr_platform_model_unification.md`). `_make_companion`
+    # publishes `any`, which satisfies every platform in the fan-out.
     sync_result = ocx.run("patch", "sync", format="json", check=False)
     assert sync_result.returncode == 0, (
         f"ocx patch sync must succeed; got {sync_result.returncode}\nstderr: {sync_result.stderr}"

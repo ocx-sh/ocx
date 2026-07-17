@@ -453,28 +453,25 @@ def test_add_no_pull_then_pull_last_wins_installs(
 
 
 # ---------------------------------------------------------------------------
-# V2 lock shape: ``ocx add`` writes the V2 shape (bare repository +
-# [tool.platforms]); carried-forward untouched entries use exact-only
-# transcription and fail on miss (Codex R2 / ADR §add)
+# Lock shape: ``ocx add`` writes bare ``repository`` + ``[tool.platforms]``;
+# untouched carried-forward entries pass through byte-identical.
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_ADD = _re_add.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def test_add_writes_v2_lock_shape(
+def test_add_writes_v3_lock_shape(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx add <pkg>`` writes the V2 ``ocx.lock`` shape: bare ``repository``
+    """``ocx add <pkg>`` writes the ``ocx.lock`` shape: bare ``repository``
     (no tag, no digest) + ``[tool.platforms]`` table with per-platform leaf
-    digests.  No ``pinned =`` line may appear in the written lock.
-
-    ADR §lock.rs: "Write only V2. No code path emits V1."
+    digests. No ``pinned =`` line may appear in the written lock.
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_add_v2shape"
+    repo = f"t_{short}_add_v3shape"
     pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
-    project_dir = tmp_path / "proj_v2shape"
+    project_dir = tmp_path / "proj_v3shape"
     project_dir.mkdir()
     _write_ocx_toml(project_dir, "[tools]\n")
 
@@ -487,125 +484,27 @@ def test_add_writes_v2_lock_shape(
     assert lock_path.exists(), "ocx.lock must be written by ocx add"
     lock_text = lock_path.read_text()
 
-    # V2 structural assertions.
-    assert "lock_version = 2" in lock_text, (
-        "ocx add must write lock_version = 2; got:\n" + lock_text[:400]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "ocx add V2 lock must carry a [tool.platforms] table"
+        "ocx add lock must carry a [tool.platforms] table"
     )
     leaf_digests = _LEAF_RE_ADD.findall(lock_text)
     assert leaf_digests, (
-        "ocx add V2 lock must record at least one per-platform leaf digest"
+        "ocx add lock must record at least one per-platform leaf digest"
     )
     # The bare repository coordinate must be present (no tag, no digest suffix).
     assert f'repository = "{ocx.registry}/{repo}"' in lock_text, (
-        f"ocx add V2 lock must carry a bare repository coordinate for {repo!r}; "
+        f"ocx add lock must carry a bare repository coordinate for {repo!r}; "
         f"got:\n" + lock_text[:400]
     )
     assert f'repository = "{ocx.registry}/{repo}@' not in lock_text, (
-        "V2 repository must NOT carry a digest suffix"
+        "repository must NOT carry a digest suffix"
     )
     assert f'repository = "{ocx.registry}/{repo}:' not in lock_text, (
-        "V2 repository must NOT carry a tag suffix"
+        "repository must NOT carry a tag suffix"
     )
     # Legacy `pinned` line must be absent.
     assert "pinned =" not in lock_text, (
-        "V2 lock written by ocx add must NOT carry a legacy `pinned` line"
-    )
-
-
-def test_add_untouched_tool_exact_only_fails_on_missing_index(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """``ocx add <new_tool>`` must NOT silently re-resolve an untouched existing
-    tool's platform set when its carried V1 index is gone (Codex R2).
-
-    Whole-file model §4.3/§8.2: a mutator carries untouched bindings forward
-    verbatim; a V1 entry is transcribed exact-only from its pinned index
-    digest. When that index is unreachable the add fails with exit 78
-    (``LockUpgradeRequired``) and the message names ``ocx update`` — never a
-    silent live-tag re-resolve.
-
-    Setup: lock two real tools (A, B) to learn the live ``declaration_hash``,
-    then hand-author a V1 lock carrying that SAME hash (so the pre-mutation
-    freshness gate passes) but with a FAKE, unreachable ``pinned`` index digest
-    for each. ``ocx add`` of a new tool C must fail closed at the carry-forward.
-    """
-    short = uuid4().hex[:8]
-    repo_a = f"t_{short}_cod_r2_a"
-    repo_b = f"t_{short}_cod_r2_b"
-    repo_c = f"t_{short}_cod_r2_c"
-    # Push A and B to the registry so they have real tags.
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
-    # Push C (the new tool being added).
-    pkg_c = make_package(ocx, repo_c, "1.0.0", tmp_path, new=True, cascade=False)
-
-    project_dir = tmp_path / "proj_codr2"
-    project_dir.mkdir()
-    _write_ocx_toml(
-        project_dir,
-        f"""\
-[tools]
-tool_a = "{ocx.registry}/{repo_a}:1.0.0"
-tool_b = "{ocx.registry}/{repo_b}:1.0.0"
-""",
-    )
-
-    # Lock A + B (no pull) to learn the live declaration_hash. The carried V1
-    # lock must reuse this exact hash so the pre-mutation freshness gate passes
-    # and the carry-forward (not the staleness gate) is what fails.
-    lock_r = subprocess.run(
-        [str(ocx.binary), "lock", "--no-pull"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True,
-        env=ocx.env,
-    )
-    assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
-    v2_text = (project_dir / "ocx.lock").read_text()
-    decl_match = _re_add.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
-    assert decl_match, f"baseline lock must carry a declaration_hash; got:\n{v2_text[:400]}"
-    decl_hash = decl_match.group(1)
-
-    # Overwrite with a V1 lock carrying the SAME declaration_hash (freshness
-    # gate passes) but FAKE, unreachable ``pinned`` index digests.
-    fake_digest = "a" * 64
-    (project_dir / "ocx.lock").write_text(
-        f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "tool_a"
-group = "default"
-pinned = "{ocx.registry}/{repo_a}@sha256:{fake_digest}"
-
-[[tool]]
-name = "tool_b"
-group = "default"
-pinned = "{ocx.registry}/{repo_b}@sha256:{fake_digest}"
-"""
-    )
-
-    # ``ocx add tool_c`` must fail closed: it cannot carry A and B's V1 entries
-    # exactly (fake index → not cached, not live) and exact-only carry-forward
-    # prohibits the re-resolve fallback for untouched tools.
-    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg_c.fq)
-    assert result.returncode == EXIT_CONFIG, (
-        "ocx add must fail with exit 78 (LockUpgradeRequired) when an untouched "
-        f"V1 tool's index is unreachable; rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
-    # The error must direct the user to the whole-file bump verb `ocx update`.
-    combined = (result.stderr + result.stdout).lower()
-    assert "update" in combined, (
-        "error message must direct the user to run `ocx update`; "
-        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+        "lock written by ocx add must NOT carry a legacy `pinned` line"
     )
 
 
@@ -767,10 +666,10 @@ def test_add_with_no_lock_succeeds(
     assert (project_dir / "ocx.lock").exists(), "ocx.lock must be created by bootstrap add"
 
 
-def test_add_with_empty_tools_v2_lock_succeeds(
+def test_add_with_empty_tools_lock_succeeds(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Bootstrap: ``ocx add`` against an empty-tools V2 lock (``tools = []``)
+    """Bootstrap: ``ocx add`` against an empty-tools lock (``tools = []``)
     succeeds — the empty carry set resolves only the new binding."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_emptylock"
@@ -780,7 +679,7 @@ def test_add_with_empty_tools_v2_lock_succeeds(
     project_dir.mkdir()
     _write_ocx_toml(project_dir, "[tools]\n")
 
-    # An empty-tools V2 lock current with the empty config (lock first so the
+    # An empty-tools lock current with the empty config (lock first so the
     # declaration_hash matches the empty [tools] table exactly).
     lock_r = subprocess.run(
         [str(ocx.binary), "lock", "--no-pull"],
@@ -790,11 +689,10 @@ def test_add_with_empty_tools_v2_lock_succeeds(
         env=ocx.env,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline empty lock failed: {lock_r.stderr}"
-    assert "lock_version = 2" in (project_dir / "ocx.lock").read_text()
 
     result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq)
     assert result.returncode == EXIT_SUCCESS, (
-        f"add against an empty-tools V2 lock must succeed; "
+        f"add against an empty-tools lock must succeed; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     lock_text = (project_dir / "ocx.lock").read_text()

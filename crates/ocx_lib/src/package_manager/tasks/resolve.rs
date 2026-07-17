@@ -204,7 +204,7 @@ impl PackageManager {
     pub async fn resolve(
         &self,
         package: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Result<ResolvedChain, PackageErrorKind> {
         // Walk the manifest chain through ChainedIndex. Each `fetch_manifest`
         // returns cache-first with write-through persistence, so every digest
@@ -276,7 +276,7 @@ impl PackageManager {
                     size: top_size,
                 }];
 
-                let pinned = match self.index().select(&top_id, platforms, IndexOperation::Resolve).await {
+                let pinned = match self.index().select(&top_id, &platform, IndexOperation::Resolve).await {
                     Ok(SelectResult::Found(id)) => {
                         oci::PinnedIdentifier::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
                     }
@@ -384,14 +384,14 @@ impl PackageManager {
     pub async fn resolve_all(
         &self,
         packages: &[oci::Identifier],
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Result<Vec<ResolvedChain>, package_manager::error::Error> {
         if packages.is_empty() {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
             let _spin = self.progress().spinner(format!("Resolving '{}'", packages[0]));
-            let pinned = self.resolve(&packages[0], platforms).await.map_err(|kind| {
+            let pinned = self.resolve(&packages[0], platform).await.map_err(|kind| {
                 package_manager::error::Error::ResolveFailed(vec![PackageError::new(packages[0].clone(), kind)])
             })?;
             return Ok(vec![pinned]);
@@ -401,10 +401,10 @@ impl PackageManager {
         for package in packages {
             let mgr = self.clone();
             let package = package.clone();
-            let platforms = platforms.clone();
+            let platform = platform.clone();
             tasks.spawn(async move {
                 let _spin = mgr.progress().spinner(format!("Resolving '{package}'"));
-                let result = mgr.resolve(&package, platforms).await;
+                let result = mgr.resolve(&package, platform).await;
                 (package, result)
             });
         }
@@ -1012,11 +1012,7 @@ impl PackageManager {
                 (_, oci::Manifest::ImageIndex(_)) => {
                     let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
                     let selected_id = match local_index
-                        .select(
-                            &top_id,
-                            vec![host_platform, oci::Platform::any()],
-                            IndexOperation::Query,
-                        )
+                        .select(&top_id, &host_platform, IndexOperation::Query)
                         .await?
                     {
                         SelectResult::Found(id) => id,
@@ -1126,17 +1122,16 @@ impl PackageManager {
     ///
     /// # Parameters
     ///
-    /// - `platforms` — reserved for future per-platform companion filtering
-    ///   (a later sub-phase will use this to restrict companion resolution to
-    ///   platforms relevant to the current host).  Currently unused; callers
-    ///   should pass the host platform set via
-    ///   `&[oci::Platform::current().unwrap_or_else(oci::Platform::any)]` so
-    ///   the value is meaningful when the filter is implemented.
+    /// - `platform` — reserved for future per-platform companion filtering (a
+    ///   later sub-phase will use this to restrict companion resolution to the
+    ///   platform relevant to the current host).  Currently unused; callers
+    ///   should pass `&oci::Platform::current().unwrap_or_else(oci::Platform::any)`
+    ///   so the value is meaningful when the filter is implemented.
     ///
     /// # Errors
     ///
     /// Returns an error if the local filesystem state cannot be read.
-    pub async fn resolve_site_patch_roots(&self, _platforms: &[oci::Platform]) -> crate::Result<SitePatchRoots> {
+    pub async fn resolve_site_patch_roots(&self, _platform: &oci::Platform) -> crate::Result<SitePatchRoots> {
         // Short-circuit: no patch tier configured → empty roots.
         let Some(patches) = self.patches() else {
             return Ok(SitePatchRoots::default());
@@ -1314,11 +1309,7 @@ impl PackageManager {
                 Ok(Some((_, oci::Manifest::ImageIndex(_)))) => {
                     // Multi-platform: select the host-platform child manifest.
                     let selected_id = match local_index
-                        .select(
-                            &top_id,
-                            vec![host_platform.clone(), oci::Platform::any()],
-                            oci::index::IndexOperation::Query,
-                        )
+                        .select(&top_id, &host_platform, oci::index::IndexOperation::Query)
                         .await
                     {
                         Ok(SelectResult::Found(id)) => id,
@@ -1953,7 +1944,7 @@ mod spec_tests {
         let dir = TempDir::new().unwrap();
         seed_flat_manifest(&dir, &digest_a());
         let mgr = make_manager(&dir);
-        let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
+        let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
         assert_eq!(
             result.chain.len(),
             2,
@@ -1981,7 +1972,7 @@ mod spec_tests {
         let dir = TempDir::new().unwrap();
         seed_image_index(&dir, &digest_a(), &digest_b());
         let mgr = make_manager(&dir);
-        let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
+        let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
         assert_eq!(
             result.chain.len(),
             3,
@@ -2031,7 +2022,7 @@ mod spec_tests {
         std::fs::write(&child_path, child_json).unwrap();
 
         let mgr = make_manager(&dir);
-        let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await;
+        let result = mgr.resolve(&tagged_id(), linux_amd64()).await;
         assert!(result.is_err(), "nested ImageIndex must be rejected with an error");
     }
 
@@ -2043,7 +2034,7 @@ mod spec_tests {
         seed_flat_manifest(&dir, &digest_a());
         let blob_store = BlobStore::new(dir.path().join("blobs"));
         let mgr = make_manager(&dir);
-        let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
+        let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
 
         // Manifest entries (all chain entries except the trailing config blob)
         // must be on disk — ChainedIndex write-through guarantees that.
@@ -5066,7 +5057,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&[])
+            .resolve_site_patch_roots(&crate::oci::Platform::any())
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -5149,7 +5140,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&[])
+            .resolve_site_patch_roots(&crate::oci::Platform::any())
             .await
             .expect("resolve_site_patch_roots must succeed even under ChainMode::Remote");
 
@@ -5182,7 +5173,7 @@ mod phase5a_spec_tests {
         seed_installed_base_symlink(&dir, &base_id);
 
         let roots = manager
-            .resolve_site_patch_roots(&[])
+            .resolve_site_patch_roots(&crate::oci::Platform::any())
             .await
             .expect("resolve_site_patch_roots with patches=None must return Ok(empty)");
 
@@ -5306,7 +5297,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&[])
+            .resolve_site_patch_roots(&crate::oci::Platform::any())
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -5426,7 +5417,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&[])
+            .resolve_site_patch_roots(&crate::oci::Platform::any())
             .await
             .expect("resolve_site_patch_roots must succeed");
 

@@ -107,6 +107,7 @@ export default defineConfig({
             { text: "Configuration", link: "/docs/reference/configuration" },
             { text: "Environment", link: "/docs/reference/environment" },
             { text: "Metadata", link: "/docs/reference/metadata" },
+            { text: "Platforms", link: "/docs/reference/platforms" },
             { text: "mirror.yml ↗", link: "https://ocx-sh.github.io/ocx-mirror/reference/mirror-yml/" },
           ],
         },

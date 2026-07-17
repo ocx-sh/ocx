@@ -35,11 +35,11 @@ impl PackageManager {
     pub async fn install(
         &self,
         package: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         candidate: bool,
         select: bool,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        let install_info = self.pull(package, platforms.clone()).await?;
+        let install_info = self.pull(package, platform.clone()).await?;
 
         create_install_symlinks(self, package, &install_info, candidate, select).await?;
 
@@ -51,7 +51,7 @@ impl PackageManager {
         // Discovery is a side effect of the install, so a non-required patch tier
         // whose server is empty or unreachable must not abort the base install:
         // gate the failure on the tier posture (see `install_discovery_error_is_fatal`).
-        if let Err(error) = self.discover_and_install_patches(package, &platforms).await {
+        if let Err(error) = self.discover_and_install_patches(package, &platform).await {
             if super::patch_discovery::install_discovery_error_is_fatal(self.patches(), &error) {
                 return Err(error);
             }
@@ -89,16 +89,16 @@ impl PackageManager {
     pub async fn install_all(
         &self,
         packages: Vec<oci::Identifier>,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         candidate: bool,
         select: bool,
         concurrency: Concurrency,
         skip_discovery: bool,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         // Phase 1: Pull all packages with shared singleflight group.
-        // Clone platforms so Phase 3 (patch discovery) can still borrow it
-        // after pull_all() consumes the owned Vec.
-        let infos = self.pull_all(&packages, platforms.clone(), concurrency).await?;
+        // Clone the platform so Phase 3 (patch discovery) can still use it
+        // after pull_all() consumes the owned value.
+        let infos = self.pull_all(&packages, platform.clone(), concurrency).await?;
 
         // Phase 2: Create symlinks in parallel.
         if candidate || select {
@@ -179,7 +179,7 @@ impl PackageManager {
             for (index, pkg) in packages.iter().enumerate() {
                 let mgr = self.clone();
                 let pkg = pkg.clone();
-                let platforms = platforms.clone();
+                let platform = platform.clone();
                 let sem = semaphore.clone();
                 tasks.spawn(async move {
                     // Permit lives for the full discovery call; drop happens
@@ -189,7 +189,7 @@ impl PackageManager {
                     // Gate discovery failure on the tier posture: a non-required
                     // patch tier whose server is empty/unreachable warns and
                     // continues without companions rather than failing the install.
-                    let result = match mgr.discover_and_install_patches(&pkg, &platforms).await {
+                    let result = match mgr.discover_and_install_patches(&pkg, &platform).await {
                         Err(error)
                             if !super::patch_discovery::install_discovery_error_is_fatal(mgr.patches(), &error) =>
                         {

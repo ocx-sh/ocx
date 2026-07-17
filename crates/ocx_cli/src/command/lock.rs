@@ -9,6 +9,7 @@ use ocx_lib::project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{load_project_for_mutate, load_project_with_lock, materialize_lock};
+use crate::conventions;
 use crate::options;
 
 /// Resolve tool tags to digests and write `ocx.lock`.
@@ -50,7 +51,7 @@ pub struct Lock {
     pub pull: options::Pull,
 
     #[clap(flatten)]
-    pub platforms: options::Platforms,
+    pub platform: options::PlatformOption,
 }
 
 impl Lock {
@@ -129,7 +130,8 @@ impl Lock {
         // the object-store population is deferred. Matches `add` semantics.
         // `--no-pull` opts out: defers to `ocx pull` or the first direnv hit.
         let eager = self.pull.enabled(true);
-        materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
+        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
         // Non-fatal advisory note when `.gitattributes` lacks
         // `ocx.lock merge=union`.
@@ -140,7 +142,7 @@ impl Lock {
                 .warn("add `ocx.lock merge=union` to .gitattributes to avoid merge conflicts");
         }
 
-        let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
+        let report_platform = platform;
         let entries: Vec<LockEntry> = new_lock
             .tools
             .iter()
@@ -216,14 +218,23 @@ mod tests {
         );
     }
 
-    /// `--platform` is repeatable (comma-delimited too) and parses into `Platforms`.
+    /// `--platform` accepts a single value.
     #[test]
-    fn parses_repeatable_platform_flag() {
-        let lock = Lock::try_parse_from(["lock", "-p", "linux/arm64,linux/amd64"]).unwrap();
+    fn parses_platform_flag() {
+        let lock = Lock::try_parse_from(["lock", "-p", "linux/arm64"]).unwrap();
         assert_eq!(
-            lock.platforms.as_slice().len(),
-            2,
-            "comma-delimited -p must split into two entries"
+            lock.platform.platform.map(|p| p.to_string()),
+            Some("linux/arm64".to_owned())
+        );
+    }
+
+    /// A second `--platform` occurrence is a usage error (D4 of
+    /// `adr_platform_model_unification.md`).
+    #[test]
+    fn rejects_repeated_platform_flag() {
+        assert!(
+            Lock::try_parse_from(["lock", "-p", "linux/arm64", "-p", "linux/amd64"]).is_err(),
+            "repeated --platform must be rejected"
         );
     }
 }

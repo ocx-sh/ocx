@@ -33,11 +33,11 @@ pub struct ConfigPushArgs {
     #[clap(long = "new", short = 'n')]
     new: bool,
 
-    /// Platform entry written into the package index. Defaults to `any/any`.
+    /// Platform entry written into the package index. Defaults to `any`.
     ///
-    /// `ocx config update` only consumes the platform-independent `any/any`
+    /// `ocx config update` only consumes the platform-independent `any`
     /// entry; keep the default unless you know the consumer differs.
-    #[clap(short, long, default_value = "any/any")]
+    #[clap(short, long, default_value = "any")]
     platform: oci::Platform,
 
     /// The config file to publish (its content is staged as `config.toml`).

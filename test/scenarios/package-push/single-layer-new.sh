@@ -21,8 +21,8 @@ EOF
 repo="t_$(uuidgen | tr -d '-' | head -c 8)_pushdemo"
 fq="$REGISTRY/$repo:1.0.0"
 
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -n -p linux/amd64 -m metadata.json -i "$fq" mytool-1.0.0.tar.xz
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
+ocx package push -n -i "$fq" mytool-1.0.0.tar.xz
 ocx index update "$repo"
 
 out="$(ocx index list "$repo")"

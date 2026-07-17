@@ -211,7 +211,7 @@ def test_metadata_with_empty_entrypoints_object_installs(
     import json as _json  # noqa: PLC0415
     import sys  # noqa: PLC0415
     import stat  # noqa: PLC0415
-    from src.helpers import current_platform  # noqa: PLC0415
+    from src.helpers import current_platform, resolved_metadata_path  # noqa: PLC0415
 
     pkg_dir = tmp_path / "pkg-empty-ep"
     bin_dir = pkg_dir / "bin"
@@ -232,12 +232,12 @@ def test_metadata_with_empty_entrypoints_object_installs(
     metadata_path.write_text(_json.dumps(metadata_obj))
 
     bundle = tmp_path / "bundle-empty-ep.tar.xz"
-    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir))
-
     plat = current_platform()
+    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), "-p", plat, str(pkg_dir))
+
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     push_result = ocx.run(
-        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "-i", fq, str(bundle),
+        "package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle)), "-n", "-i", fq, str(bundle),
         check=False,
     )
     # Empty entrypoints is valid — push must succeed.

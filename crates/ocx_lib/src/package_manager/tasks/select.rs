@@ -27,9 +27,9 @@ impl PackageManager {
     pub async fn select_all(
         &self,
         packages: Vec<oci::Identifier>,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Result<Vec<(InstallInfo, WireSelectionOutcome)>, package_manager::error::Error> {
-        let infos = self.find_all(packages.clone(), platforms).await?;
+        let infos = self.find_all(packages.clone(), platform).await?;
 
         // ponytail: sequential wire-up matches the deselect_all / uninstall_all
         // precedent — the expensive resolve already ran in parallel inside

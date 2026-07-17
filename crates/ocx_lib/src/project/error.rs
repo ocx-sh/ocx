@@ -74,37 +74,38 @@ pub enum ProjectErrorKind {
     #[error("TOML serialization error")]
     TomlSerialize(#[source] toml::ser::Error),
 
-    /// A V2 lock `[[tool]]` `repository` carried a tag or digest. The V2
+    /// A lock `[[tool]]` `repository` carried a tag or digest. The lock
     /// shape stores bare registry/repo coordinates only — the per-platform
     /// pull id is reconstructed from `repository` + the per-platform leaf
     /// digest, so a tag or digest on `repository` is a malformed lock.
     #[error("lock repository '{value}' must be bare (no tag, no digest)")]
     LockRepositoryNotBare { value: String },
 
-    /// Two advertised index children stringified to the same V2 platform
-    /// map key while building the available-only `platforms` map. A
-    /// defensive guard against a silent `BTreeMap` overwrite — should never
-    /// fire under the lossless, injective [`crate::oci::Platform::lock_key`].
+    /// Two advertised index children stringified to the same platform map
+    /// key while building the available-only `platforms` map. A defensive
+    /// guard against a silent `BTreeMap` overwrite — should never fire under
+    /// the lossless, injective canonical [`crate::oci::Platform`] grammar.
     #[error("duplicate platform key '{key}' in resolved leaf map")]
     DuplicatePlatformKey { key: String },
 
-    /// A lock-mutating command (`ocx add`/`remove`) carried forward an
-    /// untouched V1 entry whose legacy index digest is no longer retrievable,
-    /// so it could not be transcribed to V2 exact-only. The command refuses to
-    /// silently re-resolve the untouched tool's live tag (Codex R2); the user
-    /// must run the whole-file bump verb `ocx update` to re-resolve instead.
-    ///
-    /// The remedy is **tier-neutral** (spec §4.1): the error layer has no tier
-    /// context, so a `ocx --global add/remove` user is told to add `--global`
-    /// rather than being handed a project-only `ocx update` that would target
-    /// the wrong toolchain.
-    #[error(
-        "tool '{name}': locked entry can no longer be migrated exactly; run `ocx update` to re-resolve (add `--global` for the global toolchain)"
-    )]
-    LockUpgradeRequired { name: String },
+    /// A lock `[[tool]] platforms` (or dependency-pin sidecar) key is not the
+    /// canonical grammar spelling of the [`crate::oci::Platform`] it parses
+    /// to (`Platform::from_str(key)?.to_string() != key`) — e.g. an unsorted
+    /// `os_features` list (`+b,a` instead of `+a,b`) or a redundant duplicate
+    /// feature (`+a,a` instead of `+a`). Rejected rather than silently
+    /// normalized, so the on-disk bytes stay the unique canonical form.
+    #[error("platform key '{key}' is not in canonical form; regenerate with `ocx lock`")]
+    NoncanonicalPlatformKey { key: String },
 
-    /// A V2 lock entry ships no leaf for the host platform (no host key and
-    /// no `"any"` fallback) at the locked version. Decided from local lock
+    /// `ocx.lock` `metadata.lock_version` is not the version this build
+    /// understands. Surfaced explicitly at the version peek — rather than
+    /// relying on `serde_repr`'s generic "unknown variant" failure — so the
+    /// message names the found version and the regenerate remedy.
+    #[error("unsupported ocx.lock version {found}; regenerate with `ocx lock`")]
+    UnsupportedLockVersion { found: u8 },
+
+    /// A lock entry ships no leaf for the host platform (no host key and no
+    /// `"any"` fallback) at the locked version. Decided from local lock
     /// bytes, so it surfaces at lock-read **pre-network** rather than as a
     /// late `SelectResult::NotFound`. The publisher does not ship this
     /// platform at the locked version (or the lock predates it) — run
@@ -114,6 +115,25 @@ pub enum ProjectErrorKind {
         "no '{platform}' leaf for tool '{name}' at the locked version; run `ocx update` to re-resolve if it has since been added"
     )]
     NoHostLeaf { name: String, platform: String },
+
+    /// A lock entry ships two or more leaves that tie at the maximum D1
+    /// compatibility score for the host platform (e.g. a dual-libc host
+    /// against separate single-libc entries with no combined entry) — the
+    /// leaf is genuinely ambiguous, not absent. Distinct from
+    /// [`Self::NoHostLeaf`]: `ocx update` re-runs the same fresh resolve and
+    /// would tie identically, so it is the wrong remedy here — the user must
+    /// disambiguate with an explicit `--platform`. `candidates` names every
+    /// tied entry's canonical-grammar platform key.
+    #[error(
+        "ambiguous '{platform}' leaf for tool '{name}': {} tied candidates ({}); pass --platform to disambiguate",
+        candidates.len(),
+        candidates.join(", ")
+    )]
+    AmbiguousHostLeaf {
+        name: String,
+        platform: String,
+        candidates: Vec<String>,
+    },
 
     /// A reserved group keyword (`default`, `all`) was declared as a
     /// `[group.<name>]` table in `ocx.toml`.
@@ -390,13 +410,18 @@ impl ClassifyExitCode for Error {
                     ExitCode::Unavailable
                 }
                 ProjectErrorKind::LockMissing => ExitCode::ConfigError,
-                // A carried-forward V1 entry cannot be migrated exactly —
-                // the lock needs an explicit `ocx update` re-resolve.
-                ProjectErrorKind::LockUpgradeRequired { .. } => ExitCode::ConfigError,
+                // The lock was written by an unsupported version — the user
+                // must regenerate it, same remedy shape as a config mismatch.
+                ProjectErrorKind::UnsupportedLockVersion { .. } => ExitCode::ConfigError,
                 // The locked version ships no leaf for the host platform —
                 // a pre-network config-state condition; the remedy is a
                 // whole-file re-resolve (`ocx update`).
                 ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError,
+                // Two or more leaves tie at the host platform's maximum D1
+                // score — malformed/ambiguous *selection*, not a missing
+                // entry (`ocx update` cannot fix a tie): same classification
+                // as the fresh-resolve `SelectionAmbiguous` case (DataError).
+                ProjectErrorKind::AmbiguousHostLeaf { .. } => ExitCode::DataError,
                 ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound,
                 ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError,
                 ProjectErrorKind::BindingNotFound { .. } => ExitCode::NotFound,
@@ -412,6 +437,9 @@ impl ClassifyExitCode for Error {
                 // A dup-key collision is a structural integrity violation in
                 // the resolved leaf map — classify as malformed data (65).
                 ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError,
+                // A noncanonical platform-map key is malformed on-disk data —
+                // same classification as a dup-key collision.
+                ProjectErrorKind::NoncanonicalPlatformKey { .. } => ExitCode::DataError,
                 // Offline / frozen refused an unpinned-tag resolve during lock
                 // building — same category as the index-layer policy block.
                 ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,
@@ -564,40 +592,20 @@ mod tests {
         );
     }
 
-    /// `LockUpgradeRequired` (a carried/survivor V1 index gone, exit 78) must
-    /// now name `ocx update` — the whole-file bump verb that re-resolves —
-    /// not the deleted `ocx lock --upgrade`. It must name no internal function
-    /// and stay tier-neutral (spec §4.1): a `ocx --global add/remove` user must
-    /// be steered to add `--global` rather than handed a bare project-only
-    /// `ocx update` that would re-resolve the wrong toolchain.
+    /// `UnsupportedLockVersion` must name the exact found version and the
+    /// `ocx lock` regenerate remedy — the entire migration story for a
+    /// rejected lock version (D3: no migration code).
     #[test]
-    fn lock_upgrade_required_names_ocx_update_remedy() {
-        let kind = ProjectErrorKind::LockUpgradeRequired {
-            name: "cmake".to_string(),
-        };
+    fn unsupported_lock_version_names_found_version_and_regenerate_remedy() {
+        let kind = ProjectErrorKind::UnsupportedLockVersion { found: 2 };
         let rendered = kind.to_string();
         assert!(
-            rendered.contains("`ocx update`"),
-            "message must name the user remedy `ocx update`; got {rendered:?}"
-        );
-        // Tier-neutral (spec §4.1): the remedy must point `--global` users at
-        // their tier rather than hard-coding a project-only `ocx update`.
-        assert!(
-            rendered.contains("--global"),
-            "message must stay tier-neutral by naming `--global` for the global toolchain; got {rendered:?}"
-        );
-        // Ensure the deleted `lock --upgrade` flag form does not appear.
-        assert!(
-            !rendered.contains("lock --upgrade"),
-            "message must not name the deleted `ocx lock --upgrade` verb; got {rendered:?}"
+            rendered.contains('2'),
+            "message must name the found version; got {rendered:?}"
         );
         assert!(
-            !rendered.contains("transcribe"),
-            "message must not leak an internal function name; got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("cmake"),
-            "message must name the affected tool; got {rendered:?}"
+            rendered.contains("`ocx lock`"),
+            "message must name the user remedy `ocx lock`; got {rendered:?}"
         );
         // C-GOOD-ERR: lowercase first word, no trailing period.
         assert!(
@@ -607,6 +615,24 @@ mod tests {
         assert!(
             !rendered.trim_end().ends_with('.'),
             "message must not end with a period per C-GOOD-ERR; got {rendered:?}"
+        );
+    }
+
+    /// `NoncanonicalPlatformKey` must name the offending key and the
+    /// `ocx lock` regenerate remedy.
+    #[test]
+    fn noncanonical_platform_key_names_key_and_regenerate_remedy() {
+        let kind = ProjectErrorKind::NoncanonicalPlatformKey {
+            key: "linux/amd64+b,a".to_string(),
+        };
+        let rendered = kind.to_string();
+        assert!(
+            rendered.contains("linux/amd64+b,a"),
+            "message must name the offending key; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("`ocx lock`"),
+            "message must name the user remedy `ocx lock`; got {rendered:?}"
         );
     }
 }

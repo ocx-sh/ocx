@@ -233,6 +233,17 @@ impl PackageManager {
     /// Only the KNOWN SET (symlink-store candidates + global root) is queried.
     /// The registry is not crawled for new repos.
     ///
+    /// # Platform fan-out
+    ///
+    /// `platforms` is an explicit enumeration of CONCRETE platforms, not a
+    /// selection tier list: discovery runs once per platform in the slice,
+    /// pinning whichever companion variant satisfies each one, so a synced
+    /// companion set is shareable across a team running mixed platforms —
+    /// this is the one exception to the single-platform resolution contract
+    /// (D4 of `adr_platform_model_unification.md`). An empty slice performs
+    /// no companion resolution at all (zero fan-out iterations); the CLI
+    /// default expands no `--platform` to the full concrete ship matrix.
+    ///
     /// # Errors
     ///
     /// Returns `Err(crate::Error::OfflineMode)` when offline.
@@ -289,7 +300,13 @@ impl PackageManager {
             }
         }
 
-        // ── Step 2: Run Sync-mode discovery over the known set. ───────────────────
+        // ── Step 2: Run Sync-mode discovery over the known set, once per ──────────
+        // ── concrete platform in the fan-out list. ─────────────────────────────────
+        //
+        // `platforms` is an explicit enumeration (produce N outputs), not a
+        // selection tier list: each concrete platform gets its own discovery
+        // pass so a team running mixed platforms all have their own companion
+        // variant pinned locally. An empty slice performs zero passes.
         //
         // Per installed base: a `Both` pass force-re-fetches the global root AND the
         // base's package-specific descriptor and installs every matching companion
@@ -297,56 +314,59 @@ impl PackageManager {
         // matching `*`) is present locally for a later OFFLINE exec — a
         // `PackageSpecificOnly` per-base pass would skip global companions and
         // regress fail-closed offline behaviour. The global root is therefore
-        // re-fetched once per base; that is idempotent (content-addressed blob,
-        // no-op tag write on an unchanged digest) and the redundant round-trips are a
-        // documented Phase-6 perf optimisation, not a correctness issue.
+        // re-fetched once per (platform, base) pair; that is idempotent
+        // (content-addressed blob, no-op tag write on an unchanged digest) and the
+        // redundant round-trips are a documented Phase-6 perf optimisation, not a
+        // correctness issue.
         //
-        // With ZERO installed bases, a single `GlobalOnly` pass refreshes the
-        // global descriptor WITHOUT fabricating a synthetic base — a synthetic
-        // base would expand the path template into an extra package-specific
-        // source outside the known set (a known-set violation).
-        if installed_bases.is_empty() {
-            match self
-                .discover_and_install_patches_with_mode(
-                    &global_id,
-                    platforms,
-                    PatchDiscoveryMode::Sync,
-                    PatchDescriptorScope::GlobalOnly,
-                )
-                .await
-            {
-                Ok(count) => companions_installed += count,
-                Err(err) => {
-                    // Fail closed on a required-companion failure; warn + continue on
-                    // any transient/optional error (best-effort per-base recovery).
-                    if is_fatal_sync_error(&err) {
-                        return Err(err.into());
-                    }
-                    crate::log::warn!("patch sync: global descriptor check failed: {err}; continuing");
-                }
-            }
-        } else {
-            for base_id in &installed_bases {
+        // With ZERO installed bases, a single `GlobalOnly` pass per platform
+        // refreshes the global descriptor WITHOUT fabricating a synthetic base — a
+        // synthetic base would expand the path template into an extra
+        // package-specific source outside the known set (a known-set violation).
+        for platform in platforms {
+            if installed_bases.is_empty() {
                 match self
                     .discover_and_install_patches_with_mode(
-                        base_id,
-                        platforms,
+                        &global_id,
+                        platform,
                         PatchDiscoveryMode::Sync,
-                        PatchDescriptorScope::Both,
+                        PatchDescriptorScope::GlobalOnly,
                     )
                     .await
                 {
                     Ok(count) => companions_installed += count,
                     Err(err) => {
-                        // Fail closed on a required-companion failure; warn + continue
-                        // otherwise (best-effort per-base recovery).
+                        // Fail closed on a required-companion failure; warn + continue on
+                        // any transient/optional error (best-effort per-base recovery).
                         if is_fatal_sync_error(&err) {
                             return Err(err.into());
                         }
-                        crate::log::warn!(
-                            "patch sync: descriptor check for '{}' failed: {err}; continuing",
-                            base_id
-                        );
+                        crate::log::warn!("patch sync: global descriptor check failed: {err}; continuing");
+                    }
+                }
+            } else {
+                for base_id in &installed_bases {
+                    match self
+                        .discover_and_install_patches_with_mode(
+                            base_id,
+                            platform,
+                            PatchDiscoveryMode::Sync,
+                            PatchDescriptorScope::Both,
+                        )
+                        .await
+                    {
+                        Ok(count) => companions_installed += count,
+                        Err(err) => {
+                            // Fail closed on a required-companion failure; warn + continue
+                            // otherwise (best-effort per-base recovery).
+                            if is_fatal_sync_error(&err) {
+                                return Err(err.into());
+                            }
+                            crate::log::warn!(
+                                "patch sync: descriptor check for '{}' failed: {err}; continuing",
+                                base_id
+                            );
+                        }
                     }
                 }
             }
@@ -433,7 +453,7 @@ mod tests {
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
         assert!(manager.is_offline(), "setup: manager must be offline");
 
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         assert!(result.is_err(), "sync_patches must return Err when offline; got Ok");
         // Verify the error is OfflineMode specifically.
         let error_debug = format!("{:?}", result.unwrap_err());
@@ -456,7 +476,7 @@ mod tests {
         assert!(!manager.is_offline(), "setup: manager must be online");
         assert!(manager.patches().is_none(), "setup: patches must be None");
 
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         // No error; report is the default empty struct.
         let report = result.expect("sync_patches with no patches config must return Ok");
         assert_eq!(report.bases_checked, 0);
@@ -522,7 +542,12 @@ mod tests {
         // `is_offline()` check inside the method — the caller (sync_patches)
         // is responsible for surfacing the OfflineMode error to the user.
         let result = manager
-            .discover_and_install_patches_with_mode(&base_id, &[], PatchDiscoveryMode::Sync, PatchDescriptorScope::Both)
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &oci::Platform::any(),
+                PatchDiscoveryMode::Sync,
+                PatchDescriptorScope::Both,
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -625,7 +650,7 @@ mod tests {
         // Run sync (will attempt network calls and log warnings — that is OK
         // since sync is best-effort per-base).
         let report = manager
-            .sync_patches(&[])
+            .sync_patches(&[oci::Platform::any()])
             .await
             .expect("sync_patches with one installed base must return Ok");
 
@@ -680,7 +705,10 @@ mod tests {
         tokio::fs::write(&candidate_path, b"").await.unwrap();
 
         // Run sync.
-        manager.sync_patches(&[]).await.expect("sync_patches must not fail");
+        manager
+            .sync_patches(&[oci::Platform::any()])
+            .await
+            .expect("sync_patches must not fail");
 
         // Verify resolve.json is byte-unchanged.
         let after = tokio::fs::read(&resolve_json_path)
@@ -780,7 +808,10 @@ mod tests {
         let manager =
             PackageManager::new(fs, index, Some(stub_client), "localhost:5000").with_patches(Some(patch_config));
 
-        let report = manager.sync_patches(&[]).await.expect("sync_patches must return Ok");
+        let report = manager
+            .sync_patches(&[oci::Platform::any()])
+            .await
+            .expect("sync_patches must return Ok");
 
         // Zero installed bases + global root → one source checked.
         assert_eq!(
@@ -889,7 +920,12 @@ mod tests {
         // verify the state is unchanged (offline short-circuit is the skip mechanism in Lazy
         // offline mode; Lazy online mode is separately tested by Phase 3 tests).
         let result = offline_manager
-            .discover_and_install_patches_with_mode(&base_id, &[], PatchDiscoveryMode::Lazy, PatchDescriptorScope::Both)
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         // Offline: returns Ok(()) immediately regardless of state.
         assert!(
@@ -923,7 +959,12 @@ mod tests {
         // not skip the state) — not the network outcome.
         let online_manager = make_online_manager(tmp.path()).with_patches(Some(patch_config.clone()));
         let result_sync = online_manager
-            .discover_and_install_patches_with_mode(&base_id, &[], PatchDiscoveryMode::Sync, PatchDescriptorScope::Both)
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &oci::Platform::any(),
+                PatchDiscoveryMode::Sync,
+                PatchDescriptorScope::Both,
+            )
             .await;
         // With no real registry, the fetch fails. The method returns Err, proving
         // the re-fetch attempt was made (not skipped). If the Sync branch had skipped
@@ -1003,7 +1044,12 @@ mod tests {
         // ── Lazy mode: loads from CAS (offline OK) ──
         let offline_manager = make_offline_manager(tmp.path()).with_patches(Some(patch_config.clone()));
         let lazy_result = offline_manager
-            .discover_and_install_patches_with_mode(&base_id, &[], PatchDiscoveryMode::Lazy, PatchDescriptorScope::Both)
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         // Offline short-circuit fires before state processing — Ok(()).
         assert!(
@@ -1014,7 +1060,12 @@ mod tests {
         // ── Sync mode: MUST re-fetch from registry (not just load from CAS) ──
         let online_manager = make_online_manager(tmp.path()).with_patches(Some(patch_config.clone()));
         let sync_result = online_manager
-            .discover_and_install_patches_with_mode(&base_id, &[], PatchDiscoveryMode::Sync, PatchDescriptorScope::Both)
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &oci::Platform::any(),
+                PatchDiscoveryMode::Sync,
+                PatchDescriptorScope::Both,
+            )
             .await;
         // Network fails (no real registry) → Err proves re-fetch was attempted.
         // If Sync mode had incorrectly loaded from CAS (like Lazy) it would return Ok(())
@@ -1110,7 +1161,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
 
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         // The result must be Err — any Ok result violates the offline posture.
         assert!(
             result.is_err(),
@@ -1293,7 +1344,7 @@ mod tests {
 
         // ── Run sync ──
         let report = manager
-            .sync_patches(&[])
+            .sync_patches(&[oci::Platform::any()])
             .await
             .expect("sync_patches with stub registry must not fail");
 
@@ -1414,7 +1465,10 @@ mod tests {
             .with_patches(Some(patch_config.clone()));
 
         // ── Run sync ──
-        let _report = manager.sync_patches(&[]).await.expect("sync_patches must not fail");
+        let _report = manager
+            .sync_patches(&[oci::Platform::any()])
+            .await
+            .expect("sync_patches must not fail");
 
         // After sync, the tag-store entry must hold the NEW manifest digest.
         let state_after = crate::package_manager::tasks::patch_discovery::PatchTagMap::read(&global_tags_path)
@@ -1577,7 +1631,7 @@ mod tests {
             .with_patches(Some(patch_config.clone()));
 
         // ── Run sync: the required companion fails, so sync fails closed (F-A). ──
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         assert!(
             result.is_err(),
             "a required-companion install failure during sync must fail closed (F-A); got Ok: {result:?}"
@@ -1738,7 +1792,7 @@ mod tests {
             .with_patches(Some(patch_config.clone()));
 
         // Zero installed bases → sync runs the GlobalOnly first-discovery pass.
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         assert!(
             result.is_err(),
             "A3: a first-discovery required-companion failure must fail closed; got {result:?}"
@@ -1870,7 +1924,7 @@ mod tests {
             PackageManager::new(fs, index, Some(stub_client), "localhost:5000").with_patches(Some(patch_config));
 
         // Zero installed bases → GlobalOnly re-sync pass; required companion fails closed.
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         assert!(
             result.is_err(),
             "A4: a required-companion failure during re-sync must fail closed; got {result:?}"
@@ -1997,7 +2051,7 @@ mod tests {
         let manager =
             PackageManager::new(fs, index, Some(stub_client), "localhost:5000").with_patches(Some(patch_config));
 
-        let result = manager.sync_patches(&[]).await;
+        let result = manager.sync_patches(&[oci::Platform::any()]).await;
         assert!(
             result.is_err(),
             "A5: a required-companion failure during a both-scope re-sync must fail closed; got {result:?}"
@@ -2105,7 +2159,9 @@ mod tests {
         // Lazy discovery (Both scope) over a real base: the global corrupt-cache heal
         // re-fetches EAGERLY; the required companion then fails → fail closed.
         let base_id = crate::oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
-        let result = manager.discover_and_install_patches(&base_id, &[]).await;
+        let result = manager
+            .discover_and_install_patches(&base_id, &oci::Platform::any())
+            .await;
         assert!(
             result.is_err(),
             "A6: a required-companion failure after the corrupt-cache heal must fail closed; got {result:?}"

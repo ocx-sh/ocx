@@ -109,7 +109,7 @@ def _tags_snapshot(ocx: OcxRunner) -> list[tuple[str, bytes]]:
     )
 
 
-# V2 lock shape: each ``[[tool]]`` carries a bare ``repository`` plus a
+# Lock shape: each ``[[tool]]`` carries a bare ``repository`` plus a
 # ``[tool.platforms]`` table of per-platform leaf digests. There is no single
 # ``pinned`` index digest — a tool's content fingerprint is its leaf set.
 _LEAF_RE = re.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
@@ -643,11 +643,11 @@ tool = "{fake_registry}/{repo}:latest"
 """,
     )
 
-    # Hand-author a V2 lock so the predecessor exists but the tag is uncached.
+    # Hand-author a lock so the predecessor exists but the tag is uncached.
     (project / "ocx.lock").write_text(
         f"""\
 [metadata]
-lock_version = 2
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:{"d" * 64}"
 generated_by = "ocx 0.3.0"
@@ -702,12 +702,12 @@ tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
 
-    # Hand-author a V2 lock so a predecessor exists but the tag is uncached
+    # Hand-author a lock so a predecessor exists but the tag is uncached
     # locally (mirrors ``test_update_offline_uncached_policy_blocked``).
     (project / "ocx.lock").write_text(
         f"""\
 [metadata]
-lock_version = 2
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:{"d" * 64}"
 generated_by = "ocx 0.3.0"

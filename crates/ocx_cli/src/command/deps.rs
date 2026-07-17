@@ -21,7 +21,7 @@ use ocx_lib::{
     utility,
 };
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 /// Show the dependency tree for one or more packages.
 ///
@@ -56,7 +56,7 @@ pub struct Deps {
     depth: Option<usize>,
 
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Package identifiers to inspect.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -65,11 +65,11 @@ pub struct Deps {
 
 impl Deps {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
-        let infos = manager.find_all(identifiers, platforms).await?;
+        let infos = manager.find_all(identifiers, platform).await?;
         let fs = manager.file_structure();
 
         if self.flat {

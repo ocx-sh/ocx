@@ -877,30 +877,27 @@ def test_clean_survives_departed_project_before_survivor(
 
 
 # ---------------------------------------------------------------------------
-# V2 lock shape: GC roots leaf digests from [tool.platforms] (ADR §clean.rs)
+# Lock shape: GC roots leaf digests from [tool.platforms] (ADR §clean.rs)
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_CLEAN = _re_clean.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
 def _leaf_digests_in_lock(lock_text: str) -> list[str]:
-    """Return all per-platform leaf digest hex values from a V2 lock."""
+    """Return all per-platform leaf digest hex values from the lock."""
     return _LEAF_RE_CLEAN.findall(lock_text)
 
 
-def test_clean_v2_lock_roots_leaf_digests_from_platforms_table(
+def test_clean_roots_leaf_digests_from_platforms_table(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx clean`` on a V2 lock roots digests from ``[tool.platforms]``, not
-    from a ``pinned`` index digest.
+    """``ocx clean`` roots digests from ``[tool.platforms]``, not from a
+    ``pinned`` index digest.
 
-    ADR §GC: "V2: root leaf digests straight from the lock (presence-gated);
-    the index-blob-read path is retained only for V1."
-
-    Scenario: lock a project (V2 shape), confirm the lock carries a
-    ``[tool.platforms]`` table with at least one leaf digest, run
-    ``ocx clean --dry-run --format json``, and assert the package is held
-    (not free) — proving GC roots the V2 leaf, not a missing index digest.
+    Scenario: lock a project, confirm the lock carries a ``[tool.platforms]``
+    table with at least one leaf digest, run ``ocx clean --dry-run --format
+    json``, and assert the package is held (not free) — proving GC roots the
+    leaf, not a missing index digest.
     """
     proj_a = tmp_path / "proj-a-v2gc"
     proj_b = tmp_path / "proj-b-v2gc"
@@ -909,19 +906,16 @@ def test_clean_v2_lock_roots_leaf_digests_from_platforms_table(
     repo, tag = _setup_project_a(ocx, tmp_path, proj_a)
 
     lock_text = (proj_a / "ocx.lock").read_text()
-    assert "lock_version = 2" in lock_text, (
-        "V2 lock shape required for this test; got:\n" + lock_text[:300]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "V2 lock must carry a [tool.platforms] table; got:\n" + lock_text[:300]
+        "lock must carry a [tool.platforms] table; got:\n" + lock_text[:300]
     )
     leaf_digests = _leaf_digests_in_lock(lock_text)
     assert leaf_digests, (
-        "V2 lock must record at least one leaf digest; got:\n" + lock_text[:300]
+        "lock must record at least one leaf digest; got:\n" + lock_text[:300]
     )
     # The lock must NOT carry a legacy `pinned` line.
     assert "pinned =" not in lock_text, (
-        "V2 lock must not carry a `pinned` index-digest line"
+        "lock must not carry a `pinned` index-digest line"
     )
 
     # GC from proj_b: proj_a's leaf-pinned package must NOT be free.
@@ -929,99 +923,7 @@ def test_clean_v2_lock_roots_leaf_digests_from_platforms_table(
     object_entries = [e for e in entries if e.get("kind") == "object"]
     free_entries = [e for e in object_entries if not e.get("held_by")]
     assert len(free_entries) == 0, (
-        "V2 GC must root the package via the per-platform leaf digest from "
+        "GC must root the package via the per-platform leaf digest from "
         "[tool.platforms]; package must NOT appear as collectable.\n"
-        f"Free entries: {free_entries}"
-    )
-
-
-def test_clean_v1_lock_roots_via_legacy_index_path(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """A committed V1 lock (``lock_version = 1`` with ``pinned`` index digest)
-    still roots GC correctly via the legacy index-blob-read path — no forced
-    upgrade and no read-path mutation.
-
-    ADR §clean.rs: "V1: retain the index-blob-read walk in
-    ``resolve_to_package_digests`` (presence-gated)."
-
-    Scenario: hand-author a V1 ``ocx.lock`` whose ``pinned`` digest matches the
-    live index (obtained by running a real ``ocx lock`` first, capturing the
-    digest, then re-writing the lock file in V1 format).  ``ocx pull`` is then
-    run against the V1 lock (legacy install path) to populate the object store.
-    ``ocx clean --dry-run`` from a sibling project must show the package as held.
-    """
-    proj_a = tmp_path / "proj-a-v1gc"
-    proj_b = tmp_path / "proj-b-v1gc"
-    proj_b.mkdir(parents=True, exist_ok=True)
-
-    repo, tag = _published_tool(ocx, tmp_path, "v1gc")
-    proj_a.mkdir(parents=True, exist_ok=True)
-    _write_ocx_toml(
-        proj_a,
-        f"""\
-[tools]
-the_tool = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-
-    # Run `ocx lock` to get a real V2 lock (we need the real digest values).
-    lock_result = _run(ocx, proj_a, "lock", "--no-pull")
-    assert lock_result.returncode == EXIT_SUCCESS, (
-        f"ocx lock failed for V1 GC test setup: rc={lock_result.returncode}\n"
-        f"stderr:\n{lock_result.stderr}"
-    )
-
-    v2_lock_text = (proj_a / "ocx.lock").read_text()
-    # Extract bare repository and one leaf digest from the V2 lock so we can
-    # synthesise the V1 `pinned` field.
-    repo_match = _re_clean.search(r'repository\s*=\s*"([^"]+)"', v2_lock_text)
-    leaf_match = _LEAF_RE_CLEAN.search(v2_lock_text)
-    assert repo_match and leaf_match, (
-        "V2 lock must carry repository + leaf for V1-synthesis;\n" + v2_lock_text[:300]
-    )
-    bare_repo = repo_match.group(1)
-    leaf_hex = leaf_match.group(1)
-
-    # Preserve the real declaration_hash so the lock passes stale-check.
-    decl_hash_match = _re_clean.search(
-        r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_lock_text
-    )
-    assert decl_hash_match, "declaration_hash missing in V2 lock"
-    decl_hash = decl_hash_match.group(1)
-
-    # Overwrite with a V1 lock using the real `pinned` identifier built from
-    # the V2 bare repo + leaf digest (this is how a consumer-written V1 lock
-    # that was never upgraded looks).
-    (proj_a / "ocx.lock").write_text(
-        f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "the_tool"
-group = "default"
-pinned = "{bare_repo}@sha256:{leaf_hex}"
-"""
-    )
-
-    # ``ocx pull`` against the V1 lock must succeed (legacy index-digest path).
-    pull_result = _run(ocx, proj_a, "pull")
-    assert pull_result.returncode == EXIT_SUCCESS, (
-        f"ocx pull on V1 lock must succeed via legacy path; "
-        f"rc={pull_result.returncode}\nstderr:\n{pull_result.stderr}"
-    )
-
-    # GC from proj_b: the V1-locked package must still be held.
-    entries = _run_clean_json(ocx, proj_b)
-    object_entries = [e for e in entries if e.get("kind") == "object"]
-    free_entries = [e for e in object_entries if not e.get("held_by")]
-    assert len(free_entries) == 0, (
-        "V1 GC path must root the package via the legacy index-blob walk; "
-        "package must NOT appear as collectable.\n"
         f"Free entries: {free_entries}"
     )

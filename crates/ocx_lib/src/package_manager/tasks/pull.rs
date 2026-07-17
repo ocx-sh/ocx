@@ -117,10 +117,10 @@ impl PackageManager {
     pub fn pull(
         &self,
         package: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
         let groups = SetupGroups::new();
-        setup_with_tracker(self, package, platforms, groups)
+        setup_with_tracker(self, package, platform, groups)
     }
 
     /// Pulls multiple packages in parallel with a shared singleflight group
@@ -139,7 +139,7 @@ impl PackageManager {
     pub async fn pull_all(
         &self,
         packages: &[oci::Identifier],
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         if packages.is_empty() {
@@ -160,7 +160,7 @@ impl PackageManager {
         for package in packages {
             let mgr = self.clone();
             let package = package.clone();
-            let platforms = platforms.clone();
+            let platform = platform.clone();
             let groups = shared_groups.clone();
             let sem = semaphore.clone();
             tasks.spawn(async move {
@@ -169,7 +169,7 @@ impl PackageManager {
                 // the next queued root pull.
                 let _permit = super::super::concurrency::acquire_permit(&sem).await;
                 let spin = mgr.progress().spinner(format!("Pulling '{package}'"));
-                let result = spin.scope(setup_with_tracker(&mgr, &package, platforms, groups)).await;
+                let result = spin.scope(setup_with_tracker(&mgr, &package, platform, groups)).await;
                 (package, result)
             });
         }
@@ -183,11 +183,11 @@ impl PackageManager {
 fn setup_with_tracker<'a>(
     mgr: &'a PackageManager,
     package: &oci::Identifier,
-    platforms: Vec<oci::Platform>,
+    platform: oci::Platform,
     groups: SetupGroups,
 ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
     let package = package.clone();
-    Box::pin(async move { setup_impl(mgr, &package, platforms, groups, None).await })
+    Box::pin(async move { setup_impl(mgr, &package, platform, groups, None).await })
 }
 
 /// Inner implementation of [`PackageManager::pull`] — see that method for
@@ -201,7 +201,7 @@ fn setup_with_tracker<'a>(
 async fn setup_impl(
     mgr: &PackageManager,
     package: &oci::Identifier,
-    platforms: Vec<oci::Platform>,
+    platform: oci::Platform,
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
 ) -> Result<InstallInfo, PackageErrorKind> {
@@ -212,7 +212,7 @@ async fn setup_impl(
     // (top-level index + platform child where applicable) and the leaf
     // `final_manifest` — the pull pipeline no longer re-fetches the manifest
     // from the client, and the chain is linked into `refs/blobs/` in one shot.
-    let resolved = mgr.resolve(package, platforms.clone()).await?;
+    let resolved = mgr.resolve(package, platform.clone()).await?;
     let pinned = resolved.pinned.clone();
     log::debug!("Resolved package identifier: {}", &pinned);
 
@@ -247,7 +247,7 @@ async fn setup_impl(
     // to waiters. On error, broadcast the error message so waiters get a
     // meaningful diagnostic instead of a generic "abandoned".
     // If we panic, Drop sends Abandoned as a fallback.
-    match setup_owned(mgr, &pinned, resolved, platforms, groups, dest_override, None).await {
+    match setup_owned(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
         Ok(info) => {
             handle.complete(info.clone());
             Ok(info)
@@ -276,7 +276,7 @@ pub async fn setup_owned(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
     resolved: super::resolve::ResolvedChain,
-    platforms: Vec<oci::Platform>,
+    platform: oci::Platform,
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
@@ -291,7 +291,7 @@ pub async fn setup_owned(
         mgr,
         pinned,
         resolved,
-        platforms,
+        platform,
         groups,
         dest_override,
         provided_metadata,
@@ -304,7 +304,7 @@ async fn setup_owned_impl(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
     resolved: super::resolve::ResolvedChain,
-    platforms: Vec<oci::Platform>,
+    platform: oci::Platform,
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
@@ -401,7 +401,7 @@ async fn setup_owned_impl(
     // Extract layers to layers/ store and pull dependencies in parallel.
     let (layer_digests, dependencies) = tokio::join!(
         extract_layers(mgr, pinned, &manifest, groups.layers.clone()),
-        setup_dependencies(mgr, &metadata, pinned, platforms, groups.clone()),
+        setup_dependencies(mgr, &metadata, pinned, platform, groups.clone()),
     );
     let (layer_digests, dependencies) = (layer_digests?, dependencies?);
 
@@ -582,7 +582,7 @@ async fn setup_dependencies(
     mgr: &PackageManager,
     metadata: &crate::package::metadata::Metadata,
     parent: &oci::PinnedIdentifier,
-    platforms: Vec<oci::Platform>,
+    platform: oci::Platform,
     groups: SetupGroups,
 ) -> Result<Vec<Arc<InstallInfo>>, PackageErrorKind> {
     let deps = metadata.dependencies();
@@ -601,10 +601,10 @@ async fn setup_dependencies(
     for (idx, dep) in deps.iter().enumerate() {
         let mgr = mgr.clone();
         let dep_id = dep.identifier.clone();
-        let platforms = platforms.clone();
+        let platform = platform.clone();
         let groups = groups.clone();
         tasks.spawn(crate::cli::progress::inherit_scope(async move {
-            let info = setup_with_tracker(&mgr, &dep_id, platforms, groups).await?;
+            let info = setup_with_tracker(&mgr, &dep_id, platform, groups).await?;
             Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
         }));
     }

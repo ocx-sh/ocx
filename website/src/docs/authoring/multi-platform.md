@@ -148,73 +148,56 @@ The selection rule is subset semantics: an index entry matches when every `os_fe
 
 ### Diagnosing selection {#libc-debug}
 
-[`ocx about`][cmd-about] reports the detected libc family and the supported-platform set that `Index::select` uses for resolution. Run it to confirm what OCX sees before publishing or troubleshooting a failed install.
+[`ocx about`][cmd-about] reports the detected libc family and the host platform `Index::select` resolves against. Run it to confirm what OCX sees before publishing or troubleshooting a failed install.
 
 ```
 ...
-Platform   linux/amd64, any
+Platform   linux/amd64
 Libc       libc.glibc
 ...
 ```
 
-When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent and the supported set contains only the bare `os/arch` entries — install then falls back to entries with empty `os_features`. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected).
+When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent — the host still resolves as the bare `os/arch` platform with no declared features, so install matches only manifests declaring no `os_features` of their own. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected).
 
 ## Dependencies with Platform-Specific Builds {#dependency-platforms}
 
 A package built once with `--platform any` — a shell script, a Python entry point, anything without native code of its own — can still depend on a package that ships different manifests per platform, such as the native binary the script wraps. A single dependency identifier can only carry one digest, so which platform's build does that digest name?
 
-[`ocx package create --platform any`][cmd-package-create] answers this by resolving each unpinned dependency's advertised platforms into a per-dependency pin map instead of a single digest, and deriving your own package's target-platform set as the intersection of what every dependency actually covers — a package cannot claim to run on a platform one of its dependencies doesn't ship.
+[`ocx package create`][cmd-package-create] answers this the same way it resolves any other dependency: against the single `--platform` you declared for the whole bundle, using the [directed compatibility relation][reference-platforms-compatibility] every platform decision in OCX routes through. A concrete `--platform` pins each dependency straight to the one compatible manifest digest. `--platform any` is the interesting case, covered below.
 
-### Pin Maps and the Target-Platform Set {#dependency-platforms-target-set}
+### The `any`-Deps Rule {#dependency-platforms-any-deps}
 
-Write the dependency tag-only, same as any other:
+An `any`-targeted package performs no platform-specific resolution of its own — nothing about it varies by host — so it can only depend on dependencies that themselves offer an `any` manifest. This falls straight out of the [compatibility relation][reference-platforms-compatibility]: an `any` requirement is satisfied only by an `any` offer.
 
 ```json
-{ "dependencies": [{ "identifier": "ocx.sh/cmake:3.28" }] }
+{ "dependencies": [{ "identifier": "ocx.sh/mytool:1.0" }] }
 ```
 
-If `ocx.sh/cmake:3.28` ships `linux/amd64` and `darwin/arm64` manifests, `ocx package create -p any` rewrites the sidecar with a pin map and a bundle-level target set:
+`ocx package create --platform any` resolves this by writing a single `"any"`-keyed pin:
 
 ```json
 {
   "dependencies": [
-    {
-      "identifier": "ocx.sh/cmake:3.28",
-      "platforms": { "linux/amd64": "sha256:aaaa...", "darwin/arm64": "sha256:bbbb..." }
-    }
-  ],
-  "platforms": ["linux/amd64", "darwin/arm64"]
+    { "identifier": "ocx.sh/mytool:1.0", "platforms": { "any": "sha256:aaaa..." } }
+  ]
 }
 ```
 
-A dependency that ships only a platform-agnostic build (its own tag resolves to a single `any` manifest) collapses to a plain digest pin instead — no map noise for the common case. When more than one dependency is platform-specific, the target set is the intersection across all of them: a dependency available only on `linux/amd64` limits the whole package to `linux/amd64`, no matter how broadly the others reach. An intersection with no member at all fails `create` (exit 65) rather than publish a package nobody can install.
+If `ocx.sh/mytool:1.0` ships only platform-specific manifests (`linux/amd64`, `darwin/arm64`, and so on) with no `any` build, `create` fails with exit 65, naming the dependency and listing what it does offer. There is no partial coverage to derive — a platform-agnostic package either can lean on a platform-agnostic dependency, or it cannot depend on that package at all under `--platform any`.
 
-[`ocx package push`][cmd-package-push] reads the embedded target set and decides the fan-out for you:
+### No Direct Digest Pins Under `--platform any` {#dependency-platforms-digest-pin-prohibition}
 
-```sh
-# Publishes one manifest per platform in the embedded set (linux/amd64 and darwin/arm64).
-ocx package push -i mytool:1.0.0 mytool.tar.xz
+A leaf manifest carries no platform descriptor of its own — the platform lives in the *image index entry* that points at it, one level up. That means a dependency pinned by a bare `@digest` cannot be verified as genuinely `any`-offered; the digest alone gives no way to check. Both `ocx package create --platform any` and `ocx package push` therefore reject a direct digest pin anywhere in an `any`-targeted bundle's dependency list (exit 65) — including a dependency that was already pinned by hand before `create` ran. Pin the dependency through `ocx package create --platform any` (which records the verifiable `"any"`-keyed map entry above) instead of hand-writing a digest.
 
-# Narrows the push to the linux/amd64 member only.
-ocx package push -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz
-
-# Fails (exit 64): windows/amd64 is not a member of the embedded set.
-ocx package push -p windows/amd64 -i mytool:1.0.0 mytool.tar.xz
-```
-
-A sidecar with no embedded target set — one built without `--platform`, or hand-authored with every dependency already pinned — keeps requiring `--platform` on push, exactly as [described earlier][authoring-building-pushing-dependency-pins].
+Concrete-targeted bundles are unaffected: a direct digest pin is fine there, because the platform being published is already known and the pin's provenance is not in question.
 
 ### Snapshot Semantics {#dependency-platforms-snapshot}
 
-A pin map is a snapshot of the dependency's platform coverage at `create` time, not a live query. If `ocx.sh/cmake:3.28`'s publisher later adds a `windows/amd64` manifest, your already-published package does not retroactively gain `windows/amd64` support — the pin map still lists only the platforms that existed when you ran `create`. Re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to widen your package's own target set to match.
+A pin map is a snapshot of the dependency's platform coverage at `create` time, not a live query. If `ocx.sh/mytool:1.0`'s publisher later adds an `any` manifest where none existed before, your already-published package does not retroactively pick it up — the pin map still reflects what existed when you ran `create`. Re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
 
 ### libc-Tagged Dependencies {#dependency-platforms-libc}
 
-The three-tier lookup that projects a pin map onto a specific platform — exact match, then the same platform with `os.features` stripped, then `any` — treats a plain `linux/amd64` dependency pin as covering a libc-tagged package platform like `linux/amd64+libc.glibc`, but not the reverse: a dependency pinned only at a `libc.glibc`-tagged key does not cover the plain `linux/amd64` platform. This mirrors the fail-closed `can_run` subset rule [described above][libc-selection] — a consumer that only advertises the bare platform should not silently receive a build resolved against a libc it never declared.
-
-::: info Two encodings, one platform
-The pin map's keys use the same key format as [`ocx.lock`'s per-platform table][in-depth-project-lock-format] — `;osf=libc.glibc` — while the bundle-level `platforms` target set (and the `--platform` flag itself) use the `+libc.glibc` form seen throughout this page. Both name the same platform; see the [Per-Platform Pins reference][reference-per-platform-pins] for the full encoding rule.
-:::
+Projecting a pin map onto the platform being published or run against uses the same [compatibility relation and scoring][reference-platforms-compatibility] as every other platform decision in OCX: a plain `linux/amd64` dependency pin covers a libc-tagged package platform like `linux/amd64+libc.glibc` (the pin declares no feature requirement, so it is a subset of anything), but not the reverse — a dependency pinned only at a `libc.glibc`-tagged key does not cover the plain `linux/amd64` platform. A consumer that only advertises the bare platform should not silently receive a build resolved against a libc it never declared.
 
 ## See Also {#see-also}
 
@@ -224,7 +207,8 @@ The pin map's keys use the same key format as [`ocx.lock`'s per-platform table][
 - [Versioning in depth — platforms][in-depth-versioning-platforms]
 - [Building & pushing][authoring-building-pushing] — cascade, layer reuse, BYO archives, dependency pin resolution
 - [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
-- [Per-Platform Pins reference][reference-per-platform-pins] — pin map shape, lookup rule, target-set derivation
+- [Platforms reference][reference-platforms] — the canonical grammar and the compatibility relation this page builds on
+- [Per-Platform Pins reference][reference-per-platform-pins] — pin map shape and the `any`-deps rule
 - [Migration patterns][authoring-migration] — `ocx_mirror` per-platform spec
 
 <!-- external -->
@@ -259,9 +243,8 @@ The pin map's keys use the same key format as [`ocx.lock`'s per-platform table][
 
 <!-- reference -->
 [reference-per-platform-pins]: ../reference/metadata.md#dependencies-per-platform-pins
-
-<!-- in-page -->
-[libc-selection]: #libc-selection
+[reference-platforms]: ../reference/platforms.md
+[reference-platforms-compatibility]: ../reference/platforms.md#compatibility
 
 <!-- in-depth -->
 [in-depth-storage-multi-layer]: ../in-depth/storage.md#multi-layer

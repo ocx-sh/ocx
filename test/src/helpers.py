@@ -58,6 +58,28 @@ def start_registry(registry: str) -> None:
 # Package publishing
 # ---------------------------------------------------------------------------
 
+# Mirrors `conventions::infer_metadata_file` in the Rust CLI: extensions
+# checked after one suffix is already stripped by `Path.stem` (Python) /
+# `Path::file_stem` (Rust).
+_KNOWN_ARCHIVE_EXTENSIONS = (".tar", ".tar.gz", ".tgz", ".zip")
+
+
+def resolved_metadata_path(bundle: Path) -> Path:
+    """Path `ocx package create -o <bundle>` writes the canonicalized sidecar to.
+
+    `ocx package create` never writes back to its `-m` input file — it always
+    writes next to `-o` (see `conventions::infer_metadata_file`). Fields
+    `create` resolves and records (dependency pins, the recorded `platform` —
+    D5) only exist in *this* file; `push`/`package test` must read metadata
+    from here, not from the pre-`create` input.
+    """
+    stem = bundle.stem
+    for ext in _KNOWN_ARCHIVE_EXTENSIONS:
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return bundle.parent / f"{stem}-metadata.json"
+
 
 def _build_trap_script(outputs: dict[str, str], marker: str) -> str:
     """Build an argument-aware trap shell script.
@@ -244,6 +266,8 @@ def make_package(
         str(metadata_path),
         "-o",
         str(bundle_l0),
+        "-p",
+        plat,
         str(pkg_dir),
     )
 
@@ -267,8 +291,11 @@ def make_package(
         all_bundles.append(bundle_ln)
 
     # Push — pass all layer bundles as positional args to `ocx package push`.
+    # `-m` points at the sidecar `create` actually wrote (next to bundle_l0),
+    # not the pre-`create` input — that's the file carrying `create`'s
+    # resolved pins and recorded platform.
     fq = f"{ocx.registry}/{repo}:{tag}"
-    push_args = ["package", "push", "-p", plat, "-m", str(metadata_path)]
+    push_args = ["package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle_l0))]
     if new:
         push_args.append("-n")
     if cascade:
@@ -425,11 +452,11 @@ def make_package_with_entrypoints(
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"
+    plat = current_platform()
     ocx.plain(
-        "package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir)
+        "package", "create", "-m", str(metadata_path), "-o", str(bundle), "-p", plat, str(pkg_dir)
     )
 
-    plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
     ocx.plain(
         "package",
@@ -437,7 +464,7 @@ def make_package_with_entrypoints(
         "-p",
         plat,
         "-m",
-        str(metadata_path),
+        str(resolved_metadata_path(bundle)),
         "-n",
         "--cascade",
         "-i",

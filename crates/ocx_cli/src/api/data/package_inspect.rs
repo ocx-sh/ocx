@@ -52,7 +52,7 @@ impl SemanticAnnotation {
 ///   metadata document plus the manifest's layers —
 ///   `{ identifier, pinned_digest, metadata, layers }`.
 /// - **resolution** (`--resolve`): platform-selected metadata and layers plus
-///   the OCI resolution chain — `{ identifier, pinned_digest, platforms,
+///   the OCI resolution chain — `{ identifier, pinned_digest, platform,
 ///   metadata, layers, resolution }`. Each `resolution.chain` entry carries
 ///   `{ digest, role, media_type, size }` (role ∈ `index` | `manifest` |
 ///   `config`); the layers live at the top level, not inside `resolution`.
@@ -79,7 +79,7 @@ enum Body {
     },
     Resolved {
         pinned: oci::PinnedIdentifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         metadata: Metadata,
         layers: Vec<Layer>,
         resolution: Resolution,
@@ -141,10 +141,10 @@ impl Layer {
 
 impl PackageInspect {
     /// Builds the report from the task result. `identifier` is the requested
-    /// identifier (post default-registry expansion); `platforms` is the
-    /// platform list resolution considered (only meaningful in `--resolve`
+    /// identifier (post default-registry expansion); `platform` is the
+    /// platform resolution selected against (only meaningful in `--resolve`
     /// mode).
-    pub fn new(identifier: oci::Identifier, platforms: Vec<oci::Platform>, result: InspectResult) -> Self {
+    pub fn new(identifier: oci::Identifier, platform: oci::Platform, result: InspectResult) -> Self {
         match result {
             InspectResult::Candidates { pinned, candidates } => Self {
                 identifier,
@@ -184,7 +184,7 @@ impl PackageInspect {
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Resolved {
                     pinned,
-                    platforms,
+                    platform,
                     metadata: metadata.into(),
                     layers: Layer::from_descriptors(&chain.final_manifest.layers),
                     resolution: Resolution::from_chain(&chain),
@@ -233,13 +233,13 @@ impl Serialize for PackageInspect {
                 s.serialize_field("layers", layers)?;
             }
             Body::Resolved {
-                platforms,
+                platform,
                 metadata,
                 layers,
                 resolution,
                 ..
             } => {
-                s.serialize_field("platforms", platforms)?;
+                s.serialize_field("platform", platform)?;
                 s.serialize_field("metadata", metadata)?;
                 s.serialize_field("layers", layers)?;
                 s.serialize_field("resolution", resolution)?;

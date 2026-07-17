@@ -120,7 +120,7 @@ mod tests {
 
     fn write_empty_lock(lock_path: &Path, declaration_hash: &str) {
         let body = format!(
-            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+            "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\n\
              declaration_hash = \"{declaration_hash}\"\n\
              generated_by = \"ocx-test\"\n\
              generated_at = \"2026-04-19T00:00:00Z\"\n"

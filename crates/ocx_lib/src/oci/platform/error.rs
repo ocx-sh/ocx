@@ -22,7 +22,7 @@ pub struct PlatformError {
 #[non_exhaustive]
 pub enum PlatformErrorKind {
     /// The platform string has an invalid format.
-    #[error("expected format 'os/arch' or 'any'")]
+    #[error("expected format 'os/arch[/variant][+feature[,feature...]]' or 'any'")]
     InvalidFormat,
 
     /// The OS component is not a recognized value.

@@ -94,8 +94,8 @@ fn project_lock_schema_publishes_at_canonical_id() {
         .and_then(Value::as_str)
         .expect("project-lock schema must carry a top-level $id");
     assert_eq!(
-        id, "https://ocx.sh/schemas/project-lock/v2.json",
-        "project-lock schema $id must advance to v2 in lock-step with LockVersion::V2"
+        id, "https://ocx.sh/schemas/project-lock/v3.json",
+        "project-lock schema $id must advance to v3 in lock-step with LockVersion::V3"
     );
 }
 
@@ -125,11 +125,11 @@ fn project_lock_schema_carries_machine_generated_comment() {
 }
 
 #[test]
-fn project_lock_schema_pins_lock_version_to_two() {
-    // The written on-disk format version is now 2 (V2 is the only shape the
-    // writer emits). Tightening to `enum: [2]` means a v1 OR v3 manuscript
-    // fed into the v2 schema fails validation — the guard so consumers don't
-    // silently validate a foreign-format file against the v2 schema.
+fn project_lock_schema_pins_lock_version_to_three() {
+    // The written on-disk format version is now 3 (V3 is the only shape the
+    // writer emits). Tightening to `enum: [3]` means a v1 OR v2 manuscript
+    // fed into the v3 schema fails validation — the guard so consumers don't
+    // silently validate a foreign-format file against the v3 schema.
     let schema = parse("project-lock");
 
     // Walk: properties.metadata is a `$ref` to `#/$defs/LockMetadata`,
@@ -180,27 +180,27 @@ fn project_lock_schema_pins_lock_version_to_two() {
     assert_eq!(
         enum_values.len(),
         1,
-        "lock_version enum must contain exactly one value (`[2]`); got {enum_values:?}"
+        "lock_version enum must contain exactly one value (`[3]`); got {enum_values:?}"
     );
     let value = enum_values[0]
         .as_i64()
         .expect("lock_version enum value must be an integer");
     assert_eq!(
-        value, 2,
-        "lock_version enum must constrain to `[2]` (rejects v1/v3 manuscripts)"
+        value, 3,
+        "lock_version enum must constrain to `[3]` (rejects v1/v2 manuscripts)"
     );
 }
 
-/// The V2 lock schema must describe the per-platform leaf map: a `tool`
-/// array whose items carry a bare `repository` string and a `platforms`
-/// object mapping platform key → leaf digest. There is NO `pinned`
-/// index-digest field (ADR: the outer index digest is not stored).
+/// The lock schema must describe the per-platform leaf map: a `tool` array
+/// whose items carry a bare `repository` string and a `platforms` object
+/// mapping platform key → leaf digest. There is NO `pinned` index-digest
+/// field (ADR: the outer index digest is not stored).
 #[test]
 fn project_lock_schema_describes_platforms_map() {
     let schema = parse("project-lock");
 
     // Resolve the per-tool item schema. The `tool` array's `items` may be
-    // inline or a `$ref` into `$defs.LockedToolV2`.
+    // inline or a `$ref` into `$defs.LockedTool`.
     let properties = schema
         .get("properties")
         .and_then(Value::as_object)
@@ -248,7 +248,7 @@ fn project_lock_schema_describes_platforms_map() {
 
     assert!(
         !item_props.contains_key("pinned"),
-        "a V2 lock item must NOT carry a `pinned` index-digest field"
+        "a lock item must NOT carry a `pinned` index-digest field"
     );
 }
 

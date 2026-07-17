@@ -47,10 +47,10 @@ tasks:
     desc: Generate JSON Schema for ocx.lock
     sources: *schema-sources
     status:
-      - test -f {{.PROJECT_LOCK_SCHEMA_DIR}}/v1.json
+      - test -f {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
     cmds:
       - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
 
   generate-patch:
     desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)

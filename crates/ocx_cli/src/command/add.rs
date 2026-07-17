@@ -12,6 +12,7 @@ use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, 
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{ensure_global_project_initialized, load_project_for_mutate, materialize_lock};
+use crate::conventions;
 use crate::options;
 
 /// Add one or more tool bindings to `ocx.toml`.
@@ -50,7 +51,7 @@ pub struct Add {
     pub pull: options::Pull,
 
     #[clap(flatten)]
-    pub platforms: options::Platforms,
+    pub platform: options::PlatformOption,
 
     /// Fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28`).
     #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
@@ -173,11 +174,12 @@ impl Add {
         // `--no-pull` opts out: lock write happens regardless; only the
         // object-store materialization is deferred.
         let eager = self.pull.enabled(true);
-        materialize_lock(&context, &new_lock, eager, self.platforms.as_slice()).await?;
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
+        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
         // Report the full resulting lock to the user, keyed on the requested
         // platform when `--platform` was given (else the host).
-        let report_platform = crate::app::project_context::primary_platform(self.platforms.as_slice());
+        let report_platform = platform;
         let entries: Vec<LockEntry> = new_lock
             .tools
             .iter()
@@ -242,19 +244,28 @@ mod tests {
         );
     }
 
-    /// `--platform` is repeatable and parses alongside the positional identifier.
+    /// `--platform` accepts a single value alongside the positional identifier.
     #[test]
-    fn parses_repeatable_platform_flag() {
-        let add = Add::try_parse_from(["add", "--platform", "linux/arm64", "-p", "linux/amd64", "cmake:3.28"]).unwrap();
+    fn parses_platform_flag() {
+        let add = Add::try_parse_from(["add", "--platform", "linux/arm64", "cmake:3.28"]).unwrap();
         assert_eq!(
-            add.platforms.as_slice().len(),
-            2,
-            "two --platform values must parse into two entries"
+            add.platform.platform.map(|p| p.to_string()),
+            Some("linux/arm64".to_owned())
         );
         assert_eq!(
             add.identifiers,
             vec!["cmake:3.28".to_owned()],
             "--platform must not swallow the identifier"
+        );
+    }
+
+    /// A second `--platform` occurrence is a usage error — the flag takes at
+    /// most one value (D4 of `adr_platform_model_unification.md`).
+    #[test]
+    fn rejects_repeated_platform_flag() {
+        assert!(
+            Add::try_parse_from(["add", "--platform", "linux/arm64", "-p", "linux/amd64", "cmake:3.28"]).is_err(),
+            "repeated --platform must be rejected"
         );
     }
 }

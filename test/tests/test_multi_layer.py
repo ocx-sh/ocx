@@ -76,15 +76,15 @@ def _push_multi_layer(
     Returns the fully-qualified identifier.
     """
     fq = f"{ocx.registry}/{repo}:{tag}"
+    plat = current_platform()
     if metadata_path is None:
         metadata_path = tmp_path / f"meta-{repo}-{tag}.json"
         metadata_path.write_text(json.dumps({
-            "type": "bundle", "version": 1, "env": [
+            "type": "bundle", "version": 1, "platform": plat, "env": [
                 {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
             ],
         }))
 
-    plat = current_platform()
     args = ["package", "push", "-p", plat, "-m", str(metadata_path)]
     if new:
         args.append("-n")
@@ -131,11 +131,12 @@ def test_push_zero_layers_succeeds_with_metadata(
     """Push with zero layers but explicit `--metadata` is a valid
     OCI config-only artifact (e.g. referrer-only / description-only
     manifests). Verify it round-trips via the registry manifest API."""
+    plat = current_platform()
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "platform": plat,
+        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
-    plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     ocx.plain(
         "package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq,
@@ -179,11 +180,12 @@ def test_round_trip_zero_layers(
 ):
     """Push a config-only package (zero layers + metadata), install it,
     verify the install succeeds and produces an empty content/ directory."""
+    plat = current_platform()
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "platform": plat,
+        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
-    plat = current_platform()
     short = f"{unique_repo}:1.0.0"
     fq = f"{ocx.registry}/{short}"
     ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq)
@@ -430,7 +432,8 @@ def test_push_bare_digest_is_rejected(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "platform": current_platform(),
+        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     bare_digest = "sha256:" + "0" * 64
     result = ocx.run(
@@ -459,7 +462,8 @@ def test_push_digest_layer_not_found(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "platform": current_platform(),
+        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     result = ocx.run(
         "package", "push", "-p", current_platform(),

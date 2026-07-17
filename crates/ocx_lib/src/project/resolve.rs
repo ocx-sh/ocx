@@ -19,16 +19,12 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::error::{ProjectError, ProjectErrorKind};
-use super::lock::LockedResolution;
+use super::lock::validate_canonical_platform_keys;
 use super::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
 use crate::oci::client::error::ClientError;
 use crate::oci::index::{Index, IndexOperation};
-use crate::oci::{Digest, Identifier, PinnedIdentifier, Platform};
+use crate::oci::{Digest, Identifier, Platform, Selection, select_best};
 use crate::project::hash::DECLARATION_HASH_VERSION;
-
-/// The V2 `platforms` map key for a platform-agnostic (flat `Manifest::Image`)
-/// package. Matches [`Platform::Any`]'s [`Platform::lock_key`].
-const ANY_KEY: &str = "any";
 
 /// Default per-tool timeout wrapping the entire retry chain.
 pub const DEFAULT_PER_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -175,10 +171,8 @@ async fn resolve_work(
 ///    "resolve everything" on an empty set.
 /// 3. **Carry forward** every predecessor entry whose `(group, name)` is not in
 ///    `touched` AND is still declared in `candidate` (so a `remove`'s dropped
-///    binding falls out): V2 byte-identical; V1 via
-///    [`transcribe_v1_to_v2`]`(exact_only = true)`, which fails
-///    [`ProjectErrorKind::LockUpgradeRequired`] (exit 78) on a gone index —
-///    never a silent live-tag re-resolve (Codex R2).
+///    binding falls out) — byte-identical, zero registry contact
+///    ([`merge_carry_forward`]).
 /// 4. **Stamp `hash(candidate)`** into the produced metadata.
 ///
 /// Fully transactional: any resolution failure aborts before the merge,
@@ -186,10 +180,8 @@ async fn resolve_work(
 ///
 /// # Errors
 /// Returns [`super::Error`]: [`ProjectErrorKind::StaleLockOnPartial`] on a
-/// drifted pre-mutation hash (65), [`ProjectErrorKind::LockUpgradeRequired`]
-/// on a carried V1 entry whose index is gone (78), plus the same
-/// tag-resolution / registry / auth / policy failures as [`resolve_lock`] for
-/// the touched bindings.
+/// drifted pre-mutation hash (65), plus the same tag-resolution / registry /
+/// auth / policy failures as [`resolve_lock`] for the touched bindings.
 pub async fn resolve_lock_touched(
     candidate: &ProjectConfig,
     pre_mutation: &ProjectConfig,
@@ -257,11 +249,11 @@ pub async fn resolve_lock_touched(
 
     // See `resolve_lock` for the rationale on wrapping `index` once in an `Arc`.
     let index = Arc::new(index.clone());
-    let resolved = resolve_work(work, Arc::clone(&index), &options).await?;
+    let resolved = resolve_work(work, index, &options).await?;
 
     // 4. Carry every untouched, still-declared predecessor entry forward
-    //    verbatim (V2) or exact-only-transcribed (V1), then append + sort.
-    let tools = merge_carry_forward(previous, resolved, candidate, index.as_ref(), &options).await?;
+    //    verbatim, then append + sort.
+    let tools = merge_carry_forward(previous, resolved, candidate);
 
     // 5. Stamp `hash(candidate)` into the produced metadata (`build_lock` reads
     //    `candidate.declaration_hash_cached()`), so the commit-time coherence
@@ -271,8 +263,7 @@ pub async fn resolve_lock_touched(
 }
 
 /// Carry forward every predecessor entry the caller did not (re)resolve and is
-/// still declared in `candidate`, transcribing any carried V1 entry to V2
-/// exact-only, then append `resolved` and sort.
+/// still declared in `candidate`, then append `resolved` and sort.
 ///
 /// Shared by the carry-forward path of [`resolve_lock_touched`]. A predecessor
 /// entry is carried iff its `(group, name)` is:
@@ -282,30 +273,21 @@ pub async fn resolve_lock_touched(
 /// - **still declared** in `candidate` (a binding `remove` dropped from
 ///   `ocx.toml` must not survive in the lock).
 ///
-/// V2 (`PerPlatform`) entries pass through byte-identical (zero registry
-/// contact). V1 (`LegacyIndex`) entries are transcribed via
-/// [`transcribe_v1_to_v2`]`(exact_only = true)` — reading the pinned, immutable
-/// index digest preserves the pin exactly, and a gone index fails
-/// [`ProjectErrorKind::LockUpgradeRequired`] (exit 78) rather than silently
-/// re-resolving the live tag (Codex R2).
-///
-/// # Errors
-/// Returns [`super::Error`] when an exact-only V1 transcription fails (the
-/// pinned index is gone → [`ProjectErrorKind::LockUpgradeRequired`], or a
-/// policy/registry failure on the digest fetch).
-async fn merge_carry_forward(
+/// Every carried entry passes through byte-identical — zero registry contact
+/// — because [`ProjectLock::load`] rejects any lock version other than V3
+/// before `previous` ever reaches this function (D3: no bridged legacy
+/// read), so a carried entry is always already in the current shape.
+fn merge_carry_forward(
     previous: &ProjectLock,
     resolved: Vec<LockedTool>,
     candidate: &ProjectConfig,
-    index: &Index,
-    options: &ResolveLockOptions,
-) -> Result<Vec<LockedTool>, super::Error> {
+) -> Vec<LockedTool> {
     // Carry forward every predecessor entry whose `(group, name)` was NOT just
     // resolved AND is still declared in `candidate`. The "still declared"
     // filter is what drops a `remove`'s binding (absent from `candidate`) from
     // the new lock. The block scope on `new_keys` ends its borrow into
     // `resolved` before `resolved` is moved into `tools` below.
-    let carried: Vec<LockedTool> = {
+    let mut tools: Vec<LockedTool> = {
         let new_keys: HashSet<(&str, &str)> = resolved.iter().map(|t| (t.group.as_str(), t.name.as_str())).collect();
         previous
             .tools
@@ -315,40 +297,12 @@ async fn merge_carry_forward(
             .cloned()
             .collect()
     };
-
-    // The writer only emits V2 — a carried-forward V1 (`LegacyIndex`) entry
-    // reaching the writer is a bug. Transcribe each carried V1 entry to V2
-    // **exact-only** (Codex R2): an unrelated `add`/`remove` must never silently
-    // re-resolve an untouched tool's live tag. If the legacy index is no longer
-    // retrievable, the transcription fails `LockUpgradeRequired` (78) and
-    // directs the user to run `ocx update`.
-    let mut tools: Vec<LockedTool> = Vec::with_capacity(carried.len() + resolved.len());
-    for tool in carried {
-        match tool.resolution {
-            LockedResolution::PerPlatform { .. } => tools.push(tool),
-            LockedResolution::LegacyIndex(pinned) => {
-                // INVARIANT: the `carried` set above is pre-filtered to entries
-                // where `declared_identifier(candidate, group, name).is_some()`,
-                // so this lookup cannot return `None` (CWE-570: the prior
-                // `unwrap_or_else` fallback was unreachable).
-                let declared = declared_identifier(candidate, &tool.group, &tool.name)
-                    .expect("invariant: carried entries are filtered to declared bindings only");
-                let resolution =
-                    transcribe_v1_to_v2(index, &pinned, &declared, IndexOperation::Resolve, true, options).await?;
-                tools.push(LockedTool {
-                    name: tool.name,
-                    group: tool.group,
-                    resolution,
-                });
-            }
-        }
-    }
     tools.extend(resolved);
 
     // Deterministic output: same `(group, name)` order as `resolve_lock`.
     tools.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
-    Ok(tools)
+    tools
 }
 
 /// Validate that the `previous` lock structurally describes `candidate`'s
@@ -421,21 +375,12 @@ fn validate_predecessor_coherence(
             // Declared but neither touched nor carried — a missing entry.
             return Err(stale());
         };
-        if carried_repository(&tool.resolution) != declared.without_specifiers() {
+        if tool.repository != declared.without_specifiers() {
             return Err(stale());
         }
     }
 
     Ok(())
-}
-
-/// Return the bare `repository` coordinate (no tag, no digest) a carried lock
-/// entry pins, for repository-coherence comparison against the declaration.
-fn carried_repository(resolution: &LockedResolution) -> Identifier {
-    match resolution {
-        LockedResolution::PerPlatform { repository, .. } => repository.clone(),
-        LockedResolution::LegacyIndex(pinned) => pinned.as_identifier().without_specifiers(),
-    }
 }
 
 /// Validate `groups` argument and return the set of group names to
@@ -523,17 +468,15 @@ fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Optio
     }
 }
 
-/// Resolve a single `(group, name, identifier)` to a [`LockedTool`] in the
-/// V2 per-platform shape ([`LockedResolution::PerPlatform`]), wrapping the
-/// fetch in `tokio::time::timeout`.
+/// Resolve a single `(group, name, identifier)` to a [`LockedTool`], wrapping
+/// the fetch in `tokio::time::timeout`.
 ///
-/// Switches from a single `fetch_manifest_digest` (one index digest) to
-/// `fetch_candidates` (one entry per advertised index child): it stores the
-/// bare `repository` (`identifier` with tag and digest stripped) plus one
-/// leaf-digest entry per advertised child, keyed by the child's lossless
-/// [`Platform::lock_key`]. No omitted-platform rows are synthesized and the
-/// outer index digest is discarded. A flat `Manifest::Image` package yields
-/// a single `"any"` entry. An `Option::None`/empty candidate set on a
+/// Uses `fetch_candidates` (one entry per advertised index child): it stores
+/// the bare `repository` (`identifier` with tag and digest stripped) plus one
+/// leaf-digest entry per advertised child, keyed by the child's canonical
+/// grammar [`Platform`] string. No omitted-platform rows are synthesized and
+/// the outer index digest is discarded. A flat `Manifest::Image` package
+/// yields a single `"any"` entry. An `Option::None`/empty candidate set on a
 /// `Resolve` miss surfaces as [`ProjectErrorKind::PolicyBlocked`] / a
 /// not-found error per the active routing policy.
 async fn resolve_one(
@@ -567,13 +510,11 @@ async fn resolve_one(
     Ok(LockedTool {
         name,
         group,
-        resolution: LockedResolution::PerPlatform {
-            // Bare repository coordinates — the outer index digest is
-            // discarded; per-platform pull ids are reconstructed from
-            // `repository` + each leaf digest.
-            repository: identifier.without_specifiers(),
-            platforms,
-        },
+        // Bare repository coordinates — the outer index digest is
+        // discarded; per-platform pull ids are reconstructed from
+        // `repository` + each leaf digest.
+        repository: identifier.without_specifiers(),
+        platforms,
     })
 }
 
@@ -647,23 +588,27 @@ fn candidate_fetch_error(err: crate::Error, identifier: Identifier) -> super::Er
 /// Build the available-only `platforms` map from the advertised candidate
 /// children returned by `Index::fetch_candidates`.
 ///
-/// Each entry's leaf digest is keyed by the child's lossless
-/// [`Platform::lock_key`]. The runtime dup-key guard ([`guard_unique_key`])
+/// Each entry's leaf digest is keyed by the child's canonical grammar
+/// [`Platform`] string (D2). The runtime dup-key guard ([`guard_unique_key`])
 /// fires cleanly (never silently overwrites) if two advertised children
 /// stringify to the same key — a defensive assertion that should never fire
-/// under an injective key.
+/// under an injective key. [`validate_canonical_platform_keys`] is run over
+/// the finished map as a write-site defense-in-depth check (D3) — every key
+/// here is already canonical by construction (it comes straight from
+/// `Platform::to_string()`), so this never fires in practice.
 fn build_platforms_map(candidates: Vec<(Identifier, Platform)>) -> Result<BTreeMap<String, Digest>, super::Error> {
     // Each child's leaf digest is inserted through `guard_unique_key` keyed
-    // by `platform.lock_key()`. A candidate without a digest is skipped: the
+    // by `platform.to_string()`. A candidate without a digest is skipped: the
     // resolver always pins each child to its leaf digest via
     // `clone_with_digest`, so this never drops an advertised leaf in practice.
     let mut map: BTreeMap<String, Digest> = BTreeMap::new();
     for (candidate, platform) in candidates {
-        let key = platform.lock_key();
+        let key = platform.to_string();
         if let Some(digest) = candidate.digest() {
             guard_unique_key(&mut map, key, digest)?;
         }
     }
+    validate_canonical_platform_keys(&map).map_err(|kind| ProjectError::new(PathBuf::new(), kind))?;
     Ok(map)
 }
 
@@ -677,34 +622,46 @@ fn guard_unique_key(map: &mut BTreeMap<String, Digest>, key: String, digest: Dig
     Ok(())
 }
 
-/// Shared host → `"any"` lookup over a V2 `platforms` map.
+/// Look up the leaf [`Digest`] compatible with `host` in a lock/pin
+/// `platforms` map (D1: `lookup_host_leaf` routes through the same
+/// `select_best` helper as fresh-resolve, closing the dual-libc silent-`None`
+/// gap the old exact-key tier walk had).
 ///
-/// Tries three keys in order:
+/// Parses every map key via [`Platform::from_str`], then scores each parsed
+/// candidate against `host` with [`select_best`] — the identical relation and
+/// scoring [`crate::oci::Index::select`] uses at fresh-resolve time, so
+/// lock-read and fresh-resolve give provably identical answers for the same
+/// host and candidate set. A key that fails to parse is skipped (canonical-key
+/// validation already rejects it at load/write time — see
+/// [`validate_canonical_platform_keys`] — so this is unreachable for a lock
+/// that passed that gate, but the lookup itself does not re-validate).
 ///
-/// 1. the host platform's exact [`Platform::lock_key`] — matches a package
-///    that declared the host's libc (e.g. host `linux/amd64;osf=libc.glibc`
-///    against a `libc.glibc`-tagged entry);
-/// 2. the host's [`Platform::base_lock_key`] — the same os/arch/variant with
-///    empty `os_features`. This is the backward-compat tier: a libc-detecting
-///    host must still resolve a plain `linux/amd64` entry keyed before libc
-///    detection existed, or a deliberately libc-agnostic static-linked build.
-///    Without it, `Platform::current()` populating real `os_features` would
-///    turn every legacy per-platform lock into a spurious `NoHostLeaf`;
-/// 3. the `"any"` key (flat `Manifest::Image` packages).
-///
-/// Tier 2 keys on the *empty-features* base only, so it never falsely matches a
-/// different libc's entry: a `libc.musl`-only entry is not the plain
-/// `linux/amd64` key, so a glibc host will not resolve it here. Cross-libc
-/// subset selection is [`crate::oci::Index::select`]'s job, not this exact-key
-/// lookup's.
-///
-/// Returns the matching leaf [`Digest`], or `None` when no tier matches (the
-/// caller raises a clean pre-network "no <host> leaf" error).
-pub fn lookup_host_leaf<'a>(platforms: &'a BTreeMap<String, Digest>, host: &Platform) -> Option<&'a Digest> {
-    platforms
-        .get(&host.lock_key())
-        .or_else(|| platforms.get(&host.base_lock_key()))
-        .or_else(|| platforms.get(ANY_KEY))
+/// Returns the [`Selection`] verbatim — `Selection::Found` carries the
+/// winning `(digest, original map key)` pair; `Selection::Ambiguous` carries
+/// one pair per tied entry, so a caller that needs to name the tied
+/// candidates (e.g. an `AmbiguousHostLeaf` diagnostic) reads their original
+/// canonical-grammar keys directly, with no re-parse. `Selection::None` means
+/// no entry is compatible with `host` at all. Unlike the pre-D1-F2 shape
+/// (`Option<&Digest>`), `None` and `Ambiguous` are no longer conflated —
+/// `Option` could not distinguish "no compatible entry" (the publisher
+/// genuinely does not ship this platform) from "two or more entries tie at
+/// the maximum score" (e.g. a dual-libc host against separate single-libc
+/// entries with no combined entry), so callers that need to route the two to
+/// different remedies previously collapsed both to the same "no `<host>`
+/// leaf" error and the wrong one ("re-resolve") for a genuine ambiguity.
+pub fn lookup_host_leaf<'a>(
+    platforms: &'a BTreeMap<String, Digest>,
+    host: &Platform,
+) -> Selection<(&'a Digest, &'a str)> {
+    let candidates: Vec<((&'a Digest, &'a str), Platform)> = platforms
+        .iter()
+        .filter_map(|(key, digest)| {
+            key.parse::<Platform>()
+                .ok()
+                .map(|platform| ((digest, key.as_str()), platform))
+        })
+        .collect();
+    select_best(host, &candidates)
 }
 
 /// Run the retry chain: up to `retry_attempts` retries on
@@ -1030,9 +987,7 @@ fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     ProjectLock {
         metadata: LockMetadata {
-            // V2 is the only written shape — the resolver produces
-            // PerPlatform entries.
-            lock_version: LockVersion::V2,
+            lock_version: LockVersion::V3,
             declaration_hash_version: DECLARATION_HASH_VERSION,
             declaration_hash: config.declaration_hash_cached().to_string(),
             generated_by: format!("ocx {}", env!("CARGO_PKG_VERSION")),
@@ -1040,98 +995,6 @@ fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
         },
         tools,
     }
-}
-
-/// Transcribe a legacy V1 index pin into the V2 per-platform shape.
-///
-/// Used to upgrade carried-forward V1 lock entries to V2 before any write.
-/// Resolves the index children of `pinned` (cache-first → registry) and
-/// records one leaf per advertised child — pin-preserving when the V1 index
-/// is still retrievable.
-///
-/// - `pinned` — the V1 entry's locked index digest.
-/// - `declared` — the binding's `ocx.toml` identifier (registry/repo + tag),
-///   used as the re-resolve target in the non-exact fallback (Codex C4).
-/// - `policy` — the index routing operation ([`IndexOperation`]) for the
-///   active `ChainMode` (Codex C5).
-/// - `exact_only` — when `true` (mutator carry-forward), transcription is
-///   exact and **fails on miss** (the index is gone) so an unrelated
-///   `add`/`remove` never silently re-resolves an untouched entry's live tag
-///   (Codex R2): the user must run `ocx update` to re-resolve. When `false`,
-///   a miss falls back to re-resolving `declared`'s tag and warns (offline /
-///   frozen + uncached → `PolicyResolutionBlocked`).
-pub async fn transcribe_v1_to_v2(
-    index: &Index,
-    pinned: &PinnedIdentifier,
-    declared: &Identifier,
-    policy: IndexOperation,
-    exact_only: bool,
-    options: &ResolveLockOptions,
-) -> Result<LockedResolution, super::Error> {
-    // Bare repository coordinates are shared by every platform leaf and by
-    // both the exact-pin and the re-resolve fallback.
-    let repository = pinned.as_identifier().without_specifiers();
-
-    // Exact, pin-preserving path: fan the V1 index digest's children out
-    // directly (cache-first → registry per the active `ChainMode`). The
-    // index manifest is digest-addressed, so `fetch_candidates` returns the
-    // exact locked leaves when the index is still retrievable.
-    let index_id = pinned.as_identifier();
-    match index.fetch_candidates(index_id, policy).await {
-        Ok(Some(children)) if !children.is_empty() => {
-            let platforms = build_platforms_map(children)?;
-            return Ok(LockedResolution::PerPlatform { repository, platforms });
-        }
-        // The V1 index is gone (orphaned + GC'd) — fall through to the miss
-        // handling below.
-        Ok(_) => {}
-        Err(err) => {
-            // A no-resolve policy refusal on the digest fetch is terminal in
-            // both modes: never silently downgrade to a re-resolve.
-            if let Some(policy_label) = policy_block_label(&err) {
-                return Err(ProjectError::new(
-                    PathBuf::new(),
-                    ProjectErrorKind::PolicyBlocked {
-                        identifier: Box::new(index_id.clone()),
-                        policy: policy_label,
-                    },
-                )
-                .into());
-            }
-            // A 404-class error means the locked V1 index manifest is no
-            // longer retrievable (orphaned + GC'd — the fragility this ADR
-            // fixes) — treat it as a miss and fall through. Any other class
-            // (transient registry, auth) is a genuine failure to surface.
-            if !matches!(classify_client_error(&err), ClientFailure::NotFound) {
-                return Err(candidate_fetch_error(err, index_id.clone()));
-            }
-        }
-    }
-
-    // Miss handling: the V1 index digest is no longer retrievable.
-    if exact_only {
-        // Mutator carry-forward (Codex R2): never silently re-resolve an
-        // untouched tool's live tag. Fail with guidance to run the explicit
-        // whole-file bump verb `ocx update`.
-        return Err(ProjectError::new(
-            PathBuf::new(),
-            ProjectErrorKind::LockUpgradeRequired {
-                name: declared.name().to_string(),
-            },
-        )
-        .into());
-    }
-
-    // Non-exact fallback: re-resolve the declared `ocx.toml` tag
-    // (offline/frozen + uncached surfaces as PolicyBlocked via
-    // `resolve_to_platforms`) and warn that versions may move.
-    crate::log::warn!(
-        "lock upgrade: the locked index for '{}' is no longer retrievable; re-resolving the declared tag '{}' (versions may move)",
-        declared.repository(),
-        declared.tag_or_latest(),
-    );
-    let platforms = resolve_to_platforms(index, declared.clone(), options.clone()).await?;
-    Ok(LockedResolution::PerPlatform { repository, platforms })
 }
 
 #[cfg(test)]
@@ -1493,15 +1356,9 @@ mod tests {
         }
     }
 
-    /// Extract a [`LockedTool`]'s V2 per-platform map, panicking if the
-    /// resolver produced a `LegacyIndex` (the resolver must emit V2).
+    /// Extract a [`LockedTool`]'s `(repository, platforms)` pair.
     fn resolved_platforms(tool: &LockedTool) -> (&Identifier, &BTreeMap<String, Digest>) {
-        match &tool.resolution {
-            LockedResolution::PerPlatform { repository, platforms } => (repository, platforms),
-            LockedResolution::LegacyIndex(_) => {
-                panic!("resolve_one must produce a PerPlatform resolution, got LegacyIndex")
-            }
-        }
+        (&tool.repository, &tool.platforms)
     }
 
     /// Default test options: short timeout, 2 retries, minimal backoff.
@@ -1998,27 +1855,25 @@ gamma = "{r}/gamma:1"
         ProjectConfig::from_toml_str(&toml).expect("three-tool config parses")
     }
 
-    /// A single V2 `LockedTool` pinning `default/<name>` to one `linux/amd64`
+    /// A single `LockedTool` pinning `default/<name>` to one `linux/amd64`
     /// leaf digest, so carried-forward equality is observable per entry.
-    fn v2_tool(name: &str, leaf: &str) -> LockedTool {
+    fn locked_tool_fixture(name: &str, leaf: &str) -> LockedTool {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256(leaf.repeat(64)));
         LockedTool {
             name: name.to_string(),
             group: "default".to_string(),
-            resolution: LockedResolution::PerPlatform {
-                repository: Identifier::new_registry(name, TEST_REGISTRY),
-                platforms,
-            },
+            repository: Identifier::new_registry(name, TEST_REGISTRY),
+            platforms,
         }
     }
 
-    /// Build a V2 predecessor lock stamping `config`'s declaration hash and
+    /// Build a predecessor lock stamping `config`'s declaration hash and
     /// carrying `tools` verbatim.
-    fn v2_predecessor_lock(config: &ProjectConfig, tools: Vec<LockedTool>) -> ProjectLock {
+    fn predecessor_lock(config: &ProjectConfig, tools: Vec<LockedTool>) -> ProjectLock {
         ProjectLock {
             metadata: LockMetadata {
-                lock_version: LockVersion::V2,
+                lock_version: LockVersion::V3,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
                 declaration_hash: config.declaration_hash_cached().to_string(),
                 generated_by: "ocx test".to_string(),
@@ -2047,10 +1902,10 @@ gamma = "{r}/gamma:1"
     async fn resolve_lock_touched_resolves_only_touched_carries_rest_v2() {
         let config = three_tool_config();
         let pre_mutation = three_tool_config();
-        let alpha = v2_tool("alpha", "a");
-        let beta_old = v2_tool("beta", "b");
-        let gamma = v2_tool("gamma", "g");
-        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta_old.clone(), gamma.clone()]);
+        let alpha = locked_tool_fixture("alpha", "a");
+        let beta_old = locked_tool_fixture("beta", "b");
+        let gamma = locked_tool_fixture("gamma", "g");
+        let previous = predecessor_lock(&config, vec![alpha.clone(), beta_old.clone(), gamma.clone()]);
 
         // Only `beta` is touched; its fresh resolve returns a NEW leaf so the
         // change is observable. `alpha`/`gamma` must reach the PanicMock zero
@@ -2101,10 +1956,10 @@ gamma = "{r}/gamma:1"
     async fn resolve_lock_touched_empty_touched_carries_everything() {
         let config = three_tool_config();
         let pre_mutation = three_tool_config();
-        let alpha = v2_tool("alpha", "a");
-        let beta = v2_tool("beta", "b");
-        let gamma = v2_tool("gamma", "g");
-        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta.clone(), gamma.clone()]);
+        let alpha = locked_tool_fixture("alpha", "a");
+        let beta = locked_tool_fixture("beta", "b");
+        let gamma = locked_tool_fixture("gamma", "g");
+        let previous = predecessor_lock(&config, vec![alpha.clone(), beta.clone(), gamma.clone()]);
 
         // PanicMock: any resolve attempt panics — proves empty-touched resolves
         // nothing and carries every survivor verbatim.
@@ -2146,24 +2001,22 @@ delta = "{r}/delta:1"
         };
 
         // Predecessor lock is current with the PRE-mutation config (one tool),
-        // carrying a V2 `cmake` entry. The freshness gate anchors on
+        // carrying a `cmake` entry. The freshness gate anchors on
         // hash(pre_mutation) == previous hash, so a clean add passes.
-        let cmake = v2_tool(TOOL_NAME, "a");
+        //
         // The predecessor's `cmake` repo must match the declared repository so
-        // it carries verbatim through the PanicMock; reuse v2_tool's shape but
-        // with the right repo coordinates.
+        // it carries verbatim through the PanicMock; reuse locked_tool_fixture's
+        // shape but with the right repo coordinates.
         let cmake = LockedTool {
-            resolution: LockedResolution::PerPlatform {
-                repository: Identifier::new_registry(TOOL_REPO, TEST_REGISTRY),
-                platforms: {
-                    let mut p = BTreeMap::new();
-                    p.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
-                    p
-                },
+            repository: Identifier::new_registry(TOOL_REPO, TEST_REGISTRY),
+            platforms: {
+                let mut p = BTreeMap::new();
+                p.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+                p
             },
-            ..cmake
+            ..locked_tool_fixture(TOOL_NAME, "a")
         };
-        let previous = v2_predecessor_lock(&pre_mutation, vec![cmake.clone()]);
+        let previous = predecessor_lock(&pre_mutation, vec![cmake.clone()]);
 
         // Only `delta` is resolved fresh; `cmake` carries through untouched.
         let delta_leaf = "d".repeat(64);
@@ -2209,7 +2062,7 @@ delta = "{r}/delta:1"
         // pre_mutation drifted: a DIFFERENT config whose hash will not match
         // the predecessor stamped from `config`.
         let pre_mutation = single_tool_config();
-        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a")]);
+        let previous = predecessor_lock(&config, vec![locked_tool_fixture("alpha", "a")]);
 
         // PanicMock: if the gate did not short-circuit, the resolve would panic.
         let index = Index::from_impl(PanicMock);
@@ -2252,100 +2105,6 @@ delta = "{r}/delta:1"
         );
     }
 
-    /// Spec §8.1 — an untouched V1 (`LegacyIndex`) entry whose pinned index is
-    /// gone fails `LockUpgradeRequired` (exit 78); the carry-forward never
-    /// silently re-resolves the live tag.
-    #[tokio::test]
-    async fn resolve_lock_touched_untouched_v1_gone_fails_lock_upgrade_required() {
-        let config = single_tool_config();
-        let pre_mutation = single_tool_config();
-        // Predecessor carries a single V1 `cmake` entry pinned to a V1 index.
-        let previous = ProjectLock {
-            metadata: LockMetadata {
-                lock_version: LockVersion::V1,
-                declaration_hash_version: DECLARATION_HASH_VERSION,
-                declaration_hash: config.declaration_hash_cached().to_string(),
-                generated_by: "ocx test".to_string(),
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-            },
-            tools: vec![LockedTool {
-                name: TOOL_NAME.to_string(),
-                group: "default".to_string(),
-                resolution: LockedResolution::LegacyIndex(v1_pinned()),
-            }],
-        };
-
-        // The V1 index is gone (`fetch_candidates` → None), so exact-only
-        // transcription must FAIL rather than re-resolve.
-        let index = Index::from_impl(ManifestMock::new(v1_pinned().digest(), None));
-
-        // touched = ∅ (a remove of an unrelated binding would leave this V1
-        // survivor in the carry set).
-        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
-            .await
-            .expect_err("a carried V1 entry whose index is gone must fail, not re-resolve");
-
-        let mut found = false;
-        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
-        while let Some(c) = cause {
-            if let Some(ProjectErrorKind::LockUpgradeRequired { name }) = c.downcast_ref::<ProjectErrorKind>() {
-                assert_eq!(name, TOOL_NAME, "the gone-index tool is named in the error");
-                found = true;
-                break;
-            }
-            cause = c.source();
-        }
-        assert!(found, "error chain must contain LockUpgradeRequired; chain: {err:#}");
-
-        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
-        assert_eq!(
-            code,
-            Some(crate::cli::ExitCode::ConfigError),
-            "LockUpgradeRequired must classify as ConfigError (exit 78); got {code:?}"
-        );
-    }
-
-    /// Spec §8.1 — an untouched V1 entry whose pinned index IS retrievable is
-    /// transcribed to V2 exact (the pinned index digest's children become the
-    /// V2 leaf map) — pin-preserving, no live-tag re-resolve.
-    #[tokio::test]
-    async fn resolve_lock_touched_untouched_v1_present_transcribes_exact() {
-        let config = single_tool_config();
-        let pre_mutation = single_tool_config();
-        let previous = ProjectLock {
-            metadata: LockMetadata {
-                lock_version: LockVersion::V1,
-                declaration_hash_version: DECLARATION_HASH_VERSION,
-                declaration_hash: config.declaration_hash_cached().to_string(),
-                generated_by: "ocx test".to_string(),
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-            },
-            tools: vec![LockedTool {
-                name: TOOL_NAME.to_string(),
-                group: "default".to_string(),
-                resolution: LockedResolution::LegacyIndex(v1_pinned()),
-            }],
-        };
-
-        // The V1 index digest fans out into one linux/amd64 leaf — the exact,
-        // pin-preserving transcription (no live-tag lookup).
-        let leaf = "a".repeat(64);
-        let manifest = image_index_manifest(&[(format!("sha256:{leaf}"), Some("linux/amd64"))]);
-        let index = Index::from_impl(ManifestMock::new(v1_pinned().digest(), Some(manifest)));
-
-        let lock = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
-            .await
-            .expect("a retrievable V1 index transcribes exact, pin-preserving");
-
-        let tool = locked(&lock, "default", TOOL_NAME);
-        let (_repo, platforms) = resolved_platforms(tool);
-        assert_eq!(
-            platforms.get("linux/amd64"),
-            Some(&Digest::Sha256(leaf)),
-            "the V1 index child leaf is carried verbatim into V2 — pin-preserving"
-        );
-    }
-
     /// Spec §8.1 — `merge_carry_forward` (exercised via `resolve_lock_touched`
     /// with empty touched): a predecessor `(group, name)` absent from
     /// `candidate` is NOT carried (the remove path). `beta` is removed from the
@@ -2365,9 +2124,13 @@ gamma = "{r}/gamma:1"
             ProjectConfig::from_toml_str(&toml).expect("two-tool candidate parses")
         };
         // Predecessor is current with pre_mutation (all 3 declared).
-        let previous = v2_predecessor_lock(
+        let previous = predecessor_lock(
             &pre_mutation,
-            vec![v2_tool("alpha", "a"), v2_tool("beta", "b"), v2_tool("gamma", "g")],
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
         );
 
         // PanicMock: empty touched ⇒ nothing resolved; survivors carried.
@@ -2383,8 +2146,8 @@ gamma = "{r}/gamma:1"
             "the removed binding must NOT be carried forward; got {:?}",
             lock.tools
         );
-        assert_eq!(locked(&lock, "default", "alpha"), &v2_tool("alpha", "a"));
-        assert_eq!(locked(&lock, "default", "gamma"), &v2_tool("gamma", "g"));
+        assert_eq!(locked(&lock, "default", "alpha"), &locked_tool_fixture("alpha", "a"));
+        assert_eq!(locked(&lock, "default", "gamma"), &locked_tool_fixture("gamma", "g"));
         assert_eq!(
             lock.metadata.declaration_hash,
             declaration_hash(&candidate),
@@ -2414,7 +2177,10 @@ gamma = "{r}/gamma:1"
         let pre_mutation = three_tool_config();
         // Predecessor is missing `gamma` despite carrying the matching config
         // declaration_hash — a corrupt/hand-edited lock.
-        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a"), v2_tool("beta", "b")]);
+        let previous = predecessor_lock(
+            &config,
+            vec![locked_tool_fixture("alpha", "a"), locked_tool_fixture("beta", "b")],
+        );
 
         // PanicMock: the coherence gate must short-circuit before any resolve.
         let index = Index::from_impl(PanicMock);
@@ -2448,11 +2214,16 @@ gamma = "{r}/gamma:1"
         let pre_mutation = three_tool_config();
         // `beta`'s carried entry points at a DIFFERENT repository than the
         // candidate declares (`registry.test/beta`). A corrupt/hand-edited lock.
-        let mut beta_wrong = v2_tool("beta", "b");
-        if let LockedResolution::PerPlatform { repository, .. } = &mut beta_wrong.resolution {
-            *repository = Identifier::new_registry("wrong-repo", TEST_REGISTRY);
-        }
-        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a"), beta_wrong, v2_tool("gamma", "g")]);
+        let mut beta_wrong = locked_tool_fixture("beta", "b");
+        beta_wrong.repository = Identifier::new_registry("wrong-repo", TEST_REGISTRY);
+        let previous = predecessor_lock(
+            &config,
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                beta_wrong,
+                locked_tool_fixture("gamma", "g"),
+            ],
+        );
 
         // PanicMock: the coherence gate must short-circuit before any resolve.
         let index = Index::from_impl(PanicMock);
@@ -2482,13 +2253,13 @@ gamma = "{r}/gamma:1"
         let config = three_tool_config();
         let pre_mutation = three_tool_config();
         // Two `beta` entries — a duplicate the carry-forward must not launder.
-        let previous = v2_predecessor_lock(
+        let previous = predecessor_lock(
             &config,
             vec![
-                v2_tool("alpha", "a"),
-                v2_tool("beta", "b"),
-                v2_tool("beta", "c"),
-                v2_tool("gamma", "g"),
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("beta", "c"),
+                locked_tool_fixture("gamma", "g"),
             ],
         );
 
@@ -2529,9 +2300,13 @@ gamma = "{r}/gamma:1"
     async fn resolve_lock_touched_rejects_undeclared_touched_binding() {
         let config = three_tool_config();
         let pre_mutation = three_tool_config();
-        let previous = v2_predecessor_lock(
+        let previous = predecessor_lock(
             &config,
-            vec![v2_tool("alpha", "a"), v2_tool("beta", "b"), v2_tool("gamma", "g")],
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
         );
 
         let index = Index::from_impl(PanicMock);
@@ -2572,10 +2347,10 @@ gamma = "{r}/gamma:1"
     async fn resolve_lock_touched_duplicate_touched_pair_resolves_exactly_once() {
         let config = three_tool_config();
         let pre_mutation = three_tool_config();
-        let alpha = v2_tool("alpha", "a");
-        let beta_old = v2_tool("beta", "b");
-        let gamma = v2_tool("gamma", "g");
-        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta_old, gamma.clone()]);
+        let alpha = locked_tool_fixture("alpha", "a");
+        let beta_old = locked_tool_fixture("beta", "b");
+        let gamma = locked_tool_fixture("gamma", "g");
+        let previous = predecessor_lock(&config, vec![alpha.clone(), beta_old, gamma.clone()]);
 
         // `beta` is listed TWICE in touched — the dedup must ensure it is
         // resolved only once, so the final lock carries exactly one `beta` entry.
@@ -2648,8 +2423,9 @@ gamma = "{r}/gamma:1"
     // ── build_platforms_map / guard_unique_key ──────────────────────────────
 
     /// `build_platforms_map` keys each advertised child's leaf digest by its
-    /// lossless [`Platform::lock_key`]. Two distinct platforms → two distinct
-    /// keys; the index digest is never part of the map.
+    /// lossless canonical [`Platform`] `Display` string. Two distinct
+    /// platforms → two distinct keys; the index digest is never part of the
+    /// map.
     #[test]
     fn build_platforms_map_keys_by_lossless_platform() {
         let amd64: Platform = "linux/amd64".parse().unwrap();
@@ -2704,6 +2480,17 @@ gamma = "{r}/gamma:1"
 
     // ── lookup_host_leaf ────────────────────────────────────────────────────
 
+    /// Test helper: unwrap a `Selection::Found` to its digest, panicking with
+    /// the actual `Selection` otherwise — keeps the assertions below terse
+    /// now that `lookup_host_leaf` returns [`Selection`] (D1 F2) instead of
+    /// `Option`.
+    fn expect_found_digest(selection: Selection<(&Digest, &str)>) -> Digest {
+        match selection {
+            Selection::Found((digest, _key)) => digest.clone(),
+            other => panic!("expected Selection::Found, got {other:?}"),
+        }
+    }
+
     /// Host key present → that leaf is returned directly.
     #[test]
     fn lookup_host_leaf_returns_host_key_when_present() {
@@ -2712,8 +2499,8 @@ gamma = "{r}/gamma:1"
         platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
         platforms.insert("any".to_string(), Digest::Sha256("z".repeat(64)));
 
-        let leaf = lookup_host_leaf(&platforms, &host).expect("host key present");
-        assert_eq!(*leaf, Digest::Sha256("a".repeat(64)), "host key wins over `any`");
+        let leaf = expect_found_digest(lookup_host_leaf(&platforms, &host));
+        assert_eq!(leaf, Digest::Sha256("a".repeat(64)), "host key wins over `any`");
     }
 
     /// Host key absent but `"any"` present → fall back to `"any"` (the flat
@@ -2724,422 +2511,128 @@ gamma = "{r}/gamma:1"
         let mut platforms = BTreeMap::new();
         platforms.insert("any".to_string(), Digest::Sha256("z".repeat(64)));
 
-        let leaf = lookup_host_leaf(&platforms, &host).expect("any fallback present");
+        let leaf = expect_found_digest(lookup_host_leaf(&platforms, &host));
         assert_eq!(
-            *leaf,
+            leaf,
             Digest::Sha256("z".repeat(64)),
             "absent host key falls back to `any`"
         );
     }
 
-    /// Host key absent AND no `"any"` → `None` (the caller raises a clean
-    /// pre-network "no <host> leaf" error).
+    /// Host key absent AND no `"any"` → `Selection::None` (the caller raises
+    /// a clean pre-network "no <host> leaf" error). `windows/amd64` required
+    /// against a `linux/amd64` offer is not `is_compatible` (os mismatch) —
+    /// no candidate survives.
     #[test]
     fn lookup_host_leaf_none_when_host_and_any_absent() {
         let host: Platform = "windows/amd64".parse().unwrap();
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
 
-        assert!(
-            lookup_host_leaf(&platforms, &host).is_none(),
-            "neither the host key nor `any` is present → None"
+        assert_eq!(
+            lookup_host_leaf(&platforms, &host),
+            Selection::None,
+            "neither the host key nor `any` is present → Selection::None"
         );
     }
 
-    /// Backward compat: a libc-detecting host (its `lock_key` carries
-    /// `;osf=libc.glibc`) must still resolve a plain `linux/amd64` entry keyed
-    /// before libc detection existed. Without the base-key tier this regresses
-    /// to a spurious `NoHostLeaf` on every legacy per-platform lock.
+    /// A bare (empty-`os_features`) entry runs on any feature-bearing host:
+    /// `offered.os_features ⊆ required.os_features` holds trivially for an
+    /// empty offered set, so a glibc host resolves a plain `linux/amd64`
+    /// entry even though the entry declares no libc requirement.
     #[test]
-    fn lookup_host_leaf_falls_back_to_legacy_base_key() {
+    fn lookup_host_leaf_bare_entry_matches_feature_bearing_host() {
         let host: Platform = "linux/amd64+libc.glibc".parse().unwrap();
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
 
-        let leaf = lookup_host_leaf(&platforms, &host).expect("legacy base key present");
+        let leaf = expect_found_digest(lookup_host_leaf(&platforms, &host));
         assert_eq!(
-            *leaf,
+            leaf,
             Digest::Sha256("a".repeat(64)),
             "a glibc host resolves the plain (empty-os_features) entry"
         );
     }
 
-    /// The exact libc key wins over the legacy base key when both are present:
-    /// tier order is exact → base → any.
+    /// A feature-matching entry outscores a co-present bare entry: both are
+    /// `is_compatible`, but `compatibility_score` ranks the feature-count
+    /// axis lexicographically, so the glibc-tagged entry wins over the bare
+    /// entry.
     #[test]
-    fn lookup_host_leaf_prefers_exact_libc_key_over_base() {
+    fn lookup_host_leaf_feature_specific_entry_outscores_bare_entry() {
         let host: Platform = "linux/amd64+libc.glibc".parse().unwrap();
         let mut platforms = BTreeMap::new();
-        platforms.insert(host.lock_key(), Digest::Sha256("g".repeat(64)));
+        platforms.insert(host.to_string(), Digest::Sha256("g".repeat(64)));
         platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
 
-        let leaf = lookup_host_leaf(&platforms, &host).expect("exact libc key present");
+        let leaf = expect_found_digest(lookup_host_leaf(&platforms, &host));
         assert_eq!(
-            *leaf,
+            leaf,
             Digest::Sha256("g".repeat(64)),
-            "the exact libc.glibc leaf wins over the plain base entry"
+            "the glibc-matching leaf wins over the plain bare entry"
         );
     }
 
     /// A dual-libc host against a map that carries only feature-specific keys
-    /// (`libc.glibc` and `libc.musl`, no combined key, no plain base) resolves
-    /// to `None` — the base-key tier keys on empty-os_features only, so it never
-    /// falsely matches one libc's entry for a host that requested both.
+    /// (`libc.glibc` and `libc.musl`, no combined key, no plain base) is
+    /// genuinely irreducible: both single-libc entries are individually
+    /// `is_compatible` (subset of the host's two-feature set) and tie at the
+    /// same score, so `lookup_host_leaf` returns `Selection::Ambiguous`
+    /// carrying both tied candidates' original map keys — not a silent
+    /// `None`, and not an arbitrary pick.
     #[test]
-    fn lookup_host_leaf_dual_libc_no_false_match_on_feature_specific_keys() {
-        let host: Platform = "linux/amd64+libc.glibc+libc.musl".parse().unwrap();
+    fn lookup_host_leaf_dual_libc_ambiguous_between_separate_single_libc_entries() {
+        let host: Platform = "linux/amd64+libc.glibc,libc.musl".parse().unwrap();
         let glibc: Platform = "linux/amd64+libc.glibc".parse().unwrap();
         let musl: Platform = "linux/amd64+libc.musl".parse().unwrap();
         let mut platforms = BTreeMap::new();
-        platforms.insert(glibc.lock_key(), Digest::Sha256("g".repeat(64)));
-        platforms.insert(musl.lock_key(), Digest::Sha256("m".repeat(64)));
+        platforms.insert(glibc.to_string(), Digest::Sha256("g".repeat(64)));
+        platforms.insert(musl.to_string(), Digest::Sha256("m".repeat(64)));
 
-        assert!(
-            lookup_host_leaf(&platforms, &host).is_none(),
-            "a dual-libc host must not falsely match a single feature-specific entry"
+        let result = lookup_host_leaf(&platforms, &host);
+        let Selection::Ambiguous(candidates) = result else {
+            panic!("expected Selection::Ambiguous, got {result:?}");
+        };
+        let mut keys: Vec<&str> = candidates.iter().map(|(_, key)| *key).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["linux/amd64+libc.glibc", "linux/amd64+libc.musl"],
+            "the ambiguous selection must name both tied original map keys"
         );
     }
 
     /// The same dual-libc host resolves its exact combined key when present.
     #[test]
     fn lookup_host_leaf_dual_libc_matches_exact_combined_key() {
-        let host: Platform = "linux/amd64+libc.glibc+libc.musl".parse().unwrap();
+        let host: Platform = "linux/amd64+libc.glibc,libc.musl".parse().unwrap();
         let mut platforms = BTreeMap::new();
-        platforms.insert(host.lock_key(), Digest::Sha256("d".repeat(64)));
+        platforms.insert(host.to_string(), Digest::Sha256("d".repeat(64)));
 
-        let leaf = lookup_host_leaf(&platforms, &host).expect("exact combined key present");
-        assert_eq!(*leaf, Digest::Sha256("d".repeat(64)), "exact dual-libc key wins");
+        let leaf = expect_found_digest(lookup_host_leaf(&platforms, &host));
+        assert_eq!(leaf, Digest::Sha256("d".repeat(64)), "exact dual-libc key wins");
     }
 
-    // ── transcribe_v1_to_v2 ─────────────────────────────────────────────────
+    /// D1 gap-closed regression: a dual-libc host resolves EITHER a
+    /// glibc-only OR a musl-only lock entry when the map ships only ONE of
+    /// them (no combined key). The old exact-key tier walk required a byte-
+    /// exact match on the host's full multi-feature key and stripped ALL
+    /// features for its fallback tier, so neither single-feature entry ever
+    /// matched a dual-libc host — a silent `None` despite the entry being
+    /// genuinely runnable (`offered.os_features ⊆ required.os_features`).
+    /// `select_best`'s subset relation closes this by construction.
+    #[test]
+    fn lookup_host_leaf_dual_libc_host_resolves_single_libc_entry_gap_closed() {
+        let host: Platform = "linux/amd64+libc.glibc,libc.musl".parse().unwrap();
 
-    /// Build a V1 [`PinnedIdentifier`] for `registry/repo@sha256:<byte*64>`.
-    fn v1_pinned() -> PinnedIdentifier {
-        let id = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY).clone_with_digest(Digest::Sha256("c".repeat(64)));
-        PinnedIdentifier::try_from(id).expect("carries a digest")
-    }
+        let mut glibc_only = BTreeMap::new();
+        glibc_only.insert("linux/amd64+libc.glibc".to_string(), Digest::Sha256("g".repeat(64)));
+        let leaf = expect_found_digest(lookup_host_leaf(&glibc_only, &host));
+        assert_eq!(leaf, Digest::Sha256("g".repeat(64)));
 
-    /// Plan Testing Strategy (`transcribe_v1_to_v2`, cached/live): the V1
-    /// index digest fans out into the V2 per-platform leaf map, pin-
-    /// preserving — exact, no re-resolve. The resulting resolution is
-    /// `PerPlatform`.
-    #[tokio::test]
-    async fn transcribe_v1_to_v2_pin_preserving_when_index_fetchable() {
-        let pinned = v1_pinned();
-        let declared = tool_identifier();
-        let amd64_leaf = "a".repeat(64);
-        let manifest = image_index_manifest(&[(format!("sha256:{amd64_leaf}"), Some("linux/amd64"))]);
-        let mock = ManifestMock::new(pinned.digest(), Some(manifest));
-        let index = Index::from_impl(mock);
-
-        // exact_only = true (partial carry-forward) and exact_only = false
-        // (explicit `ocx update`) both pin-preserve when the index is fetchable.
-        let resolution = transcribe_v1_to_v2(
-            &index,
-            &pinned,
-            &declared,
-            IndexOperation::Resolve,
-            true,
-            &fast_options(),
-        )
-        .await
-        .expect("cached/live index transcribes pin-preserving");
-
-        let LockedResolution::PerPlatform { repository, platforms } = resolution else {
-            panic!("transcription must produce a PerPlatform resolution");
-        };
-        assert!(
-            repository.tag().is_none() && repository.digest().is_none(),
-            "bare repository"
-        );
-        assert_eq!(
-            platforms.get("linux/amd64"),
-            Some(&Digest::Sha256(amd64_leaf)),
-            "the V1 index child leaf is carried verbatim into V2"
-        );
-    }
-
-    /// Plan Testing Strategy (partial carry-forward, `exact_only = true`):
-    /// when the V1 index is gone (`fetch_candidates` → None) the transcription
-    /// **fails** rather than silently re-resolving the live tag (Codex R2 —
-    /// an unrelated `add`/`remove`/`update` must not drift an untouched
-    /// tool's platform set). The clean error, NOT an `unreachable!()`, is the
-    /// contract.
-    #[tokio::test]
-    async fn transcribe_exact_only_fails_when_index_gone() {
-        let pinned = v1_pinned();
-        let declared = tool_identifier();
-        // No manifest → the V1 index is no longer fetchable.
-        let mock = ManifestMock::new(pinned.digest(), None);
-        let index = Index::from_impl(mock);
-
-        let err = transcribe_v1_to_v2(
-            &index,
-            &pinned,
-            &declared,
-            IndexOperation::Resolve,
-            true,
-            &fast_options(),
-        )
-        .await
-        .expect_err("exact-only transcription must fail when the index is gone, not re-resolve");
-
-        // It must be a clean library error — assert it is not silently Ok and
-        // surfaces a project-tier error the CLI can route to guidance.
-        let crate::project::Error::Project(_) = err;
-    }
-
-    // ── transcribe_v1_to_v2: non-exact re-resolve fallback — unit tests ──────
-
-    /// A mock that dispatches on whether the requested identifier is digest-
-    /// addressed (the orphaned V1 index lookup) or tag-addressed (the
-    /// non-exact re-resolve fallback).
-    ///
-    /// `digest_manifest` is returned when the incoming identifier carries a
-    /// digest (exact V1 index fetch); `tag_manifest` is returned for
-    /// tag-addressed lookups (the declared-tag re-resolve path).
-    /// `None` in either slot simulates the corresponding miss.
-    #[derive(Clone)]
-    struct DispatchMock {
-        /// Digest returned by `fetch_manifest_digest` for the exact V1 index lookup.
-        digest_head: Digest,
-        /// Manifest returned for digest-addressed `fetch_manifest` (the V1 index).
-        /// `None` → the V1 index is gone (orphaned + GC'd).
-        digest_manifest: Option<Manifest>,
-        /// Manifest returned for tag-addressed `fetch_manifest` (the declared tag
-        /// re-resolve). `None` → the declared tag does not exist.
-        tag_manifest: Option<Manifest>,
-        /// Head digest returned by `fetch_manifest_digest` for tag-addressed calls.
-        tag_head: Digest,
-        digest_calls: Arc<Mutex<usize>>,
-    }
-
-    impl DispatchMock {
-        fn new(
-            digest_head: Digest,
-            digest_manifest: Option<Manifest>,
-            tag_head: Digest,
-            tag_manifest: Option<Manifest>,
-        ) -> Self {
-            Self {
-                digest_head,
-                digest_manifest,
-                tag_manifest,
-                tag_head,
-                digest_calls: Arc::new(Mutex::new(0)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl IndexImpl for DispatchMock {
-        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
-            Ok(Vec::new())
-        }
-        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest(
-            &self,
-            identifier: &Identifier,
-            _op: IndexOperation,
-        ) -> crate::Result<Option<(Digest, Manifest)>> {
-            // Dispatch based on whether the identifier is digest-addressed.
-            if identifier.digest().is_some() {
-                Ok(self.digest_manifest.clone().map(|m| (self.digest_head.clone(), m)))
-            } else {
-                Ok(self.tag_manifest.clone().map(|m| (self.tag_head.clone(), m)))
-            }
-        }
-        async fn fetch_manifest_digest(
-            &self,
-            identifier: &Identifier,
-            _op: IndexOperation,
-        ) -> crate::Result<Option<Digest>> {
-            *self.digest_calls.lock().unwrap() += 1;
-            if identifier.digest().is_some() {
-                Ok(self.digest_manifest.as_ref().map(|_| self.digest_head.clone()))
-            } else {
-                Ok(self.tag_manifest.as_ref().map(|_| self.tag_head.clone()))
-            }
-        }
-        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-        fn box_clone(&self) -> Box<dyn IndexImpl> {
-            Box::new(self.clone())
-        }
-    }
-
-    /// Non-exact (`exact_only = false`) path: when the V1 index is gone
-    /// (`fetch_candidates` → None for the digest-addressed lookup) but the
-    /// declared tag is resolvable, the transcription falls back to re-resolving
-    /// the declared tag and returns a `PerPlatform` resolution whose leaves come
-    /// from the tag manifest.
-    #[tokio::test]
-    async fn transcribe_v1_to_v2_gone_online_resolves_declared_tag_and_warns() {
-        let pinned = v1_pinned();
-        let declared = tool_identifier();
-
-        // The V1 index manifest is gone (digest-addressed miss → None).
-        // The declared tag is live and returns a two-platform image index.
-        let amd64_leaf = "d".repeat(64);
-        let arm64_leaf = "e".repeat(64);
-        let tag_manifest = image_index_manifest(&[
-            (format!("sha256:{amd64_leaf}"), Some("linux/amd64")),
-            (format!("sha256:{arm64_leaf}"), Some("linux/arm64")),
-        ]);
-        let tag_head = Digest::Sha256("f".repeat(64));
-
-        let mock = DispatchMock::new(
-            pinned.digest(), // digest_head — irrelevant, digest_manifest is None
-            None,            // V1 index is gone
-            tag_head,        // tag_head
-            Some(tag_manifest),
-        );
-        let index = Index::from_impl(mock);
-
-        // exact_only = false → explicit `ocx update` re-resolve fallback.
-        let resolution = transcribe_v1_to_v2(
-            &index,
-            &pinned,
-            &declared,
-            IndexOperation::Resolve,
-            false, // `ocx update` path
-            &fast_options(),
-        )
-        .await
-        .expect("`ocx update` must succeed by re-resolving the declared tag when the V1 index is gone");
-
-        // The result must be PerPlatform — the caller holds a re-resolved leaf
-        // set (from the declared tag), not a LegacyIndex.
-        let LockedResolution::PerPlatform { repository, platforms } = resolution else {
-            panic!("`ocx update` fallback must produce a PerPlatform resolution; got LegacyIndex");
-        };
-
-        // Repository coordinates must be bare (no tag, no digest).
-        assert!(repository.tag().is_none(), "repository must be bare (no tag)");
-        assert!(repository.digest().is_none(), "repository must be bare (no digest)");
-
-        // The leaves must come from the declared tag's index children.
-        assert_eq!(
-            platforms.len(),
-            2,
-            "re-resolved platforms must match the declared tag's index children; got {platforms:?}"
-        );
-        assert_eq!(
-            platforms.get("linux/amd64"),
-            Some(&Digest::Sha256(amd64_leaf)),
-            "linux/amd64 leaf from the declared tag's index"
-        );
-        assert_eq!(
-            platforms.get("linux/arm64"),
-            Some(&Digest::Sha256(arm64_leaf)),
-            "linux/arm64 leaf from the declared tag's index"
-        );
-    }
-
-    // ── Finding 3b: the non-exact re-resolve fallback EMITS the warn ─────────
-
-    /// A thread-local, process-global capturing [`log::Log`] for asserting that
-    /// the non-exact re-resolve fallback actually emits its WARN line.
-    ///
-    /// The logger is installed exactly once per process (`log::set_boxed_logger`
-    /// is one-shot) and records every line on the *calling* thread into a
-    /// thread-local buffer, so parallel tests never observe each other's logs.
-    /// `crate::log::warn!` (the `log` facade re-exported via `tracing_log`)
-    /// routes through this logger when no other logger is installed in the test
-    /// binary.
-    mod warn_capture {
-        use std::cell::RefCell;
-
-        use crate::log::{self, Level, LevelFilter, Log, Metadata, Record};
-
-        thread_local! {
-            static CAPTURED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-        }
-
-        struct ThreadLocalLogger;
-
-        impl Log for ThreadLocalLogger {
-            fn enabled(&self, metadata: &Metadata) -> bool {
-                metadata.level() <= Level::Warn
-            }
-
-            fn log(&self, record: &Record) {
-                if self.enabled(record.metadata()) {
-                    CAPTURED.with(|buffer| buffer.borrow_mut().push(format!("{}", record.args())));
-                }
-            }
-
-            fn flush(&self) {}
-        }
-
-        /// Install the capturing logger (idempotent across tests) and start a
-        /// fresh per-thread capture buffer. Call [`drain`] afterwards on the
-        /// SAME thread to read the lines logged in between.
-        ///
-        /// Split into install/drain (rather than a closure wrapper) so the
-        /// code under test can be `.await`-ed directly on the test thread —
-        /// nesting a `block_on` inside a `#[tokio::test]` would panic.
-        pub fn arm() {
-            // `set_boxed_logger` succeeds at most once; subsequent tests reuse
-            // the already-installed logger. The buffer is thread-local, so the
-            // single shared logger still isolates concurrent tests.
-            let _ = log::set_boxed_logger(Box::new(ThreadLocalLogger));
-            log::set_max_level(LevelFilter::Warn);
-            CAPTURED.with(|buffer| buffer.borrow_mut().clear());
-        }
-
-        /// Read the WARN lines captured on the current thread since [`arm`].
-        pub fn drain() -> Vec<String> {
-            CAPTURED.with(|buffer| buffer.borrow().clone())
-        }
-    }
-
-    /// Finding 3b — the non-exact re-resolve fallback (re-resolving a moved
-    /// advisory tag because the V1 index is gone) must EMIT a WARN that versions
-    /// may move — not silently re-pin. Asserting the warning is produced (not
-    /// merely that the lock changed) is the gap the existing
-    /// `..._resolves_declared_tag_and_warns` test left open.
-    #[tokio::test]
-    async fn update_reresolve_fallback_emits_warn() {
-        let pinned = v1_pinned();
-        let declared = tool_identifier();
-
-        // V1 index gone (digest-addressed miss); declared tag live.
-        let amd64_leaf = "d".repeat(64);
-        let tag_manifest = image_index_manifest(&[(format!("sha256:{amd64_leaf}"), Some("linux/amd64"))]);
-        let mock = DispatchMock::new(
-            pinned.digest(),
-            None, // V1 index orphaned + GC'd
-            Digest::Sha256("f".repeat(64)),
-            Some(tag_manifest),
-        );
-        let index = Index::from_impl(mock);
-
-        // Arm the per-thread capture, drive the re-resolve fallback
-        // (`exact_only = false`) directly on the test thread (the
-        // single-threaded `#[tokio::test]` runtime runs the future here, so the
-        // synchronous WARN lands on this thread's buffer), then drain.
-        warn_capture::arm();
-        transcribe_v1_to_v2(
-            &index,
-            &pinned,
-            &declared,
-            IndexOperation::Resolve,
-            false, // explicit `ocx update` re-resolve fallback
-            &fast_options(),
-        )
-        .await
-        .expect("`ocx update` re-resolves the declared tag when the V1 index is gone");
-        let lines = warn_capture::drain();
-
-        assert!(
-            lines.iter().any(|line| line.contains("lock upgrade")
-                && line.contains("no longer retrievable")
-                && line.contains("versions may move")),
-            "the `ocx update` re-resolve fallback must emit the 'versions may move' WARN; captured: {lines:?}"
-        );
+        let mut musl_only = BTreeMap::new();
+        musl_only.insert("linux/amd64+libc.musl".to_string(), Digest::Sha256("m".repeat(64)));
+        let leaf = expect_found_digest(lookup_host_leaf(&musl_only, &host));
+        assert_eq!(leaf, Digest::Sha256("m".repeat(64)));
     }
 }

@@ -51,6 +51,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.helpers import resolved_metadata_path
 from src.runner import OcxRunner, current_platform
 
 # ---------------------------------------------------------------------------
@@ -132,15 +133,20 @@ def _push_bundle(
         str(metadata_path),
         "-o",
         str(bundle_path),
+        "-p",
+        current_platform(),
         str(pkg_dir),
     )
+    # `create` writes its resolved sidecar next to `bundle_path`, not back to
+    # `metadata_path` — push must read that file to see the recorded
+    # platform (D5), not the pre-`create` input.
     push_args = [
         "package",
         "push",
         "-p",
         current_platform(),
         "-m",
-        str(metadata_path),
+        str(resolved_metadata_path(bundle_path)),
     ]
     if new:
         push_args.append("-n")
@@ -158,7 +164,7 @@ def _write_repo_metadata(path: Path, repo: str) -> None:
     path.write_text(
         json.dumps(
             {
-                "type": "bundle", "version": 1, "env": [
+                "type": "bundle", "version": 1, "platform": current_platform(), "env": [
                     {
                         "key": "PATH",
                         "type": "path",
@@ -537,6 +543,7 @@ def _strip_metadata(path: Path, strip: int) -> None:
             {
                 "type": "bundle",
                 "version": 1,
+                "platform": current_platform(),
                 "strip_components": strip,
                 "env": [
                     {
@@ -649,8 +656,11 @@ def test_strip_applied_at_assemble_local_path(
     pkg_dir = _build_topdir_pkg_dir(tmp_path, "local-topdir-pkg")
 
     # One bundle reused for both materializations → one shared layer digest.
+    # `base_meta` feeds both `create` (bundle build) and `push` (`-m`)
+    # directly, so it carries its own `platform` rather than relying on
+    # create's rewritten sidecar (unused here — push reads `base_meta` as-is).
     base_meta = tmp_path / "local-base-meta.json"
-    base_meta.write_text(json.dumps({"type": "bundle", "version": 1}))
+    base_meta.write_text(json.dumps({"type": "bundle", "version": 1, "platform": current_platform()}))
     bundle = tmp_path / "local-topdir-bundle.tar.xz"
     ocx.plain("package", "create", "-m", str(base_meta), "-o", str(bundle), str(pkg_dir))
 

@@ -143,32 +143,26 @@ File-backed snapshot of registry metadata. Three public entry points, each narro
 
 - `Platform::any()` — platform-agnostic packages (Java, text tools)
 - `Platform::current()` — auto-detect OS/arch; populates `os_features` from `HostCapabilities::detect()` cached at context init
-- `self.can_run(other)` — subset semantics on `os_features` + equality on `os` + `arch`; strict equality on `variant`/`os_version` only when the candidate declares them (fail-closed: `current()` never populates `os_version`); "can `self` run `other`"
+- `is_compatible(required, offered)` (free fn) — the one directed compatibility relation: `os`+`arch` equal, `variant` is offer-gated strict equality (unconstrained when the offer leaves it `None`), `offered.os_features ⊆ required.os_features` (inverted subset — a feature on the offer names a capability it demands of the host). An `Any` offer satisfies every requirement; an `Any` requirement is satisfied only by an `Any` offer. `compatibility_score(offered)` ranks matches lexicographically `(is_specific, matched_refinement_count, matched_os_feature_count)` — the middle axis counts a declared-and-matched `variant`. `select_best(required, candidates)` is the **one shared helper** — `Index::select` (fresh resolve), `project::lookup_host_leaf` (lock-read), and authoring `resolve_for_specific` (dependency pinning) all route through it, so the three answer identically for the same required platform and candidate set. ADR: `adr_platform_model_unification.md` D1.
 - `Platform::Specific.os_features` — `Vec<String>` carrying `libc.*` tags (e.g. `["libc.glibc"]`); empty `Vec` means no libc requirement declared
-- `Display` is the single canonical string (`os/arch[/variant][/os_version][+feature...]`, features sorted+deduped) — the `--platform` arg form, round-trips via `FromStr`. Filesystem paths use `segments()`/`ascii_segments()`, not `Display`.
+- `Display` is the single canonical, injective, round-tripping grammar — `os/arch[/variant][+feature[,feature...]]` (features sorted+deduped), `any` with no fields — shared by the `--platform` arg, every `ocx.lock` `[tool.platforms]` key, and every dependency pin-map key; round-trips via `FromStr`. Filesystem paths use `segments()`/`ascii_segments()`, not `Display`. ADR D2.
 - Supported: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+- One platform per `ocx package create`/`push` invocation (D5) — no bundle-level target-platform set. `--platform` is single-valued everywhere except `ocx patch sync`'s bare-invocation fan-out over the concrete ship matrix (an explicit enumeration, not a selection — D4's one sanctioned exception).
 
 ### libc Differentiation
 
-OCX encodes libc family in the OCI `platform.os.features` field using the `libc.*` namespace (`libc.glibc`, `libc.musl`). At install time `Platform::current()` discovers and identifies the host's dynamic loaders (discovery-then-identify; see Host detection below), populates `os_features`, and `Index::select` applies `can_run()` to pick the manifest whose `os_features` are a subset of the host's features.
+OCX encodes libc family in the OCI `platform.os.features` field using the `libc.*` namespace (`libc.glibc`, `libc.musl`). At install time `Platform::current()` discovers and identifies the host's dynamic loaders (discovery-then-identify; see Host detection below), populates `os_features`, and `Index::select` applies [`is_compatible`](#platform) to pick the manifest whose declared `os_features` are a subset of the host's.
 
-**ADR:** `adr_platform_libc_os_features.md`
+**ADR:** `adr_platform_libc_os_features.md` (subset semantics, `libc.*` namespace, host detection); `adr_platform_model_unification.md` D1 (the relation itself, generalized beyond libc)
 
-**`can_run` subset rule** (`self` = host, `other` = candidate index entry):
-
-```
-other.os_features ⊆ self.os_features
-```
-
-- `other.os_features` empty → matches every host (static-musl / scripts / bare-manifest fallback).
-- `other` is `Platform::Any` → always matches (scripts, JARs, data bundles).
-- `self` is `Platform::Any` (detection failed entirely) → never matches a `Specific` candidate.
-- `os` + `arch` equality required before the subset check runs.
-- `variant` mismatch (when `other` declares it) → no match; strict equality on variant preserved.
+- `offered.os_features` empty → matches every host (static-musl / scripts / bare-manifest fallback).
+- `offered` is `Platform::Any` → always matches (scripts, JARs, data bundles).
+- `required` is `Platform::Any` (detection failed entirely) → never matches a `Specific` offer.
+- `os` + `arch` equality required before the subset check runs; `variant` mismatch (when `offered` declares it) → no match.
 
 **Invariant — subset scope is narrowly `os_features` only:**
 
-Subset semantics apply **only** to `os_features`. Extending subset or any non-equality semantics to `variant`, `os_version`, or `features` requires a new ADR — this matcher's narrow shape is load-bearing for predictable single-pass index resolution.
+Subset semantics apply **only** to `os_features`. Extending subset or any non-equality semantics to `variant` or `features` requires a new ADR — this matcher's narrow shape is load-bearing for predictable single-pass index resolution.
 
 **Wire format normalization:**
 
@@ -176,7 +170,7 @@ Subset semantics apply **only** to `os_features`. Extending subset or any non-eq
 
 **Host detection:**
 
-`HostCapabilities::detect()` (module `oci/host_capabilities.rs`) uses **discovery-then-identify**. *Discovery* builds a deduped candidate-loader set from three sources (priority order): (1) the `PT_INTERP` of a fixed system-binary allowlist (`INTERP_PROBE_BINARIES`, read via the `elf` crate) — the host's exact native loader wherever it lives, so non-FHS hosts (NixOS `/nix/store`, Gentoo Prefix, custom sysroots) resolve; (2) an arch-filtered scan of canonical loader dirs (+ immediate multiarch subdirs); (3) the hardcoded `GLIBC_LOADERS`/`MUSL_LOADERS` allowlist (fallback). *Identification* then classifies each loader **purely by its `--version` banner** (table-driven over `LIBC_FAMILIES`), unioning every positive into a sorted `BTreeSet<LibcFlavor>` via a concurrent `JoinSet` (no first-wins; deterministic by construction). A host may advertise multiple families (e.g. glibc + musl on Ubuntu + `musl-tools`), giving `os_features = ["libc.glibc","libc.musl"]`, so `can_run` admits both a `libc.glibc` and a `libc.musl` candidate. Detection is Linux-only; macOS and Windows return an empty set without spawning subprocesses. Banner classification (`GNU libc`/`GLIBC` → glibc; Ubuntu 20.04 quirk: exit 127 → `{loader} /bin/true`; `musl libc` → musl, exit status ignored) makes the **gcompat → musl** case fall out by construction — the gcompat stub at the glibc path prints the musl banner, classified musl (identity, not equivalence; no special-case exclusion). Empty set → empty `os_features`; subset matching then accepts only entries with empty `os_features`. A minimal host with no readable loader yields the empty set (debug-logged when `/nix` exists). **Known limitation:** detect-env ≠ exec-env (distrobox/container/install-here-run-there) — deferred to a future ADR. Research: `.claude/artifacts/research_libc_detection_robustness.md` (v2), `research_libc_detection_methods.md` (v1).
+`HostCapabilities::detect()` (module `oci/host_capabilities.rs`) uses **discovery-then-identify**. *Discovery* builds a deduped candidate-loader set from three sources (priority order): (1) the `PT_INTERP` of a fixed system-binary allowlist (`INTERP_PROBE_BINARIES`, read via the `elf` crate) — the host's exact native loader wherever it lives, so non-FHS hosts (NixOS `/nix/store`, Gentoo Prefix, custom sysroots) resolve; (2) an arch-filtered scan of canonical loader dirs (+ immediate multiarch subdirs); (3) the hardcoded `GLIBC_LOADERS`/`MUSL_LOADERS` allowlist (fallback). *Identification* then classifies each loader **purely by its `--version` banner** (table-driven over `LIBC_FAMILIES`), unioning every positive into a sorted `BTreeSet<LibcFlavor>` via a concurrent `JoinSet` (no first-wins; deterministic by construction). A host may advertise multiple families (e.g. glibc + musl on Ubuntu + `musl-tools`), giving `os_features = ["libc.glibc","libc.musl"]`, so `is_compatible` admits both a `libc.glibc` and a `libc.musl` offer. Detection is Linux-only; macOS and Windows return an empty set without spawning subprocesses. Banner classification (`GNU libc`/`GLIBC` → glibc; Ubuntu 20.04 quirk: exit 127 → `{loader} /bin/true`; `musl libc` → musl, exit status ignored) makes the **gcompat → musl** case fall out by construction — the gcompat stub at the glibc path prints the musl banner, classified musl (identity, not equivalence; no special-case exclusion). Empty set → empty `os_features`; subset matching then accepts only entries with empty `os_features`. A minimal host with no readable loader yields the empty set (debug-logged when `/nix` exists). **Known limitation:** detect-env ≠ exec-env (distrobox/container/install-here-run-there) — deferred to a future ADR. Research: `.claude/artifacts/research_libc_detection_robustness.md` (v2), `research_libc_detection_methods.md` (v1).
 
 **RESERVED `features` field:**
 
@@ -251,6 +245,7 @@ into a `utility::fs::LayerPlacement`, called from `pull.rs` before
 ## Gotchas {#gotchas}
 
 - **OCI tags mutable.** Never assume tag "frozen" or "pinned." Only digests immutable.
+- **`Platform::can_run` deleted.** Superseded by `is_compatible`/`select_best` (D1) at every real call site; its unit tests were either redundant with `is_compatible_truth_table` or ported into it.
 - **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. Bypasses cache, produces inconsistent results. All index ops should route through `default_index`.
 - **Submodule at `external/rust-oci-client/`** patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
 - **When unsure about current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. Upstream crate evolves independently of patched fork; training-data knowledge of API shape decays fast.

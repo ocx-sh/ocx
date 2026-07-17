@@ -42,30 +42,18 @@ impl LockEntry {
     /// host-platform leaf as the primary `digest` column and projecting the
     /// full available-only map into `platforms`.
     ///
-    /// For a V1 [`LockedResolution::LegacyIndex`] entry, the primary digest
-    /// is the legacy index digest and `platforms` is empty (the legacy
-    /// format carries no per-platform map). For a V2
-    /// [`LockedResolution::PerPlatform`] entry, the primary digest is the
-    /// host→`"any"` leaf and `platforms` is the full key→digest map.
+    /// The primary digest is the host→`Any`-offer leaf; the full
+    /// available-only map surfaces in verbose / JSON output. When the host
+    /// leaf is absent OR ambiguous (the publisher does not ship this
+    /// platform, or two entries tie), the primary digest falls back to empty
+    /// rather than fabricating one or erroring out of a report command.
     pub fn from_tool(tool: &ocx_lib::project::LockedTool, host: &ocx_lib::oci::Platform) -> Self {
-        use ocx_lib::project::LockedResolution;
-
-        let (digest, platforms) = match &tool.resolution {
-            // V1: the legacy index digest is the primary column; the legacy
-            // format carries no per-platform map.
-            LockedResolution::LegacyIndex(pinned) => (pinned.digest().to_string(), BTreeMap::new()),
-            // V2: the host→`"any"` leaf is the primary digest column; the full
-            // available-only map surfaces in verbose / JSON output. When the
-            // host leaf is absent (the publisher does not ship this platform),
-            // fall back to an empty primary digest rather than fabricating one.
-            LockedResolution::PerPlatform { platforms, .. } => {
-                let primary = ocx_lib::project::lookup_host_leaf(platforms, host)
-                    .map(|d| d.to_string())
-                    .unwrap_or_default();
-                let map = platforms.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
-                (primary, map)
-            }
+        let digest = match ocx_lib::project::lookup_host_leaf(&tool.platforms, host) {
+            ocx_lib::oci::Selection::Found((digest, _key)) => digest.to_string(),
+            ocx_lib::oci::Selection::None | ocx_lib::oci::Selection::Ambiguous(_) => String::new(),
         };
+        let platforms: BTreeMap<String, String> =
+            tool.platforms.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
 
         Self {
             binding: tool.name.clone(),

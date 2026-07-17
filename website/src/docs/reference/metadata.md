@@ -36,7 +36,6 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `env` | array | No | [Environment variable declarations](#env). |
 | `dependencies` | array | No | [Package dependencies](#dependencies). |
 | `entrypoints` | object | No | [Named entry points](#entry-points), keyed by command name. |
-| `platforms` | array | No | Authoring-sidecar-only [target-platform set](#dependencies-per-platform-pins), written by [`ocx package create --platform`][cmd-package-create]. Stripped at publish. |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -214,16 +213,17 @@ explicit registry — the digest is optional:
 ```
 
 An identifier with no digest tells `ocx package create --platform <PLATFORM>` to resolve it against
-the selected index and rewrite the sidecar in place with a manifest-digest pin (or, when the
-dependency ships platform-specific builds and you build with `--platform any`, a per-dependency
-[pin map](#dependencies-per-platform-pins)). The rewritten sidecar — not the one you hand-wrote — is
-what you commit alongside the archive and hand to [`ocx package push`][cmd-package-push]. `push` reads
-that file, verifies every dependency is pinned, and refuses to publish (exit 65) anything still
-tag-only.
+the selected index and rewrite the sidecar in place: a concrete `--platform` pins the resolved
+manifest digest directly on the identifier, while `--platform any` records it in a per-dependency
+[pin map](#dependencies-per-platform-pins) instead (an `any`-targeted package can only depend on
+dependencies that themselves offer an `any` manifest). The rewritten sidecar — not the one you
+hand-wrote — is what you commit alongside the archive and hand to
+[`ocx package push`][cmd-package-push]. `push` reads that file, verifies every dependency is
+pinned, and refuses to publish (exit 65) anything still tag-only.
 
 The **published** form is what the registry stores and what [`ocx package install`][cmd-package-install]
-reads: every dependency identifier carries a manifest digest, and the sidecar-only fields — the
-per-dependency `platforms` pin map and the bundle-level `platforms` target set — are gone.
+reads: every dependency identifier carries a manifest digest, and the sidecar-only
+per-dependency `platforms` pin map is gone.
 
 ```json
 { "identifier": "ocx.sh/java:21@sha256:a1b2c3d4e5f6...", "visibility": "public" }
@@ -266,7 +266,7 @@ history; the leaf manifest digest is not.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `identifier` | string | Yes | OCX identifier with an explicit registry. In the authoring sidecar the digest is optional — a tag-only identifier tells [`ocx package create`][cmd-package-create] to resolve it. In the published form the digest is mandatory and must reference a platform manifest, never an OCI Image Index (see [above](#dependencies-manifest-pins)). The tag is always advisory. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. |
-| `platforms` | object | No | Authoring-sidecar-only. Per-dependency manifest pin map — see [Per-Platform Pins](#dependencies-per-platform-pins). Written by `ocx package create --platform any` when the dependency ships platform-specific builds; stripped at publish. |
+| `platforms` | object | No | Authoring-sidecar-only. Per-dependency manifest pin map — see [Per-Platform Pins](#dependencies-per-platform-pins). Written by `ocx package create --platform any` as a single `"any"`-keyed entry; stripped at publish. |
 | `name` | string | No | Short name used to reference this dependency in `${deps.NAME.installPath}` templates. When set, this name is used instead of the repository basename. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
 | `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
@@ -295,46 +295,43 @@ history; the leaf manifest digest is not.
 ### Per-Platform Pins {#dependencies-per-platform-pins}
 
 A package built with [`ocx package create --platform any`][cmd-package-create] (platform-agnostic
-content, such as a script) may itself depend on a package that ships different manifests per
-platform (the native binary the script wraps, for example). [`ocx package create`][cmd-package-create]
-resolves that case into a per-dependency `platforms` map instead of a single pin:
+content, such as a script) targets no specific platform of its own, so it performs no
+platform-specific resolution. That means it can only depend on dependencies that themselves offer
+an `any` manifest — [`ocx package create`][cmd-package-create] records that resolved pin in a
+per-dependency `platforms` map instead of a plain digest, because a leaf manifest carries no
+platform descriptor of its own and a bare `@digest` pin could never be verified as genuinely
+`any`-offered:
 
 ```json
 {
-  "identifier": "ocx.sh/cmake:3.28",
-  "platforms": {
-    "linux/amd64": "sha256:aaaa...",
-    "darwin/arm64": "sha256:bbbb...",
-    "linux/amd64;osf=libc.glibc": "sha256:cccc..."
-  }
+  "identifier": "ocx.sh/mytool:1.0",
+  "platforms": { "any": "sha256:aaaa..." }
 }
 ```
 
-Keys use the same lock-key encoding as [`ocx.lock`'s per-platform table][in-depth-project-lock-format]
-— plain `os/arch` for the common case, an `;osf=` suffix for a libc-tagged platform. This differs from
-the bundle-level `platforms` array (and the `--platform` CLI flag), which use the `+`-suffixed form
-(`linux/amd64+libc.glibc`) documented under [OCI Platform Fields](#oci-platform); both describe the
-same platform, encoded differently for their respective contexts.
+The map key uses the same [canonical platform grammar][reference-platforms] as every other
+platform string in OCX — `--platform`, `ocx.lock`'s per-platform table, all of it. A hand-authored
+or pre-existing sidecar may carry other keys (a concrete platform, or a feature-tagged one like
+`linux/amd64+libc.glibc`); at publish time each key is projected onto the platform being published
+through the same [compatibility relation and scoring][reference-platforms-compatibility]
+`Index::select` uses at install time — so a plain `linux/amd64` key covers a feature-tagged
+package platform like `linux/amd64+libc.glibc`, but a feature-tagged key does not cover the plain
+platform (fail-closed: the offer's declared features must be a subset of what the target
+platform's requirement offers). A platform the map does not cover at all makes the projection fail
+(exit 65), naming the uncovered platform.
 
-At publish time, the map collapses to a single pin for the platform being published, via a
-three-tier lookup: an exact key match, then the same platform with its `os.features` stripped (the
-*base tier*), then `any`. The base tier means a dependency pinned
-only at `linux/amd64` also covers a package platform of `linux/amd64;osf=libc.glibc` — the reverse
-does not hold: a dependency pinned only at the libc-tagged key does **not** cover the plain platform
-(fail-closed, matching install-time `can_run` subset semantics). A platform the map does not cover at
-all makes `create` fail (exit 65), naming the uncovered platform.
+If a dependency offers no `any` manifest at all, `ocx package create --platform any` fails (exit
+65) naming the dependency — there is no partial coverage to fall back to. The same rule extends to
+already-pinned dependencies: `create` and [`ocx package push`][cmd-package-push] both reject a
+direct digest pin anywhere in an `any`-targeted bundle's dependency list (exit 65), because that
+pin's `any`-ness cannot be verified either. See
+[Dependencies with Platform-Specific Builds][authoring-dependency-platforms] for the full
+publisher workflow.
 
-`ocx package create --platform any` derives the bundle's own `platforms` target set from these maps:
-it is the set of platforms covered by **every** dependency (direct pins and `any`-keyed map entries
-are universal, so they never narrow the intersection). If no platform is covered by every
-dependency, `create` fails (exit 65) rather than emit a package with a target set nobody can install.
-[`ocx package push`][cmd-package-push] reads the resulting target set and fans out one published
-manifest per platform in it, unless `--platform` narrows the push to a single member.
-
-A dependency pin is a snapshot of the publisher's platform coverage at `create` time. If the
-dependency later adds a platform, the consuming package does not automatically gain it — re-run
-`ocx package create --platform any` against a refreshed index, then `ocx package push`, to widen the
-target set.
+A pin map entry is a snapshot of the dependency's platform coverage at `create` time, not a live
+query. If the dependency later adds an `any` manifest where none existed before, the consuming
+package does not automatically pick it up — re-run `ocx package create --platform any` against a
+refreshed index, then `ocx package push`, to re-resolve.
 
 ### Visibility {#dependencies-visibility}
 
@@ -571,7 +568,6 @@ The metadata format carries an integer `version` field reserved for future schem
 - `strip_components` — optional leading path components to strip during extraction.
 - `env` — optional declarations of environment variables.
 - `dependencies` — optional package dependencies, digest-pinned in the published form. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), optional `visibility` controlling env propagation through the chain, and — authoring sidecar only — an optional `platforms` pin map. See [Dependencies](#dependencies).
-- `platforms` — authoring-sidecar-only bundle-level target-platform set written by `ocx package create --platform`. Absent from published metadata. See [Per-Platform Pins](#dependencies-per-platform-pins).
 - `entrypoints` — optional object keyed by the invocable name. Each value object carries two optional fields. `command`: the binary the generated launcher dispatches to when it differs from the invocable name (e.g. expose `fmt` while running `cargo-fmt`); follows the same slug constraint as the key (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes); not interpolated; omitted means the invocable name is the dispatch target. `args`: array of fixed leading arguments prepended before user-supplied arguments at dispatch time; each element is one argv token; `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time; omitted or empty are wire-identical — the field is absent in the serialized form when the array is empty.
 
 Visibility model:
@@ -581,7 +577,7 @@ Visibility model:
 
 ## OCI Platform Fields {#oci-platform}
 
-`metadata.json` describes runtime configuration for a single package build. The OCI platform descriptor — the `platform` object in an [OCI Image Index][oci-image-index] entry — is separate and not part of `metadata.json`. It is declared by the publisher at push time (or generated by the mirror tool from the asset spec) and consumed by OCX at index resolution time.
+`metadata.json` describes runtime configuration for a single package build. The OCI platform descriptor — the `platform` object in an [OCI Image Index][oci-image-index] entry — is separate and not part of `metadata.json`. It is declared by the publisher at push time (or generated by the mirror tool from the asset spec) and consumed by OCX at index resolution time. This section covers the JSON wire object; see [Platforms][reference-platforms] for the human-readable string form (`--platform`, lock keys, pin-map keys) and the compatibility relation OCX evaluates it against.
 
 ### `os.features` and libc tagging {#oci-platform-os-features}
 
@@ -629,7 +625,7 @@ Behavioral changes made within `version: 1` since the initial release:
 | **Visibility default flip** | `Var.visibility` now defaults to `"private"` instead of `"public"`. Packages that relied on the old default emit no interface-surface env entries for un-tagged vars. Publishers must explicitly set `"visibility": "public"` to restore prior behavior for consumer-visible vars. |
 | **Entry-axis addition** | `Var.visibility` gained the `"interface"` value: env entries visible on the interface surface but not the private surface. Previously only `"private"` and `"public"` were recognized; `"interface"` entries in older parsers will be rejected at deserialization. |
 | **Baked entry-point arguments** | Entry-point values now accept an optional `args` array of fixed leading arguments prepended before user-supplied arguments at dispatch time. `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time. An absent or empty `args` array is wire-identical to prior behavior — packages without `args` are unaffected. |
-| **Dependency manifest pinning** | The authoring sidecar accepts a digest-optional dependency identifier (`ocx package create --platform` resolves it), a per-dependency `platforms` pin map, and a bundle-level `platforms` target set — see [Per-Platform Pins](#dependencies-per-platform-pins). Both sidecar-only fields are stripped at publish; the published wire format is unchanged. The published digest must reference a platform manifest, never an OCI Image Index — see [Manifest Pins, Never Index Pins](#dependencies-manifest-pins). `ocx package push` rejects an index-pinned or unpinned dependency (exit 65). |
+| **Dependency manifest pinning** | The authoring sidecar accepts a digest-optional dependency identifier (`ocx package create --platform` resolves it) and a per-dependency `platforms` pin map — see [Per-Platform Pins](#dependencies-per-platform-pins). The sidecar-only field is stripped at publish; the published wire format is unchanged. The published digest must reference a platform manifest, never an OCI Image Index — see [Manifest Pins, Never Index Pins](#dependencies-manifest-pins). `ocx package push` rejects an index-pinned or unpinned dependency (exit 65). |
 
 ::: warning These changes affect existing packages
 If you published packages before the visibility-default flip, their untagged env entries will no longer appear on the consumer surface. Add `"visibility": "public"` explicitly to vars that consumers should see.
@@ -667,9 +663,14 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-package-push-layout]: ./command-line.md#package-push-layout
 [cmd-package-install]: ./command-line.md#package-install
 
+<!-- reference -->
+[reference-platforms]: ./platforms.md
+[reference-platforms-compatibility]: ./platforms.md#compatibility
+
 <!-- guide -->
 [authoring-migration]: ../authoring/env-surface.md#migrating
 [authoring-libc]: ../authoring/multi-platform.md#libc
+[authoring-dependency-platforms]: ../authoring/multi-platform.md#dependency-platforms
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-packages

@@ -74,6 +74,7 @@ pub mod platform;
 pub use platform::Architecture;
 pub use platform::OperatingSystem;
 pub use platform::Platform;
+pub use platform::{Selection, compatibility_score, is_compatible, select_best};
 
 pub mod digest;
 pub use digest::Algorithm;

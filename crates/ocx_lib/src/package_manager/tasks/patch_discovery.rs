@@ -288,11 +288,11 @@ impl PackageManager {
     pub async fn discover_and_install_patches(
         &self,
         base_id: &Identifier,
-        platforms: &[oci::Platform],
+        platform: &oci::Platform,
     ) -> Result<usize, PackageErrorKind> {
         self.discover_and_install_patches_with_mode(
             base_id,
-            platforms,
+            platform,
             PatchDiscoveryMode::Lazy,
             PatchDescriptorScope::Both,
         )
@@ -313,7 +313,7 @@ impl PackageManager {
     pub(super) async fn discover_and_install_patches_with_mode(
         &self,
         base_id: &Identifier,
-        platforms: &[oci::Platform],
+        platform: &oci::Platform,
         mode: PatchDiscoveryMode,
         scope: PatchDescriptorScope,
     ) -> Result<usize, PackageErrorKind> {
@@ -619,8 +619,7 @@ impl PackageManager {
                     );
                 }
                 let companion_id = companion.identifier.clone();
-                let platforms_vec = platforms.to_vec();
-                match self.install_companion(&companion_id, platforms_vec).await {
+                match self.install_companion(&companion_id, platform.clone()).await {
                     Ok(_) => {
                         installed_count += 1;
                         log::debug!("patch discovery: companion '{}' installed", companion_id);
@@ -684,11 +683,11 @@ impl PackageManager {
     pub(super) async fn install_companion(
         &self,
         companion_id: &Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
         // Pull the companion into the object store (candidate=false, select=false).
         // No call to discover_and_install_patches — this is the recursion guard.
-        self.pull(companion_id, platforms).await
+        self.pull(companion_id, platform).await
     }
 }
 
@@ -1718,7 +1717,9 @@ mod tests {
 
         let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without panicking or hitting unimplemented!.
-        let result = manager.discover_and_install_patches(&base_id, &[]).await;
+        let result = manager
+            .discover_and_install_patches(&base_id, &oci::Platform::any())
+            .await;
         assert!(
             result.is_ok(),
             "discover_and_install_patches must return Ok(()) when patches is None"
@@ -1745,7 +1746,9 @@ mod tests {
 
         let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without any network call.
-        let result = manager.discover_and_install_patches(&base_id, &[]).await;
+        let result = manager
+            .discover_and_install_patches(&base_id, &oci::Platform::any())
+            .await;
         assert!(
             result.is_ok(),
             "discover_and_install_patches must return Ok(()) when offline (even with patch config present)"
@@ -1826,7 +1829,7 @@ mod tests {
         // `fn(_, _, _) -> _` is the coercion point — if the method does not exist
         // or has a different argument count the cast fails at compile time.
         let _ = PackageManager::discover_and_install_patches as fn(_, _, _) -> _;
-        // `install_companion` takes `self`, `&Identifier`, `Vec<Platform>`.
+        // `install_companion` takes `self`, `&Identifier`, `Platform`.
         let _ = PackageManager::install_companion as fn(_, _, _) -> _;
         // If both casts compile, the two methods exist as distinct items.
     }
@@ -1902,7 +1905,7 @@ mod tests {
 
         // Invoke install_companion — it will fail (offline + empty store) but must
         // NOT touch the tag store.
-        let result = manager.install_companion(&companion_id, vec![]).await;
+        let result = manager.install_companion(&companion_id, oci::Platform::any()).await;
         assert!(
             result.is_err(),
             "install_companion on an offline empty manager must fail (expected: not a guard failure)"
@@ -2000,7 +2003,7 @@ mod tests {
 
         // Call install_companion — will fail (no package data in store), but must NOT
         // write any tag-store entries for the companion's patch repos.
-        let result = manager.install_companion(&companion_id, vec![]).await;
+        let result = manager.install_companion(&companion_id, oci::Platform::any()).await;
         assert!(result.is_err(), "install_companion must fail (no data in store)");
 
         // Critical: even with a non-offline manager, install_companion must NOT have
@@ -2252,7 +2255,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
         let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
-        let result = manager.discover_and_install_patches(&base_id, &[]).await;
+        let result = manager
+            .discover_and_install_patches(&base_id, &oci::Platform::any())
+            .await;
         assert!(
             result.is_ok(),
             "discover_and_install_patches must return Ok when offline (cross-registry warning is advisory only); got: {result:?}"

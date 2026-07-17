@@ -20,7 +20,7 @@ use clap::Parser;
 
 use ocx_lib::log;
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 #[derive(Parser, Clone)]
 pub struct Install {
@@ -29,7 +29,7 @@ pub struct Install {
     select: bool,
 
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Package identifiers to install.
     #[arg(required = true, num_args = 1..)]
@@ -51,7 +51,7 @@ impl Install {
             .manager()
             .install_all(
                 oci_packages.clone(),
-                platforms_or_default(self.platforms.as_slice()),
+                conventions::platform_or_default(self.platform.platform.clone()),
                 true,
                 self.select,
                 context.concurrency(),

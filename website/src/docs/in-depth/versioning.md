@@ -117,11 +117,10 @@ If a package publishes a universal build with no platform field in the manifest,
 The OCI platform model supports finer-grained descriptors for precise compatibility targeting:
 
 - **`variant`** — CPU sub-architecture. For ARM: `v6`, `v7` (32-bit), `v8` (64-bit / arm64). OCX selects the most specific match.
-- **`os.version`** — OS version string, primarily used for Windows Server editions (e.g. `10.0.14393.1066`).
 - **`os.features`** — OS capability flags, e.g. `win32k` for Windows container isolation modes.
 - **`features`** — Reserved for future platform extensions in the OCI spec.
 
-OCX matches all declared fields when selecting among manifest entries. See the [OCI Image Index specification][oci-image-index] for the complete field reference.
+OCX matches all declared fields when selecting among manifest entries, through the directed compatibility relation and scoring documented in [Platforms][reference-platforms]. See the [OCI Image Index specification][oci-image-index] for the complete field reference.
 
 ::: warning OCI platform.variant ≠ OCX variants
 [`platform.variant`][oci-image-index] is a CPU sub-architecture field, distinct from [OCX software variants](#variants), which describe build-time characteristics like optimization profiles or feature sets.
@@ -140,6 +139,7 @@ The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote`
 ## See Also
 
 - [Versioning section in the user guide][user-versioning] — how-to: pick a tag, pin a digest, override platform
+- [Platforms][reference-platforms] — the canonical platform grammar and compatibility relation
 - [Indices][in-depth-indices] — tag-store snapshots, bundled index pattern, lock semantics
 - [Storage][in-depth-storage] — content-addressed package store, layer dedup
 - [Build Separator FAQ][faq-build-separator] — full rationale for `_` over `+`
@@ -164,6 +164,9 @@ The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote`
 
 <!-- environment -->
 [env-ocx-index]: ../reference/environment.md#ocx-index
+
+<!-- reference -->
+[reference-platforms]: ../reference/platforms.md
 
 <!-- internal -->
 [user-versioning]: ../user-guide.md#versioning

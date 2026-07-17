@@ -26,6 +26,8 @@ EXIT_SUCCESS = 0
 EXIT_USAGE = 64
 # NoHostLeaf → ConfigError (78) per error.rs ClassifyExitCode.
 EXIT_CONFIG = 78
+# AmbiguousHostLeaf → DataError (65) per error.rs ClassifyExitCode.
+EXIT_DATA = 65
 
 # The published fixture ships these two; bind to the rolling minor tag, which
 # cascade makes a multi-platform image index (see test_cascade.py).
@@ -97,16 +99,34 @@ def test_pull_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: st
     )
 
 
-def test_lock_multi_platform_warms_all_requested(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`ocx lock --platform=amd64 --platform=arm64` materializes both leaves."""
+def test_lock_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx lock --platform=linux/arm64` warms the arm64 leaf and ONLY that leaf.
+
+    `--platform` takes at most one value for every resolution command (D4 of
+    `adr_platform_model_unification.md`); a second occurrence is a clap usage
+    error (see `test_lock_repeated_platform_flag_exits_64`).
+    """
+    _publish_multiplatform(ocx, unique_repo, tmp_path)
+    project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
+
+    result = _run(ocx, project_dir, "lock", f"--platform={ARM64}")
+    assert result.returncode == EXIT_SUCCESS, f"cross-platform lock failed: {result.stderr}"
+
+    assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 leaf must be warmed"
+    assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
+        "amd64 must stay uncached — only the requested arm64 leaf was materialized"
+    )
+
+
+def test_lock_repeated_platform_flag_exits_64(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx lock --platform=amd64 --platform=arm64` is a usage error (exit 64)."""
     _publish_multiplatform(ocx, unique_repo, tmp_path)
     project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
 
     result = _run(ocx, project_dir, "lock", f"--platform={AMD64}", f"--platform={ARM64}")
-    assert result.returncode == EXIT_SUCCESS, f"multi-platform lock failed: {result.stderr}"
-
-    assert _dry_run_status(ocx, project_dir, AMD64) == "cached", "amd64 leaf must be warmed"
-    assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 leaf must be warmed"
+    assert result.returncode == EXIT_USAGE, (
+        f"repeated --platform for lock must exit {EXIT_USAGE}; got {result.returncode}: {result.stderr}"
+    )
 
 
 def test_add_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -162,6 +182,45 @@ def test_pull_platform_not_shipped_exits_78(ocx: OcxRunner, unique_repo: str, tm
     assert result.returncode == EXIT_CONFIG, (
         f"unshipped --platform must exit {EXIT_CONFIG}; got {result.returncode}: {result.stderr}"
     )
+
+
+def test_pull_platform_ambiguous_dual_libc_leaf_exits_65(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx pull --platform=<dual-libc>` against a lock that ships only
+    separate single-libc leaves (no combined key) is genuinely ambiguous, not
+    absent — exit 65 (DataError), not `NoHostLeaf`'s 78, and the error names
+    both tied candidates plus the `--platform` disambiguation hint.
+
+    Regression for the F2 lock-read gap: `lookup_host_leaf` used to collapse
+    `Selection::Ambiguous` to `None`, which `host_leaf_identifier` then
+    surfaced as `NoHostLeaf` ("run `ocx update`") — the wrong remedy, since
+    re-running the same fresh resolve ties identically and never fixes it.
+    See `adr_platform_model_unification.md` D1.
+    """
+    glibc = "linux/amd64+libc.glibc"
+    musl = "linux/amd64+libc.musl"
+    # Two libc-marked entries under the SAME tag merge into one image index
+    # (`new=True` then `new=False`, `cascade=False` keeps it minimal) — same
+    # fixture shape as the fresh-resolve ambiguity regression in
+    # `test_install_libc.py::test_install_errors_ambiguous_when_host_reports_both_libcs`.
+    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "glibc", platform=glibc, new=True, cascade=False)
+    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "musl", platform=musl, new=False, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir(exist_ok=True)
+    (project_dir / "ocx.toml").write_text(f'[tools]\n{unique_repo} = "{ocx.registry}/{unique_repo}:{PUSH_VERSION}"\n')
+    lock = _run(ocx, project_dir, "lock", "--no-pull")
+    assert lock.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock.stderr}"
+
+    dual_libc_host = "linux/amd64+libc.glibc,libc.musl"
+    result = _run(ocx, project_dir, "pull", f"--platform={dual_libc_host}")
+    assert result.returncode == EXIT_DATA, (
+        f"a dual-libc --platform against separate single-libc lock entries must exit {EXIT_DATA}; "
+        f"got {result.returncode}: {result.stderr}"
+    )
+    assert glibc in result.stderr and musl in result.stderr, (
+        f"the ambiguity error must name both tied candidate keys; got: {result.stderr}"
+    )
+    assert "--platform" in result.stderr, f"the error must hint at --platform disambiguation; got: {result.stderr}"
 
 
 def test_env_platform_single_target(ocx: OcxRunner, unique_repo: str, tmp_path: Path):

@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/tech-strategy.md`
 **Domain Tags:** api
 **Supersedes:** N/A
-**Superseded By:** N/A
+**Superseded By:** [`adr_platform_model_unification.md`](./adr_platform_model_unification.md) — the matching semantics and `Platform` field set decided there (no `os_version`, no CPU `features`) replace this proposal's extensibility rationale
 
 ## Context
 

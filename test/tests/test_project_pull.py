@@ -1477,31 +1477,27 @@ hello = "{ocx.registry}/{repo}:{tag}"
 
 
 # ---------------------------------------------------------------------------
-# V2 lock: ``ocx pull`` resolves the host-leaf digest from [tool.platforms]
+# Lock: ``ocx pull`` resolves the host-leaf digest from [tool.platforms]
 # ---------------------------------------------------------------------------
 
 _LEAF_RE_PULL = _re_pull.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def test_pull_v2_lock_resolves_host_leaf_from_platforms_table(
+def test_pull_resolves_host_leaf_from_platforms_table(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx pull`` on a V2 ``ocx.lock`` resolves each tool's host-platform
-    leaf digest from ``[tool.platforms]`` — not via a legacy index-manifest +
-    ``Index::select`` walk.
+    """``ocx pull`` resolves each tool's host-platform leaf digest from
+    ``[tool.platforms]``.
 
-    ADR §pull.rs: "V2: look up ``platforms[host]``, fall back to
-    ``platforms['any']``, reconstruct ``repository.clone_with_digest(leaf)``."
-
-    Scenario: publish, ``ocx lock`` (V2, ``--no-pull`` to start cold), then
-    ``ocx pull``.  Assert:
-    1. The lock is V2 (``lock_version = 2``, ``[tool.platforms]`` present, no
-       ``pinned =`` line, at least one leaf digest recorded).
+    Scenario: publish, ``ocx lock`` (``--no-pull`` to start cold), then
+    ``ocx pull``. Assert:
+    1. The lock carries ``[tool.platforms]``, no ``pinned =`` line, at least
+       one leaf digest recorded.
     2. ``ocx pull`` exits 0 and the package appears in the object store.
     """
-    repo, tag = _published_tool(ocx, tmp_path, "v2pull")
+    repo, tag = _published_tool(ocx, tmp_path, "v3pull")
 
-    project = tmp_path / "proj_v2pull"
+    project = tmp_path / "proj_v3pull"
     project.mkdir()
     _write_ocx_toml(
         project,
@@ -1517,16 +1513,13 @@ the_tool = "{ocx.registry}/{repo}:{tag}"
     )
 
     lock_text = (project / "ocx.lock").read_text()
-    assert "lock_version = 2" in lock_text, (
-        "lock must be V2 (lock_version = 2); got:\n" + lock_text[:400]
-    )
     assert "[tool.platforms]" in lock_text, (
-        "V2 lock must carry a [tool.platforms] table"
+        "lock must carry a [tool.platforms] table"
     )
     leaf_digests = _LEAF_RE_PULL.findall(lock_text)
-    assert leaf_digests, "V2 lock must record at least one leaf digest"
+    assert leaf_digests, "lock must record at least one leaf digest"
     assert "pinned =" not in lock_text, (
-        "V2 lock must not carry a legacy `pinned` line"
+        "lock must not carry a legacy `pinned` line"
     )
 
     ocx_home = Path(ocx.env["OCX_HOME"])
@@ -1537,111 +1530,25 @@ the_tool = "{ocx.registry}/{repo}:{tag}"
 
     result = _run_pull(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx pull on V2 lock must succeed (resolves host-leaf from "
-        f"[tool.platforms]); rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
-
-    count_after = _packages_present_count(ocx_home, ocx.registry)
-    assert count_after >= 1, (
-        f"at least one package must be present after ocx pull on V2 lock; "
-        f"got {count_after}"
-    )
-
-
-def test_pull_v1_lock_still_installs_via_legacy_path(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """``ocx pull`` on a committed V1 lock (``lock_version = 1``, ``pinned``
-    field) still succeeds via the legacy index-digest + ``Index::select`` path
-    — no forced upgrade.
-
-    ADR: "V1 lock: keep the index-digest + ``Index::select`` path (no forced
-    upgrade on read)."
-
-    Flow:
-    1. Publish, lock (V2), extract real coordinates, overwrite with V1 lock.
-    2. ``ocx pull`` must succeed (the registry has the index manifest; the
-       old-path select walk resolves the host leaf).
-    3. At least one package must appear in the object store.
-    """
-    repo, tag = _published_tool(ocx, tmp_path, "v1pull")
-
-    project = tmp_path / "proj_v1pull"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-the_tool = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-
-    lock = _run_lock(ocx, project)
-    assert lock.returncode == EXIT_SUCCESS, lock.stderr
-    v2_text = (project / "ocx.lock").read_text()
-
-    # Synthesise a V1 lock from the V2 coordinates.
-    repo_match = _re_pull.search(r'repository\s*=\s*"([^"]+)"', v2_text)
-    leaf_match = _LEAF_RE_PULL.search(v2_text)
-    decl_match = _re_pull.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
-    assert repo_match and leaf_match and decl_match, (
-        "V2 lock must carry repository + leaf + declaration_hash; got:\n" + v2_text[:400]
-    )
-    bare_repo = repo_match.group(1)
-    leaf_hex = leaf_match.group(1)
-    decl_hash = decl_match.group(1)
-
-    (project / "ocx.lock").write_text(
-        f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "the_tool"
-group = "default"
-pinned = "{bare_repo}@sha256:{leaf_hex}"
-"""
-    )
-
-    ocx_home = Path(ocx.env["OCX_HOME"])
-    count_before = _packages_present_count(ocx_home, ocx.registry)
-    assert count_before == 0, "object store must be cold before pull"
-
-    result = _run_pull(ocx, project)
-    assert result.returncode == EXIT_SUCCESS, (
-        f"ocx pull on V1 lock must succeed via legacy index-digest path; "
+        f"ocx pull must succeed (resolves host-leaf from [tool.platforms]); "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     count_after = _packages_present_count(ocx_home, ocx.registry)
     assert count_after >= 1, (
-        f"at least one package must appear after pull on V1 lock; got {count_after}"
+        f"at least one package must be present after ocx pull; got {count_after}"
     )
 
 
-def test_pull_multi_platform_on_legacy_exits_64(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """``ocx pull --platform=A --platform=B`` against a V1 lock exits 64
-    before any network I/O — a legacy index pin resolves the *same*
-    identifier for every platform, so a multi-platform request cannot be
-    honoured (``reject_multi_platform_on_legacy`` in ``project_context.rs``).
-
-    Unlike ``ocx lock``/``ocx add``/``ocx update`` — which always migrate a
-    carried V1 entry to V2 before writing, so their own ``materialize_lock``
-    call never observes a legacy entry — ``ocx pull`` reads ``ocx.lock``
-    verbatim from disk without ever rewriting or migrating it. A committed
-    V1-format lock is therefore the only route that reaches this reject
-    path end-to-end; this test is the ``pull`` variant flagged by #138 (the
-    ``lock`` command's own migration makes the check unreachable there).
+def test_pull_repeated_platform_flag_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx pull --platform=A --platform=B`` always exits 64 before any
+    network I/O — `--platform` takes at most one value for every resolution
+    command (D4 of `adr_platform_model_unification.md`); a second occurrence
+    is a clap usage error regardless of the lock's format version.
     """
-    repo, tag = _published_tool(ocx, tmp_path, "v1multi")
+    repo, tag = _published_tool(ocx, tmp_path, "multiplatform")
 
-    project = tmp_path / "proj_v1multi"
+    project = tmp_path / "proj_multiplatform"
     project.mkdir()
     _write_ocx_toml(
         project,
@@ -1653,67 +1560,33 @@ the_tool = "{ocx.registry}/{repo}:{tag}"
 
     lock = _run_lock(ocx, project)
     assert lock.returncode == EXIT_SUCCESS, lock.stderr
-    v2_text = (project / "ocx.lock").read_text()
-
-    repo_match = _re_pull.search(r'repository\s*=\s*"([^"]+)"', v2_text)
-    leaf_match = _LEAF_RE_PULL.search(v2_text)
-    decl_match = _re_pull.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
-    assert repo_match and leaf_match and decl_match, (
-        "V2 lock must carry repository + leaf + declaration_hash; got:\n" + v2_text[:400]
-    )
-    bare_repo = repo_match.group(1)
-    leaf_hex = leaf_match.group(1)
-    decl_hash = decl_match.group(1)
-
-    (project / "ocx.lock").write_text(
-        f"""\
-[metadata]
-lock_version = 1
-declaration_hash_version = 1
-declaration_hash = "{decl_hash}"
-generated_by = "ocx 0.3.0"
-generated_at = "2026-01-01T00:00:00Z"
-
-[[tool]]
-name = "the_tool"
-group = "default"
-pinned = "{bare_repo}@sha256:{leaf_hex}"
-"""
-    )
 
     result = _run_pull(ocx, project, "--platform=linux/amd64", "--platform=linux/arm64")
 
     assert result.returncode == EXIT_USAGE, (
-        f"multi-platform pull against a V1 lock must exit {EXIT_USAGE}; "
-        f"got {result.returncode}\nstderr:\n{result.stderr}"
+        f"repeated --platform must exit {EXIT_USAGE}; got {result.returncode}\nstderr:\n{result.stderr}"
     )
-    assert "v2 lock" in result.stderr, (
-        f"stderr must name the v2-lock remedy; got:\n{result.stderr}"
-    )
-    assert "ocx lock" in result.stderr, (
-        f"stderr must name the `ocx lock` remedy command; got:\n{result.stderr}"
+    assert "cannot be used multiple times" in result.stderr, (
+        f"stderr must name the repeated-flag usage error; got:\n{result.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Gap 3 — host-platform absent from V2 lock → clean pre-network error (exit 78)
+# Gap 3 — host-platform absent from lock → clean pre-network error (exit 78)
 # ---------------------------------------------------------------------------
 
 
 def test_pull_host_platform_absent_exits_78_before_network(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """A V2 lock whose ``[tool.platforms]`` carries only a non-host key causes
+    """A lock whose ``[tool.platforms]`` carries only a non-host key causes
     ``ocx pull`` to exit **78** (``ConfigError``) with an error mentioning
     ``ocx update``, and the failure fires **before** any network I/O (proven by
     identical behaviour under ``--offline``).
 
-    ADR per-platform-lock-pinning Decision Outcome / absent-key behaviour:
-    "an absent host key errors at lock-read, pre-network."
-
     Setup:
-    1. Push a normal package and write a V2 lock with ``ocx lock --no-pull``
-       so we have a real declaration_hash and a syntactically valid repository.
+    1. Push a normal package and write a lock with ``ocx lock --no-pull`` so
+       we have a real declaration_hash and a syntactically valid repository.
     2. Rewrite the lock's ``[tool.platforms]`` to contain only a dummy
        platform key that is *not* the host platform — simulating "publisher
        ships only for an OS the host runner doesn't run."
@@ -1733,20 +1606,20 @@ tool = "{ocx.registry}/{repo}:{tag}"
 """,
     )
 
-    # Populate a V2 lock without warming the object store.
+    # Populate a lock without warming the object store.
     lock_result = _run_lock(ocx, project)
     assert lock_result.returncode == EXIT_SUCCESS, (
         f"setup lock failed: rc={lock_result.returncode}\nstderr:\n{lock_result.stderr}"
     )
     lock_text = (project / "ocx.lock").read_text()
 
-    # Extract fields needed to reconstruct a syntactically-valid V2 lock.
+    # Extract fields needed to reconstruct a syntactically-valid lock.
     decl_match = _re_pull.search(
         r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', lock_text
     )
     repo_match = _re_pull.search(r'repository\s*=\s*"([^"]+)"', lock_text)
     assert decl_match and repo_match, (
-        f"V2 lock must carry declaration_hash and repository; got:\n{lock_text[:400]}"
+        f"lock must carry declaration_hash and repository; got:\n{lock_text[:400]}"
     )
     decl_hash = decl_match.group(1)
     bare_repo = repo_match.group(1)
@@ -1754,14 +1627,14 @@ tool = "{ocx.registry}/{repo}:{tag}"
     # Craft a fake leaf digest for a non-host platform.  We use "darwin/arm64"
     # as a portable non-host key on the Linux CI runner (and on darwin/amd64
     # runners).  We pick the lexicographically smallest key that is NOT the
-    # host platform's lock_key to ensure the host-key lookup fails.
+    # host platform's canonical key to ensure the host-key lookup fails.
     fake_leaf = "b" * 64
     non_host_platform = "darwin/arm64"
 
     (project / "ocx.lock").write_text(
         f"""\
 [metadata]
-lock_version = 2
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "{decl_hash}"
 generated_by = "ocx 0.3.0"

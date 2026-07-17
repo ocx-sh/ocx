@@ -1,9 +1,17 @@
-"""Acceptance tests for the `ocx package push` dependency gate + fan-out.
+"""Acceptance tests for the `ocx package push` dependency gate.
 
-Push is a pure gate plus mechanical multi-platform materialization
-(adr_dependency_manifest_pinning.md): it rejects unpinned or index-pinned
-dependencies (create is the compiler) and fans out one published manifest per
-platform in the sidecar's embedded target set.
+Push is a pure gate (adr_dependency_manifest_pinning.md): it rejects unpinned
+or index-pinned dependencies (create is the compiler).
+
+Per `adr_platform_model_unification.md` D5, a bundle targets exactly one
+platform per `create`/`push` invocation — there is no bundle-level embedded
+target *set* and no per-push multi-platform fan-out (the sidecar's `platforms`
+field, and the fan-out it drove, are deleted). The single-platform `push`
+CLI surface (default `--platform`, cascade-tag interaction) is WP-E's
+implementation scope (`adr_platform_model_unification.md` "Resolved" note
+#2) — this file keeps only the platform-set-independent dependency gate
+coverage; the multi-platform narrowing/fan-out tests that exercised the
+deleted coverage-intersection machinery are removed with it.
 """
 
 from __future__ import annotations
@@ -15,9 +23,9 @@ from pathlib import Path
 
 from src.helpers import make_package
 from src.registry import (
-    fetch_blob,
     fetch_manifest_from_registry,
     fetch_platform_manifest_digest,
+    index_platforms,
     push_raw_package,
 )
 from src.runner import OcxRunner, current_platform
@@ -30,18 +38,6 @@ EXIT_NOT_FOUND = 79
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _fetch_manifest_by_digest(registry: str, repo: str, digest: str) -> dict:
-    """GET a child image manifest by digest (manifests endpoint, not blobs)."""
-    import urllib.request
-
-    req = urllib.request.Request(
-        f"http://{registry}/v2/{repo}/manifests/{digest}",
-        headers={"Accept": "application/vnd.oci.image.manifest.v1+json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode())
 
 
 def _bundle(ocx: OcxRunner, tmp_path: Path, name: str) -> Path:
@@ -63,7 +59,7 @@ def _created_app(
     ocx: OcxRunner, tmp_path: Path, name: str, deps: list[dict], platform: str
 ) -> Path:
     """Run `ocx package create -p` so the OUTPUT sidecar carries resolved pins
-    plus the embedded target set; push infers that sidecar from the bundle."""
+    for `platform`; push infers that sidecar from the bundle."""
     pkg_dir = tmp_path / f"content-{name}"
     (pkg_dir / "bin").mkdir(parents=True)
     (pkg_dir / "bin" / "app").write_text("#!/bin/sh\necho app\n")
@@ -81,15 +77,6 @@ def _created_app(
 
 def _push(ocx: OcxRunner, fq: str, bundle: Path, *args: str, check: bool = True):
     return ocx.run("package", "push", "-n", *args, "-i", fq, str(bundle), check=check)
-
-
-def _two_platform_leaf(ocx: OcxRunner, repo: str, tmp_path: Path):
-    """Publish one dep tag carrying BOTH linux/amd64 and darwin/arm64 children."""
-    make_package(ocx, repo, "1.0.0", tmp_path, platform="linux/amd64", cascade=False)
-    return make_package(
-        ocx, repo, "1.0.0", tmp_path.joinpath("second"), platform="darwin/arm64",
-        cascade=False, new=False,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +111,7 @@ def test_push_rejects_index_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_pat
     bundle = _bundle(ocx, tmp_path, "indexpin")
     metadata = _write_metadata(tmp_path, "indexpin", {
         "type": "bundle", "version": 1,
+        "platform": current_platform(),
         "dependencies": [{"identifier": f"{leaf.fq}@{index_digest}"}],
     })
 
@@ -140,6 +128,7 @@ def test_push_rejects_missing_dep_manifest(ocx: OcxRunner, unique_repo: str, tmp
     bundle = _bundle(ocx, tmp_path, "ghost")
     metadata = _write_metadata(tmp_path, "ghost", {
         "type": "bundle", "version": 1,
+        "platform": current_platform(),
         "dependencies": [{"identifier": f"{ocx.registry}/{unique_repo}_ghost:1.0.0@{ghost_digest}"}],
     })
 
@@ -156,6 +145,7 @@ def test_push_accepts_manifest_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_
     bundle = _bundle(ocx, tmp_path, "pinned")
     metadata = _write_metadata(tmp_path, "pinned", {
         "type": "bundle", "version": 1,
+        "platform": current_platform(),
         "dependencies": [{"identifier": f"{leaf.fq}@{manifest_digest}"}],
     })
 
@@ -166,156 +156,153 @@ def test_push_accepts_manifest_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_
 
 
 # ---------------------------------------------------------------------------
-# Platform-set decision (D1)
+# Single-platform contract (D4/D5) — `--platform` defaults to `current()`,
+# takes one value, no fan-out. Push publishes exactly the manifest for the
+# platform it ran under; publishing more than one platform under a tag is
+# multiple pushes (existing cascade/index-merge mechanics, unaffected by
+# this ADR), not one push fanning out from an embedded set.
 # ---------------------------------------------------------------------------
-
-
-def test_push_legacy_sidecar_requires_platform(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """A sidecar without an embedded target set keeps requiring -p."""
-    bundle = _bundle(ocx, tmp_path, "legacy")
-    metadata = _write_metadata(tmp_path, "legacy", {"type": "bundle", "version": 1})
-
-    result = _push(
-        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
-        "-m", str(metadata), check=False,
-    )
-    assert result.returncode == EXIT_USAGE, result.stderr
-
-    _push(
-        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
-        "-m", str(metadata), "-p", current_platform(),
-    )
-
-
-def test_push_platform_must_be_in_embedded_set(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """Embedded set wins; -p is a member-filter and must be a member."""
-    bundle = _created_app(ocx, tmp_path, "memberfilter", [], "any")
-
-    result = _push(
-        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
-        "-p", "linux/amd64", check=False,
-    )
-    assert result.returncode == EXIT_USAGE, result.stderr
-
-    _push(ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle, "-p", "any")
-
-
-def test_push_platform_narrows_multi_member_set(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-):
-    """`-p` genuinely NARROWS a multi-member embedded target set to the named
-    platform alone — it must not fan out to every platform in the set. The
-    single-member fixture above (`["any"]`) cannot distinguish "narrow" from
-    "fan out everything"; this one embeds two platforms so the assertion is
-    meaningful."""
-    dep_repo = f"{unique_repo}_dep"
-    _two_platform_leaf(ocx, dep_repo, tmp_path)
-    dep_fq = f"{ocx.registry}/{dep_repo}:1.0.0"
-
-    bundle = _created_app(ocx, tmp_path, "narrow", [{"identifier": dep_fq}], "any")
-    app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
-    _push(ocx, app_fq, bundle, "-p", "linux/amd64")
-
-    index = fetch_manifest_from_registry(ocx.registry, f"{unique_repo}_app", "1.0.0")
-    children = index["manifests"]
-    assert len(children) == 1, f"-p must narrow to a single platform, not fan out: {children}"
-    plat = children[0]["platform"]
-    assert f"{plat['os']}/{plat['architecture']}" == "linux/amd64"
-
-
-# ---------------------------------------------------------------------------
-# Fan-out
-# ---------------------------------------------------------------------------
-
-
-def test_push_fanout_materializes_single_pins_per_platform(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-):
-    """`create -p any` + platform-specific dep -> push fans out one manifest
-    per covered platform; each child config blob carries a SINGLE manifest
-    pin for its platform and no sidecar-only fields."""
-    dep_repo = f"{unique_repo}_dep"
-    _two_platform_leaf(ocx, dep_repo, tmp_path)
-    dep_fq = f"{ocx.registry}/{dep_repo}:1.0.0"
-
-    bundle = _created_app(
-        ocx, tmp_path, "fanout", [{"identifier": dep_fq}], "any"
-    )
-    app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
-    _push(ocx, app_fq, bundle)
-
-    index = fetch_manifest_from_registry(ocx.registry, f"{unique_repo}_app", "1.0.0")
-    children = index["manifests"]
-    platforms = {
-        f"{c['platform']['os']}/{c['platform']['architecture']}" for c in children
-    }
-    assert platforms == {"linux/amd64", "darwin/arm64"}
-
-    expected = {
-        "linux/amd64": fetch_platform_manifest_digest(
-            ocx.registry, dep_repo, "1.0.0", platform="linux/amd64"
-        ),
-        "darwin/arm64": fetch_platform_manifest_digest(
-            ocx.registry, dep_repo, "1.0.0", platform="darwin/arm64"
-        ),
-    }
-    for child in children:
-        plat = f"{child['platform']['os']}/{child['platform']['architecture']}"
-        manifest = _fetch_manifest_by_digest(ocx.registry, f"{unique_repo}_app", child["digest"])
-        config = json.loads(
-            fetch_blob(
-                ocx.registry, f"{unique_repo}_app", manifest["config"]["digest"]
-            ).decode()
-        )
-        dep = config["dependencies"][0]
-        assert dep["identifier"].endswith(f"@{expected[plat]}"), (
-            f"{plat} child must pin that platform's manifest digest: {dep}"
-        )
-        assert "platforms" not in dep, "published dep must carry no pin map"
-        assert "platforms" not in config, "published metadata must carry no target set"
-
-
-def test_push_fanout_cascade_updates_rolling_tags(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-):
-    dep_repo = f"{unique_repo}_dep"
-    _two_platform_leaf(ocx, dep_repo, tmp_path)
-    bundle = _created_app(
-        ocx, tmp_path, "cascade",
-        [{"identifier": f"{ocx.registry}/{dep_repo}:1.0.0"}], "any",
-    )
-    app_repo = f"{unique_repo}_app"
-    report = ocx.json(
-        "package", "push", "-n", "--cascade",
-        "-i", f"{ocx.registry}/{app_repo}:1.2.3", str(bundle),
-    )
-    # Ordered union (adr_dependency_manifest_pinning.md): both platforms cascade
-    # to the same tag set with no blockers, so the written order matches the
-    # cascade algebra's most-specific -> least-specific walk (patch's parent
-    # levels, then `latest`) rather than being incidentally order-blind.
-    assert report["cascade_tags_written"] == ["1.2", "1", "latest"]
-
-    for tag in ("1.2.3", "1.2", "1", "latest"):
-        index = fetch_manifest_from_registry(ocx.registry, app_repo, tag)
-        platforms = {
-            f"{c['platform']['os']}/{c['platform']['architecture']}"
-            for c in index["manifests"]
-        }
-        assert platforms == {"linux/amd64", "darwin/arm64"}, f"tag {tag}: {platforms}"
 
 
 def test_push_repush_is_idempotent(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    dep_repo = f"{unique_repo}_dep"
-    _two_platform_leaf(ocx, dep_repo, tmp_path)
+    leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
     bundle = _created_app(
-        ocx, tmp_path, "idem",
-        [{"identifier": f"{ocx.registry}/{dep_repo}:1.0.0"}], "any",
+        ocx, tmp_path, "idem", [{"identifier": leaf.fq}], current_platform(),
     )
     app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
 
     first = ocx.json("package", "push", "-n", "-i", app_fq, str(bundle))
     second = ocx.json("package", "push", "-n", "-i", app_fq, str(bundle))
     assert first["manifest_digest"] == second["manifest_digest"]
+
+
+def test_push_concrete_platform_flag_round_trip(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`--platform` on push (not just the default) succeeds end-to-end for a
+    concrete platform, matching what `ocx package create --platform` resolved."""
+    plat = current_platform()
+    leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
+    bundle = _created_app(ocx, tmp_path, "concrete", [{"identifier": leaf.fq}], plat)
+    app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
+
+    _push(ocx, app_fq, bundle, "-p", plat)
+
+
+def test_push_defaults_to_created_platform(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`push` with no `--platform` publishes under the platform `ocx package
+    create` recorded in the sidecar, not the host platform — the two must
+    stay bound even when the flag is never repeated on push."""
+    plat = current_platform()
+    bundle = _created_app(ocx, tmp_path, "defaultplat", [], plat)
+    app_repo = f"{unique_repo}_app"
+    app_fq = f"{ocx.registry}/{app_repo}:1.0.0"
+
+    _push(ocx, app_fq, bundle)
+
+    manifest = fetch_manifest_from_registry(ocx.registry, app_repo, "1.0.0")
+    assert plat in index_platforms(manifest), (
+        f"published index must carry the create-recorded platform {plat!r}, got {manifest}"
+    )
+
+
+def test_push_platform_mismatch_rejected(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """An explicit `--platform` that disagrees with the platform `ocx package
+    create` recorded in the sidecar is rejected (exit 65), naming both."""
+    bundle = _created_app(ocx, tmp_path, "mismatch", [], "linux/amd64")
+    app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
+
+    result = _push(ocx, app_fq, bundle, "-p", "darwin/arm64", check=False)
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "linux/amd64" in result.stderr, result.stderr
+    assert "darwin/arm64" in result.stderr, result.stderr
+
+
+def test_push_any_target_with_any_offered_dep_succeeds(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """D5: an `any`-targeted bundle depending only on `any`-offered
+    dependencies creates and pushes successfully end to end; the recorded
+    `any` platform round-trips to the published index entry."""
+    leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
+    bundle = _created_app(ocx, tmp_path, "anyok", [{"identifier": leaf.fq}], "any")
+    app_repo = f"{unique_repo}_app"
+    app_fq = f"{ocx.registry}/{app_repo}:1.0.0"
+
+    _push(ocx, app_fq, bundle, "-p", "any")
+
+    manifest = fetch_manifest_from_registry(ocx.registry, app_repo, "1.0.0")
+    assert "any/any" in index_platforms(manifest), (
+        f"an any-targeted push must publish the OCI any/any platform entry, got {manifest}"
+    )
+
+
+def test_push_any_target_rejects_direct_digest_pin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """D5: push re-checks the digest-pin prohibition for an `any`-targeted
+    bundle — a hand-edited sidecar can carry a direct digest pin without ever
+    going through `ocx package create --platform any`."""
+    leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
+    manifest_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
+    bundle = _bundle(ocx, tmp_path, "anydigest")
+    metadata = _write_metadata(tmp_path, "anydigest", {
+        "type": "bundle", "version": 1,
+        "platform": "any",
+        "dependencies": [{"identifier": f"{leaf.fq}@{manifest_digest}"}],
+    })
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), "-p", "any", check=False,
+    )
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "direct digest pin" in result.stderr, result.stderr
+
+
+def test_push_any_target_rejects_forged_any_pin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """D5 provenance check: a hand-edited sidecar can claim a dependency leaf
+    is `any`-offered via `platforms: {"any": <digest>}}` without ever going
+    through `ocx package create --platform any`. If that digest is only
+    published under a concrete platform, the claim is a forgery — push must
+    fetch the dependency's own image index and reject it, not just check the
+    leaf exists."""
+    leaf = make_package(ocx, f"{unique_repo}_concreteleaf", "1.0.0", tmp_path)
+    leaf_manifest_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
+    bundle = _bundle(ocx, tmp_path, "forgedany")
+    metadata = _write_metadata(tmp_path, "forgedany", {
+        "type": "bundle", "version": 1,
+        "platform": "any",
+        "dependencies": [{
+            "identifier": leaf.fq,
+            "platforms": {"any": leaf_manifest_digest},
+        }],
+    })
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), "-p", "any", check=False,
+    )
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert leaf.repo in result.stderr, result.stderr
+
+
+def test_push_repeated_platform_flag_rejected(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """Passing `--platform` twice is a clap usage error (64), not a
+    fan-out request — push targets exactly one platform per invocation."""
+    leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
+    bundle = _bundle(ocx, tmp_path, "repeatedplat")
+    manifest_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
+    metadata = _write_metadata(tmp_path, "repeatedplat", {
+        "type": "bundle", "version": 1,
+        "dependencies": [{"identifier": f"{leaf.fq}@{manifest_digest}"}],
+    })
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), "-p", "linux/amd64", "-p", "darwin/arm64", check=False,
+    )
+    assert result.returncode == EXIT_USAGE, result.stderr
 
 
 # ---------------------------------------------------------------------------

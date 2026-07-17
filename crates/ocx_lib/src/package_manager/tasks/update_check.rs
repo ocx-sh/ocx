@@ -393,7 +393,7 @@ impl PackageManager {
                     .tag()
                     .expect("find_latest_version always returns tagged identifier")
                     .to_string();
-                let platforms = oci::Platform::supported_set();
+                let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
                 // Bind the two adjacent bool positionals to named locals at the
                 // call site so the intent reads at a glance — Q-W6 in R3.
                 // candidate=false: self-update does not create a candidate symlink.
@@ -407,7 +407,7 @@ impl PackageManager {
                 let skip_discovery = true;
                 self.install_all(
                     vec![latest_id],
-                    platforms,
+                    platform,
                     candidate,
                     select,
                     Concurrency::default(),

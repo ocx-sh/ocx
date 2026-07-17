@@ -58,7 +58,7 @@ SCHEMA_VARIANTS = [
     ("project", "https://ocx.sh/schemas/project/v1.json", "project"),
     (
         "project-lock",
-        "https://ocx.sh/schemas/project-lock/v2.json",
+        "https://ocx.sh/schemas/project-lock/v3.json",
         "project-lock",
     ),
 ]
@@ -203,13 +203,13 @@ def test_project_lock_schema_carries_machine_generated_comment(
     )
 
 
-def test_project_lock_schema_pins_lock_version_to_two(
+def test_project_lock_schema_pins_lock_version_to_three(
     schema_binary: Path,
 ) -> None:
     """The project-lock schema must constrain ``lock_version`` to
-    ``[2]`` (V2 is the only written shape) so a v1 or v3 manuscript fed
-    to the v2 schema fails validation rather than being silently
-    accepted.
+    ``[3]`` (V3 is the only written shape) so a foreign-version
+    manuscript fed to the v3 schema fails validation rather than being
+    silently accepted.
     """
     raw = _run_schema(schema_binary, "project-lock")
     schema = json.loads(raw)
@@ -244,9 +244,8 @@ def test_project_lock_schema_pins_lock_version_to_two(
         lock_version = schema.get("$defs", {}).get(target, {})
 
     enum_values = lock_version.get("enum")
-    assert enum_values == [2], (
-        f"lock_version must constrain to `[2]` (rejects v1/v3 manuscripts); "
-        f"got {enum_values!r}"
+    assert enum_values == [3], (
+        f"lock_version must constrain to `[3]`; got {enum_values!r}"
     )
 
 

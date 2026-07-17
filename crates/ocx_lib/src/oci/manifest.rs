@@ -15,11 +15,11 @@ use super::{Manifest, Platform};
 ///
 /// This function uses **intentional strict struct-equality** on the serialized
 /// `native::Platform` representation — it is testing exact manifest membership,
-/// not host compatibility. This is **distinct** from `Platform::can_run`,
-/// which uses subset semantics on `os_features` (`other ⊆ self`) for
-/// install-resolution. Never replace this comparison with `can_run` — the
-/// two functions serve different purposes. See `Platform::can_run` for the
-/// subset-matching logic used during index resolution.
+/// not host compatibility. This is **distinct** from [`super::is_compatible`],
+/// which uses subset semantics on `os_features` (`offered ⊆ required`) for
+/// install-resolution. Never replace this comparison with `is_compatible` —
+/// the two functions serve different purposes. See [`super::is_compatible`]
+/// for the subset-matching relation used during index resolution.
 pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
     let Manifest::ImageIndex(index) = manifest else {
         return false;

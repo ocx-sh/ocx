@@ -24,9 +24,9 @@ impl PackageManager {
     async fn find_or_install(
         &self,
         package: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        match self.find(package, platforms.clone()).await {
+        match self.find(package, platform.clone()).await {
             Ok(info) => Ok(info),
             Err(PackageErrorKind::NotFound) => {
                 if self.is_offline() {
@@ -37,7 +37,7 @@ impl PackageManager {
                 } else {
                     log::info!("Package '{}' not found locally, pulling.", package);
                 }
-                self.pull(package, platforms).await
+                self.pull(package, platform).await
             }
             Err(e) => Err(e),
         }
@@ -52,7 +52,7 @@ impl PackageManager {
     pub async fn find_or_install_all(
         &self,
         packages: Vec<oci::Identifier>,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         if packages.is_empty() {
@@ -61,7 +61,7 @@ impl PackageManager {
         if packages.len() == 1 {
             let spin = self.progress().spinner(format!("Resolving '{}'", packages[0]));
             let info = spin
-                .scope(self.find_or_install(&packages[0], platforms))
+                .scope(self.find_or_install(&packages[0], platform))
                 .await
                 .map_err(|kind| {
                     package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
@@ -75,7 +75,7 @@ impl PackageManager {
         for package in &packages {
             let mgr = self.clone();
             let pkg = package.clone();
-            let plat = platforms.clone();
+            let plat = platform.clone();
             let sem = semaphore.clone();
 
             tasks.spawn(async move {

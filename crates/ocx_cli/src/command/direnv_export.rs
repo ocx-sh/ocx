@@ -11,7 +11,7 @@ use ocx_lib::{
     shell,
 };
 
-use crate::conventions::{emit_lines, supported_platforms};
+use crate::conventions::emit_lines;
 use crate::options;
 
 /// Prints stateless shell export statements for the project toolchain.
@@ -87,8 +87,8 @@ impl DirenvExport {
         // local, so a present tool resolves with no registry contact and a
         // not-materialised tool buckets into `missing`.
         let offline = context.manager().offline_view(context.local_index().clone());
-        let platforms = supported_platforms();
-        let mut applied = collect_applied(&offline, &project.lock, &platforms).await?;
+        let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let mut applied = collect_applied(&offline, &project.lock, &platform).await?;
 
         // Default: materialise anything the store is missing, then re-probe so
         // the freshly-pulled tools join the export. `--no-pull` opts out and the
@@ -104,11 +104,7 @@ impl DirenvExport {
                 .tools
                 .iter()
                 .filter(|tool| tool.group == DEFAULT_GROUP && missing.contains(tool.name.as_str()))
-                .filter_map(|tool| {
-                    platforms
-                        .iter()
-                        .find_map(|platform| host_leaf_identifier(tool, platform).ok())
-                })
+                .filter_map(|tool| host_leaf_identifier(tool, &platform).ok())
                 .collect();
             if !to_install.is_empty() {
                 // Best-effort: a per-prompt hook must never fail on a transient
@@ -117,10 +113,10 @@ impl DirenvExport {
                 // the prompt.
                 match context
                     .manager()
-                    .find_or_install_all(to_install, platforms.clone(), context.concurrency())
+                    .find_or_install_all(to_install, platform.clone(), context.concurrency())
                     .await
                 {
-                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platforms).await?,
+                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platform).await?,
                     Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
                 }
             }

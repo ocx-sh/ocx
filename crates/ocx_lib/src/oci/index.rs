@@ -268,7 +268,21 @@ impl Index {
                     let digest = manifest.digest.try_into()?;
                     let candidate = identifier.clone_with_digest(digest);
                     let platform = match manifest.platform {
-                        Some(platform) => platform.try_into()?,
+                        Some(platform) => match oci::Platform::try_from(platform) {
+                            Ok(platform) => platform,
+                            Err(error) => {
+                                // A foreign or corrupted image index may carry an
+                                // entry OCX cannot represent (unsupported os/arch,
+                                // malformed fields). Skip it rather than failing
+                                // the whole candidate list — the remaining
+                                // entries are still selectable.
+                                log::warn!(
+                                    "skipping image-index entry for '{}' with unparseable platform: {error}",
+                                    candidate
+                                );
+                                continue;
+                            }
+                        },
                         None => oci::Platform::any(),
                     };
                     candidates.push((candidate, platform));
@@ -286,56 +300,35 @@ impl Index {
     pub async fn select(
         &self,
         identifier: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: &oci::Platform,
         op: IndexOperation,
     ) -> Result<SelectResult> {
-        log::debug!("Selecting package '{}' for platforms {:?}.", identifier, platforms);
+        log::debug!("Selecting package '{}' for platform {}.", identifier, platform);
 
         let Some(candidates) = self.fetch_candidates(identifier, op).await? else {
             log::debug!("No candidates found for '{}'.", identifier);
             return Ok(SelectResult::NotFound);
         };
 
-        // Walk the host's priority tiers (`supported_set()`: native platform
-        // first, then `Any`). Within the first tier that yields any match,
-        // keep only the most specific candidates — those declaring the most
-        // `os_features` the host satisfies. A glibc host seeing both a
-        // `libc.glibc` entry and a bare (empty `os_features`) entry prefers the
-        // libc-tagged one; the bare entry is a less specific subset match.
-        // Genuine ambiguity (two equally specific matches) still surfaces as
-        // `Ambiguous`.
-        let mut matching_candidates = Vec::new();
-        for platform in &platforms {
-            // Collect (specificity, index) pairs for candidates this platform
-            // can run — defer cloning the winner identifiers until after the
-            // specificity filter so we only clone the survivors, not every
-            // candidate that passes can_run.
-            let mut tier_matches: Vec<(usize, usize)> = Vec::new();
-            for (index, (_, candidate_platform)) in candidates.iter().enumerate() {
-                if platform.can_run(candidate_platform) {
-                    tier_matches.push((candidate_os_feature_count(candidate_platform), index));
-                }
-            }
-            if let Some(max_specificity) = tier_matches.iter().map(|(count, _)| *count).max() {
-                matching_candidates = tier_matches
-                    .into_iter()
-                    .filter(|&(count, _)| count == max_specificity)
-                    .map(|(_, index)| candidates[index].0.clone())
-                    .collect();
-                break;
-            }
-        }
-
-        let result = match matching_candidates.len() {
+        // Route through the shared D1 selection helper (`is_compatible` +
+        // `compatibility_score`): the same relation `lookup_host_leaf` and
+        // authoring `resolve_for_specific` use, so fresh-resolve gives an
+        // identical answer for the same requested platform and candidate set.
+        // An `Any`-offered candidate satisfies every requirement by
+        // construction (D1 rule), so no separate `Any` fallback tier is
+        // needed here.
+        let result = match oci::select_best(platform, &candidates) {
+            oci::Selection::Found(id) => SelectResult::Found(id),
+            oci::Selection::Ambiguous(ids) => SelectResult::Ambiguous(ids),
             // Distinguish a feature mismatch from a plain not-found. When the
             // host declared non-empty `os.features` and there exist candidates
             // sharing the host's os+arch but none satisfied subset matching,
             // the package ships for this os/arch under different `os.features`
             // only — surface the dedicated variant so the caller can report a
             // feature mismatch rather than a generic not-found.
-            0 => match host_os_features(&platforms) {
+            oci::Selection::None => match host_os_features(platform) {
                 Some(host_features) => {
-                    let available = candidates_sharing_host_os_arch(&platforms, &candidates);
+                    let available = candidates_sharing_host_os_arch(platform, &candidates);
                     if available.is_empty() {
                         SelectResult::NotFound
                     } else {
@@ -347,8 +340,6 @@ impl Index {
                 }
                 None => SelectResult::NotFound,
             },
-            1 => SelectResult::Found(matching_candidates.into_iter().next().expect("len checked above")),
-            _ => SelectResult::Ambiguous(matching_candidates),
         };
 
         match &result {
@@ -384,60 +375,42 @@ impl Clone for Index {
     }
 }
 
-/// Count the `os_features` a candidate platform declares.
+/// Extract the requested platform's declared `os_features`, when it is
+/// `Specific` and carries a non-empty set.
 ///
-/// Used as the specificity score when several candidates match the same host
-/// tier: the candidate satisfying the most host-provided features wins. `Any`
-/// and bare (empty `os_features`) candidates score `0`.
-fn candidate_os_feature_count(candidate: &oci::Platform) -> usize {
-    match candidate {
-        oci::Platform::Specific { os_features, .. } => os_features.len(),
-        oci::Platform::Any => 0,
+/// A non-empty `os_features` set (e.g. a detected libc, or an explicit
+/// `--platform linux/amd64+libc.musl`) is the signal that a no-match is a
+/// feature mismatch rather than a plain not-found.
+fn host_os_features(platform: &oci::Platform) -> Option<Vec<String>> {
+    match platform {
+        oci::Platform::Specific { os_features, .. } if !os_features.is_empty() => Some(os_features.clone()),
+        _ => None,
     }
 }
 
-/// Extract the host's declared `os_features` from the requested platform
-/// list, if any `Specific` host platform carries a non-empty set.
-///
-/// `supported_set()` always passes the host-native `Platform::current()` first,
-/// then `Platform::any()`. A non-empty `os_features` set (e.g. a detected
-/// libc, or an explicit `--platform linux/amd64+libc.musl`) is the signal that
-/// a no-match is a feature mismatch rather than a plain not-found.
-fn host_os_features(platforms: &[oci::Platform]) -> Option<Vec<String>> {
-    platforms.iter().find_map(|platform| match platform {
-        oci::Platform::Specific { os_features, .. } if !os_features.is_empty() => Some(os_features.clone()),
-        _ => None,
-    })
-}
-
-/// Collect the candidate platforms that share os+arch with a `Specific` host
-/// platform from the requested list.
+/// Collect the candidate platforms that share os+arch with the requested
+/// `Specific` platform.
 ///
 /// These are the entries the user could target with `--platform` — the package
 /// ships for this os/arch, just under a different libc. Returns them sorted by
 /// display string for deterministic error output.
 fn candidates_sharing_host_os_arch(
-    platforms: &[oci::Platform],
+    platform: &oci::Platform,
     candidates: &[(oci::Identifier, oci::Platform)],
 ) -> Vec<oci::Platform> {
-    let host_os_arch: Vec<(&oci::OperatingSystem, &oci::Architecture)> = platforms
-        .iter()
-        .filter_map(|platform| match platform {
-            oci::Platform::Specific { os, arch, .. } => Some((os, arch)),
-            oci::Platform::Any => None,
-        })
-        .collect();
+    let oci::Platform::Specific {
+        os: host_os,
+        arch: host_arch,
+        ..
+    } = platform
+    else {
+        return Vec::new();
+    };
 
     let mut matched: Vec<oci::Platform> = candidates
         .iter()
         .filter_map(|(_, candidate)| match candidate {
-            oci::Platform::Specific { os, arch, .. }
-                if host_os_arch
-                    .iter()
-                    .any(|(host_os, host_arch)| host_os == &os && host_arch == &arch) =>
-            {
-                Some(candidate.clone())
-            }
+            oci::Platform::Specific { os, arch, .. } if os == host_os && arch == host_arch => Some(candidate.clone()),
             _ => None,
         })
         .collect();
@@ -559,9 +532,7 @@ mod tests {
             os: oci::OperatingSystem::Linux,
             arch: oci::Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: vec!["libc.glibc".to_string()],
-            features: None,
         }
     }
 
@@ -570,9 +541,7 @@ mod tests {
             os: oci::OperatingSystem::Linux,
             arch: oci::Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: vec!["libc.musl".to_string()],
-            features: None,
         }
     }
 
@@ -582,9 +551,7 @@ mod tests {
             os: oci::OperatingSystem::Linux,
             arch: oci::Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: Vec::new(),
-            features: None,
         }
     }
 
@@ -596,11 +563,7 @@ mod tests {
         let glibc_digest = format!("sha256:{}", "a".repeat(64));
 
         let result = index
-            .select(
-                &test_id(),
-                vec![glibc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &glibc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -632,11 +595,7 @@ mod tests {
         let musl_digest = format!("sha256:{}", "b".repeat(64));
 
         let result = index
-            .select(
-                &test_id(),
-                vec![musl_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &musl_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -668,11 +627,7 @@ mod tests {
         let untagged_digest = format!("sha256:{}", "c".repeat(64));
 
         let result = index
-            .select(
-                &test_id(),
-                vec![no_libc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &no_libc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -711,9 +666,7 @@ mod tests {
             os: oci::OperatingSystem::Linux,
             arch: oci::Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: vec!["libc.glibc".to_string(), "libc.musl".to_string()],
-            features: None,
         }
     }
 
@@ -724,11 +677,7 @@ mod tests {
         let musl_digest = format!("sha256:{}", "b".repeat(64));
 
         let result = index
-            .select(
-                &test_id(),
-                vec![dual_libc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &dual_libc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -762,7 +711,7 @@ mod tests {
     // ── Discriminating test: proves subset semantics, NOT just equality (3.4) ────
     //
     // This test FAILS under a strict-equality matcher and only passes under
-    // `can_run()`'s subset semantics.
+    // `is_compatible()`'s subset semantics.
     //
     // Setup: index contains ONLY an untagged entry (empty os_features).
     //        Host is a glibc host (os_features = ["libc.glibc"]).
@@ -771,7 +720,7 @@ mod tests {
     //   host {os_features: ["libc.glibc"]} != candidate {os_features: []}
     //   → SelectResult::NotFound  (test assertion fails here — proving it drives impl)
     //
-    // Under subset semantics (can_run):
+    // Under subset semantics (is_compatible):
     //   candidate.os_features = []  (empty set)
     //   {} ⊆ {libc.glibc}  → true
     //   → SelectResult::Found(untagged entry)  (test passes)
@@ -916,11 +865,7 @@ mod tests {
         let index = Index::from_impl(MuslOnlyIndex::new());
 
         let result = index
-            .select(
-                &test_id(),
-                vec![glibc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &glibc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -963,7 +908,7 @@ mod tests {
     //
     // An explicit `--platform linux/amd64+libc.musl` must select the musl
     // manifest even when host *detection* would baseline to glibc. The parsed
-    // platform carries `os_features: ["libc.musl"]`, so `can_run` admits
+    // platform carries `os_features: ["libc.musl"]`, so `is_compatible` admits
     // only the musl-tagged candidate. This proves the `+features` syntax flows
     // through `Index::select` end to end.
 
@@ -977,7 +922,7 @@ mod tests {
         let explicit: Platform = "linux/amd64+libc.musl".parse().unwrap();
 
         let result = index
-            .select(&test_id(), vec![explicit], IndexOperation::Query)
+            .select(&test_id(), &explicit, IndexOperation::Query)
             .await
             .unwrap();
 
@@ -1003,7 +948,7 @@ mod tests {
     // ── Discriminating test: proves subset semantics, NOT just equality (3.4) ────
     //
     // This test FAILS under a strict-equality matcher and only passes under
-    // `can_run()`'s subset semantics.
+    // `is_compatible()`'s subset semantics.
     //
     // Setup: index contains ONLY an untagged entry (empty os_features).
     //        Host is a glibc host (os_features = ["libc.glibc"]).
@@ -1012,7 +957,7 @@ mod tests {
     //   host {os_features: ["libc.glibc"]} != candidate {os_features: []}
     //   → SelectResult::NotFound  (test assertion fails here — proving it drives impl)
     //
-    // Under subset semantics (can_run):
+    // Under subset semantics (is_compatible):
     //   candidate.os_features = []  (empty set)
     //   {} ⊆ {libc.glibc}  → true
     //   → SelectResult::Found(untagged entry)  (test passes)
@@ -1024,7 +969,7 @@ mod tests {
     /// Discriminating test: glibc host, index has ONLY untagged entry.
     ///
     /// - Fails under strict equality  (NotFound, not Found)
-    /// - Passes under `can_run()` subset semantics  (empty ⊆ glibc-host)
+    /// - Passes under `is_compatible()` subset semantics  (empty ⊆ glibc-host)
     ///
     /// This is the load-bearing case that proves subset semantics are actually
     /// exercised, not just equality-by-coincidence.
@@ -1033,15 +978,11 @@ mod tests {
         let index = Index::from_impl(UntaggedOnlyIndex::new());
         let untagged_digest = format!("sha256:{}", "d".repeat(64));
 
-        // Glibc host (os_features = ["libc.glibc"]) + Any fallback.
+        // Glibc host (os_features = ["libc.glibc"]).
         // The only index entry has empty os_features.
         // Subset: {} ⊆ {libc.glibc} → must match.
         let result = index
-            .select(
-                &test_id(),
-                vec![glibc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &glibc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -1056,7 +997,7 @@ mod tests {
             SelectResult::NotFound => panic!(
                 "glibc host failed to select untagged entry — strict equality rejected \
                  empty-set ⊆ {{libc.glibc}}; this test drives implementation of \
-                 can_run() subset semantics"
+                 is_compatible() subset semantics"
             ),
             SelectResult::Ambiguous(candidates) => panic!("expected single match, got ambiguous: {:?}", candidates),
             SelectResult::FeatureMismatch {
@@ -1086,11 +1027,7 @@ mod tests {
         let index = Index::from_impl(MuslOnlyIndex::new());
 
         let result = index
-            .select(
-                &test_id(),
-                vec![no_libc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &no_libc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 
@@ -1178,11 +1115,7 @@ mod tests {
         let index = Index::from_impl(WindowsOnlyIndex::new());
 
         let result = index
-            .select(
-                &test_id(),
-                vec![glibc_host_platform(), Platform::any()],
-                IndexOperation::Query,
-            )
+            .select(&test_id(), &glibc_host_platform(), IndexOperation::Query)
             .await
             .unwrap();
 

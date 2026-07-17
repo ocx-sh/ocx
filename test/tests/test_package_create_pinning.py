@@ -3,8 +3,16 @@
 Create is the compiler of the create-resolves / push-gates split
 (adr_dependency_manifest_pinning.md): tag-only dependencies in the metadata
 sidecar are resolved to platform MANIFEST digests (never the GC-prone image
-index digest) and the sidecar is rewritten canonically with the pins plus the
-package's target-platform set.
+index digest) and the sidecar is rewritten canonically with the pins.
+
+A bundle targets exactly one platform per `create` invocation
+(adr_platform_model_unification.md D5) — there is no bundle-level
+target-platform *set* in the sidecar. A concrete `--platform P` resolve pins
+each dependency's identifier directly (`@digest`); an `--platform any`
+resolve requires every dependency to offer an `any`-typed manifest and
+records the pin as a single `"any"`-keyed entry in the dependency's
+`platforms` map (never a bare digest — a leaf carries no platform
+descriptor, so only a map key can record a verified `any`-ness).
 """
 
 from __future__ import annotations
@@ -13,11 +21,7 @@ import json
 from pathlib import Path
 
 from src.helpers import make_package
-from src.registry import (
-    fetch_manifest_digest,
-    fetch_manifest_from_registry,
-    fetch_platform_manifest_digest,
-)
+from src.registry import fetch_manifest_digest, fetch_manifest_from_registry
 from src.runner import OcxRunner, current_platform
 
 EXIT_USAGE = 64  # UsageError — unpinned deps without --platform
@@ -106,9 +110,6 @@ def test_create_pins_tag_to_manifest_digest(ocx: OcxRunner, unique_repo: str, tm
     assert pinned_digest == manifest_digest, "must pin the platform manifest digest"
     assert pinned_digest != index_digest, "must NOT pin the image index digest"
 
-    # The declared platform is embedded as the package target set.
-    assert sidecar["platforms"] == [current_platform()]
-
 
 def test_create_no_compatible_platform_lists_available(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
@@ -148,7 +149,7 @@ def test_create_ambiguous_platform_lists_candidates(
     out = tmp_path / "app-ambiguous.tar.xz"
 
     result = _create(
-        ocx, pkg_dir, metadata, out, "-p", "linux/amd64+libc.glibc+libc.musl", check=False
+        ocx, pkg_dir, metadata, out, "-p", "linux/amd64+libc.glibc,libc.musl", check=False
     )
 
     assert result.returncode == EXIT_DATA_ERR, result.stderr
@@ -157,8 +158,10 @@ def test_create_ambiguous_platform_lists_candidates(
     assert "linux/amd64+libc.musl" in result.stderr, result.stderr
 
 
-def test_create_any_with_agnostic_dep_single_pin(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`-p any` + a platform-agnostic dep collapses to a plain single pin."""
+def test_create_any_with_agnostic_dep_pins_into_map(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`-p any` + a platform-agnostic dep records the pin as a single
+    `"any"`-keyed map entry — never a bare digest (D5: a leaf carries no
+    platform descriptor, so only a map key can record a verified `any`-ness)."""
     leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
     pkg_dir, metadata = _write_app(tmp_path, "anyany", [{"identifier": leaf.fq}])
     out = tmp_path / "app-anyany.tar.xz"
@@ -167,72 +170,54 @@ def test_create_any_with_agnostic_dep_single_pin(ocx: OcxRunner, unique_repo: st
 
     sidecar = _sidecar(out)
     dep = sidecar["dependencies"][0]
-    assert "@sha256:" in dep["identifier"]
-    assert "platforms" not in dep, "agnostic dep must not carry a pin map"
-    assert sidecar["platforms"] == ["any"]
+    assert "@sha256:" not in dep["identifier"], "an any-targeted pin must not be a bare digest"
+    manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
+    assert dep["platforms"] == {"any": manifest_digest}
 
 
-def test_create_any_with_specific_dep_builds_map(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`-p any` + a platform-specific dep produces a per-dep pin map and a
-    derived (specific) target set."""
+def test_create_any_with_specific_only_dep_fails(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """D5: a dependency offering only a Specific leaf (no `any` manifest)
+    fails an `any`-targeted create — an any-targeted package performs no
+    platform-specific resolution, so it cannot pick a platform-specific
+    dependency leaf."""
     plat = current_platform()
     leaf = make_package(ocx, f"{unique_repo}_spec", "1.0.0", tmp_path, platform=plat)
     pkg_dir, metadata = _write_app(tmp_path, "anyspec", [{"identifier": leaf.fq}])
     out = tmp_path / "app-anyspec.tar.xz"
 
-    _create(ocx, pkg_dir, metadata, out, "-p", "any")
+    result = _create(ocx, pkg_dir, metadata, out, "-p", "any", check=False)
 
-    sidecar = _sidecar(out)
-    dep = sidecar["dependencies"][0]
-    assert "@sha256:" not in dep["identifier"], "map-bearing dep keeps a digest-less identifier"
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "has no leaf compatible with platform 'any'" in result.stderr, result.stderr
+
+
+def test_create_any_with_direct_digest_pin_fails(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """D5: an `any`-targeted create rejects a dependency that already carries
+    a direct digest pin — a leaf manifest carries no platform descriptor, so
+    a bare `@digest` pin cannot be verified to be `any`-offered."""
+    leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
     manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
-    assert dep["platforms"] == {plat: manifest_digest}
-    assert sidecar["platforms"] == [plat]
-
-
-def test_create_any_platform_prepinned_multiplatform_map_intersects(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-):
-    """H1 regression: a dependency ALREADY pinned as a multi-platform map (no
-    ``any`` key, and no OTHER dependency to seed the coverage union via fresh
-    resolution) must still contribute its own specific platforms to the
-    package target-set intersection. Before the fix this raised
-    ``EmptyPlatformIntersection`` (65) even though the map covers two
-    platforms — a pass-through pinned map's own platforms never entered the
-    intersection computation, which only tracked freshly-resolved deps."""
-    dep_repo = f"{unique_repo}_dep"
-    make_package(ocx, dep_repo, "1.0.0", tmp_path, platform="linux/amd64", cascade=False)
-    make_package(
-        ocx, dep_repo, "1.0.0", tmp_path.joinpath("second"),
-        platform="darwin/arm64", cascade=False, new=False,
+    pkg_dir, metadata = _write_app(
+        tmp_path, "anydigest", [{"identifier": f"{leaf.fq}@{manifest_digest}"}]
     )
-    linux_digest = fetch_platform_manifest_digest(ocx.registry, dep_repo, "1.0.0", platform="linux/amd64")
-    darwin_digest = fetch_platform_manifest_digest(ocx.registry, dep_repo, "1.0.0", platform="darwin/arm64")
+    out = tmp_path / "app-anydigest.tar.xz"
 
-    pkg_dir, metadata = _write_app(tmp_path, "h1map", [{
-        "identifier": f"{ocx.registry}/{dep_repo}:1.0.0",
-        "platforms": {"linux/amd64": linux_digest, "darwin/arm64": darwin_digest},
-    }])
-    out = tmp_path / "app-h1map.tar.xz"
+    result = _create(ocx, pkg_dir, metadata, out, "-p", "any", check=False)
 
-    _create(ocx, pkg_dir, metadata, out, "-p", "any", root_flags=("--offline",))
-
-    sidecar = _sidecar(out)
-    assert set(sidecar["platforms"]) == {"linux/amd64", "darwin/arm64"}
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "direct digest pin" in result.stderr, result.stderr
 
 
 def test_create_empty_intersection_fails(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """Deps with disjoint platform coverage leave no publishable platform."""
+    """A dependency offering only Specific leaves (no shared `any` manifest)
+    leaves no publishable platform for an `any`-targeted create."""
     linux = make_package(ocx, f"{unique_repo}_linux", "1.0.0", tmp_path, platform="linux/amd64")
-    mac = make_package(ocx, f"{unique_repo}_mac", "1.0.0", tmp_path, platform="darwin/arm64")
-    pkg_dir, metadata = _write_app(
-        tmp_path, "disjoint", [{"identifier": linux.fq}, {"identifier": mac.fq}]
-    )
+    pkg_dir, metadata = _write_app(tmp_path, "disjoint", [{"identifier": linux.fq}])
     out = tmp_path / "app-disjoint.tar.xz"
 
     result = _create(ocx, pkg_dir, metadata, out, "-p", "any", check=False)
     assert result.returncode == EXIT_DATA_ERR, result.stderr
-    assert "no platform is covered by every dependency" in result.stderr, result.stderr
+    assert "has no leaf compatible with platform 'any'" in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +275,6 @@ def test_create_concrete_platform_passes_through_pinned_dep(
     sidecar = _sidecar(out)
     dep = sidecar["dependencies"][0]
     assert dep["identifier"].endswith(f"@{manifest_digest}"), "pinned digest must survive untouched"
-    assert sidecar["platforms"] == [current_platform()]
 
 
 def test_create_offline_unpinned_is_policy_blocked(

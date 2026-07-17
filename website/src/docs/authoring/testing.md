@@ -15,10 +15,10 @@ The fastest way to find out whether a package works is to push it and install it
 
 ## Basic usage {#basic}
 
-The argument shape mirrors [`ocx package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`.
+The argument shape mirrors [`ocx package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then an optional `--platform`. Like `push`, `--platform` defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; pass it explicitly only to assert it matches (a mismatch is rejected).
 
 ```sh
-ocx package test -p linux/amd64 -i mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool --version
+ocx package test -i mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool --version
 ```
 
 The `--` separator marks the end of package arguments and the start of the command to run. Everything after `--` is passed verbatim to the child process. If you need to run scripted assertions instead of a single command, use `--script` instead of `--` — the two forms are mutually exclusive.
@@ -114,21 +114,21 @@ Digest layers are fetched from the registry on demand when not already cached lo
 A typical authoring session looks like this:
 
 ```sh
-# 1. Build the archive.
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+# 1. Build the archive — --platform is recorded in the sidecar for the
+#    steps below to read back.
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 
 # 2. Test it locally — no registry involved.
-ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.0 \
+ocx package test -i mytool:1.0.0 \
   mytool-1.0.0.tar.xz -- mytool --version
 
 # 3. Something wrong? Keep the dir and inspect.
-ocx package test -p linux/amd64 --keep -m metadata.json -i mytool:1.0.0 \
+ocx package test --keep -i mytool:1.0.0 \
   mytool-1.0.0.tar.xz -- mytool --version
 ls "$HOME/.ocx/temp/test/"*/
 
 # 4. Happy with it? Push.
-ocx package push -n -p linux/amd64 -m metadata.json \
-  -i mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -n -i mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
 <Terminal src="/casts/authoring/package-test.cast" title="Testing a package locally before pushing" collapsed />

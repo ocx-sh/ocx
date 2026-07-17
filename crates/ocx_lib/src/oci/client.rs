@@ -4403,9 +4403,7 @@ mod tests {
                 os: oci::OperatingSystem::Linux,
                 arch: oci::Architecture::Amd64,
                 variant: None,
-                os_version: None,
                 os_features: vec!["libc.glibc".to_string(), "libc.x".to_string()],
-                features: None,
             };
             client
                 .merge_platform_into_index(&id, "3.28", &first_platform, "sha256:first_push", 100)
@@ -4419,9 +4417,7 @@ mod tests {
                 os: oci::OperatingSystem::Linux,
                 arch: oci::Architecture::Amd64,
                 variant: None,
-                os_version: None,
                 os_features: vec!["libc.x".to_string(), "libc.glibc".to_string()],
-                features: None,
             };
             client
                 .merge_platform_into_index(&id, "3.28", &second_platform, "sha256:second_push", 200)

@@ -12,9 +12,9 @@
 //! the CLI layer; this module accepts the loaded data as input.
 
 use crate::oci::identifier::error::IdentifierErrorKind;
-use crate::oci::{Identifier, Platform};
+use crate::oci::{Identifier, Platform, Selection};
 use crate::project::config::ProjectConfig;
-use crate::project::lock::{LockedResolution, LockedTool, ProjectLock, resolutions_content_equal};
+use crate::project::lock::{LockedTool, ProjectLock, locked_tool_content_equal};
 
 use super::error::{ProjectError, ProjectErrorKind};
 
@@ -194,8 +194,8 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
 ///    names, preserving first-seen order; within a group, lock entry order is
 ///    preserved).
 /// 2. Duplicate-across-groups check, performed at the **lock level**: the same
-///    binding in two selected groups with identical [`LockedResolution`]
-///    content (via [`resolutions_content_equal`]) collapses to the first-seen
+///    binding in two selected groups with identical [`LockedTool`]
+///    content (via [`locked_tool_content_equal`]) collapses to the first-seen
 ///    entry; differing content errors with
 ///    [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`]. This validation
 ///    is whole-scope and fires regardless of any later name filter. Because it
@@ -256,7 +256,7 @@ pub fn select_tool_set(
                     let ToolSource::Locked(existing_tool) = &existing.source else {
                         unreachable!("a Group-origin selection always carries a Locked source");
                     };
-                    let same_content = resolutions_content_equal(&existing_tool.resolution, &entry.resolution);
+                    let same_content = locked_tool_content_equal(existing_tool, entry);
                     if !same_content {
                         let other_group = match &existing.origin {
                             Origin::Group(g) => g.clone(),
@@ -354,15 +354,15 @@ pub fn resolve_selected_tools(
 /// selection.
 ///
 /// Note the internal ordering: duplicate validation now fully precedes
-/// host-leaf resolution and compares [`LockedResolution`] content rather than
+/// host-leaf resolution and compares [`LockedTool`] content rather than
 /// resolved leaves. This is behaviour-preserving for real locks — a lock is
 /// generated from one resolved manifest, so the same repository implies an
 /// identical `platforms` map.
 ///
-/// `current_platform` is the host platform: V2 lock entries resolve to the
-/// host→`"any"` leaf digest for that platform; V1 entries fall back to the
-/// legacy index-digest path. `config` is currently unused beyond signature
-/// parity.
+/// `current_platform` is the host platform: each lock entry resolves to its
+/// host-compatible leaf digest for that platform via
+/// [`crate::project::resolve::lookup_host_leaf`]. `config` is currently
+/// unused beyond signature parity.
 pub fn compose_tool_set(
     config: &ProjectConfig,
     lock: Option<&ProjectLock>,
@@ -376,45 +376,45 @@ pub fn compose_tool_set(
 
 /// Resolve a locked tool to its host-platform pull [`Identifier`].
 ///
-/// V2 ([`LockedResolution::PerPlatform`]): look up the host platform's leaf
-/// (host key → `"any"` fallback) and reconstruct
-/// `repository.clone_with_digest(leaf)`. Absent host leaf (no host key and
-/// no `"any"`) → a clean pre-network [`ProjectErrorKind::NoHostLeaf`] error
-/// naming the tool.
+/// Looks up the host platform's compatible leaf via
+/// [`crate::project::resolve::lookup_host_leaf`] and reconstructs
+/// `repository.clone_with_digest(leaf)`. No compatible entry →
+/// [`ProjectErrorKind::NoHostLeaf`]; two or more entries tied at the maximum
+/// score → [`ProjectErrorKind::AmbiguousHostLeaf`] — the two conditions carry
+/// different remedies (re-resolve vs. disambiguate with `--platform`), so
+/// they are surfaced as distinct error kinds rather than both collapsing to
+/// "no leaf".
 ///
-/// V1 ([`LockedResolution::LegacyIndex`]): return the legacy index
-/// identifier verbatim (the legacy index-digest path; `Index::select`
-/// happens downstream).
-///
-/// Single source of the absent-host-leaf resolution shared by every lock
-/// reader — `compose_tool_set`, `ocx pull`, and lock materialization — so the
-/// condition always carries the same typed [`ProjectErrorKind::NoHostLeaf`]
-/// (exit 78) and the same message. The error is the outer [`super::Error`]
-/// enum so CLI callers can convert it with `.map_err(anyhow::Error::from)` and
-/// still have the `main.rs` boundary classify it via the enum's
-/// [`crate::cli::ClassifyExitCode`] impl.
+/// Single source of the host-leaf resolution shared by every lock reader —
+/// `compose_tool_set`, `ocx pull`, and lock materialization — so both
+/// conditions always carry the same typed error and message. The error is
+/// the outer [`super::Error`] enum so CLI callers can convert it with
+/// `.map_err(anyhow::Error::from)` and still have the `main.rs` boundary
+/// classify it via the enum's [`crate::cli::ClassifyExitCode`] impl.
 ///
 /// # Errors
 ///
-/// Returns [`ProjectErrorKind::NoHostLeaf`] when a V2 entry ships no leaf for
-/// the host platform and no `"any"` fallback at the locked version.
+/// Returns [`ProjectErrorKind::NoHostLeaf`] when the entry ships no leaf
+/// compatible with the host platform at the locked version, or
+/// [`ProjectErrorKind::AmbiguousHostLeaf`] when two or more leaves tie.
 pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> Result<Identifier, super::Error> {
-    match &tool.resolution {
-        // V1 legacy path: return the index identifier verbatim. The
-        // host-platform pick happens downstream via `Index::select`.
-        LockedResolution::LegacyIndex(pinned) => Ok(pinned.as_identifier().clone()),
-        LockedResolution::PerPlatform { repository, platforms } => {
-            match super::resolve::lookup_host_leaf(platforms, current_platform) {
-                Some(leaf) => Ok(repository.clone_with_digest(leaf.clone())),
-                None => Err(super::Error::Project(ProjectError::new(
-                    std::path::PathBuf::new(),
-                    ProjectErrorKind::NoHostLeaf {
-                        name: tool.name.clone(),
-                        platform: current_platform.lock_key(),
-                    },
-                ))),
-            }
-        }
+    match super::resolve::lookup_host_leaf(&tool.platforms, current_platform) {
+        Selection::Found((leaf, _key)) => Ok(tool.repository.clone_with_digest(leaf.clone())),
+        Selection::None => Err(super::Error::Project(ProjectError::new(
+            std::path::PathBuf::new(),
+            ProjectErrorKind::NoHostLeaf {
+                name: tool.name.clone(),
+                platform: current_platform.to_string(),
+            },
+        ))),
+        Selection::Ambiguous(candidates) => Err(super::Error::Project(ProjectError::new(
+            std::path::PathBuf::new(),
+            ProjectErrorKind::AmbiguousHostLeaf {
+                name: tool.name.clone(),
+                platform: current_platform.to_string(),
+                candidates: candidates.into_iter().map(|(_, key)| key.to_string()).collect(),
+            },
+        ))),
     }
 }
 
@@ -435,16 +435,15 @@ fn is_valid_binding(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::oci::{Digest, Identifier};
-    use crate::project::lock::{LockMetadata, LockVersion, LockedResolution, LockedTool, ProjectLock};
+    use crate::project::lock::{LockMetadata, LockVersion, LockedTool, ProjectLock};
     use std::collections::BTreeMap;
 
     fn sha(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
     }
 
-    /// The host platform the compose tests resolve against. Every V2 lock
-    /// fixture below ships a `linux/amd64` leaf so the host→`"any"` lookup
-    /// finds it.
+    /// The host platform the compose tests resolve against. Every lock
+    /// fixture below ships a `linux/amd64` leaf so the host lookup finds it.
     fn host() -> Platform {
         "linux/amd64".parse().expect("valid host platform")
     }
@@ -452,9 +451,7 @@ mod tests {
     fn lock_with(tools: Vec<LockedTool>) -> ProjectLock {
         ProjectLock {
             metadata: LockMetadata {
-                // V2 is the only written shape; compose reads it via the
-                // host→`"any"` leaf lookup.
-                lock_version: LockVersion::V2,
+                lock_version: LockVersion::V3,
                 declaration_hash_version: 1,
                 declaration_hash: format!("sha256:{}", sha('0')),
                 generated_by: "ocx test".into(),
@@ -468,25 +465,24 @@ mod tests {
         ProjectConfig::from_parts(BTreeMap::new(), BTreeMap::new())
     }
 
-    /// A V2 [`LockedTool`] with a single `linux/amd64` leaf keyed by the host
-    /// platform's lossless key. `c` selects the leaf digest byte so distinct
-    /// content can be expressed without tags (V2 carries no tag).
+    /// A [`LockedTool`] with a single `linux/amd64` leaf keyed by the host
+    /// platform's canonical grammar key. `c` selects the leaf digest byte so
+    /// distinct content can be expressed without tags (the lock carries no
+    /// tag).
     fn locked(name: &str, group: &str, reg: &str, repo: &str, c: char) -> LockedTool {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256(sha(c)));
         LockedTool {
             name: name.into(),
             group: group.into(),
-            resolution: LockedResolution::PerPlatform {
-                repository: Identifier::new_registry(repo, reg),
-                platforms,
-            },
+            repository: Identifier::new_registry(repo, reg),
+            platforms,
         }
     }
 
     /// Like [`locked`] but ships ONLY a `windows/amd64` leaf — no
-    /// `linux/amd64`, no `"any"`. On the linux test [`host`] the host→`"any"`
-    /// lookup finds nothing, so [`resolve_selected_tools`] errors with
+    /// `linux/amd64`, no `"any"`. On the linux test [`host`] the lookup
+    /// finds nothing, so [`resolve_selected_tools`] errors with
     /// `NoHostLeaf` for this entry while [`select_tool_set`] (resolution-free)
     /// returns it without error.
     fn locked_windows_only(name: &str, group: &str, reg: &str, repo: &str, c: char) -> LockedTool {
@@ -495,10 +491,8 @@ mod tests {
         LockedTool {
             name: name.into(),
             group: group.into(),
-            resolution: LockedResolution::PerPlatform {
-                repository: Identifier::new_registry(repo, reg),
-                platforms,
-            },
+            repository: Identifier::new_registry(repo, reg),
+            platforms,
         }
     }
 

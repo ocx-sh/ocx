@@ -5,7 +5,7 @@ use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 /// Set the current version of one or more packages.
 ///
@@ -19,7 +19,7 @@ use crate::{api, conventions::platforms_or_default, options};
 #[derive(Parser)]
 pub struct Select {
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Package identifiers to select.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -30,13 +30,13 @@ impl Select {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
 
         // `select_all` resolves in parallel (via `find_all`) then wires each
         // `current` symlink sequentially, aggregating every per-package failure
         // into one `SelectFailed` instead of aborting on the first. Results are
         // returned in input order, so zipping with `self.packages` is sound.
-        let results = context.manager().select_all(identifiers, platforms).await?;
+        let results = context.manager().select_all(identifiers, platform).await?;
 
         let mut packages = HashMap::with_capacity(results.len());
 

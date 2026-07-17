@@ -24,9 +24,7 @@ pub use config::{PackageSettings, ProjectConfig};
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
-pub use lock::{
-    LockMetadata, LockVersion, LockedResolution, LockedTool, ProjectLock, ProjectLockV2, resolutions_content_equal,
-};
+pub use lock::{LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
 pub use mutate::{
     add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
     remove_binding_in_memory,

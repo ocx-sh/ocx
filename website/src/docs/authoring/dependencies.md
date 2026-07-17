@@ -49,7 +49,7 @@ The full identifier rules — required registry component, identifier syntax, th
 
 ### When a Dependency Ships Multiple Platforms {#pinning-per-platform}
 
-A package built with [`ocx package create --platform any`][cmd-package-create] — platform-agnostic content, like a script — can still depend on a package that ships different manifests per platform (the native binary the script wraps, for example). `create` resolves that case into a per-dependency `platforms` pin map instead of a single digest, and narrows your own package's target-platform set to whatever every dependency actually covers. The map shape, the lookup rule for libc-tagged platforms, and the fan-out this produces at push time are covered in [Multi-Platform Packages][authoring-multi-platform] and the [Per-Platform Pins reference][reference-per-platform-pins].
+A package built with [`ocx package create --platform any`][cmd-package-create] — platform-agnostic content, like a script — can still depend on a package that ships different manifests per platform (the native binary the script wraps, for example). `create` resolves that case into a per-dependency `platforms` pin map instead of a single digest: the `any`-targeted package performs no platform-specific resolution of its own, so it can only depend on dependencies that themselves offer an `any` build. The map shape and the any-deps rule are covered in [Multi-Platform Packages][authoring-multi-platform] and the [Per-Platform Pins reference][reference-per-platform-pins].
 
 ## When You Need a `name` Override {#name-field}
 

@@ -5,9 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::oci;
-
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 /// Downloads packages into the local object store without creating install symlinks.
 ///
@@ -21,8 +19,8 @@ use crate::{api, conventions::platforms_or_default, options};
 /// installed files or `<root>/entrypoints/` for generated launchers.
 #[derive(Parser, Clone)]
 pub struct PackagePull {
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platform: options::PlatformOption,
 
     /// Package identifiers to pull.
     #[arg(required = true, num_args = 1..)]
@@ -36,7 +34,7 @@ impl PackagePull {
             .manager()
             .pull_all(
                 &oci_packages,
-                platforms_or_default(&self.platforms),
+                conventions::platform_or_default(self.platform.platform.clone()),
                 context.concurrency(),
             )
             .await?;

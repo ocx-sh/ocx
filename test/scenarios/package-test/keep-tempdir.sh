@@ -17,13 +17,13 @@ cat >metadata.json <<'EOF'
   ] }
 EOF
 
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 
 # --keep prints the tempdir path to stderr before exec replaces the process.
 # Run via subshell so we can capture stderr without ending the parent script.
 stderr="$(
-    ocx package test --keep -p linux/amd64 \
-        -m metadata.json -i "$REGISTRY"/mytool:1.0.0 \
+    ocx package test --keep \
+        -i "$REGISTRY"/mytool:1.0.0 \
         mytool-1.0.0.tar.xz -- mytool 2>&1 1>/dev/null
 )"
 

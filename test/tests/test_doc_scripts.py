@@ -44,11 +44,24 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     Empty or missing root ⇒ zero parameters ⇒ zero cases, no error.
     Case IDs are paths relative to ``DOC_SCRIPTS_DIR`` (parity with
     ``test_scenarios_smoke.py``).
+
+    ``patches__consumer.sh`` runs ``ocx patch sync`` with no ``--platform``,
+    which (per D4 of `adr_platform_model_unification.md`) also probes the
+    registry-wide reserved ``global`` patch-descriptor repository — the same
+    shared slot `tests/test_patches.py` serializes itself against via the
+    ``patch_global_slot`` xdist group. Join that group here too so this case
+    never races a concurrent global-descriptor publish from that module.
     """
     if "script" in metafunc.fixturenames:
         scripts = discover_doc_scripts(DOC_SCRIPTS_DIR)
         ids = [str(p.relative_to(DOC_SCRIPTS_DIR)) for p in scripts]
-        metafunc.parametrize("script", scripts, ids=ids)
+        params = [
+            pytest.param(script, marks=pytest.mark.xdist_group("patch_global_slot"))
+            if script.name == "patches__consumer.sh"
+            else script
+            for script in scripts
+        ]
+        metafunc.parametrize("script", params, ids=ids)
 
 
 def test_doc_script(

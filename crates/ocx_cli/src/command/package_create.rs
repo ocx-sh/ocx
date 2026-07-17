@@ -20,9 +20,11 @@ pub struct PackageCreate {
     /// When metadata declares dependencies without a digest, this flag is
     /// required: create resolves each one against the selected index to a
     /// platform manifest digest and rewrites the metadata sidecar with the
-    /// pins plus the package's target-platform set (consumed by
-    /// `ocx package push` to fan out). Resolution honors `--remote`,
-    /// `--offline`, and `--frozen`. Also used to infer the output filename.
+    /// resolved pins. Resolution honors `--remote`, `--offline`, and
+    /// `--frozen`. When `--metadata` is given, this platform is also
+    /// recorded in the sidecar; `ocx package push` and `ocx package test`
+    /// default to it and reject a `--platform` that disagrees. Also used
+    /// to infer the output filename.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -77,12 +79,15 @@ impl PackageCreate {
             Some(metadata_source) => {
                 let metadata = AuthoringMetadata::read_json(metadata_source.as_path()).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context).await?;
+                let platform = self.validation_platform();
                 // Validate the projection the publisher will actually push:
-                // project for a platform every dependency covers and run the
-                // publish-time env/entrypoint checks.
-                let validation_platform = Self::validation_platform(&metadata);
-                package::metadata::ValidMetadata::try_from(metadata.to_published(&validation_platform)?)?;
-                Some(metadata)
+                // run the publish-time env/entrypoint checks against the
+                // declared platform.
+                package::metadata::ValidMetadata::try_from(metadata.to_published(&platform)?)?;
+                // Record the platform dependency pins were resolved against
+                // so `ocx package push`/`ocx package test` can bind to it
+                // instead of silently defaulting to the host platform.
+                Some(metadata.with_platform(platform))
             }
             None => None,
         };
@@ -120,29 +125,19 @@ impl PackageCreate {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Pick the platform to run publish-time validation against.
-    ///
-    /// Prefer the embedded target set's first entry (present whenever
-    /// `--platform` resolved a set). Otherwise — an already-pinned legacy
-    /// sidecar with no embedded set — derive a platform covered by every
-    /// dependency, so a specific-only pin map is not validated against bare
-    /// `any` (which would wrongly fail with `MissingPlatformPin`). Falls back to
-    /// `any` only when no dependency advertises a specific platform (all
-    /// direct-digest pins), where `any` projects correctly.
-    fn validation_platform(metadata: &AuthoringMetadata) -> oci::Platform {
-        if let Some(set) = metadata.target_platforms() {
-            return set.first().clone();
-        }
-        package::dependency_pinning::covered_platforms(metadata.dependencies())
-            .into_iter()
-            .next()
-            .unwrap_or_else(oci::Platform::any)
+    /// Pick the platform to run publish-time validation against: the declared
+    /// `--platform`, or the host platform (falling back to `any`) when a
+    /// pre-pinned sidecar was supplied without one.
+    fn validation_platform(&self) -> oci::Platform {
+        self.platform
+            .clone()
+            .unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
     }
 
     /// Resolve unpinned dependencies against the selected index.
     ///
-    /// - `--platform` given: resolve + embed the target-platform set (pinned
-    ///   dependencies pass through untouched, no network).
+    /// - `--platform` given: resolve every unpinned dependency against it
+    ///   (already-pinned dependencies pass through untouched, no network).
     /// - `--platform` omitted: metadata must already be fully pinned (usage
     ///   error otherwise); passes through for canonical rewrite only.
     async fn resolve_dependency_pins(

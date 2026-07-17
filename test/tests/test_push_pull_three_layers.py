@@ -68,7 +68,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
 
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [
+        "type": "bundle", "version": 1, "platform": current_platform(), "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
@@ -108,7 +108,7 @@ def test_default_push_emits_no_layer_annotations(ocx: OcxRunner, unique_repo: st
 
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [
+        "type": "bundle", "version": 1, "platform": current_platform(), "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
@@ -143,7 +143,7 @@ def test_cascade_layout_annotations_identical_across_tags(ocx: OcxRunner, unique
 
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [
+        "type": "bundle", "version": 1, "platform": current_platform(), "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))

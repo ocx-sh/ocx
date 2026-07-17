@@ -52,14 +52,12 @@ impl About {
         // env var, layered config, then compiled fallback (already merged in
         // Context::default_registry).
         let registry = context.default_registry().to_string();
-        // Render each platform's bare os/arch base (no `+os_features` suffix):
-        // the host row derives from `Platform::current()`, whose `Display` now
-        // carries the detected libc, which the dedicated `Libc` row already
-        // shows. `segments()` is the no-features rendering.
-        let platforms: Vec<String> = crate::conventions::supported_platforms()
-            .iter()
-            .map(|platform| platform.segments().join("/"))
-            .collect();
+        // Render the host platform's bare os/arch base (no `+os_features`
+        // suffix): `Platform::current()`'s `Display` now carries the detected
+        // libc, which the dedicated `Libc` row already shows. `segments()` is
+        // the no-features rendering.
+        let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let platforms: Vec<String> = vec![host_platform.segments().join("/")];
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
         let home = file_structure::default_ocx_root()
             .map(|p| p.display().to_string())

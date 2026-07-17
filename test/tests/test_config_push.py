@@ -83,7 +83,10 @@ def test_config_push_produces_ordinary_package_manifest(
         for entry in entries
         if entry.get("platform")
     }
-    assert platforms == {"any/any"}, f"default --platform must be any/any, got {platforms}"
+    # The CLI `--platform` default is the grammar string `any` (D2 of
+    # adr_platform_model_unification.md), which is `Platform::Any` — that
+    # value's OCI wire representation is unchanged: `{"os":"any","architecture":"any"}`.
+    assert platforms == {"any/any"}, f"default --platform must serialize as OCI any/any, got {platforms}"
 
     manifest = _fetch_manifest_by_digest(registry, unique_repo, entries[0]["digest"])
     layers = manifest["layers"]

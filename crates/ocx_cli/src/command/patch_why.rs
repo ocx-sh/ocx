@@ -16,13 +16,13 @@ use clap::Args;
 use ocx_lib::package::install_info::InstallInfo;
 use ocx_lib::package_manager::PatchScope;
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{api, conventions, options};
 
 /// Arguments for `ocx patch why`.
 #[derive(Args)]
 pub struct PatchWhyArgs {
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Base identifier to trace patch provenance for.
     #[clap(value_name = "BASE-ID", required = true)]
@@ -38,11 +38,11 @@ impl PatchWhyArgs {
         // `[patches]` tier overlays for the base, not a project opt-out
         // decision (there is no project to opt out from).
         let base_id = self.base.with_domain(context.default_registry())?;
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
         let manager = context.manager();
 
         let info = manager
-            .find_or_install_all(vec![base_id.clone()], platforms, context.concurrency())
+            .find_or_install_all(vec![base_id.clone()], platform, context.concurrency())
             .await?;
         let info: Vec<Arc<InstallInfo>> = info.into_iter().map(Arc::new).collect();
 

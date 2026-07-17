@@ -48,9 +48,9 @@ impl PlatformValue {
     pub(super) const TYPE: &'static str = "Platform";
 
     /// Projects an OCX [`Platform`] into the typed Starlark wrapper. The
-    /// optional CPU `variant` / `os_version` / feature lists are not exposed
-    /// in v1 — they exist on the OCX `Platform` for OCI manifest fidelity, but
-    /// a test script that reads `p.os` / `p.arch` is the v1 contract.
+    /// optional CPU `variant` / feature lists are not exposed in v1 — they
+    /// exist on the OCX `Platform` for OCI manifest fidelity, but a test
+    /// script that reads `p.os` / `p.arch` is the v1 contract.
     pub(super) fn from_platform(p: &Platform) -> Self {
         match p {
             Platform::Any => Self {
@@ -142,9 +142,7 @@ mod tests {
             os: OperatingSystem::Linux,
             arch: Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: Vec::new(),
-            features: None,
         };
         let p = PlatformValue::from_platform(&platform);
         assert!(!p.is_any);
@@ -160,9 +158,7 @@ mod tests {
             os: OperatingSystem::Linux,
             arch: Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: Vec::new(),
-            features: None,
         };
         let value = heap.alloc(PlatformValue::from_platform(&platform));
         let is_any = value.get_attr("is_any", heap).unwrap().unwrap();
@@ -194,9 +190,7 @@ mod tests {
             os: OperatingSystem::Linux,
             arch: Architecture::Amd64,
             variant: None,
-            os_version: None,
             os_features: Vec::new(),
-            features: None,
         };
         assert_eq!(PlatformValue::from_platform(&platform).to_string(), "linux/amd64");
         assert_eq!(PlatformValue::from_platform(&Platform::Any).to_string(), "any");

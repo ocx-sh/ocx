@@ -43,10 +43,12 @@ class MultiLayer(Scenario):
             {"bin/myapp": f"#!/bin/sh\necho {marker}\n"},
         )
 
+        plat = current_platform()
         metadata_path = self.tmp_path / f"meta-{repo}.json"
         metadata_path.write_text(json.dumps({
             "type": "bundle",
             "version": 1,
+            "platform": plat,
             "env": [
                 {
                     "key": "PATH", "type": "path", "required": True,
@@ -64,7 +66,6 @@ class MultiLayer(Scenario):
             )
             bundles.append(bundle)
 
-        plat = current_platform()
         fq = f"{self.ocx.registry}/{repo}:1.0.0"
         push_args = [
             "package", "push", "-p", plat, "-m", str(metadata_path),

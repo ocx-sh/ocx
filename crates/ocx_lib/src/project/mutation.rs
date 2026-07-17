@@ -101,9 +101,9 @@ pub struct MutationGuard {
     /// Raw on-disk bytes of the predecessor `ocx.lock`, captured verbatim at
     /// guard-acquisition time. `None` mirrors [`Self::previous_lock`] (no lock
     /// existed). Used by the rollback path to restore the predecessor
-    /// byte-for-byte — including a V1 (`LegacyIndex`) lock, which the V2 writer
-    /// refuses to serialize. Restoring the original bytes keeps a rolled-back
-    /// mutation from converting (or panicking on) a committed V1 lock.
+    /// byte-for-byte, guaranteeing the restored file is identical to the
+    /// pre-commit on-disk state rather than whatever `ProjectLock::save`
+    /// would re-emit from the parsed form.
     previous_lock_bytes: Option<Vec<u8>>,
 }
 
@@ -421,10 +421,10 @@ impl MutationGuard {
     /// and loaded both the current [`ProjectConfig`] and the optional
     /// predecessor [`ProjectLock`]. `previous_lock_bytes` carries the raw
     /// on-disk bytes of that predecessor (captured verbatim so the rollback
-    /// path can restore a V1 lock byte-for-byte); it MUST be `Some` exactly
-    /// when `previous_lock` is `Some`. The constructor does not re-validate
-    /// these inputs — it merely packages them into a guard whose drop glue
-    /// releases the flock.
+    /// path can restore it byte-for-byte instead of re-serializing); it MUST
+    /// be `Some` exactly when `previous_lock` is `Some`. The constructor does
+    /// not re-validate these inputs — it merely packages them into a guard
+    /// whose drop glue releases the flock.
     ///
     /// The only sanctioned external ingress is the CLI shim
     /// `ocx_cli::app::project_context::load_project_for_mutate`, which
@@ -544,11 +544,9 @@ async fn maybe_inject_fault(fault: Option<&str>, stage: CommitStage) -> Result<(
 /// - `previous_lock_bytes = Some(bytes)` → write the captured predecessor
 ///   bytes back **verbatim** under the same atomic-rename + parent-fsync
 ///   primitive used by the forward path. Writing the raw bytes (rather than
-///   re-serializing the parsed predecessor through `ProjectLock::save`) is
-///   what lets a committed **V1** (`LegacyIndex`) lock roll back correctly: the
-///   V2 writer would hit `unreachable!()` on a `LegacyIndex`, so a re-`save`
-///   would panic instead of restoring. The captured bytes restore the
-///   predecessor exactly as it was on disk (a V1 lock stays V1).
+///   re-serializing the parsed predecessor through `ProjectLock::save`)
+///   guarantees a byte-exact restore regardless of any formatting drift
+///   between the on-disk predecessor and what the writer would re-emit.
 /// - `previous_lock_bytes = None`        → delete the just-created lock file.
 ///
 /// Rollback failures log at ERROR but never replace the original error —
@@ -561,8 +559,7 @@ async fn rollback_lock_after_failure(lock_path: &Path, previous_lock_bytes: Opti
         Some(bytes) => {
             // Restore the predecessor lock byte-for-byte. The bytes were
             // captured verbatim at guard-acquisition time, so the restored
-            // file is identical to the pre-commit on-disk state — including
-            // a V1 lock, which the V2 serializer cannot emit.
+            // file is identical to the pre-commit on-disk state.
             if let Err(e) = super::lock::restore_lock_bytes_verbatim(lock_path, bytes.to_vec()).await {
                 log::error!(
                     "MutationGuard rollback: failed to restore predecessor ocx.lock at '{}': {e:#}",

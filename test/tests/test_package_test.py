@@ -34,7 +34,7 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner, current_platform
-from src.helpers import make_package
+from src.helpers import make_package, resolved_metadata_path
 from src.runner import PackageInfo
 
 
@@ -104,10 +104,14 @@ def _make_test_package(
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{unique_repo}-{tag}.tar.xz"
-    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir))
+    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), "-p", plat, str(pkg_dir))
+    # `create` writes its resolved sidecar (carrying the recorded platform,
+    # D5) next to `bundle`, not back to `metadata_path` — return THAT path so
+    # every caller's `package test -m` sees the platform-bound sidecar.
+    resolved_metadata = resolved_metadata_path(bundle)
 
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
-    ocx.plain("package", "push", "-n", "-p", plat, "-m", str(metadata_path), "-i", fq, str(bundle))
+    ocx.plain("package", "push", "-n", "-p", plat, "-m", str(resolved_metadata), "-i", fq, str(bundle))
     short = f"{unique_repo}:{tag}"
     ocx.plain("index", "update", short)
 
@@ -120,7 +124,7 @@ def _make_test_package(
         marker=marker,
         platform=plat,
     )
-    return bundle, metadata_path, pkg_info
+    return bundle, resolved_metadata, pkg_info
 
 
 def _ocx_home(ocx: OcxRunner) -> Path:

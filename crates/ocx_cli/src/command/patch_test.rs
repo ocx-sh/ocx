@@ -149,7 +149,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // the seeded descriptor. The maintainer is testing online, so the base is
     // pulled from the shared registry source; offline → fail-closed.
     let base_info = manager
-        .pull(&base_id, vec![platform.clone()])
+        .pull(&base_id, platform.clone())
         .await
         .map_err(ocx_lib::Error::from)
         .with_context(|| format!("materializing base '{base_id}' into the scratch store"))?;
@@ -326,7 +326,7 @@ async fn materialize_companions(
             continue;
         }
         let pull_result = manager
-            .pull(&companion.identifier, vec![platform.clone()])
+            .pull(&companion.identifier, platform.clone())
             .await
             .map_err(ocx_lib::Error::from);
         match pull_result {

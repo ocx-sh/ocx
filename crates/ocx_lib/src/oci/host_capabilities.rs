@@ -4,8 +4,7 @@
 //! Host libc detection for platform-aware OCI index resolution.
 //!
 //! Enumerates the libc families present on the current host and maps them to
-//! `os.features` tag values consumed by
-//! [`super::platform::Platform::can_run`].
+//! `os.features` tag values consumed by [`super::is_compatible`].
 //!
 //! ## Self-linkage vs. host capability
 //!
@@ -213,8 +212,8 @@ impl Feature {
 
 /// Detected capabilities of the current host relevant to platform selection.
 ///
-/// At v1 this carries only the set of libc families. Future fields (CPU
-/// microarch feature level, OS version) may be added here under new ADRs.
+/// At v1 this carries only the set of libc families. Future fields (e.g. CPU
+/// microarch feature level) may be added here under new ADRs.
 #[derive(Debug, Clone)]
 pub struct HostCapabilities {
     /// The set of libc families the host can execute. Empty when detection is

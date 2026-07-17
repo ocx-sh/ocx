@@ -65,7 +65,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
-    cli,
     oci::Platform,
     package::metadata::env::entry::Entry,
     package_manager::PatchProvenance,
@@ -75,7 +74,7 @@ use ocx_lib::{
 use crate::{
     api,
     app::project_context::load_project_with_lock,
-    conventions::{emit_lines, export_ci, platforms_or_default, resolve_ci_arg, resolve_shell_arg},
+    conventions::{emit_lines, export_ci, platform_or_default, resolve_ci_arg, resolve_shell_arg},
     options,
 };
 
@@ -175,7 +174,7 @@ pub struct ToolchainEnv {
     export_file: Option<std::path::PathBuf>,
 
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     #[clap(flatten)]
     pull: options::Pull,
@@ -208,10 +207,10 @@ impl ToolchainEnv {
         let ci = resolve_ci_arg(self.ci)?;
 
         // The single target platform to compose for. `env` produces ONE
-        // environment (a single PATH cannot hold two platforms' tool dirs), so
-        // `--platform` is single-valued here: omitted → host native; one value
-        // → cross-build target; more than one → usage error.
-        let target = single_target(self.platforms.as_slice())?;
+        // environment (a single PATH cannot hold two platforms' tool dirs);
+        // clap's `Option<Platform>` `--platform` field already enforces at
+        // most one value, so the default-to-host fallback is all that's left.
+        let target = platform_or_default(self.platform.platform.clone());
 
         // ── Resolve entries: one global path, one project path ───────────────
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
@@ -270,7 +269,6 @@ impl ToolchainEnv {
             // surfaces `NoHostLeaf` (exit 78) from `compose_tool_set`.
             let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &target)?;
 
-            let platforms = platforms_or_default(self.platforms.as_slice());
             let manager = context.manager();
             let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = if self.pull.enabled(true) {
                 // Default: resolve + install-on-miss, a SINGLE batched install
@@ -281,7 +279,7 @@ impl ToolchainEnv {
                 let identifiers: Vec<ocx_lib::oci::Identifier> =
                     composed.into_iter().map(|tool| tool.identifier).collect();
                 manager
-                    .find_or_install_all(identifiers, platforms, context.concurrency())
+                    .find_or_install_all(identifiers, target.clone(), context.concurrency())
                     .await?
                     .into_iter()
                     .map(Arc::new)
@@ -297,7 +295,7 @@ impl ToolchainEnv {
                 let offline = manager.offline_view(context.local_index().clone());
                 let mut infos = Vec::with_capacity(composed.len());
                 for tool in &composed {
-                    match offline.find(&tool.identifier, platforms.clone()).await {
+                    match offline.find(&tool.identifier, target.clone()).await {
                         Ok(info) => infos.push(Arc::new(info)),
                         Err(ocx_lib::package_manager::error::PackageErrorKind::NotFound) => {
                             context.ui().warn(format!(
@@ -377,21 +375,6 @@ impl ToolchainEnv {
     }
 }
 
-/// Resolve `env`'s repeatable `--platform` flag down to a single target.
-///
-/// `env` produces ONE environment (a single PATH cannot carry two platforms'
-/// tool dirs), so the flag is single-valued here: omitted → the host native
-/// platform (unchanged default); exactly one → that platform (cross-build
-/// target); more than one → a usage error (exit 64). Naming the flag in the
-/// message keeps stderr greppable.
-fn single_target(platforms: &[Platform]) -> anyhow::Result<Platform> {
-    match platforms {
-        [] => Ok(Platform::current().unwrap_or_else(Platform::any)),
-        [one] => Ok(one.clone()),
-        _ => Err(cli::UsageError::new("--platform accepts a single target platform for env").into()),
-    }
-}
-
 /// Resolve the global toolchain's **lock-pinned** set into env entries.
 ///
 /// Source = `$OCX_HOME/ocx.lock`, scoped to `groups` via
@@ -466,10 +449,6 @@ pub(crate) async fn resolve_global_pinned_env(
     // Offline-only manager clone: MUST NOT contact the registry regardless
     // of `--remote` (architect boundary; §4 login-path guarantee).
     let manager = context.manager().offline_view(context.local_index().clone());
-    // `find`'s platform filter: the target first, then `"any"` as a fallback.
-    // Inert for V2 leaf identifiers (already digest-pinned); for a legacy V1
-    // index digest it drives `Index::select` the same way the host default did.
-    let platforms = vec![target.clone(), Platform::any()];
 
     let mut infos = Vec::new();
     for tool in &lock.tools {
@@ -479,26 +458,16 @@ pub(crate) async fn resolve_global_pinned_env(
             continue;
         }
         // Resolve the lock entry to its `target`-platform identifier offline
-        // against the local object store. V1 ([`LockedResolution::LegacyIndex`]):
-        // the lock pins the ImageIndex manifest digest, so `find` walks the
-        // (already-local) OCI chain from it. V2 ([`LockedResolution::PerPlatform`]):
-        // reconstruct `repository`+target leaf and find that directly.
-        let identifier: ocx_lib::oci::Identifier = match &tool.resolution {
-            ocx_lib::project::LockedResolution::LegacyIndex(pinned) => pinned.clone().into(),
-            ocx_lib::project::LockedResolution::PerPlatform {
-                repository,
-                platforms: leaves,
-            } => {
-                // V2: reconstruct the target leaf directly (target key → `"any"`
-                // fallback). Absent leaf → skip silently (global tier is
-                // lenient; the login exporter must never block a shell).
-                let Some(leaf) = ocx_lib::project::lookup_host_leaf(leaves, target) else {
-                    continue;
-                };
-                repository.clone_with_digest(leaf.clone())
-            }
+        // against the local object store: reconstruct `repository`+target
+        // leaf and find that directly. Absent OR ambiguous leaf → skip
+        // silently (global tier is lenient; the login exporter must never
+        // block a shell on a disambiguation it cannot perform).
+        let ocx_lib::oci::Selection::Found((leaf, _key)) = ocx_lib::project::lookup_host_leaf(&tool.platforms, target)
+        else {
+            continue;
         };
-        match manager.find(&identifier, platforms.clone()).await {
+        let identifier: ocx_lib::oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
+        match manager.find(&identifier, target.clone()).await {
             Ok(info) => infos.push(Arc::new(info)),
             // Pinned package not materialised locally — skip silently
             // (the login exporter must never block a shell).
@@ -573,30 +542,17 @@ mod tests {
 
     /// No `--platform` → the host native platform (or `any` when unsupported).
     #[test]
-    fn single_target_defaults_to_host() {
+    fn platform_defaults_to_host() {
         // Never errors; the concrete value depends on the build target.
-        single_target(&[]).expect("empty platform list resolves to host default");
+        platform_or_default(None);
     }
 
-    /// Exactly one `--platform` → that platform, verbatim.
-    #[test]
-    fn single_target_accepts_one() {
-        let target = single_target(&[platform("linux/arm64")]).expect("one platform is accepted");
-        assert_eq!(target.to_string(), "linux/arm64");
-    }
-
-    /// More than one `--platform` → usage error (env composes a single env).
-    #[test]
-    fn single_target_rejects_multiple() {
-        let result = single_target(&[platform("linux/arm64"), platform("linux/amd64")]);
-        assert!(result.is_err(), "env must reject more than one --platform target");
-    }
-
-    /// `--platform` parses at the clap layer (the >1 rejection is at execute time).
+    /// `--platform` parses at the clap layer to exactly one value; clap itself
+    /// rejects a second occurrence of the flag (Option<T>, not Vec<T>).
     #[test]
     fn parses_platform_flag() {
         let env = ToolchainEnv::try_parse_from(["env", "--platform", "linux/arm64"]).unwrap();
-        assert_eq!(env.platforms.as_slice().len(), 1);
+        assert_eq!(env.platform.platform, Some(platform("linux/arm64")));
     }
 
     /// `-g` is repeatable and comma-delimited: `-g ci,lint -g release` → 3.
@@ -631,29 +587,27 @@ mod tests {
 
     fn lock_with_groups(groups: &[&str]) -> ProjectLock {
         use ocx_lib::oci::{Digest, Identifier};
-        use ocx_lib::project::{LockMetadata, LockVersion, LockedResolution, LockedTool};
+        use ocx_lib::project::{LockMetadata, LockVersion, LockedTool};
         let tools = groups
             .iter()
             .enumerate()
             .map(|(i, group)| {
-                let mut leaves = std::collections::BTreeMap::new();
-                leaves.insert(
+                let mut platforms = std::collections::BTreeMap::new();
+                platforms.insert(
                     "linux/amd64".to_owned(),
                     Digest::Sha256(std::iter::repeat_n('a', 64).collect()),
                 );
                 LockedTool {
                     name: format!("tool{i}"),
                     group: (*group).to_owned(),
-                    resolution: LockedResolution::PerPlatform {
-                        repository: Identifier::new_registry(format!("tool{i}"), "ocx.sh"),
-                        platforms: leaves,
-                    },
+                    repository: Identifier::new_registry(format!("tool{i}"), "ocx.sh"),
+                    platforms,
                 }
             })
             .collect();
         ProjectLock {
             metadata: LockMetadata {
-                lock_version: LockVersion::V2,
+                lock_version: LockVersion::V3,
                 declaration_hash_version: 1,
                 declaration_hash: format!("sha256:{}", std::iter::repeat_n('0', 64).collect::<String>()),
                 generated_by: "ocx test".into(),

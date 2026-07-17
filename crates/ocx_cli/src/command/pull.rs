@@ -9,7 +9,7 @@ use ocx_lib::project::expand_all_keyword;
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock;
-use crate::conventions::platforms_or_default;
+use crate::conventions;
 use crate::options;
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
@@ -49,7 +49,7 @@ pub struct Pull {
     pub groups: Vec<String>,
 
     #[clap(flatten)]
-    pub platforms: options::Platforms,
+    pub platform: options::PlatformOption,
 }
 
 impl Pull {
@@ -74,17 +74,13 @@ impl Pull {
         // authoritative. Walk it directly, preserving lock order (sorted
         // by `(group, name)` at write time, so the result is deterministic).
         //
-        // V2 ([`LockedResolution::PerPlatform`]): the pull id is the requested
-        // platform's leaf (`repository.clone_with_digest(leaf)`, host key →
-        // `"any"` fallback); an unshipped platform → clean pre-network
-        // `NoHostLeaf` (exit 78). V1 ([`LockedResolution::LegacyIndex`]): the
-        // legacy index-digest path (identical for every platform, deduped
-        // below; the requested platforms drive `Index::select` in `pull_all`).
+        // The pull id is the requested platform's leaf
+        // (`repository.clone_with_digest(leaf)`, host key → `Any`-offer
+        // fallback); an unshipped platform → clean pre-network `NoHostLeaf`
+        // (exit 78).
         //
-        // `--platform` omitted → the host native platform (unchanged). One or
-        // more `--platform` values → warm each requested platform's leaf, so an
-        // amd64 host can pre-warm an arm64 leaf.
-        let selection = crate::app::project_context::platform_selection(self.platforms.as_slice());
+        // `--platform` omitted → the host native platform.
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
         let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
@@ -97,19 +93,12 @@ impl Pull {
                 .filter(|t| expanded.iter().any(|g| g == &t.group))
                 .collect()
         };
-        // A V1 legacy tool resolves the same index id for every platform, so a
-        // multi-platform request would silently materialize only the first (see
-        // `reject_multi_platform_on_legacy`). Fail loud before any store write.
-        let has_legacy = selected.iter().any(|t| t.resolution.is_legacy());
-        crate::app::project_context::reject_multi_platform_on_legacy(has_legacy, self.platforms.as_slice())?;
         let mut pinned: Vec<oci::PinnedIdentifier> = Vec::new();
         for tool in &selected {
-            for platform in &selection {
-                let id = host_pull_pinned(tool, platform)?;
-                // ponytail: O(n²) dedup over tools×platforms — both tiny.
-                if !pinned.contains(&id) {
-                    pinned.push(id);
-                }
+            let id = host_pull_pinned(tool, &platform)?;
+            // ponytail: O(n) dedup over tools — tiny.
+            if !pinned.contains(&id) {
+                pinned.push(id);
             }
         }
 
@@ -118,7 +107,7 @@ impl Pull {
         // Dry-run runs after the staleness gate so a stale lock still
         // exits 65 before any preview prints. No network, no store writes.
         if self.dry_run {
-            return run_dry_run(&context, &pinned, self.platforms.as_slice()).await;
+            return run_dry_run(&context, &pinned, platform).await;
         }
 
         let identifiers: Vec<oci::Identifier> = pinned.iter().cloned().map(Into::into).collect();
@@ -131,11 +120,7 @@ impl Pull {
         // failure.
         let info = context
             .manager()
-            .pull_all(
-                &identifiers,
-                platforms_or_default(self.platforms.as_slice()),
-                context.concurrency(),
-            )
+            .pull_all(&identifiers, platform, context.concurrency())
             .await?;
 
         // Re-save the lock with same bytes to advance its mtime, so direnv
@@ -143,22 +128,14 @@ impl Pull {
         // inside `ProjectLock::save` freezes `generated_at` when content is
         // unchanged — atomic rename still advances mtime. Skipped under
         // `--dry-run` because dry-run must not cause any side effects.
-        //
-        // A committed V1 (legacy) lock is NEVER rewritten on a read path: the
-        // writer only emits V2, and the ADR forbids a read-path forced upgrade
-        // (the migration is an explicit `ocx lock --upgrade` / write command).
-        // The mtime bump is purely a direnv-refresh nicety, so skipping it for
-        // a V1 lock is harmless — direnv still re-fires on the next write.
-        if !crate::app::project_context::has_legacy_entry(&ctx.lock.tools) {
-            ctx.lock
-                .save(
-                    &ctx.lock_path,
-                    Some(&ctx.lock),
-                    context.file_structure().root(),
-                    &ctx.config_path,
-                )
-                .await?;
-        }
+        ctx.lock
+            .save(
+                &ctx.lock_path,
+                Some(&ctx.lock),
+                context.file_structure().root(),
+                &ctx.config_path,
+            )
+            .await?;
 
         let entries: Vec<api::data::paths::PathEntry> = identifiers
             .iter()
@@ -217,11 +194,9 @@ type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathB
 async fn run_dry_run(
     context: &crate::app::Context,
     pinned: &[oci::PinnedIdentifier],
-    platforms: &[oci::Platform],
+    platform: oci::Platform,
 ) -> anyhow::Result<ExitCode> {
     use api::data::pull_dry_run::{DryRunEntry, PullDryRun, PullStatus};
-
-    let platforms = platforms_or_default(platforms);
 
     // Fan out one resolve + probe per pinned id, tagged with its input index.
     // `resolve` hits the index (network on a cold cache), so a sequential loop
@@ -232,10 +207,10 @@ async fn run_dry_run(
     for (index, id) in pinned.iter().enumerate() {
         let manager = context.manager().clone();
         let identifier: oci::Identifier = id.clone().into();
-        let platforms = platforms.clone();
+        let platform = platform.clone();
         join_set.spawn(async move {
             let result = async {
-                let resolved = match manager.resolve(&identifier, platforms).await {
+                let resolved = match manager.resolve(&identifier, platform).await {
                     Ok(chain) => Some(chain.pinned),
                     Err(_) => None,
                 };
@@ -290,20 +265,28 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    /// `--platform` is repeatable (and comma-delimited) and coexists with `-g`.
+    /// `--platform` accepts a single value and coexists with `-g`.
     #[test]
-    fn parses_repeatable_platform_flag() {
-        let pull =
-            Pull::try_parse_from(["pull", "-g", "ci", "--platform", "linux/arm64", "-p", "linux/amd64"]).unwrap();
+    fn parses_platform_flag() {
+        let pull = Pull::try_parse_from(["pull", "-g", "ci", "--platform", "linux/arm64"]).unwrap();
         assert_eq!(
-            pull.platforms.as_slice().len(),
-            2,
-            "two --platform values must parse into two entries"
+            pull.platform.platform.map(|p| p.to_string()),
+            Some("linux/arm64".to_owned())
         );
         assert_eq!(
             pull.groups,
             vec!["ci".to_owned()],
             "-g must still parse alongside --platform"
+        );
+    }
+
+    /// A second `--platform` occurrence is a usage error (D4 of
+    /// `adr_platform_model_unification.md`).
+    #[test]
+    fn rejects_repeated_platform_flag() {
+        assert!(
+            Pull::try_parse_from(["pull", "--platform", "linux/arm64", "-p", "linux/amd64"]).is_err(),
+            "repeated --platform must be rejected"
         );
     }
 

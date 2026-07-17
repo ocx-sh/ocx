@@ -31,7 +31,7 @@ pub struct Exec {
     self_view: bool,
 
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Package identifiers to layer environment from.
     ///
@@ -54,11 +54,11 @@ pub struct Exec {
 impl Exec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let manager = context.manager();
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = platform_or_default(self.platform.platform.clone());
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         let infos = manager
-            .find_or_install_all(identifiers, platforms, context.concurrency())
+            .find_or_install_all(identifiers, platform, context.concurrency())
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();

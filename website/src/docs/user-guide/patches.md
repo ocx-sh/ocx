@@ -274,12 +274,13 @@ the `[patches]` tier was added. This is the only command that contacts the patch
 It is safe to run frequently; it piggybacks on the same index-update mechanism as
 `ocx index update`.
 
-Without `--platform`, `patch sync` resolves companions for **every supported platform**, not
-just the platform running the sync — the same default [`ocx lock`][cmd-lock] uses. A synced
-descriptor/companion set is a shared artifact: if it only covered the maintainer's own
-platform, a teammate on a different OS or architecture would silently miss a required
-companion and hit a failed (or worse, unpatched) launch. Pass `--platform` (repeatable) to
-narrow to a subset when you only need to refresh one platform's companions.
+Without `--platform`, `patch sync` resolves companions for **every concrete ship platform**, not
+just the platform running the sync — the same default [`ocx lock`][cmd-lock] uses. This is
+`patch sync`'s one sanctioned multi-platform fan-out: an explicit enumeration over the concrete
+matrix, not a selection among candidates. A synced descriptor/companion set is a shared artifact:
+if it only covered the maintainer's own platform, a teammate on a different OS or architecture
+would silently miss a required companion and hit a failed (or worse, unpatched) launch. Pass a
+single `--platform` to narrow to just that platform's companions.
 
 ## Enforcement {#patches-enforcement}
 

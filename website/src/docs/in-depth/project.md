@@ -40,9 +40,16 @@ The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 87
 
 ### Lock format — per-platform leaf digests {#lock-format}
 
-Each `[[tool]]` entry in `ocx.lock` records the bare registry/repository coordinates (no tag, no digest) and a `[tool.platforms]` table mapping each platform the publisher ships to its per-platform leaf manifest digest:
+`lock_version = 3` is the only lock format this build reads or writes — see [Platforms][reference-platforms] for the canonical grammar its keys use. A `[metadata]` header carries the format version, a `declaration_hash` over the canonicalized `ocx.toml`, and provenance (`generated_by`, `generated_at`). Each `[[tool]]` entry records the bare registry/repository coordinates (no tag, no digest) and a `[tool.platforms]` table mapping each platform the publisher ships to its per-platform leaf manifest digest:
 
 ```toml
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:<hex>"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
 [[tool]]
 name = "cmake"
 group = "default"
@@ -57,7 +64,15 @@ repository = "ocx.sh/cmake"           # registry/repo only — no tag, no digest
 
 Only the platforms the publisher ships are recorded: a platform absent from the map means the publisher does not ship it at the locked version. `ocx lock` records every shipped platform at once, regardless of which OS the command runs on, so a lock committed on Linux is already complete for macOS and Windows CI runners — no re-resolution or re-commit is required on a different machine.
 
-At install and run time, OCX looks up the host platform key in `[tool.platforms]`, falling back to the `"any"` key for packages that ship a single platform-independent binary. A host key that is absent — and has no `"any"` fallback — produces a clean pre-network error naming the missing platform and pointing to `ocx update <tool>` to re-lock if the publisher has since added support.
+Every key in `[tool.platforms]` must be the canonical grammar spelling of the platform it parses to (`+a,a` or unsorted `+b,a` are rejected, not silently normalized) and no two keys may parse to the same platform — both checked on load and on every write, so the file's bytes stay the unique canonical form. Two distinct keys pointing at the *same* digest is fine and expected (see [Shared Digests][reference-platforms-shared-digests]); only key-level duplication is rejected.
+
+At install and run time, OCX resolves the host against `[tool.platforms]` through the same [directed compatibility relation][reference-platforms-compatibility] `Index::select` uses for a fresh install — a bare `linux/amd64` host can match a `linux/amd64+libc.glibc` entry, and a package that ships only `"any"` matches every host. A host with no compatible entry at all produces a clean pre-network error naming the missing platform and pointing to `ocx update <tool>` to re-lock if the publisher has since added support.
+
+::: warning `ocx.lock` version 1 and 2 are rejected outright
+A lock written by an older OCX release fails to load with `unsupported ocx.lock version N;
+regenerate with \`ocx lock\`` (exit 78) — there is no bridged read and no partial support. Run
+[`ocx lock`](#lock) to regenerate it against the current registry state.
+:::
 
 ### Adding and dropping platforms {#lock-platforms-lifecycle}
 
@@ -66,7 +81,7 @@ A newly-shipped platform becomes available after an explicit `ocx update <tool>`
 ::: warning `ocx.lock` is machine-generated
 Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the file-level `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions.
 
-Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v2.json`][schema-lock]; the schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
+Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v3.json`][schema-lock]; the schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
 :::
 
 ::: tip Commit `ocx.lock` and tame merge conflicts
@@ -87,7 +102,7 @@ Project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) seriali
 
 `ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving tool's live tag. This is the guarantee that adding a new tool or dropping an old one never silently advances the versions of everything else.
 
-The carry-forward has two modes depending on the lock format of the surviving entry. A V2 entry is passed through byte-identical — no registry contact. A V1 (legacy) entry is transcribed using the pinned index digest it already stores: OCX reads the exact same index manifest and extracts its per-platform leaf digests, producing a V2 entry with the identical pins. If the V1 index is no longer retrievable from the registry, the command fails with exit 78 and a message directing you to `ocx update` — it never silently re-resolves against the live tag.
+Every surviving entry is passed through byte-identical — no registry contact. Because `ocx.lock` is always the current V3 format (an older lock fails to load outright, per the warning above), there is nothing to transcribe: `ocx add` and `ocx remove` never touch the network for pins they are not adding or removing.
 
 The freshness gate runs before any carry-forward. If `ocx.toml` drifted from `ocx.lock` since the lock was last written (the `declaration_hash` does not match), the mutator fails with exit 65 before touching anything. The fix is a single `ocx lock` to reconcile the file, after which the add or remove succeeds.
 
@@ -293,7 +308,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [slsa-attestation]: https://slsa.dev/spec/v1.0/attestation-model
 [sigstore]: https://www.sigstore.dev/
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-lock]: https://ocx.sh/schemas/project-lock/v2.json
+[schema-lock]: https://ocx.sh/schemas/project-lock/v3.json
 [composer-source]: https://github.com/ocx-sh/ocx/blob/main/crates/ocx_lib/src/package_manager/composer.rs
 
 <!-- commands -->
@@ -315,6 +330,11 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 <!-- internal anchors -->
 [project-toml]: #toml
 [project-lock]: #lock
+
+<!-- reference -->
+[reference-platforms]: ../reference/platforms.md
+[reference-platforms-compatibility]: ../reference/platforms.md#compatibility
+[reference-platforms-shared-digests]: ../reference/platforms.md#shared-digests
 
 <!-- cross-page -->
 [user-project]: ../user-guide.md#project

@@ -32,7 +32,7 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     metadata.write_text(
         json.dumps(
             {
-                "type": "bundle", "version": 1, "env": [
+                "type": "bundle", "version": 1, "platform": plat, "env": [
                     {
                         "key": "PATH",
                         "type": "path",

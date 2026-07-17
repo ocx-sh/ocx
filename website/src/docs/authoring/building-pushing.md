@@ -7,11 +7,11 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 
 ## The First Push {#first-push}
 
-[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest in the order you give. `--platform` selects which platform this push publishes; passing a concrete platform is required unless the metadata sidecar already carries a target-platform set (written by [`ocx package create --platform any`][cmd-package-create] — see [Resolving Dependency Pins][dependency-pins] below), in which case omitting `--platform` fans out to every platform in that set. The hand-driven flow below publishes one platform at a time — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across pushes.
+[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and records it in the metadata sidecar; `push` reads it back and publishes under it by default, so the platform a package is published under always matches what its dependency pins were resolved against. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
 
 ```sh
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -p linux/amd64 -m metadata.json -i mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
+ocx package push -i mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
 `--new` (`-n`) is a `--cascade` modifier: it tells the cascade resolver to skip the existing-tag lookup on the first publish of a repository. Outside `--cascade` the flag is a no-op. Reach for it once you adopt rolling tags.
@@ -42,19 +42,21 @@ ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 
 `create` resolves every unpinned dependency against the selected index and rewrites the sidecar in place with the resolved manifest pin — the rewritten file, not the one you hand-wrote, is what you push. Index selection follows the same [`--remote`][arg-remote] / [`--offline`][arg-offline] / [`--frozen`][arg-frozen] routing as every other resolution: the default checks the local index first and fetches on a miss; `--offline`/`--frozen` refuse to resolve a dependency tag that is not already cached (exit 81); a dependency tag absent from the selected index entirely fails with exit 79.
 
-[`ocx package push`][cmd-package-push] then makes no resolution decisions of its own — it is a gate. It reads the sidecar `create` wrote, verifies every dependency carries a manifest pin covering the platform(s) being published, and verifies each unique pin actually resolves in its registry:
+[`ocx package push`][cmd-package-push] then makes no resolution decisions of its own — it is a gate. It reads the sidecar `create` wrote, verifies every dependency carries a manifest pin covering the single platform being published, and verifies each unique pin actually resolves in its registry:
 
 | Failure | Exit code | Meaning |
 |---|---|---|
+| Sidecar has no recorded platform | 65 | The sidecar predates `create`, or was hand-authored — run `ocx package create --platform` to establish one. |
+| An explicit `--platform` disagrees with the sidecar's recorded platform | 65 | Drop `--platform` to publish under the recorded platform, or re-run `create` for the one you passed. |
 | Dependency still tag-only | 65 | Re-run `ocx package create --platform` to pin it. |
-| Pin map missing a fan-out platform | 65 | The dependency has no pin covering one of the platforms being published. |
+| Pin map has no entry covering the platform being published | 65 | The dependency has no pin compatible with this push's platform. |
 | Pin resolves to an image index | 65 | The dependency was pinned by hand against an index digest — re-run `create`. |
 | Pinned manifest not found in the registry | 79 | The dependency's manifest was deleted, or the digest is wrong. |
 | Registry authentication failed | 80 | Refresh credentials for the dependency's registry. |
 
 A package with no dependencies, or one whose sidecar is already fully pinned, skips all of this — `create` does not touch the network when `--platform` is omitted and every dependency already carries a digest.
 
-When a dependency itself ships platform-specific builds and you build with `--platform any`, `create` writes a per-dependency pin map instead of a single digest, and narrows your own package's target-platform set to whatever every dependency covers. See [Multi-Platform Packages][authoring-multi-platform].
+Building with `--platform any` is the one case where `create` writes a per-dependency pin map instead of a single digest: an `any`-targeted package performs no platform-specific resolution, so it can only depend on dependencies that themselves offer an `any` build — a dependency with no `any` manifest fails `create` outright, naming it. See [Multi-Platform Packages][authoring-multi-platform].
 
 ## Cascading Rolling Tags {#cascade}
 
@@ -111,9 +113,6 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 
 <!-- reference -->
 [reference-manifest-pins]: ../reference/metadata.md#dependencies-manifest-pins
-
-<!-- in-page -->
-[dependency-pins]: #dependency-pins
 
 <!-- in-depth -->
 [in-depth-storage-layers]: ../in-depth/storage.md#layers

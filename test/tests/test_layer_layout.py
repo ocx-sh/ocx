@@ -51,7 +51,7 @@ def _bundle_layer(ocx: OcxRunner, layer_dir: Path, tmp_path: Path) -> Path:
 def _write_meta(tmp_path: Path) -> Path:
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "env": [
+        "type": "bundle", "version": 1, "platform": current_platform(), "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))

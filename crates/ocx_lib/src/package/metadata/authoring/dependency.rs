@@ -17,9 +17,15 @@ use super::AuthoringError;
 ///
 /// Unlike the published [`Dependency`], the identifier's digest is optional:
 /// a tag-only identifier declares "resolve me at `ocx package create` time".
-/// The optional `platforms` map carries per-platform manifest pins (key =
-/// [`Platform::lock_key`](crate::oci::Platform::lock_key), the lock V2
-/// encoding) for packages whose dependency ships platform-specific manifests.
+/// The optional `platforms` map carries a per-platform manifest pin (key =
+/// the canonical grammar [`Platform`](crate::oci::Platform) string, D2). A
+/// fresh `ocx package create --platform any` resolve writes exactly one
+/// `"any"`-keyed entry here (never a bare `@digest` — D5: a leaf manifest
+/// carries no platform descriptor, so only a map key can record which
+/// platform a pin was verified against); a concrete `--platform P` resolve
+/// pins the identifier's own digest directly instead (`platforms` stays
+/// `None`). A hand-authored or pre-existing sidecar may still carry other
+/// keys; [`AuthoringDependency::pin_for`] reads whatever the map holds.
 ///
 /// Projection to the published form ([`AuthoringDependency::pin_for`])
 /// collapses the map to a single [`PinnedIdentifier`](oci::PinnedIdentifier);
@@ -43,10 +49,11 @@ pub struct AuthoringDependency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<DependencyName>,
 
-    /// Per-platform manifest pins written by `ocx package create` when the
-    /// dependency ships platform-specific manifests. Key = platform lock key
-    /// (e.g. `linux/amd64`, `any`), value = that platform's manifest digest.
-    /// Authoring sidecar only — stripped at publish.
+    /// Per-platform manifest pin written by `ocx package create --platform
+    /// any` (an `"any"`-keyed entry — D5). Key = the canonical grammar
+    /// [`Platform`](crate::oci::Platform) string (e.g. `linux/amd64`, `any`),
+    /// value = that platform's manifest digest. Authoring sidecar only —
+    /// stripped at publish.
     ///
     /// Deserialization rejects duplicate JSON keys (see
     /// [`deserialize_platforms`]) instead of silently keeping the last value
@@ -120,6 +127,23 @@ where
             let mut entries: BTreeMap<String, oci::Digest> = BTreeMap::new();
             while let Some(key) = map.next_key::<String>()? {
                 let value: oci::Digest = map.next_value()?;
+                // D3 canonical-key validation, applied to every platform-map
+                // write site: a key must parse as a `Platform` and its
+                // canonical `Display` spelling must equal the on-disk bytes
+                // (`adr_platform_model_unification.md` D3). By `Platform`
+                // `Display` injectivity this also enforces canonical-platform
+                // uniqueness for free — two canonical keys can never parse
+                // to the same `Platform` (see `project::lock::
+                // validate_canonical_platform_keys` for the lock-side twin
+                // of this check).
+                let parsed: oci::Platform = key
+                    .parse()
+                    .map_err(|_| serde::de::Error::custom(format!("platform key '{key}' is not in canonical form")))?;
+                if parsed.to_string() != key {
+                    return Err(serde::de::Error::custom(format!(
+                        "platform key '{key}' is not in canonical form"
+                    )));
+                }
                 match entries.entry(key) {
                     Entry::Occupied(occupied) => {
                         return Err(serde::de::Error::custom(format!(
@@ -171,15 +195,19 @@ impl AuthoringDependency {
     /// Projects this dependency to the single manifest pin for `platform`.
     ///
     /// A direct digest pin is universal (passes through untouched). A
-    /// platforms map is consulted via the lock V2 3-tier lookup: exact
-    /// [`lock_key`](crate::oci::Platform::lock_key), then
-    /// [`base_lock_key`](crate::oci::Platform::base_lock_key), then `"any"`.
+    /// platforms map is consulted via [`crate::project::lookup_host_leaf`] —
+    /// the same directed compatibility relation and `select_best` scoring
+    /// [`crate::oci::Index::select`] uses at fresh-resolve time
+    /// (`adr_platform_model_unification.md` D1), so authoring pinning and
+    /// runtime resolution agree on the same candidate set.
     ///
     /// # Errors
     ///
     /// [`AuthoringError::UnpinnedDependency`] when the dependency has neither
     /// a digest nor a platforms map; [`AuthoringError::MissingPlatformPin`]
-    /// when the map has no key covering `platform`.
+    /// when the map has no key covering `platform`;
+    /// [`AuthoringError::AmbiguousPlatformPin`] when two or more map keys tie
+    /// at the maximum score for `platform`.
     pub fn pin_for(&self, platform: &oci::Platform) -> Result<oci::PinnedIdentifier, AuthoringError> {
         if let Some(pinned) = self.pinned() {
             return Ok(pinned);
@@ -189,13 +217,23 @@ impl AuthoringDependency {
                 identifier: Box::new(self.identifier.clone()),
             });
         };
-        let Some(digest) = lookup_host_leaf(map, platform) else {
-            return Err(AuthoringError::MissingPlatformPin {
-                identifier: Box::new(self.identifier.clone()),
-                platform: platform.to_string(),
-            });
+        let digest = match lookup_host_leaf(map, platform) {
+            oci::Selection::Found((digest, _key)) => digest.clone(),
+            oci::Selection::None => {
+                return Err(AuthoringError::MissingPlatformPin {
+                    identifier: Box::new(self.identifier.clone()),
+                    platform: platform.to_string(),
+                });
+            }
+            oci::Selection::Ambiguous(candidates) => {
+                return Err(AuthoringError::AmbiguousPlatformPin {
+                    identifier: Box::new(self.identifier.clone()),
+                    platform: platform.to_string(),
+                    candidates: candidates.into_iter().map(|(_, key)| key.to_string()).collect(),
+                });
+            }
         };
-        let pinned_identifier = self.identifier.clone_with_digest(digest.clone());
+        let pinned_identifier = self.identifier.clone_with_digest(digest);
         Ok(oci::PinnedIdentifier::try_from(pinned_identifier).expect("digest just attached"))
     }
 
@@ -388,5 +426,41 @@ mod tests {
         );
         let parsed: AuthoringDependency = serde_json::from_str(&json).expect("unique keys must parse");
         assert_eq!(parsed.platforms.as_ref().unwrap().len(), 2);
+    }
+
+    // ── F6: D3 canonical-key validation, deserialize site ──────────────────
+
+    /// An unsorted `os_features` list (`+b,a` instead of the canonical
+    /// `+a,b`) is a noncanonical spelling of a valid `Platform` — rejected
+    /// at deserialize, mirroring the lock-side check
+    /// (`project::lock::validate_canonical_platform_keys`).
+    #[test]
+    fn platforms_map_rejects_unsorted_feature_list_key() {
+        let json = format!(
+            r#"{{"identifier":"example.com/dep","platforms":{{"linux/amd64+b,a":"sha256:{a}"}}}}"#,
+            a = hex('a'),
+        );
+        let err = serde_json::from_str::<AuthoringDependency>(&json)
+            .expect_err("unsorted feature-list key must be rejected, not silently accepted");
+        assert!(
+            err.to_string().contains("canonical"),
+            "expected a canonical-form error, got: {err}"
+        );
+    }
+
+    /// A redundant duplicate feature (`+a,a` instead of the canonical `+a`)
+    /// is likewise a noncanonical spelling — rejected.
+    #[test]
+    fn platforms_map_rejects_duplicate_feature_key() {
+        let json = format!(
+            r#"{{"identifier":"example.com/dep","platforms":{{"linux/amd64+a,a":"sha256:{a}"}}}}"#,
+            a = hex('a'),
+        );
+        let err = serde_json::from_str::<AuthoringDependency>(&json)
+            .expect_err("duplicate-feature key must be rejected, not silently accepted");
+        assert!(
+            err.to_string().contains("canonical"),
+            "expected a canonical-form error, got: {err}"
+        );
     }
 }

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::{conventions::platforms_or_default, options};
+use crate::{conventions, options};
 
 /// Inspect what sits at one or more package references. Read-only — nothing
 /// is installed and no symlinks are created. Accepts a tag or an `@digest`.
@@ -34,7 +34,7 @@ use crate::{conventions::platforms_or_default, options};
 #[derive(Parser)]
 pub struct PackageInspect {
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     /// Platform-select through the index and emit the OCI resolution chain
     /// (pinned identifier and walk-order chain digests: index, manifest,
@@ -54,13 +54,13 @@ impl PackageInspect {
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
 
         // `inspect_all` preserves input order, so zipping the results back with
         // `self.packages` (the raw request strings) is sound.
         let results = context
             .manager()
-            .inspect_all(identifiers.clone(), platforms.clone(), self.resolve)
+            .inspect_all(identifiers.clone(), platform.clone(), self.resolve)
             .await?;
 
         let entries: Vec<(String, PackageInspect)> = self
@@ -71,7 +71,7 @@ impl PackageInspect {
             .map(|((raw, identifier), result)| {
                 (
                     raw.raw().to_string(),
-                    PackageInspect::new(identifier, platforms.clone(), result),
+                    PackageInspect::new(identifier, platform.clone(), result),
                 )
             })
             .collect();

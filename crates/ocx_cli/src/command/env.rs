@@ -31,7 +31,7 @@ pub struct Env {
     self_view: bool,
 
     #[clap(flatten)]
-    platforms: options::Platforms,
+    platform: options::PlatformOption,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -99,7 +99,7 @@ impl Env {
         // `--ci` is mutually exclusive with `--shell` (clap `conflicts_with`).
         let ci = resolve_ci_arg(self.ci)?;
 
-        let platforms = platforms_or_default(self.platforms.as_slice());
+        let platform = platform_or_default(self.platform.platform.clone());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
@@ -108,7 +108,7 @@ impl Env {
             manager.find_symlink_all(identifiers, kind).await?
         } else {
             manager
-                .find_or_install_all(identifiers, platforms, context.concurrency())
+                .find_or_install_all(identifiers, platform, context.concurrency())
                 .await?
         };
 

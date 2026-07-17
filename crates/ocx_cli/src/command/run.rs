@@ -34,7 +34,6 @@ use ocx_lib::project::{
 use ocx_lib::utility::child_process;
 
 use crate::app::project_context::load_project_with_lock;
-use crate::conventions::platforms_or_default;
 
 /// Run a command with the composed environment from the project toolchain.
 ///
@@ -201,11 +200,10 @@ impl Run {
         let resolved = resolve_selected_tools(&filtered, &host)?;
 
         let manager = context.manager();
-        let platforms = platforms_or_default(&[]);
 
         let identifiers: Vec<_> = resolved.iter().map(|r| r.identifier.clone()).collect();
         let infos = manager
-            .find_or_install_all(identifiers, platforms, context.concurrency())
+            .find_or_install_all(identifiers, host.clone(), context.concurrency())
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
@@ -371,9 +369,7 @@ fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> Result<Vec<
 mod tests {
     use super::*;
     use ocx_lib::oci::{Digest, Identifier, PinnedIdentifier, Platform};
-    use ocx_lib::project::{
-        LockMetadata, LockVersion, LockedResolution, LockedTool, ProjectConfig, ProjectLock, ToolSource,
-    };
+    use ocx_lib::project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock, ToolSource};
     use std::collections::BTreeMap;
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -511,10 +507,10 @@ mod tests {
     /// locking the unnamed-run contract.
     #[test]
     fn named_subset_resolves_while_unnamed_whole_group_errors() {
-        fn lock_v2(tools: Vec<LockedTool>) -> ProjectLock {
+        fn lock_v3(tools: Vec<LockedTool>) -> ProjectLock {
             ProjectLock {
                 metadata: LockMetadata {
-                    lock_version: LockVersion::V2,
+                    lock_version: LockVersion::V3,
                     declaration_hash_version: 1,
                     declaration_hash: format!("sha256:{}", sha('0')),
                     generated_by: "ocx test".into(),
@@ -529,14 +525,12 @@ mod tests {
             LockedTool {
                 name: name.into(),
                 group: "default".into(),
-                resolution: LockedResolution::PerPlatform {
-                    repository: Identifier::new_registry(name, "ocx.sh"),
-                    platforms,
-                },
+                repository: Identifier::new_registry(name, "ocx.sh"),
+                platforms,
             }
         }
 
-        let lock = lock_v2(vec![
+        let lock = lock_v3(vec![
             leaf("cmake", "linux/amd64", 'a'),
             leaf("winonly", "windows/amd64", 'b'),
         ]);

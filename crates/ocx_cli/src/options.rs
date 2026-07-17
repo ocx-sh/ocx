@@ -6,7 +6,7 @@ mod compression_level;
 mod content_path;
 mod format;
 mod identifier;
-mod platforms;
+mod platform;
 mod pull;
 mod verify;
 
@@ -15,6 +15,6 @@ pub use compression_level::CompressionLevel;
 pub use content_path::ContentPath;
 pub use format::Format;
 pub use identifier::Identifier;
-pub use platforms::Platforms;
+pub use platform::PlatformOption;
 pub use pull::Pull;
 pub use verify::Verify;

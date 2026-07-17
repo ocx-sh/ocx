@@ -83,7 +83,7 @@ impl PackageManager {
     /// layer descriptors). `-p/--platform` does not apply here.
     ///
     /// `resolve == true`: the identifier is resolved through the index with
-    /// platform selection (honoring `platforms`), returning
+    /// platform selection (honoring `platform`), returning
     /// [`InspectResult::Resolved`] with metadata and the resolution chain.
     ///
     /// Accepts a tag or an `@digest` identifier.
@@ -98,11 +98,11 @@ impl PackageManager {
     pub async fn inspect(
         &self,
         package: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         resolve: bool,
     ) -> Result<InspectResult, PackageErrorKind> {
         if resolve {
-            let resolved = self.resolve(package, platforms).await?;
+            let resolved = self.resolve(package, platform).await?;
             let metadata =
                 super::common::load_config_metadata(self.index(), &resolved.pinned, &resolved.final_manifest).await?;
             return Ok(InspectResult::Resolved {
@@ -163,7 +163,7 @@ impl PackageManager {
     pub async fn inspect_all(
         &self,
         packages: Vec<oci::Identifier>,
-        platforms: Vec<oci::Platform>,
+        platform: oci::Platform,
         resolve: bool,
     ) -> Result<Vec<InspectResult>, package_manager::error::Error> {
         if packages.is_empty() {
@@ -171,7 +171,7 @@ impl PackageManager {
         }
         if packages.len() == 1 {
             let _spin = self.progress().spinner(format!("Inspecting '{}'", packages[0]));
-            let result = self.inspect(&packages[0], platforms, resolve).await.map_err(|kind| {
+            let result = self.inspect(&packages[0], platform, resolve).await.map_err(|kind| {
                 package_manager::error::Error::InspectFailed(vec![PackageError::new(packages[0].clone(), kind)])
             })?;
             return Ok(vec![result]);
@@ -181,10 +181,10 @@ impl PackageManager {
         for package in &packages {
             let mgr = self.clone();
             let package = package.clone();
-            let platforms = platforms.clone();
+            let platform = platform.clone();
             tasks.spawn(async move {
                 let _spin = mgr.progress().spinner(format!("Inspecting '{package}'"));
-                let result = mgr.inspect(&package, platforms, resolve).await;
+                let result = mgr.inspect(&package, platform, resolve).await;
                 (package, result)
             });
         }
@@ -289,7 +289,7 @@ mod spec_tests {
         write_blob(&dir, &digest(HEX_C), METADATA_JSON);
 
         let mgr = make_manager(&dir);
-        let result = mgr.inspect(&tagged_id(), vec![linux_amd64()], false).await.unwrap();
+        let result = mgr.inspect(&tagged_id(), linux_amd64(), false).await.unwrap();
 
         match result {
             InspectResult::Manifest {
@@ -321,7 +321,7 @@ mod spec_tests {
         write_blob(&dir, &digest(HEX_A), &index_json);
 
         let mgr = make_manager(&dir);
-        let result = mgr.inspect(&tagged_id(), vec![], false).await.unwrap();
+        let result = mgr.inspect(&tagged_id(), oci::Platform::any(), false).await.unwrap();
 
         match result {
             InspectResult::Candidates { pinned, candidates } => {
@@ -351,7 +351,7 @@ mod spec_tests {
         write_blob(&dir, &digest(HEX_C), METADATA_JSON);
 
         let mgr = make_manager(&dir);
-        let result = mgr.inspect(&tagged_id(), vec![linux_amd64()], true).await.unwrap();
+        let result = mgr.inspect(&tagged_id(), linux_amd64(), true).await.unwrap();
 
         match result {
             InspectResult::Resolved { pinned, chain, .. } => {
@@ -372,7 +372,10 @@ mod spec_tests {
     async fn inspect_unknown_tag_is_policy_blocked_offline() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir);
-        let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
+        let err = mgr
+            .inspect(&tagged_id(), oci::Platform::any(), false)
+            .await
+            .unwrap_err();
         match err {
             PackageErrorKind::Internal(crate::Error::OciIndex(
                 crate::oci::index::error::Error::PolicyResolutionBlocked { policy, .. },
@@ -417,7 +420,10 @@ mod spec_tests {
         write_blob(&dir, &digest(HEX_C), BAD_METADATA_JSON);
 
         let mgr = make_manager(&dir);
-        let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
+        let err = mgr
+            .inspect(&tagged_id(), oci::Platform::any(), false)
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, PackageErrorKind::Internal(_)),
@@ -441,7 +447,10 @@ mod spec_tests {
         write_blob(&dir, &digest(HEX_A), index_json);
 
         let mgr = make_manager(&dir);
-        let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
+        let err = mgr
+            .inspect(&tagged_id(), oci::Platform::any(), false)
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, PackageErrorKind::Internal(_)),

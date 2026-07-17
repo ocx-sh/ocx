@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use crate::file_structure::{FileStructure, StaleEntry};
 use crate::log;
 use crate::oci;
-use crate::project::{LockedResolution, ProjectLock, ProjectRegistry};
+use crate::project::{ProjectLock, ProjectRegistry};
 
 use super::super::PackageManager;
 use super::garbage_collection::{GarbageCollector, ProjectRootDigests};
@@ -49,142 +49,33 @@ pub struct CleanResult {
     pub temp: Vec<PathBuf>,
 }
 
-/// Resolves a locked `pinned` identifier to the set of `PinnedIdentifier`s
-/// that actually key package-store paths.
+/// Resolve a locked tool's per-platform leaf digests into the set of
+/// package-store root digests it pins, presence-gated against the on-disk
+/// package store.
 ///
-/// `ocx.lock` stores the **ImageIndex manifest digest** (the top-level OCI
-/// manifest, which covers all platforms). The package store is keyed by the
-/// **child platform-manifest digest** — the one selected when `ocx pull`
-/// ran on the current platform. To find the correct package-store path, this
-/// function:
-///
-/// 1. Reads the manifest blob from the local blob store at
-///    `blobs/{registry}/{algo}/{shard}/data`.
-/// 2. Parses it as an [`oci::Manifest`].
-/// 3. If it is a flat `Image` manifest: the locked digest IS the package
-///    digest; return it unchanged.
-/// 4. If it is an `ImageIndex`: enumerate the child manifest digests and
-///    return all that have a corresponding package directory on disk (i.e.
-///    those that were actually pulled on this machine).
-///
-/// If the blob is absent (the package was never pulled to this store) or
-/// unreadable, the original digest is returned as a best-effort fallback —
-/// the resulting path will not exist in the store and will therefore be a
-/// no-op root that does not affect GC decisions, but also does not raise an
-/// error that would abort the operation.
-/// Resolve a locked tool's [`LockedResolution`] into the set of
-/// package-store root digests it pins (presence-gated).
-///
-/// V2 ([`LockedResolution::PerPlatform`]): read the leaf digests straight
-/// from the `platforms` map and reconstruct `repository`+leaf for each,
-/// presence-gating against the on-disk package store. V1
-/// ([`LockedResolution::LegacyIndex`]): retain the index-blob-read walk via
-/// [`resolve_to_package_digests`]. Presence-gating is kept in both paths.
+/// Each leaf in `platforms` maps directly to a package-store key
+/// (`repository.clone_with_digest(leaf)`) — no index-blob read needed, since
+/// the lock stores platform-manifest digests directly (never the outer
+/// image-index digest). Presence-gating means a single-platform machine does
+/// not root phantom (never-pulled) platform leaves.
 async fn collect_tool_roots(
-    resolution: &LockedResolution,
+    repository: &oci::Identifier,
+    platforms: &std::collections::BTreeMap<String, oci::Digest>,
     file_structure: &FileStructure,
 ) -> Vec<oci::PinnedIdentifier> {
-    match resolution {
-        LockedResolution::LegacyIndex(pinned) => resolve_to_package_digests(pinned, file_structure).await,
-        // V2: the lock already stores per-platform leaf digests — read them
-        // straight from the map (no index-blob read). Each leaf maps directly
-        // to a package-store key; presence-gate so a single-platform machine
-        // does not root phantom (never-pulled) platform leaves.
-        LockedResolution::PerPlatform { repository, platforms } => {
-            let mut roots = Vec::new();
-            for leaf in platforms.values() {
-                let child_id = repository.clone_with_digest(leaf.clone());
-                let child_pinned = match oci::PinnedIdentifier::try_from(child_id) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let pkg_path = file_structure.packages.path(&child_pinned);
-                if crate::utility::fs::path_exists_lossy(&pkg_path).await {
-                    roots.push(child_pinned);
-                }
-            }
-            roots
+    let mut roots = Vec::new();
+    for leaf in platforms.values() {
+        let child_id = repository.clone_with_digest(leaf.clone());
+        let child_pinned = match oci::PinnedIdentifier::try_from(child_id) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let pkg_path = file_structure.packages.path(&child_pinned);
+        if crate::utility::fs::path_exists_lossy(&pkg_path).await {
+            roots.push(child_pinned);
         }
     }
-}
-
-async fn resolve_to_package_digests(
-    pinned: &oci::PinnedIdentifier,
-    file_structure: &FileStructure,
-) -> Vec<oci::PinnedIdentifier> {
-    let registry = pinned.registry();
-    let digest = pinned.digest();
-    let blob_path = file_structure.blobs.data(registry, &digest);
-
-    let blob_bytes = match tokio::fs::read(&blob_path).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // Blob not yet cached locally — return the original pinned id as
-            // a best-effort fallback. It will not match any existing package
-            // directory, so GC will be unaffected.
-            log::debug!("Project root blob not found locally for '{}', using as-is.", pinned);
-            return vec![pinned.clone()];
-        }
-    };
-
-    let manifest: oci::Manifest = match serde_json::from_slice(&blob_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("Failed to parse manifest blob for '{}': {e}", pinned);
-            return vec![pinned.clone()];
-        }
-    };
-
-    match manifest {
-        // Flat image manifest: the locked digest IS the package-store key.
-        oci::Manifest::Image(_) => vec![pinned.clone()],
-
-        // Image index: the package is stored by the child platform-manifest
-        // digest. Enumerate all children and return those that are present
-        // in the package store on disk (i.e. were pulled on this machine).
-        oci::Manifest::ImageIndex(index) => {
-            let mut resolved = Vec::new();
-            for entry in &index.manifests {
-                let child_digest = match oci::Digest::try_from(entry.digest.as_str()) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        log::warn!(
-                            "ImageIndex child digest '{}' is malformed for '{}': {e}",
-                            entry.digest,
-                            pinned
-                        );
-                        continue;
-                    }
-                };
-                // Construct a child PinnedIdentifier with the same registry
-                // and repository as the parent, but with the child digest.
-                let child_id =
-                    oci::Identifier::new_registry(pinned.repository(), registry).clone_with_digest(child_digest);
-                let child_pinned = match oci::PinnedIdentifier::try_from(child_id) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                // Only include children that actually have a package directory
-                // on disk. This handles the common case where only one
-                // platform was pulled to this machine.
-                let pkg_path = file_structure.packages.path(&child_pinned);
-                if crate::utility::fs::path_exists_lossy(&pkg_path).await {
-                    resolved.push(child_pinned);
-                }
-            }
-            if resolved.is_empty() {
-                // No children present on disk — fall back to original digest
-                // so GC decisions are unaffected.
-                log::debug!(
-                    "No ImageIndex children found on disk for '{}', using index digest as fallback.",
-                    pinned
-                );
-                vec![pinned.clone()]
-            } else {
-                resolved
-            }
-        }
-    }
+    roots
 }
 
 /// Enumerates live registered projects from the flat symlink ledger, reads each
@@ -199,12 +90,10 @@ async fn resolve_to_package_digests(
 /// project lock cannot be read, the entry is skipped with a WARN log and does
 /// not abort the clean operation.
 ///
-/// The `file_structure` parameter is used to resolve each locked identifier's
-/// manifest from the local blob store. `ocx.lock` stores the **ImageIndex
-/// manifest digest** (the top-level OCI index), but the package store is keyed
-/// by the **child platform manifest digest**. This function reads the ImageIndex
-/// blob and enumerates its children so that `ProjectRootDigests::digests`
-/// contains the digests that actually map to package-store paths.
+/// The `file_structure` parameter is used to presence-gate each locked
+/// tool's per-platform leaf digests against the on-disk package store, so
+/// `ProjectRootDigests::digests` contains only the digests that actually map
+/// to package-store paths on this machine.
 ///
 /// Uses [`crate::project::registry::ProjectRegistry::live_projects`] — the flat
 /// symlink store at `$OCX_HOME/projects/` (ADR: `adr_project_gc_symlink_ledger.md`).
@@ -342,7 +231,8 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     for (index, loaded_lock) in loaded.iter().enumerate() {
         for tool in &loaded_lock.tools {
             let sem = Arc::clone(&sem);
-            let resolution = tool.resolution.clone();
+            let repository = tool.repository.clone();
+            let platforms = tool.platforms.clone();
             let group = tool.group.clone();
             let name = tool.name.clone();
             // Dense post-filter position in `loaded` (Bug-R3): the resolve
@@ -350,12 +240,12 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
             // survivor's dense index here, never the original `entries`
             // enumerate index (which spans `LockLoad::Absent` entries too and
             // would index `buckets` out of bounds).
-            // `resolve_to_package_digests` borrows `&FileStructure`. Cloning is
+            // `collect_tool_roots` borrows `&FileStructure`. Cloning is
             // cheap (the struct holds `Arc`-shared sub-stores).
             let fs = file_structure.clone();
             resolve_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let resolved = collect_tool_roots(&resolution, &fs).await;
+                let resolved = collect_tool_roots(&repository, &platforms, &fs).await;
                 (index, group, name, resolved)
             });
         }
@@ -475,7 +365,7 @@ impl PackageManager {
         };
 
         let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-        let patch_roots = self.resolve_site_patch_roots(&[host_platform]).await?;
+        let patch_roots = self.resolve_site_patch_roots(&host_platform).await?;
         let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots, &patch_roots).await?;
 
         let targets = garbage_collector.unreachable_objects();
@@ -588,19 +478,19 @@ mod tests {
     use super::*;
     use crate::file_structure::FileStructure;
 
-    // Minimal valid ocx.lock that `ProjectLock::from_path` can parse.
+    // Minimal valid V3 ocx.lock that `ProjectLock::from_path` can parse.
     //
     // The `declaration_hash` value is not validated on load — only
-    // `declaration_hash_version` is checked.  The `pinned` identifier must be
-    // a fully-qualified `registry/repo@sha256:<hex>` form so that
-    // `PinnedIdentifier::try_from` accepts it during deserialization.
+    // `declaration_hash_version` is checked. `repository` is the bare
+    // registry/repo coordinate; each `[tool.platforms]` entry is a leaf
+    // digest keyed by the canonical grammar `Platform` string (D2).
     //
     // Registry must contain `.` or `:` or be "localhost" to be parsed as an
     // explicit registry (see `oci::identifier::has_explicit_registry`).
     // Using `localhost:5000` which carries a colon and is always valid.
     const LOCK_WITH_ONE_TOOL: &str = r#"
 [metadata]
-lock_version = 1
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 generated_by = "ocx test"
@@ -609,13 +499,16 @@ generated_at = "2026-01-01T00:00:00Z"
 [[tool]]
 name = "cmake"
 group = "default"
-pinned = "localhost:5000/cmake@sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
+repository = "localhost:5000/cmake"
+
+[tool.platforms]
+"linux/amd64" = "sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
 "#;
 
-    // A second distinct pinned digest used in multi-tool fixtures.
+    // A second distinct tool + leaf digest used in multi-tool fixtures.
     const LOCK_WITH_TWO_TOOLS: &str = r#"
 [metadata]
-lock_version = 1
+lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 generated_by = "ocx test"
@@ -624,13 +517,43 @@ generated_at = "2026-01-01T00:00:00Z"
 [[tool]]
 name = "cmake"
 group = "default"
-pinned = "localhost:5000/cmake@sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
+repository = "localhost:5000/cmake"
+
+[tool.platforms]
+"linux/amd64" = "sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
 
 [[tool]]
 name = "shfmt"
 group = "default"
-pinned = "localhost:5000/shfmt@sha256:bbbb0000000000000000000000000000000000000000000000000000000000cc"
+repository = "localhost:5000/shfmt"
+
+[tool.platforms]
+"linux/amd64" = "sha256:bbbb0000000000000000000000000000000000000000000000000000000000cc"
 "#;
+
+    /// Build the `PinnedIdentifier` a `repository`/leaf-digest pair in the
+    /// fixtures above resolves to, and pre-create its package-store
+    /// directory so `collect_tool_roots`'s presence gate passes.
+    ///
+    /// `collect_tool_roots` only checks the path exists (no metadata/resolve
+    /// validity needed — that's the GC reachability walker's concern, not
+    /// this presence gate).
+    async fn seed_pinned_package_dir(
+        file_structure: &FileStructure,
+        repository: &str,
+        registry: &str,
+        digest_hex: &str,
+    ) -> oci::PinnedIdentifier {
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry(repository, registry)
+                .clone_with_digest(oci::Digest::Sha256(digest_hex.to_string())),
+        )
+        .unwrap();
+        tokio::fs::create_dir_all(file_structure.packages.path(&pinned))
+            .await
+            .unwrap();
+        pinned
+    }
 
     /// `collect_project_roots` includes the pinned digest from
     /// `$OCX_HOME/ocx.lock` as a GC root even when there are no entries in
@@ -652,6 +575,15 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
         tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
 
         let file_structure = FileStructure::with_root(ocx_home.clone());
+        // The per-platform path presence-gates against the package store —
+        // seed the leaf's package directory so the gate passes.
+        seed_pinned_package_dir(
+            &file_structure,
+            "cmake",
+            "localhost:5000",
+            "aaaa0000000000000000000000000000000000000000000000000000000000bb",
+        )
+        .await;
         let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
 
         let roots = match result {
@@ -666,9 +598,6 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
             global_root.ocx_lock_path, lock_path,
             "root's lock path must be $OCX_HOME/ocx.lock"
         );
-        // The digest from the lock should be present.  `resolve_to_package_digests`
-        // falls back to the original pinned id when the blob is absent locally
-        // (the common case in a fresh temp dir).  Either way the digest is in roots.
         assert!(
             !global_root.digests.is_empty(),
             "global lock must contribute at least one digest root"
@@ -729,6 +658,22 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
         tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
 
         let file_structure = FileStructure::with_root(ocx_home.clone());
+        // The per-platform path presence-gates against the package store —
+        // seed both leaves' package directories so the gate passes.
+        seed_pinned_package_dir(
+            &file_structure,
+            "cmake",
+            "localhost:5000",
+            "aaaa0000000000000000000000000000000000000000000000000000000000bb",
+        )
+        .await;
+        seed_pinned_package_dir(
+            &file_structure,
+            "shfmt",
+            "localhost:5000",
+            "bbbb0000000000000000000000000000000000000000000000000000000000cc",
+        )
+        .await;
         let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
 
         let roots = match result {

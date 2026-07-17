@@ -408,7 +408,7 @@ def test_about_plain_does_not_double_render_libc(ocx: OcxRunner) -> None:
     finally:
         ocx.env.pop("__OCX_TEST_LIBC", None)
 
-    assert "Platforms: linux/amd64, any" in result.stdout, (
+    assert "Platforms: linux/amd64" in result.stdout, (
         f"Platforms row must render the bare os/arch, no +os_features suffix; got: {result.stdout!r}"
     )
     assert result.stdout.count("libc.glibc") == 1, (

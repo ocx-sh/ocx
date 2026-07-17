@@ -10,7 +10,7 @@
 use ocx_lib::Config;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::patch::PatchDescriptor;
-use ocx_lib::project::{ProjectConfig, ProjectLockV2};
+use ocx_lib::project::{ProjectConfig, ProjectLock};
 use schemars::generate::SchemaSettings;
 
 /// Top-level `$comment` injected into the project-lock schema. Flags the
@@ -26,8 +26,8 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 ///
 /// The output JSON has its `$id` set to the canonical published URL
 /// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
-/// `v1.json` except `project-lock`, which is at `v2.json` (in lock-step with
-/// `LockVersion::V2`). The `project-lock` schema additionally carries a
+/// `v1.json` except `project-lock`, which is at `v3.json` (in lock-step with
+/// `LockVersion::V3`). The `project-lock` schema additionally carries a
 /// top-level `$comment` flagging the format as machine-generated.
 ///
 /// The `patch` schema describes the JSON document authored for
@@ -53,8 +53,8 @@ pub fn schema_for(kind: &str) -> Option<String> {
             "https://ocx.sh/schemas/project/v1.json",
             None,
         )),
-        "project-lock" => Some(generate_schema::<ProjectLockV2>(
-            "https://ocx.sh/schemas/project-lock/v2.json",
+        "project-lock" => Some(generate_schema::<ProjectLock>(
+            "https://ocx.sh/schemas/project-lock/v3.json",
             Some(PROJECT_LOCK_COMMENT),
         )),
         "patch" => Some(generate_schema::<PatchDescriptor>(
@@ -116,10 +116,6 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("#/$defs/Identifier"),
             "authoring dependency identifier must be the digest-optional Identifier"
-        );
-        assert!(
-            defs.get("TargetPlatforms").is_some(),
-            "bundle target-platform set must be documented"
         );
         assert!(
             defs.get("PinnedIdentifier").is_none(),
