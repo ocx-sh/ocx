@@ -158,6 +158,7 @@ ground external findings in local code. `meta-ai-config.md`
   substantial research as `research_[topic].md`
 - ALWAYS include component contracts (with expected behavior and edge
   cases) and user experience scenarios (with error cases)
+- ALWAYS include a **Parallelization** section: WP table (name, files, size, deps, base tip) + DAG + merge order — see `workflow-swarm.md`
 - ALWAYS announce final config, even post-approval, hand off to
   `/swarm-execute` with explicit next-step
 - ALWAYS init plan with `## Status` block (template seeds it; Step `/swarm-plan → plan-approved`) and write `.claude/state/current_plan.md` pointer — schema + mutation table → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol"

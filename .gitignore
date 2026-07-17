@@ -44,6 +44,12 @@ CLAUDE.local.md
 .claude/worktrees/
 
 # =============================================================================
+# Parallel Agent Worktrees — one per work package (see workflow-swarm.md
+# "Parallel Worktree Execution").
+# =============================================================================
+.agents/worktrees/
+
+# =============================================================================
 # Claude Lint Reports — build artifacts from `task claude:lint:links`, etc.
 # =============================================================================
 .claude/reports/

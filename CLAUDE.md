@@ -116,6 +116,8 @@ On user feedback or corrections, evaluate if insight should persist as AI config
 | `ocx-sion` | `sion` |
 | `ocx-soraka` | `soraka` |
 
+**Parallel Agents**: Implementation agents run in git worktrees under `.agents/worktrees/<slug>` (gitignored). Plans MUST be parallel-capable by design: file-disjoint work packages, explicit dependency DAG, contract-first stubs. Details → [workflow-swarm.md](./.claude/rules/workflow-swarm.md) "Parallel Worktree Execution".
+
 Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/CLAUDE.md/tooling (no changelog).
 
 Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). Landing: `/finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).

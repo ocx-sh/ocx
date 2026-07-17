@@ -71,6 +71,19 @@ See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
 | [Decision 1] | [Why] |
 | [Decision 2] | [Why] |
 
+## Parallelization
+
+Work packages (WPs) for parallel execution across git worktrees (`.agents/worktrees/<wp-slug>`). See `workflow-swarm.md` "Parallel Worktree Execution".
+
+| WP | Scope | Key Files | Size | Base |
+|----|-------|-----------|------|------|
+| [WP 1] | [What it covers] | `path/to/file.rs` | [S/M/L] | main |
+| [WP 2] | [What it covers] | `path/to/file.rs` | [S/M/L] | [main or WP-N tip] |
+
+**Dependency DAG:** [WP 1] → [WP 2] → ...
+
+**Merge order:** [WP 1], [WP 2], ... (run `cargo check` after each merge)
+
 ## Implementation Steps
 
 > **Contract-First TDD**: Every feature follows Stub → Verify → Specify → Implement → Review.

@@ -217,6 +217,32 @@ When worker completes assigned task, MUST follow full completion protocol from A
 
 **Critical**: NEVER push to remote — human decides when to push (CI has real cost).
 
+## Parallel Worktree Execution
+
+Plans MUST be parallel-capable by design when work packages (WPs) are file-disjoint. This section governs the mechanics of running WPs concurrently in separate git worktrees.
+
+### Lifecycle
+
+- One worktree per WP, at `.agents/worktrees/<wp-slug>` (gitignored)
+- Worktree created from the **DAG-designated base tip** — NOT always main/feature-root; a WP may base on another WP's tip when the dependency DAG says so
+- One branch per WP
+- Merge back in DAG order
+- Run `cargo check` after **every** merge — catches cross-file interactions per-file verify misses
+- Remove the worktree after its WP merges
+
+### Plan Requirements
+
+Plans must define per WP: name, owned files (disjoint across concurrently-running WPs), size, dependencies, base tip, merge order. See `swarm-plan` "Parallelization" and `plan.template.md`.
+
+### Anti-Patterns
+
+| Anti-pattern | Why it breaks |
+|---|---|
+| Two concurrent WPs touch the same file | Merge conflicts, lost work, non-deterministic outcome |
+| Branch from main when the DAG says branch from a WP tip | Missing the dependency's changes, broken build after merge |
+| Reuse a worktree for a second WP | Stale branch state, cross-contamination between WPs |
+| Skip the post-merge `cargo check` | Cross-file interactions surface only after merge — per-file verify misses them |
+
 ## Performance Tips
 
 - Launch multiple explorers for broad searches
