@@ -236,6 +236,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Add(_) => "add",
         Command::Clean(_) => "clean",
         Command::Config(sub) => match sub {
+            ConfigCmd::Setup(_) => "config setup",
             ConfigCmd::Update(_) => "config update",
             ConfigCmd::Push(_) => "config push",
         },
@@ -250,7 +251,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Lock(_) => "lock",
         Command::Login(_) => "login",
         Command::Logout(_) => "logout",
-        Command::Upgrade(_) => "upgrade",
+        Command::Update(_) => "update",
         Command::Launcher(sub) => match sub {
             LauncherCmd::Exec(_) => "launcher exec",
         },

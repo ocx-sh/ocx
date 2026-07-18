@@ -130,7 +130,7 @@ impl VerifyPipeline {
         // 1. Resolve the per-platform target manifest.
         let resolved = match ctx
             .index
-            .select(ctx.identifier, vec![ctx.platform.clone()], IndexOperation::Resolve)
+            .select(ctx.identifier, ctx.platform, IndexOperation::Resolve)
             .await
             .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?
         {

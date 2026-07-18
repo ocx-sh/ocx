@@ -1983,6 +1983,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "index_list": "index list",
         "index_update": "index update",
         # Managed-config group subcommands (file stem -> "config <verb>").
+        "config_setup": "config setup",
         "config_update": "config update",
         "config_push": "config push",
         "direnv_init": "direnv init",
