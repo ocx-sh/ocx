@@ -102,6 +102,38 @@ def mirror_registry() -> str:
 
 
 @pytest.fixture(scope="session")
+def legacy_registry() -> str:
+    """Session-scoped referrers-NEGATIVE fixture (registry:2, localhost:5001).
+
+    A real OCI Distribution v2 registry that does NOT implement the OCI 1.1
+    Referrers API: ``GET /v2/<name>/referrers/<digest>`` returns 404. Consumed
+    by ``test_referrers_capability.py`` (#106) to assert the clean
+    ``ReferrersUnsupported`` / exit-84 path against a genuine v2 registry, and
+    by ``test_referrers_smoke.py`` to prove the harness carries a real
+    referrers-unsupported registry.
+
+    Backed by the SAME docker-compose ``mirror-registry`` service as
+    ``mirror_registry`` — the compose file keeps exactly one ``registry:2``
+    instance, which serves both the mirror-test and referrers-negative roles.
+    Skips (like ``mirror_registry``) when the service is unreachable: a
+    single-registry environment, no Docker, or a Windows runner that sets
+    ``OCX_TESTS_NO_REGISTRY=1``.
+    """
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: legacy (registry:2) fixture not started")
+
+    addr = os.environ.get("LEGACY_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
+
+    from src.helpers import registry_is_reachable  # noqa: PLC0415
+    if not registry_is_reachable(addr):
+        pytest.skip(
+            f"legacy registry:2 fixture at {addr} is not reachable; "
+            "test_referrers_capability.py requires the docker-compose 'mirror-registry' service"
+        )
+    return addr
+
+
+@pytest.fixture(scope="session")
 def ocx_binary() -> Path:
     if env_path := os.environ.get("OCX_COMMAND"):
         p = Path(env_path)

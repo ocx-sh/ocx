@@ -22,6 +22,9 @@ pub struct PackagePull {
     #[clap(flatten)]
     platform: options::PlatformOption,
 
+    #[clap(flatten)]
+    verify: options::SignatureVerify,
+
     /// Package identifiers to pull.
     #[arg(required = true, num_args = 1..)]
     packages: Vec<options::Identifier>,
@@ -30,8 +33,10 @@ pub struct PackagePull {
 impl PackagePull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
-        let install_infos = context
-            .manager()
+        // Auto-verify is attached on the shared manager (Context::try_init);
+        // refine its opt-out from this command's --verify/--no-verify flag.
+        let manager = crate::conventions::manager_with_verify_flag(&context, &self.verify);
+        let install_infos = manager
             .pull_all(
                 &oci_packages,
                 conventions::platform_or_default(self.platform.platform.clone()),

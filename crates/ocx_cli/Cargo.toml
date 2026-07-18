@@ -29,6 +29,7 @@ vergen-gix = { version = "=9.1.0", default-features = false, features = ["build"
 [dependencies]
 ocx_lib.workspace = true
 
+chrono.workspace = true
 tokio.workspace = true
 # NOTE: clap 4.5.55 (2026-01-27) introduced a regression in the
 # `value_terminator("--") + last(true)` interaction; 4.5.57 (2026-02-03)
@@ -46,6 +47,10 @@ thiserror.workspace = true
 which.workspace = true
 secrecy.workspace = true
 async-trait.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 serde_json = "1"

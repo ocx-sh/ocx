@@ -89,11 +89,19 @@ class OcxRunner:
         check: bool = True,
         log_level: str | None = None,
         env_overrides: dict[str, str] | None = None,
+        env_overlay: dict[str, str] | None = None,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ocx with the given arguments.
 
-        ``env_overrides`` adds/overrides environment variables for this single
-        invocation without mutating ``self.env``.
+        ``env_overrides`` / ``env_overlay`` add or override entries on top of
+        the runner's isolated environment for a single invocation without
+        mutating ``self.env`` — use this for per-test secrets like
+        ``OCX_IDENTITY_TOKEN`` so each call site does not have to spell out the
+        full ``{**ocx.env, ...}`` merge. (Two aliases exist for historical
+        reasons; both are applied.) ``stdin`` is forwarded to the subprocess as
+        ``input=`` so callers can drive flows that read from standard input
+        (e.g. the ``--identity-token-stdin`` sign path).
         """
         cmd: list[str] = [str(self.binary)]
         if format:
@@ -101,12 +109,13 @@ class OcxRunner:
         if log_level:
             cmd += ["--log-level", log_level]
         cmd += list(args)
-        env = self.env if not env_overrides else {**self.env, **env_overrides}
+        env = {**self.env, **(env_overrides or {}), **(env_overlay or {})}
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             env=env,
+            input=stdin,
         )
         if check and result.returncode != 0:
             raise AssertionError(

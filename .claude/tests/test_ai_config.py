@@ -1175,6 +1175,8 @@ class TestAiConfigOverhaulPhase2:
         "codex-adversary": False,
         "swarm-plan": False,
         "swarm-execute": False,
+        "swarm-loop": False,
+        "swarm-x": False,
         # Pure analysis / advisory — auto-invocation safe
         "architect": False,
         "builder": False,
@@ -1926,4 +1928,132 @@ class TestVerifyDeepBuildMatrix:
             "'Final state diff (must land before main)'. The iteration tactic of "
             "temporarily commenting out macOS is permitted DURING Windows debug "
             "cycles only; the leg MUST be re-enabled before the branch lands."
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI command table coverage in subsystem-cli-commands.md
+# ---------------------------------------------------------------------------
+
+
+class TestSubsystemCliCommandsTableCoverage:
+    """Every clap command file must appear in the Command Summary table.
+
+    Regression guard against the B2 finding on PR #87 — the `package sign`
+    and `package verify` commands shipped without rows in the Command Summary
+    table of `subsystem-cli-commands.md`. When a new CLI command is added,
+    this test fails until the doc table catches up.
+    """
+
+    _CLI_COMMANDS_RULE = CLAUDE_DIR / "rules" / "subsystem-cli-commands.md"
+    _COMMAND_DIR = ROOT / "crates" / "ocx_cli" / "src" / "command"
+
+    # Filename stems whose first row in the table maps to a multi-token command
+    # ("package_sign.rs" → "package sign"). The table cell uses the spaced
+    # form, so we normalize the stem to match.
+    _STEM_REWRITES = {
+        # OCI-tier package subcommands (file stem -> "package <verb>").
+        "install": "package install",
+        "uninstall": "package uninstall",
+        "select": "package select",
+        "deselect": "package deselect",
+        "exec": "package exec",
+        "env": "package env",
+        "deps": "package deps",
+        "which": "package which",
+        "package_create": "package create",
+        "package_describe": "package describe",
+        "package_info": "package info",
+        "package_inspect": "package inspect",
+        "package_pull": "package pull",
+        "package_push": "package push",
+        "package_sign": "package sign",
+        "package_verify": "package verify",
+        "package_test": "package test",
+        # Patch-group subcommands (file stem -> "patch <verb>").
+        "patch_freeze": "patch freeze",
+        "patch_publish": "patch publish",
+        "patch_sync": "patch sync",
+        "patch_test": "patch test",
+        "patch_why": "patch why",
+        # Toolchain-tier `ocx env` lives in toolchain_env.rs.
+        "toolchain_env": "env",
+        # Grouped subcommands (file stem -> "<group> <verb>").
+        "index_catalog": "index catalog",
+        "index_list": "index list",
+        "index_update": "index update",
+        # Managed-config group subcommands (file stem -> "config <verb>").
+        "config_setup": "config setup",
+        "config_update": "config update",
+        "config_push": "config push",
+        "direnv_init": "direnv init",
+        "direnv_export": "direnv export",
+        "shell_completion": "shell completion",
+    }
+
+    # Commands intentionally absent from the public table (internal /
+    # umbrella subcommands; `verify` is documented as `package verify`).
+    _EXEMPT = {
+        # Parent group dispatchers whose subcommands are documented individually
+        # (the leaf subcommands live under nested directories, not globbed here):
+        "package",
+        "patch",
+        "shell",
+        "index",
+        "config",
+        "launcher",
+        "direnv",
+        "self_group",
+        # `patch_common.rs` = shared helpers for the patch group (not a command);
+        # `script_runner.rs` = internal Starlark host runner, not a user command.
+        "patch_common",
+        "script_runner",
+        # `app.rs` / `command.rs` rooted dispatchers (not commands themselves).
+    }
+
+    def _table_cells(self) -> set[str]:
+        """Extract the leading-cell tokens from the Command Summary table."""
+        text = self._CLI_COMMANDS_RULE.read_text()
+        # Find the "Command Summary" section and walk its `|`-delimited rows.
+        section_start = text.find("## Command Summary")
+        assert section_start != -1, "Command Summary section missing"
+        section = text[section_start:]
+        next_section = section.find("\n## ", 1)
+        if next_section != -1:
+            section = section[:next_section]
+        cells: set[str] = set()
+        for line in section.splitlines():
+            if not line.startswith("| `"):
+                continue
+            # Row shape: `| \`name [ARGS]\` | ... | ... |`
+            first_cell = line.split("|", 2)[1].strip()
+            if first_cell.startswith("`"):
+                first_cell = first_cell.strip("`")
+            # Strip leading "ocx " if present, then take first word(s) up to ARGS.
+            head = first_cell.split(" ")
+            # Multi-token command (e.g. "package sign IDENTIFIER") — keep first
+            # two tokens if first is a group; else single token.
+            group_heads = {"package", "patch", "shell", "index", "config", "ci", "launcher", "generate", "direnv", "self"}
+            if head and head[0] in group_heads and len(head) >= 2:
+                cells.add(f"{head[0]} {head[1]}")
+            elif head:
+                cells.add(head[0])
+        return cells
+
+    def test_subsystem_cli_commands_table_covers_all_commands(self) -> None:
+        if not self._COMMAND_DIR.is_dir():
+            pytest.skip("CLI command directory missing — pre-Rust checkout")
+        documented = self._table_cells()
+        missing: list[str] = []
+        for cmd_file in sorted(self._COMMAND_DIR.glob("*.rs")):
+            stem = cmd_file.stem
+            if stem in self._EXEMPT:
+                continue
+            expected = self._STEM_REWRITES.get(stem, stem)
+            if expected not in documented:
+                missing.append(f"{cmd_file.relative_to(ROOT)} → expected `{expected}`")
+        assert not missing, (
+            f"CLI command files without a row in `subsystem-cli-commands.md` "
+            f"Command Summary: {missing}. Add a row (one per command) so new "
+            f"commands are discoverable from the AI-config catalog."
         )

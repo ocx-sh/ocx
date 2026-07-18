@@ -29,6 +29,28 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/client/native_transport.rs` | Native transport using `oci_client` library |
 | `oci/client/hashing_reader.rs` | `HashingAsyncReader`: digest tee over sha256/sha384/sha512 |
 | `oci/client/progress_reader.rs` | `ProgressReader`: cumulative download progress callback |
+| `oci/referrer.rs` | Root module; re-exports `ReferrersApiCapability`, `ReferrersSupport`, `ReferrerManifest` |
+| `oci/referrer/capability.rs` | `ReferrersApiCapability` probe + per-registry capability cache (`$OCX_HOME/state/referrers/<registry>.json`) |
+| `oci/referrer/manifest.rs` | `ReferrerManifest` — OCI referrer manifest builder and descriptor helpers |
+| `oci/referrer/media_types.rs` | Media-type constants for Sigstore bundle and other referrer artifact types |
+| `oci/sign.rs` | Root module; re-exports signing public types |
+| `oci/sign/bundle.rs` | Sigstore bundle v0.3 (`application/vnd.dev.sigstore.bundle.v0.3+json`) serialisation |
+| `oci/sign/error.rs` | `SignError` + `SignErrorKind` — three-layer error with exit-code classification |
+| `oci/sign/fulcio.rs` | Fulcio CA client — CSR construction + certificate issuance |
+| `oci/sign/oidc.rs` | OIDC token provider trait + dispatch logic |
+| `oci/sign/oidc_ambient.rs` | Ambient CI token detection (dispatches to inline fallback) |
+| `oci/sign/oidc_ambient_inline.rs` | Per-platform inline ambient OIDC fetchers (GHA, GCP, etc.) |
+| `oci/sign/oidc_browser.rs` | Interactive browser OAuth PKCE flow (suppressed with `--no-tty`) |
+| `oci/sign/pipeline.rs` | `SignPipeline` orchestrator — resolve target, capability-check referrers, acquire OIDC token, delegate signing to a `Signer`, push bundle + referrer manifest. Wired end-to-end (#194); hand-rolled Fulcio/Rekor HTTP against the fake stack's wire shapes — see signing.md "Current Limitations" for production-hardening gaps |
+| `oci/sign/rekor.rs` | Rekor transparency-log client — log entry POST + SET extraction |
+| `oci/sign/signer.rs` | `KeylessSigner` — ephemeral ECDSA P-256 keypair generation |
+| `oci/verify.rs` | Root module; re-exports verification public types |
+| `oci/verify/error.rs` | `VerifyError` + `VerifyErrorKind` — three-layer error with exit-code classification |
+| `oci/verify/identity.rs` | Certificate identity + OIDC issuer exact-match policy |
+| `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator — resolve target, list signature referrers (capability cache), parse bundle, verify cert chain + Rekor SET + signature + identity/issuer. Wired end-to-end (#194); embedded TUF trust root still stubbed (`--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` required) — see signing.md "Current Limitations" |
+| `oci/verify/trust_root.rs` | Trust-root loading: Fulcio CA PEM, Sigstore `TrustedRoot` JSON (`--tuf-root`, pinned Rekor key), cache rebuild; embedded asset stubbed |
+| `oci/verify/trust_cache.rs` | Trust-root cache for offline verify (`$OCX_HOME/state/trust_root/<rekor-authority>.json`) — Fulcio CA + pinned Rekor key, atomic write, TTL, fail-open; mirrors `referrer/capability.rs` |
+| `oci/verify/trust_resolve.rs` | `resolve_trust_root(tuf_override, pem_override, cache_root, rekor_cache_key, offline)` — shared trust-root ladder (TUF/PEM override → cache → embedded, with the offline pinned-Rekor-key gate). Single source of the offline gate for the `ocx package verify` command (flag→override) and the auto-verify hook shared across every install surface (env→override) |
 
 ## Key Types
 

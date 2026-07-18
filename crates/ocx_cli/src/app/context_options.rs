@@ -176,6 +176,11 @@ impl ContextOptions {
             // populate this field once the managed-config tier is wired in
             // (managed-config phase 4). The parser tier starts empty.
             managed_config_source: None,
+            // The auto-verify opt-out is a per-command flag (`--no-verify`), not
+            // a `ContextOptions` field. `Context::try_init` reads `OCX_NO_VERIFY`
+            // and populates this field on the returned view; the parser tier
+            // starts as the env-unset default.
+            no_verify: false,
         }
     }
 }

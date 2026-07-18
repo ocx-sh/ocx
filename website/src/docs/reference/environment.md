@@ -156,6 +156,46 @@ export OCX_HOME="/opt/ocx"
 
 OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
+### `OCX_IDENTITY_TOKEN` {#ocx-identity-token}
+
+OIDC identity token for [`ocx package sign`][cmd-package-sign]. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent. Useful in CI systems that inject OIDC tokens via environment rather than files.
+
+The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, GitLab CI, CircleCI, etc.). The token is consumed once and never logged or written to disk.
+
+**NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside `ocx package sign` and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
+
+Token precedence for `ocx package sign` (highest to lowest):
+
+1. `--identity-token-file <PATH>` — file must have mode `0600` or tighter
+2. `--identity-token-stdin`
+3. `OCX_IDENTITY_TOKEN`
+4. Ambient CI detection — GitHub Actions (`ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), GitLab CI (`SIGSTORE_ID_TOKEN`), CircleCI (`CIRCLE_OIDC_TOKEN_V2`)
+5. Interactive browser OAuth (suppressed with `--no-tty`)
+
+::: warning Short-lived tokens only
+OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
+:::
+
+### `OCX_SIGSTORE_TRUST_ROOT` {#ocx-sigstore-trust-root}
+
+Path to a PEM file of [Fulcio][fulcio] CA certificate(s) that [`ocx package verify`][cmd-package-verify] validates the signing certificate chain against. Equivalent to the `--trust-root` flag; the flag takes precedence when both are set.
+
+A PEM carries only the Fulcio CA — not the [Rekor][rekor] public key. So the first verify against a given Rekor instance fetches that key from `--rekor-url` (trust-on-first-use) and then **caches it** under `$OCX_HOME/state/trust_root/`; subsequent verifies pin it from the cache. For a fully pinned root that needs no fetch — required offline — use [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root) instead.
+
+When neither this variable nor `--tuf-root` nor a fresh cache is available, verify falls back to the embedded production trust root — which is stubbed in this release (`TrustRoot::load_embedded` returns `TrustRootUnavailable`, exit 78). Until it ships, supplying a trust root is **required** to verify. This variable is the seam the acceptance suite uses to inject the fake Fulcio root when verifying test-minted certificates.
+
+This variable affects only the local verify operation and is **not** forwarded to subprocess children.
+
+### `OCX_SIGSTORE_TUF_ROOT` {#ocx-sigstore-tuf-root}
+
+Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--tuf-root` flag; the flag takes precedence, and both win over [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root).
+
+Unlike a bare Fulcio PEM, a trusted-root JSON carries **both** the Fulcio CA certificate(s) and the pinned [Rekor][rekor] public key, so verification needs no trust-on-first-use fetch. This is the air-gapped seam: point it at a local trust-root mirror and verify against a private Sigstore deployment with no Sigstore-services network. No [TUF][sigstore-tuf] **network** fetch or metadata-expiry refresh is performed — that is deferred; the file is read as-is.
+
+Combined with [`OCX_OFFLINE`](#ocx-offline), this is the fully offline path: the pinned Rekor key means the Signed Entry Timestamp verifies without contacting Rekor.
+
+This variable affects only the local verify operation and is **not** forwarded to subprocess children.
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
@@ -188,6 +228,18 @@ This variable is resolution-affecting and is forwarded to child ocx processes (s
 entrypoint launchers) so they resolve the same frozen companion digests as the parent.
 Unset to disable snapshot-pinning and fall back to live lookups.
 
+### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
+
+A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
+
+```sh
+export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
+```
+
+::: warning
+This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
+:::
+
 ### `OCX_JOBS` {#ocx-jobs}
 
 Caps the number of root packages pulled in parallel — applies to every command
@@ -204,18 +256,6 @@ values are ignored with a warning. Unset = unbounded (legacy default).
 
 The command line option [`--jobs`][arg-jobs] takes precedence over this
 variable.
-
-### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
-
-A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
-
-```sh
-export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
-```
-
-::: warning
-This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
-:::
 
 ### `OCX_MIRRORS` {#ocx-mirrors}
 
@@ -414,21 +454,23 @@ See the [FAQ][faq-codesign] for details on why this is necessary and how it work
 
 This variable has no effect on non-macOS systems.
 
-### `OCX_QUIET` {#ocx-quiet}
+### `OCX_NO_VERIFY` {#ocx-no-verify}
 
-When set to a [truthy value](#truthy-values), OCX suppresses the structured
-stdout report that every command emits — tables in plain mode, the JSON
-document in `--format json` mode. Errors, warnings, and progress on stderr are
-unaffected.
+When set to a [truthy value](#truthy-values), OCX skips the policy-gated automatic signature verification on [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and on every command that auto-installs on demand — [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery. Only `install` and `pull` also carry a `--verify`/`--no-verify` flag; the others opt out via this variable alone. It follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline).
 
-The command line option [`--quiet`][arg-quiet] takes precedence over this
-variable.
+By default, when a [`[[trust.policy]]`][cmd-trust-policy] covers a package being installed, OCX verifies its Sigstore signature at the metadata-first seam — after the manifest resolves, before any layer downloads — and aborts the install fail-closed if verification fails. This variable is the CI-wide opt-out. When a policy-covered package is skipped this way, OCX logs a single `WARN` per invocation so the bypass is never silent.
+
+The per-command `--no-verify` flag mirrors this variable and **wins over it**: `--verify` on the command line re-enables verification even when `OCX_NO_VERIFY` is truthy. The opt-out is forwarded to subprocess children (a launcher-spawned child install inherits the same CI-wide setting), unlike the local-only [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root) / [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root).
+
+When no `[[trust.policy]]` covers a package, verification does not run regardless of this variable — trust is opt-in. See the [user guide][guide-auto-verify] for the full model.
 
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX disables all network access. Tag→digest resolution must be satisfied by the local index or by a digest-pinned identifier; unpinned tags missing from the local index error immediately. Useful for hermetic CI runs and air-gapped environments. The command line option [`--offline`][arg-offline] takes precedence over this variable.
 
 Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
+
+For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore trust services** — the Rekor-key fetch and TUF — not the artifact registry, which verify still reads the signature from (a local mirror, in air-gapped deployments). Offline verify reuses cached or supplied trust material and must have a pinned Rekor key, so it comes from [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root), or from the `$OCX_HOME/state/trust_root/` cache a prior online verify wrote. With no such material, verify fails with exit 78 naming the remedy — it never silently skips verification.
 
 ### `OCX_PROJECT` {#ocx-project}
 
@@ -445,6 +487,16 @@ Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no
 **Escape hatch**: setting this to the empty string (`OCX_PROJECT=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
 **Symlink policy**: explicit paths (this variable and `--project`) follow symlinks. The CWD walk rejects symlinked `ocx.toml` candidates — use `--project` or `OCX_PROJECT` to opt in.
+
+### `OCX_QUIET` {#ocx-quiet}
+
+When set to a [truthy value](#truthy-values), OCX suppresses the structured
+stdout report that every command emits — tables in plain mode, the JSON
+document in `--format json` mode. Errors, warnings, and progress on stderr are
+unaffected.
+
+The command line option [`--quiet`][arg-quiet] takes precedence over this
+variable.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
@@ -609,10 +661,22 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 [mozilla-ca]: https://wiki.mozilla.org/CA/Included_Certificates
 [distroless]: https://github.com/GoogleContainerTools/distroless
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
 
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-direnv]: command-line.md#direnv
+[cmd-package-sign]: command-line.md#package-sign
+[cmd-package-verify]: command-line.md#package-verify
+[cmd-package-install]: command-line.md#package-install
+[cmd-package-pull]: command-line.md#package-pull
+[cmd-package-exec]: command-line.md#package-exec
+[cmd-package-env]: command-line.md#package-env
+[cmd-env-root]: command-line.md#env-root
+[cmd-trust-policy]: configuration.md#keys-trust
+[guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag

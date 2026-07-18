@@ -77,6 +77,9 @@ async-compression.workspace = true
 liblzma.workspace = true
 # SyncIoBridge — AsyncRead → sync Read bridge at spawn_blocking boundary (Phase 3).
 tokio-util.workspace = true
+url.workspace = true
+zeroize.workspace = true
+pem.workspace = true
 
 # Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
 starlark.workspace = true
@@ -89,6 +92,15 @@ starlark_derive.workspace = true
 allocative.workspace = true
 # ELF PT_INTERP parsing — libc-family host detection (os.features).
 elf.workspace = true
+
+# Keyless Sigstore signing (issue #194) — see workspace Cargo.toml for the
+# feature/version rationale.
+sigstore.workspace = true
+sigstore_protobuf_specs.workspace = true
+p256.workspace = true
+x509-cert.workspace = true
+ed25519-dalek.workspace = true
+reqwest.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

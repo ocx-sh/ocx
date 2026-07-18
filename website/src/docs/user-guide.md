@@ -816,6 +816,129 @@ When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture comm
 [Environment reference → `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] — adjust the background check frequency.
 :::
 
+## Supply-Chain Integrity {#supply-chain}
+
+Knowing that a binary was downloaded from the right registry is not the same as knowing it was built by the right person at the right time. Anyone with push access to a registry — or the ability to intercept traffic to it — could substitute a different binary under the same tag. Signatures provide tamper evidence: they bind a specific binary digest to a specific signer identity via a publicly verifiable log entry.
+
+OCX integrates [Sigstore][sigstore] keyless signing. You do not manage signing keys. [Fulcio][fulcio] issues a short-lived certificate binding an ephemeral key to your OIDC identity, and [Rekor][rekor] records the entry in a public, append-only transparency log.
+
+:::info How keyless signing compares to GPG
+Traditional GPG signing requires generating, distributing, and revoking a long-lived key pair — a human process that organizations frequently skip. [Sigstore][sigstore] keyless signing replaces the key management ceremony with short-lived OIDC credentials your CI system already provisions. The [Rekor][rekor] transparency log plays the role of a public key server, but with an immutable audit log rather than a mutable key ring.
+:::
+
+### Sign a release {#supply-chain-signing}
+
+[`ocx package sign`][cmd-package-sign] publishes a [Sigstore bundle][sigstore-bundle] as a referrer of the target manifest. In a GitHub Actions workflow with `id-token: write` permission, ambient OIDC detection works with no extra configuration:
+
+```shell
+ocx package sign -p linux/amd64 registry.example/pkg:1.0
+```
+
+### Verify what you install {#supply-chain-verification}
+
+[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. This release also needs an explicit [`--tuf-root`][env-sigstore-tuf-root] — the embedded production trust root ships stubbed, so verify has nothing to check the certificate against otherwise (see [Current Limitations][in-depth-signing-limitations]):
+
+```shell
+ocx package verify \
+  -p linux/amd64 \
+  --tuf-root /etc/ocx/trusted_root.json \
+  --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.example/pkg:1.0
+```
+
+:::tip Want this to happen automatically?
+Once you [pin a signer identity](#supply-chain-trust-policy) below, [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install — no flags, no extra step. See [Verify by default](#supply-chain-auto-verify).
+:::
+
+### Air-gapped verification {#supply-chain-offline}
+
+Verifying a signature normally reaches out to Sigstore's public trust services to learn the [Rekor][rekor] public key. An air-gapped or hardened runner has no such egress — but it still needs to prove the binary it is about to run was signed by the right identity.
+
+The key insight is that verification has two separate network surfaces. One is the registry the artifact and its signature live in; in an air-gapped setup that is a local mirror you already run. The other is the Sigstore trust services. Only the second is what `--offline` removes for verify — the registry is still read.
+
+So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-tuf-root] carries both the Fulcio CA and the pinned Rekor key, so nothing is fetched:
+
+```shell
+ocx --offline package verify \
+  -p linux/amd64 \
+  --tuf-root /etc/ocx/trusted_root.json \
+  --certificate-identity ci@example.com \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.internal/pkg:1.0
+```
+
+Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--tuf-root` needed.
+
+:::warning Offline verify never skips
+If you go offline with no trusted-root file and no cached material, verify fails with exit 78 and names the remedy. It never silently treats "cannot reach the trust service" as "verified" — an unverifiable package is an error, not a pass.
+:::
+
+### Pin the signer identity {#supply-chain-trust-policy}
+
+Passing `--certificate-identity` and `--certificate-oidc-issuer` on every invocation works for a one-off check, but a CI pipeline verifies the same package against the same signer on every run. Repeating both flags in every workflow step is one more place a copy-paste error can silently widen who the pipeline trusts — and it gives you no way to accept a signer during a rotation window without a moment where the old or the new identity fails.
+
+A [`[[trust.policy]]`][config-trust] entry declares the accepted signer once, for every package under a scope, instead of on every command line:
+
+```toml
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the [`--tuf-root`][env-sigstore-tuf-root] requirement from [above](#supply-chain-verification) still applies):
+
+```shell
+ocx package verify -p linux/amd64 --tuf-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
+```
+
+The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
+
+When the signing workflow moves (a renamed workflow file, a new repository, a rotated identity), add a second entry at the same scope in the **same file** instead of replacing the first. Both are accepted until you remove the old one, so there is no window where CI fails because the signer changed mid-rotation. (Rotation-by-addition only works within one tier — an old entry in `config.toml` and a new entry in `ocx.toml` do not combine; see the tip below.)
+
+```toml
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+::: tip Learn more
+[Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
+[Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching, most-specific-wins resolution, and operator-vs-project tier precedence.
+[`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
+:::
+
+### Verify by default {#supply-chain-auto-verify}
+
+A [`[[trust.policy]]`][config-trust] entry is only useful if the check it describes actually runs. Left as a manual step, verification is the thing that gets skipped the first time a deploy is running late — the exact gap the [tip](#supply-chain-verification) earlier in this section called out.
+
+Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] / [`ocx patch test`][cmd-patch-test]). No extra flag, no separate step before or after:
+
+```shell
+# with the ghcr.io/acme/* policy from the previous section in place
+ocx package install ghcr.io/acme/tool:1.0
+```
+
+The check runs before any layer is downloaded, at the point where the manifest digest has just resolved. A tampered digest or a signer outside the pinned identity aborts the install right there, with the same exit codes [`ocx package verify`][cmd-package-verify] uses — `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy problem, `79` for a missing signature, `65` for a tampered bundle. Nothing has been written to the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
+
+Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[trust.policy]]` scope installs exactly as it did before this feature existed — OCX logs an `INFO` line noting that no policy covered it, and nothing blocks. The same rule applies to a covered package's transitive dependencies: each is verified only if a policy also covers *its* scope. Pin a scope broad enough (`ghcr.io/acme/*`) to cover a dependency closure you want verified end to end. Auto-verify also reads the operator `config.toml` tier only: unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
+
+Sometimes you need to skip the check anyway — a mirror with no referrers support, a package you're debugging. Pass `--no-verify` to skip it for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out; `--verify` re-enables the check for one invocation even with the environment variable set, since the flag always wins. Either bypass logs one `WARN` per invocation — a skipped check is visible in the logs, never silent.
+
+Because the embedded production trust root ships stubbed in this release (see [Current Limitations][in-depth-signing-limitations]), a policy-covered install needs trust material available whether or not [`--offline`][arg-offline] is set: a [Sigstore trusted-root JSON][env-sigstore-tuf-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. With neither available, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
+
+::: tip Learn more
+[Command-line reference → `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] — the full auto-verify contract, options table, and exit codes.
+[Environment reference → `OCX_NO_VERIFY`][env-no-verify] — CI-wide opt-out, truthy/falsy values, forwarding to subprocess children.
+:::
+
 ## Remove and clean up {#cleanup}
 
 [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
@@ -918,6 +1041,19 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [pnpm]: https://pnpm.io/
 [pnpm-install]: https://pnpm.io/cli/install
 [product-context]: ./getting-started.md
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
+[concourse-registry]: https://github.com/concourse/registry-image-resource
+[nix]: https://nixos.org/
+[go-modules]: https://go.dev/ref/mod
+[sdkman]: https://sdkman.io/
+[homebrew]: https://brew.sh/
+[docker-images]: https://hub.docker.com/search?image_filter=official
+[semver]: https://semver.org/
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
@@ -952,6 +1088,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#package-exec
+[cmd-package-sign]: ./reference/command-line.md#package-sign
+[cmd-package-verify]: ./reference/command-line.md#package-verify
 [cmd-launcher-exec]: ./reference/command-line.md#exec
 [cmd-package-install]: ./reference/command-line.md#package-install
 [cmd-package-select]: ./reference/command-line.md#package-select
@@ -968,6 +1106,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env]: ./reference/command-line.md#env
 [cmd-env-root]: ./reference/command-line.md#env-root
+[cmd-patch-why]: ./reference/command-line.md#patch-why
+[cmd-patch-test]: ./reference/command-line.md#patch-test
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
 [cmd-lock]: ./reference/command-line.md#lock
@@ -983,9 +1123,11 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
+[env-sigstore-tuf-root]: ./reference/environment.md#ocx-sigstore-tuf-root
 [env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
+[env-identity-token]: ./reference/environment.md#ocx-identity-token
 [env-ocx-index]: ./reference/environment.md#ocx-index
 [env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
@@ -997,6 +1139,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-docker-config]: ./reference/environment.md#external-docker-config
 [env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
+[env-no-verify]: ./reference/environment.md#ocx-no-verify
 [env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
 [env-ref]: ./reference/environment.md
@@ -1008,6 +1151,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-patches]: ./reference/configuration.md#keys-patches
 [config-managed]: ./reference/configuration.md#keys-managed
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
+[config-trust]: ./reference/configuration.md#keys-trust
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
@@ -1044,3 +1188,5 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-project]: ./in-depth/project.md
 [in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
 [in-depth-project-running]: ./in-depth/project.md#running
+[in-depth-signing]: ./in-depth/signing.md
+[in-depth-signing-limitations]: ./in-depth/signing.md#current-limitations

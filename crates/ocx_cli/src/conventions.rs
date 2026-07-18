@@ -187,6 +187,28 @@ pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, en
     Ok(())
 }
 
+/// Return the manager for an install/pull command, refining the shared
+/// auto-verify config's opt-out from this command's `--verify`/`--no-verify`
+/// flag (the flag wins over `OCX_NO_VERIFY`).
+///
+/// Auto-verify itself is attached once on the shared manager in
+/// [`Context::try_init`](crate::app::Context) so every install surface inherits
+/// it; this only overrides the opt-out for the two commands that carry the
+/// flag. A plain clone when no policy is configured (`auto_verify` is `None`).
+pub fn manager_with_verify_flag(
+    context: &crate::app::Context,
+    verify: &crate::options::SignatureVerify,
+) -> ocx_lib::package_manager::PackageManager {
+    let manager = context.manager().clone();
+    let Some(auto_verify) = manager.auto_verify().cloned() else {
+        return manager;
+    };
+    // `OCX_NO_VERIFY` is resolved once in `Context::try_init` and read back from
+    // the config view here — the `--verify`/`--no-verify` flag wins over it.
+    let opted_out = !verify.resolve(context.config_view().no_verify);
+    manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{export_ci, resolve_ci_arg, resolve_shell_arg};

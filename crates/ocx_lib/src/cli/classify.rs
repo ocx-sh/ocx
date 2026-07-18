@@ -49,6 +49,34 @@ pub trait ClassifyExitCode {
     }
 }
 
+/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums.
+///
+/// "Kind" enums (e.g. `SignErrorKind`, `VerifyErrorKind`) are pure
+/// discriminants — every variant has a well-defined exit code by construction.
+/// Using a separate trait with a non-`Option` return value forces each impl to
+/// be exhaustive: adding a new variant produces a match-exhaustiveness compile
+/// error in the impl body, keeping the exit-code contract in lockstep with the
+/// enum without a separate table that can silently drift.
+///
+/// Wrapping error types (e.g. `SignError { identifier, kind }`) still implement
+/// [`ClassifyExitCode`] and delegate to `self.kind.exit_code()` wrapped in
+/// `Some(_)`.
+pub trait ClassifyErrorKind {
+    /// Return the exit code this kind maps to.
+    fn exit_code(&self) -> ExitCode;
+
+    /// Stable snake_case discriminant for `envelope.error.detail`.
+    ///
+    /// Frozen contract C-S1-1 — values must NOT change between releases.
+    /// Consumers pattern-match on this string to dispatch programmatically
+    /// without parsing stderr. The snake_case parallel to `exit_code()`:
+    /// coarse category goes on `exit_code`, fine-grained variant name goes here.
+    ///
+    /// Implementations must be exhaustive (no wildcard `_` arm) so that adding
+    /// a new variant produces a compile error and forces an explicit mapping.
+    fn kind_detail(&self) -> &'static str;
+}
+
 /// Classify a [`std::error::Error`] chain into an [`ExitCode`].
 ///
 /// Walks the error chain via [`std::error::Error::source`] and downcasts each
@@ -92,6 +120,8 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::layer_layout::LayerLayoutError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
+    use crate::oci::sign::SignError;
+    use crate::oci::verify::VerifyError;
     use crate::package::dependency_pinning::DependencyPinningError;
     use crate::package::error::Error as PackageError;
     use crate::package::metadata::authoring::AuthoringError;
@@ -153,6 +183,8 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PublishGateError);
     try_downcast!(LayerLayoutError);
     try_downcast!(PathEscapeError);
+    try_downcast!(SignError);
+    try_downcast!(VerifyError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
@@ -578,6 +610,151 @@ mod tests {
         let pm_err = crate::package_manager::error::Error::InstallFailed(vec![inner]);
         let err = crate::setup::error::Error::Bootstrap(pm_err);
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    // ── SignError (Slice 1 — referrers signing) ─────────────────────────────
+
+    #[test]
+    fn sign_error_oidc_token_rejected_maps_to_auth_error() {
+        // Slice 1 C-S1-1: SignError delegates to SignErrorKind; OidcTokenRejected → 80
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::OidcTokenRejected);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn sign_error_rekor_unavailable_maps_to_rekor_unavailable() {
+        // Slice 1: distinct exit code 83 so operators can distinguish Rekor
+        // outage from registry outage.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::RekorUnavailable);
+        assert_eq!(classify(err), ExitCode::RekorUnavailable);
+    }
+
+    #[test]
+    fn sign_error_referrers_unsupported_maps_to_referrers_unsupported() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+    }
+
+    #[test]
+    fn sign_error_offline_sign_refused_maps_to_permission_denied() {
+        // Slice 1 policy: `ocx package sign --offline` is rejected at the CLI.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::OfflineSignRefused);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    // ── VerifyError (Slice 1 — referrers verify) ────────────────────────────
+
+    #[test]
+    fn verify_error_no_signatures_found_maps_to_not_found() {
+        // Slice 1 C-S1-2: "not signed" must exit 79 so scripts can distinguish
+        // "no signature" from "bad signature" without stderr parsing.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::NoSignaturesFound);
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn verify_error_identity_mismatch_maps_to_permission_denied() {
+        // Slice 1: "verified, but not by the signer you expected" = 77.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::IdentityMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_issuer_mismatch_maps_to_permission_denied() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::IssuerMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_bundle_parse_failed_maps_to_data_error() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::BundleParseFailed);
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn verify_error_rekor_set_invalid_maps_to_data_error() {
+        // RekorSetInvalid is a crypto / data integrity failure (tampered bundle),
+        // not a service-unavailability signal. Exit 65 (DataError) so retry
+        // handlers do not retry a tampered SET.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::RekorSetInvalid);
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn verify_error_referrers_unsupported_maps_to_referrers_unsupported() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+    }
+
+    #[test]
+    fn verify_error_trust_root_unavailable_maps_to_config_error() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::TrustRootUnavailable);
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    // ── SignError: IdentityTokenFilePermissive walks the full chain ──────────
+
+    #[test]
+    fn sign_error_identity_token_file_permissive_maps_to_permission_denied() {
+        // B-T1: `classify_error` must walk the full `source()` chain and return
+        // `ExitCode::PermissionDenied` (77) when `SignErrorKind::IdentityTokenFilePermissive`
+        // is buried one level deep under a context wrapper error.
+        //
+        // Motivation: `classify_error` uses `std::iter::successors(Some(err), |e| e.source())`
+        // to walk the chain. This test proves the walker does NOT stop at the outer
+        // wrapper (which has no `ClassifyExitCode` impl) and continues to the `SignError`
+        // carried via `source()`.
+
+        // A minimal wrapper that simulates an `anyhow::context()` layer: it has
+        // a human-readable message and carries its cause via `source()`.
+        #[derive(Debug)]
+        struct ContextWrapper {
+            msg: &'static str,
+            source: crate::oci::sign::SignError,
+        }
+
+        impl std::fmt::Display for ContextWrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.msg)
+            }
+        }
+
+        impl std::error::Error for ContextWrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let sign_err = crate::oci::sign::SignError::new(
+            id,
+            crate::oci::sign::SignErrorKind::IdentityTokenFilePermissive {
+                path: std::path::PathBuf::from("/tmp/token"),
+                mode: 0o644,
+            },
+        );
+        // Wrap in a context layer — the outer error has no ClassifyExitCode impl,
+        // so the classifier must descend via source() to find the SignError.
+        let wrapped = ContextWrapper {
+            msg: "reading identity token file for sign operation",
+            source: sign_err,
+        };
+
+        assert_eq!(
+            classify_error(&wrapped as &(dyn std::error::Error + 'static)),
+            ExitCode::PermissionDenied,
+        );
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────

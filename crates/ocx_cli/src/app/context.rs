@@ -7,7 +7,7 @@ use ocx_lib::{
     ConfigInputs, ConfigLoader,
     cli::{ColorModeConfig, Printer, UserInterface},
     env,
-    file_structure::{self, BlobStore, TagStore},
+    file_structure::{self, BlobStore, StateStore, TagStore},
     log,
     oci::{self, index},
     package_manager,
@@ -23,6 +23,14 @@ pub struct Context {
     project_path: Option<PathBuf>,
     remote_client: Option<oci::Client>,
     remote_index: Option<oci::index::RemoteIndex>,
+    /// Registry client available in every mode (including `--offline`).
+    ///
+    /// Built unconditionally so `ocx package verify` can read the artifact + its
+    /// signature referrer from the registry even offline — verify's offline
+    /// semantics scope to Sigstore trust services, not the artifact registry
+    /// (see `verify_context`). `remote_client` stays offline-gated for every
+    /// other command.
+    registry_client: oci::Client,
     local_index: oci::index::LocalIndex,
     file_structure: file_structure::FileStructure,
     api: api::Api,
@@ -30,6 +38,7 @@ pub struct Context {
     default_index: oci::index::Index,
     manager: package_manager::PackageManager,
     default_registry: String,
+    config_trust: ocx_lib::trust::TrustConfig,
     config_view: env::OcxConfigView,
     concurrency: package_manager::Concurrency,
     progress: ocx_lib::cli::progress::ProgressManager,
@@ -160,24 +169,31 @@ impl Context {
         // divergence).
         let api = options.build_api(color_config);
 
+        // Explicit builder (not `from_env_with_progress`) so the config-derived
+        // `MirrorMap` is threaded in; `OCX_MIRRORS` env precedence is already
+        // folded into `mirror_map` by `resolve_mirrors`. A plain-HTTP mirror
+        // requires its host in `OCX_INSECURE_REGISTRIES` (the mirror host is
+        // what gets contacted) — composition with the existing plain-HTTP set,
+        // no implicit scheme-driven opt-out (ADR F2).
+        //
+        // Built unconditionally: `verify` reads the artifact + signature from the
+        // registry in every mode (its `--offline` scopes to Sigstore trust
+        // services, not the registry). Offline still yields `remote_client:
+        // None`, so the manager and `remote_client()` keep their offline
+        // behavior — only `verify_context()` reads this client.
+        let registry_client = oci::ClientBuilder::new()
+            .plain_http_registries(env::insecure_registries())
+            .mirrors(mirror_map)
+            .progress(progress.clone())
+            .build();
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            // Explicit builder (not `from_env_with_progress`) so the
-            // config-derived `MirrorMap` is threaded in; `OCX_MIRRORS` env
-            // precedence is already folded into `mirror_map` by
-            // `resolve_mirrors`. A plain-HTTP mirror requires its host in
-            // `OCX_INSECURE_REGISTRIES` (the mirror host is what gets contacted)
-            // — composition with the existing plain-HTTP set, no implicit
-            // scheme-driven opt-out (ADR F2).
-            let client = oci::ClientBuilder::new()
-                .plain_http_registries(env::insecure_registries())
-                .mirrors(mirror_map)
-                .progress(progress.clone())
-                .build();
             (
-                Some(client.clone()),
-                Some(index::RemoteIndex::new(index::RemoteConfig { client })),
+                Some(registry_client.clone()),
+                Some(index::RemoteIndex::new(index::RemoteConfig {
+                    client: registry_client.clone(),
+                })),
             )
         };
         let file_structure = file_structure::FileStructure::new();
@@ -358,6 +374,26 @@ impl Context {
         .with_patch_snapshot(patch_snapshot)
         .with_managed_config_client(managed_config_client);
 
+        // Attach policy-gated auto-verify ONCE on the shared manager so EVERY
+        // install surface inherits it fail-closed — not just `install`/`pull`
+        // but every `find_or_install_all` path (`package exec`, `package env`,
+        // `run`, patch discovery). `None` when no operator `[[trust.policy]]` is
+        // configured. install/pull refine the opt-out from their
+        // `--verify`/`--no-verify` flag via `conventions::manager_with_verify_flag`.
+        let operator_policies = config.trust.as_ref().map(|t| t.policy.clone()).unwrap_or_default();
+        // Resolve the `OCX_NO_VERIFY` opt-out ONCE here; both the auto-verify
+        // config below and the forwarding `config_view` further down read this
+        // single value (the per-command `--verify`/`--no-verify` flag refines it
+        // in `conventions::manager_with_verify_flag`).
+        let no_verify_env = env::flag(env::keys::OCX_NO_VERIFY, false);
+        let manager = manager.with_auto_verify(build_auto_verify(
+            operator_policies,
+            &registry_client,
+            options.offline,
+            file_structure.state.clone(),
+            no_verify_env,
+        ));
+
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
         // on whatever `$PATH` resolves at the launcher site. Falling back to
@@ -387,6 +423,11 @@ impl Context {
         // Forward the effective managed-config source so a child ocx (launcher
         // re-entry) resolves the same managed tier via `OCX_MANAGED_CONFIG`.
         config_view.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
+        // Forward the auto-verify opt-out so a launcher-spawned child install
+        // inherits the same CI-wide `OCX_NO_VERIFY`. Pure env passthrough — the
+        // per-command `--no-verify` flag is a one-shot choice and is not
+        // forwarded. (`env::keys::OCX_NO_VERIFY`, see `subsystem-cli.md`.)
+        config_view.no_verify = no_verify_env;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
@@ -394,6 +435,7 @@ impl Context {
         Ok(Context {
             remote_client,
             remote_index,
+            registry_client,
             offline: options.offline,
             project_path,
             file_structure,
@@ -403,6 +445,10 @@ impl Context {
             default_index: selected_index,
             manager,
             default_registry,
+            // Narrow projection (ISP): verify pools these with the project
+            // ocx.toml's trust policies; the rest of `config` is already
+            // extracted into `default_registry` / mirrors / patches above.
+            config_trust: config.trust.clone().unwrap_or_default(),
             config_view,
             concurrency,
             progress,
@@ -494,6 +540,13 @@ impl Context {
         &self.default_registry
     }
 
+    /// Operator-tier trust policies from the merged `config.toml` (system /
+    /// user / `$OCX_HOME`, array-appended). `ocx package verify` treats these
+    /// as authoritative over the project `ocx.toml` (`trust::resolve_tiered`).
+    pub fn config_trust_policies(&self) -> &[ocx_lib::trust::TrustPolicy] {
+        &self.config_trust.policy
+    }
+
     pub fn file_structure(&self) -> &file_structure::FileStructure {
         &self.file_structure
     }
@@ -545,6 +598,62 @@ impl Context {
     pub fn managed_config_snapshot(&self) -> Option<&ocx_lib::managed_config::ManagedConfigSnapshot> {
         self.managed_config_snapshot.as_ref()
     }
+
+    /// Returns the default [`Index`] paired with a registry [`oci::Client`] for
+    /// `ocx package verify`, in every mode — including `--offline`.
+    ///
+    /// Unlike the offline-gated [`Self::remote_client`], this never fails on
+    /// `--offline`: verify inherently reads the artifact and its signature
+    /// referrer from the registry where they live (a local mirror in air-gapped
+    /// deployments), so its `--offline` semantics scope to the Sigstore trust
+    /// services (the Rekor key fetch and TUF), not the artifact registry. The
+    /// returned `bool` is the offline flag, which the verify pipeline uses to
+    /// forbid trust-services network and require cached/supplied trust material.
+    pub fn verify_context(&self) -> (&oci::index::Index, &oci::Client, bool) {
+        (&self.default_index, &self.registry_client, self.offline)
+    }
+}
+
+/// Build the shared policy-gated auto-verify config, or `None` when no operator
+/// `[[trust.policy]]` is configured.
+///
+/// Attached once on the manager (every install surface inherits it). Carries the
+/// always-available registry client (verify reads the signature referrer from
+/// the registry even under `--offline`), the offline flag, the
+/// `OCX_SIGSTORE_TUF_ROOT` / `OCX_SIGSTORE_TRUST_ROOT` overrides, and the
+/// `OCX_NO_VERIFY` opt-out default (install/pull refine it from their flag).
+/// OCI-tier gating uses the operator `config.toml` set only; the project
+/// `ocx.toml` pool stays empty (no new OCI-tier carve-out).
+fn build_auto_verify(
+    operator_policies: Vec<ocx_lib::trust::TrustPolicy>,
+    registry_client: &oci::Client,
+    offline: bool,
+    state: StateStore,
+    user_opted_out: bool,
+) -> Option<package_manager::AutoVerify> {
+    if operator_policies.is_empty() {
+        return None;
+    }
+    // Compile-time-constant, known-valid URL — validated (not parsed by name) so
+    // the CLI never names `url::Url`. Unused when the trust root pins the Rekor
+    // key (the `OCX_SIGSTORE_TUF_ROOT` / offline path).
+    let rekor_url = oci::endpoint::validate_sigstore_url(oci::endpoint::DEFAULT_REKOR_URL, "rekor")
+        .expect("built-in default Rekor URL is valid");
+    Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
+        operator_policies,
+        // ponytail: seam for the deferred project-tier auto-verify (#99 known gap
+        // — `ocx.toml` policies not yet read on OCI-tier install/pull/exec/env/run
+        // surfaces, operator `config.toml` only today). Wire real project policies
+        // here once that follow-up is scheduled; until then, always empty.
+        project_policies: Vec::new(),
+        registry_client: registry_client.clone(),
+        rekor_url,
+        offline,
+        state,
+        tuf_root_env: std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(PathBuf::from),
+        pem_root_env: std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(PathBuf::from),
+        user_opted_out,
+    }))
 }
 
 /// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.

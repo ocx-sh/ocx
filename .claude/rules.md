@@ -150,6 +150,8 @@ Exempt from overlap detection (intended broad coupling):
 | Planning a feature (multi-agent) | `swarm-plan` |
 | Executing a feature (multi-agent) | `swarm-execute` |
 | Adversarial review | `swarm-review` |
+| One issue end-to-end (design→build→review→merge→consistency) | `swarm-loop` |
+| Whole milestone: split into issues + drive on a long-living branch | `swarm-x` |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Roadmap sync | `ocx-sync-roadmap` |

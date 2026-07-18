@@ -168,6 +168,41 @@ pub trait OciTransport: Send + Sync {
         on_progress: ProgressFn,
     ) -> Result<String>;
 
+    // ── Referrer operations (OCI 1.1) ────────────────────────────────
+
+    /// Pushes a referrer manifest with a `subject` descriptor pointing at
+    /// `subject_digest`.
+    ///
+    /// The returned descriptor identifies the pushed referrer manifest
+    /// (digest + size + media type), suitable for embedding in subsequent
+    /// Referrers-API responses.
+    async fn push_referrer_manifest(
+        &self,
+        image: &oci::native::Reference,
+        subject_digest: &oci::Digest,
+        manifest_bytes: &[u8],
+        media_type: &str,
+    ) -> Result<oci::Descriptor>;
+
+    /// Lists referrers of the given subject digest via the
+    /// `/v2/<name>/referrers/<digest>` endpoint, optionally filtered to a
+    /// single artifact type.
+    ///
+    /// When `artifact_type` is `Some`, implementations SHOULD apply it as a
+    /// server-side query filter AND MUST also filter the returned
+    /// descriptors client-side — the OCI spec permits a server to ignore the
+    /// filter, so callers can only rely on the client-side pass.
+    ///
+    /// Returns `ClientError::ReferrersUnsupported` when the registry returns
+    /// 404 on the referrers endpoint (distinguished from a subject with zero
+    /// referrers, which returns an empty list).
+    async fn list_referrers(
+        &self,
+        image: &oci::native::Reference,
+        subject_digest: &oci::Digest,
+        artifact_type: Option<&str>,
+    ) -> Result<Vec<oci::Descriptor>>;
+
     // ── Clone support ────────────────────────────────────────────────
 
     /// Clones the transport into a boxed trait object.
@@ -318,6 +353,25 @@ mod tests {
             _digest: &oci::Digest,
             _on_progress: ProgressFn,
         ) -> Result<String> {
+            unimplemented!("not needed for pull_blob_streaming default-impl test")
+        }
+
+        async fn push_referrer_manifest(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _manifest_bytes: &[u8],
+            _media_type: &str,
+        ) -> Result<oci::Descriptor> {
+            unimplemented!("not needed for pull_blob_streaming default-impl test")
+        }
+
+        async fn list_referrers(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _artifact_type: Option<&str>,
+        ) -> Result<Vec<oci::Descriptor>> {
             unimplemented!("not needed for pull_blob_streaming default-impl test")
         }
 

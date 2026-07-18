@@ -150,11 +150,59 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
     }
 }
 
+/// Atomically write `bytes` to `target` as a private file (`0o600` on Unix).
+///
+/// Fills a [`tempfile::NamedTempFile`] created in `target`'s parent directory,
+/// then publishes it over `target` via [`persist_temp_file`] (replace-existing
+/// on every platform, with the Windows transient-lock retry). A concurrent
+/// reader therefore never observes a partially-written file, and a repeated
+/// write replaces the previous content atomically.
+///
+/// The temp file is created `0o600` — owner read/write only — making the
+/// private-file contract explicit at the call site (trust material, capability
+/// caches, managed-config state, shell-integration files). This matches the
+/// `tempfile` crate's Unix default, so routing an existing plain
+/// `NamedTempFile::new_in` write through this helper does not change the
+/// published file's mode. On non-Unix platforms the `tempfile` default applies.
+///
+/// The parent directory must already exist — this helper does not create it
+/// (callers needing it call `create_dir_all` first, so the single-responsibility
+/// "publish these bytes" contract stays sharp). `target` must have a parent
+/// component.
+///
+/// Blocking — `NamedTempFile` I/O and `persist` are synchronous; call from
+/// `spawn_blocking` inside async code.
+///
+/// # Errors
+///
+/// Any I/O failure creating, writing, or publishing the temp file. Returns
+/// [`std::io::ErrorKind::InvalidInput`] when `target` has no parent component.
+pub fn write_bytes_atomic(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = target
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target path has no parent"))?;
+
+    #[cfg(unix)]
+    let mut tmp = {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o600))
+            .tempfile_in(dir)?
+    };
+    #[cfg(not(unix))]
+    let mut tmp = tempfile::Builder::new().tempfile_in(dir)?;
+
+    tmp.write_all(bytes)?;
+    persist_temp_file(tmp, target)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
 
-    use super::persist_temp_file;
+    use super::{persist_temp_file, write_bytes_atomic};
 
     /// Baseline (all platforms): a written tempfile is published to the target.
     #[test]
@@ -167,6 +215,37 @@ mod tests {
         persist_temp_file(tmp, &target).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    /// `write_bytes_atomic` publishes the bytes and, on Unix, the resulting
+    /// file is private (`0o600`) — the contract the referrers/trust-root caches
+    /// and managed-config state depend on.
+    #[test]
+    fn write_bytes_atomic_publishes_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cache.json");
+
+        write_bytes_atomic(&target, b"{\"ok\":true}").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"{\"ok\":true}");
+
+        // A second write replaces the content atomically (overwrite path).
+        write_bytes_atomic(&target, b"replaced").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "published cache file must be owner-only");
+        }
+    }
+
+    /// A target with no parent component is rejected rather than silently
+    /// writing to the current directory.
+    #[test]
+    fn write_bytes_atomic_rejects_parentless_target() {
+        let err = write_bytes_atomic(std::path::Path::new("/"), b"x").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     /// Windows: a non-sharing reader holding the destination open makes the

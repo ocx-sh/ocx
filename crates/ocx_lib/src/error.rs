@@ -116,6 +116,20 @@ pub enum Error {
     /// The unsafe set is owned by `crate::package_manager::launcher`.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
+
+    /// An OCI signing operation failed.
+    ///
+    /// Boxed because [`crate::oci::sign::SignError`] carries a full
+    /// [`crate::oci::Identifier`] plus a kind enum — materializing it
+    /// unboxed bloats every `Result<T, Error>` in the workspace past the
+    /// `clippy::result_large_err` threshold.
+    #[error(transparent)]
+    Sign(#[from] Box<crate::oci::sign::SignError>),
+    /// An OCI signature verification failed.
+    ///
+    /// Boxed for the same reason as [`Self::Sign`].
+    #[error(transparent)]
+    Verify(#[from] Box<crate::oci::verify::VerifyError>),
 }
 
 fn launcher_unsafe_hint(c: char) -> &'static str {
@@ -240,6 +254,8 @@ impl ClassifyExitCode for Error {
             Self::PinnedIdentifier(e) => e.classify(),
             Self::Singleflight(e) => e.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
+            Self::Sign(e) => e.as_ref().classify(),
+            Self::Verify(e) => e.as_ref().classify(),
         }
     }
 }

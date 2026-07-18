@@ -87,6 +87,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
+| `package sign IDENTIFIER` | Keyless Sigstore sign via OCI Referrers | `-p/--platform` (required), `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
+| `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | `-p/--platform` (required), `--certificate-identity` / `--certificate-oidc-issuer` (optional-when-a-`[trust.policy]`-matches; **both-or-neither**, one alone → exit 64), `--trust-root`, `--tuf-root`, `--rekor-url`, `--offline`, `--no-cache` |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
@@ -152,6 +154,10 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `config push -i ID CONFIG` | Operator-side publish of a `config.toml` as a managed-config package | `-i`, `-c/--cascade`, `-n/--new`, `-p` |
 
 All `ConfigGroup` variants are exempt from the required-snapshot gate; `config setup`, `config update`, and `self setup` are the three onboarding commands that get a managed-fetch client with no seed present (`app.rs::is_managed_config_onboarding_command`).
+
+**`config` group notes:**
+- Files: `crates/ocx_cli/src/command/config.rs` (dispatcher) + `config_{setup,update,push}.rs` (one leaf per subcommand).
+- The managed-config tier (`[managed]`) is fetched as an ordinary OCX package; `config push` is the operator-side publish, `config setup`/`config update` the consumer-side onboard/sync. See `adr_managed_config_tier.md`.
 
 ### Other Commands
 
@@ -243,3 +249,4 @@ Rules:
 - **`shell hook` vs `direnv export`** — `shell hook` is deleted; `direnv export` is stateless bash export generator for direnv `.envrc` (still alive, untouched).
 - **`package test` tempdir lifecycle** — without `--keep` or `--output`, temp dir deleted on any exit. `--keep` + `--output` are mutually exclusive.
 - **`launcher exec` internal subcommand** — hidden from `--help`. Wire ABI: `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true`. Resolves `${installPath}` in baked entrypoint `args` and prepends them before user args (wire ABI unchanged).
+- **`package verify` trust policy (#98)** — when the `--certificate-identity`/`--certificate-oidc-issuer` flags are omitted, verify resolves an identity from `[[trust.policy]]` under **cross-tier precedence** (`trust::resolve_tiered`): the operator `config.toml` set (system/user/`$OCX_HOME`, array-appended) is authoritative — if any operator policy matches the target, the project `ocx.toml` is ignored for it; the `ocx.toml` only ADDS trust for scopes no operator policy governs and can never override an operator pin. Within the chosen tier: most-specific scope wins, ANY-of among equal. Flags override policy when both are given; one flag alone → exit 64. No matching policy and no flags → exit 64 (`NoIdentityProvided`); a matched-but-malformed policy → exit 78 (`TrustPolicyInvalid`). Reading `ocx.toml` here is the **one documented OCI-tier carve-out**, scoped SOLELY to `[[trust.policy]]` — never package resolution (ADR `adr_trust_policy.md`).

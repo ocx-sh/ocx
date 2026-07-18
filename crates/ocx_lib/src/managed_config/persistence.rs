@@ -527,21 +527,12 @@ async fn write_snapshot_atomic(
         // writers can leave metadata from one and payload from another. Both are
         // complete, valid files and drift-sync self-heals on the next tick;
         // tighten to a temp-dir swap only if a real pairing hazard shows up.
-        write_file_atomic(&dir, &payload_path, &payload)?;
-        write_file_atomic(&dir, &snapshot_path, &metadata)?;
+        crate::utility::fs::write_bytes_atomic(&payload_path, &payload)?;
+        crate::utility::fs::write_bytes_atomic(&snapshot_path, &metadata)?;
         Ok(())
     })
     .await
     .map_err(|join_error| std::io::Error::other(join_error.to_string()))?
-}
-
-/// Publishes `bytes` to `path` via a temp file in `dir` + atomic rename.
-fn write_file_atomic(dir: &std::path::Path, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(bytes)?;
-    crate::utility::fs::persist_temp_file(tmp, path)
 }
 
 /// Reads and parses the two-file snapshot from `state`'s well-known paths,

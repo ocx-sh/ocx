@@ -77,6 +77,7 @@ CLI command (clap parse)
 | **Manifest** | OCI image manifest or image index (multi-platform) |
 | **Refs** | Reference sub-dirs inside `packages/.../refs/`: `symlinks/` (GC roots from install symlinks), `deps/` (forward-refs to other packages), `layers/` (forward-refs to layers), `blobs/` (forward-refs to blobs) |
 | **DirtyRcBlock (exit 82)** | `ExitCode::DirtyRcBlock = 82` — `ocx self setup` exits 82 when a managed activation block in a shell profile carries user edits inside the fence and `--force` was not passed. Scripts can `case $? in 82)` to detect and re-run with `--force`. Distinct from `ConfigError` (78): the RC content is valid but intentionally modified by the user. |
+| **State** | Ephemeral, registry-scoped or subsystem-scoped runtime state at `state/{subsystem}/{key}.json`; TTL-bound; not GC-walked. Examples: `state/referrers/<registry>.json` for OCI Referrers API capability cache (`adr_oci_referrers_signing_v1.md` Amendment 3); `state/trust_root/<rekor-authority>.json` for the offline-verify trust-root cache (`adr_offline_verify_trust_cache.md`). |
 
 ## ADR Index
 
@@ -90,6 +91,9 @@ CLI command (clap parse)
 | `adr_custom_oci_identifier.md` | Custom identifier parser replace `oci_spec::Reference` |
 | `adr_mirror_source_generators.md` | Generator-based URL index for mirror sources |
 | `adr_oci_artifact_enrichment.md` | Signatures, SBOMs, descriptive metadata on OCI artifacts |
+| `adr_oci_referrers_discovery.md` | OCI Referrers API for signature + SBOM discovery (superseded by v2) |
+| `adr_oci_referrers_signing_v1.md` | Keyless Sigstore signing via OCI Referrers (Slice 1 — sign + verify) |
+| `adr_trust_policy.md` | Identity-pinned verify via `[[trust.policy]]` in `config.toml` + `ocx.toml`; operator `config.toml` array-appends + is authoritative over project `ocx.toml` (`resolve_tiered`), most-specific-scope + ANY-of within a tier, `--certificate-identity`/`-oidc-issuer` optional-when-policy-matches (#98) |
 | `adr_ocx_mirror.md` | Standalone binary mirroring tool design |
 | `adr_release_install_strategy.md` | Release + install phased strategy |
 | `adr_sbom_strategy.md` | SBOM gen approach |
@@ -176,6 +180,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Join an untrusted relative path under a containment root (lexical, host-independent Windows drive/UNC/verbatim rejection); bounded, non-escaping relative-path newtype for untrusted annotation input | `utility::fs::path::join_under_root` + `RelativePath` | `utility/fs/path.rs` |
 | Move directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
 | Atomically publish a written `NamedTempFile` to a target path (Windows transient-lock retry — `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` backoff; single persist off-Windows; blocking — wrap in `spawn_blocking`) | `utility::fs::persist_temp_file` | `utility/fs.rs` (the one atomic-publish primitive; used by `BlobStore::write_blob`) |
+| Atomically write bytes to a target as a private (`0o600` on Unix) file (temp-in-parent → `persist_temp_file`; parent must already exist; blocking — wrap in `spawn_blocking`) | `utility::fs::write_bytes_atomic` | `utility/fs.rs` (thin private-file wrapper over `persist_temp_file`; used by the referrers + trust-root caches, managed-config snapshot/pause, setup profile + shims) |
 | Probe whether path exists, swallow I/O errors as `false` with debug log | `utility::fs::path_exists_lossy` | `utility/fs.rs` |
 | Refuse a destination path whose ancestor chain contains any symlink (security guard) | `utility::fs::refuse_if_symlink_in_path` | `utility/fs/symlink_walk.rs` |
 | Cross-platform same-filesystem check (Unix dev / Win32 GetVolumePathNameW) | `utility::fs::same_filesystem` | `utility/fs/same_filesystem.rs` |

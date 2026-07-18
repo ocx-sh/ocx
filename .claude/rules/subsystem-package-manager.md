@@ -34,7 +34,9 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `tasks/find.rs` | `find()`, `find_plain()`, `find_all()` — resolve installed packages |
 | `tasks/find_symlink.rs` | `find_symlink()`, `find_symlink_all()` — resolve via candidate/current |
 | `tasks/find_or_install.rs` | `find_or_install()`, `find_or_install_all()` — auto-install on miss |
-| `tasks/pull.rs` | `pull()`, `pull_all()` — download + transitive deps (PullTracker module-private) |
+| `tasks/pull.rs` | `pull()`, `pull_all()` — download + transitive deps (PullTracker module-private). `setup_impl` fires the leader-only auto-verify hook after resolve, before download (fail-closed abort → no partial state) |
+| `tasks/verify.rs` | `verify_one(package, platform, VerifyOptions)` — single lib verify facade over `VerifyPipeline::run`; wraps `VerifyError` in `PackageError` so the exit code survives the batch classifier |
+| `tasks/auto_verify.rs` | `AutoVerify` config + `maybe_auto_verify(resolved)` — policy-gated hook (composes #98 `resolve_tiered` + #196 trust-root/offline + `verify_one`, verifying the resolved leaf digest with `Platform::any()`); attached ONCE on the shared manager in `Context::try_init` via `with_auto_verify`, so **all** install surfaces (install, pull, exec, env, run, patch) inherit it; `None` = no-op |
 | `tasks/install.rs` | `install()`, `install_all()` — pull + create symlinks |
 | `tasks/uninstall.rs` | `uninstall()`, `uninstall_all()` — remove symlinks, optional purge |
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |

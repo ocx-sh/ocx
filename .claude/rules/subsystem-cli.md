@@ -15,6 +15,8 @@ The CLI surface divides into two tiers. **Toolchain-tier (project-tier)** comman
 
 `ocx run` is the toolchain-tier child-spawn command; `ocx package exec` is its OCI-tier counterpart. `ocx env` is the new toolchain-tier composed-env command. For the full command taxonomy, see `subsystem-cli-commands.md`.
 
+**One documented OCI-tier carve-out (#98):** `ocx package verify` reads `[[trust.policy]]` from the project `ocx.toml` when the `--certificate-identity`/`--certificate-oidc-issuer` flags are omitted. The operator `config.toml` trust set is authoritative over the project `ocx.toml` (`trust::resolve_tiered` — a project policy can only add trust for scopes no operator policy governs). This is a deliberate exception to "OCI-tier never consults `ocx.toml`", scoped SOLELY to trust policy (never package resolution) — a security concern, and only fires in policy mode (no flags). ADR `adr_trust_policy.md`.
+
 ## Command Taxonomy (Signed Handshake Model)
 
 ### OCI-tier — `ocx package <verb>`
@@ -205,6 +207,18 @@ The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand nam
 ## Cross-Cutting: OCX Configuration Forwarding
 
 Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
+
+### Credential exemption
+
+Env vars carrying bearer credentials are read directly via `std::env::var` and intentionally NOT forwarded via `OcxConfigView` or `apply_ocx_config`. Rationale: tokens are short-lived bearer credentials; forwarding them propagates the credential into every subprocess child env, broadening the attack surface unnecessarily.
+
+Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule violation):
+
+| Var | Read site | Rationale |
+|-----|-----------|-----------|
+| `OCX_IDENTITY_TOKEN` | `command/package_sign.rs` | Short-lived OIDC bearer token for Sigstore signing |
+
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR.
 
 ## Quality Gate
 

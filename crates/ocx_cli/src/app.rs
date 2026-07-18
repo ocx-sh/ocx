@@ -4,9 +4,11 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::cli;
+use ocx_lib::{cli, log};
 
 use crate::command;
+use crate::error_envelope::render_error_envelope;
+use crate::options::Format;
 
 mod context;
 pub use context::{Context, ManagedConfigGate};
@@ -188,7 +190,110 @@ impl App {
         let Some(command) = &cli.command else {
             unreachable!("None handled in static-command bypass above");
         };
-        command.execute(context).await
+
+        // Capture format + canonical command name so JSON mode can render an
+        // error envelope on stdout before `main.rs` returns the exit code.
+        // Error branch only: success envelopes are owned by each command's
+        // `api().report(...)` call, which already honors `--format json`.
+        let format = cli.context.format;
+        let command_name = canonical_command_name(command);
+        match command.execute(context).await {
+            Ok(code) => Ok(code),
+            Err(err) if matches!(format, Some(Format::Json)) => {
+                match render_error_envelope(command_name, &err) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(render_err) => {
+                        // Envelope rendering is infallible-by-design, but if serde
+                        // ever fails we surface both causes rather than swallowing
+                        // either one — the operator gets the underlying failure AND
+                        // a diagnostic about the broken envelope path.
+                        log::error!("error envelope render failed: {render_err:#}");
+                    }
+                }
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// Map a parsed `Command` to the canonical space-separated string consumers
+/// match on (e.g., `"package sign"`, `"verify"`, `"index update"`).
+///
+/// Frozen per ADR C-S1-1 §"`command` field". Any change to an existing mapping
+/// is a v1 → v2 schema bump.
+fn canonical_command_name(command: &command::Command) -> &'static str {
+    use command::Command;
+    use command::config::ConfigGroup as ConfigCmd;
+    use command::index::Index as IndexCmd;
+    use command::launcher::Launcher as LauncherCmd;
+    use command::package::Package as PackageCmd;
+    use command::patch::PatchGroup as PatchCmd;
+    use command::self_group::SelfGroup;
+    use command::shell::Shell as ShellCmd;
+    match command {
+        Command::Env(_) => "env",
+        Command::Add(_) => "add",
+        Command::Clean(_) => "clean",
+        Command::Config(sub) => match sub {
+            ConfigCmd::Setup(_) => "config setup",
+            ConfigCmd::Update(_) => "config update",
+            ConfigCmd::Push(_) => "config push",
+        },
+        Command::Direnv(_) => "direnv",
+        Command::Index(sub) => match sub {
+            IndexCmd::Catalog(_) => "index catalog",
+            IndexCmd::List(_) => "index list",
+            IndexCmd::Update(_) => "index update",
+        },
+        Command::About(_) => "about",
+        Command::Init(_) => "init",
+        Command::Lock(_) => "lock",
+        Command::Login(_) => "login",
+        Command::Logout(_) => "logout",
+        Command::Update(_) => "update",
+        Command::Launcher(sub) => match sub {
+            LauncherCmd::Exec(_) => "launcher exec",
+        },
+        Command::Package(sub) => match sub {
+            PackageCmd::Create(_) => "package create",
+            PackageCmd::Describe(_) => "package describe",
+            PackageCmd::Deps(_) => "package deps",
+            PackageCmd::Env(_) => "package env",
+            PackageCmd::Info(_) => "package info",
+            PackageCmd::Inspect(_) => "package inspect",
+            PackageCmd::Install(_) => "package install",
+            PackageCmd::Pull(_) => "package pull",
+            PackageCmd::Push(_) => "package push",
+            PackageCmd::Select(_) => "package select",
+            PackageCmd::Deselect(_) => "package deselect",
+            PackageCmd::Sign(_) => "package sign",
+            PackageCmd::Test(_) => "package test",
+            PackageCmd::Verify(_) => "package verify",
+            PackageCmd::Exec(_) => "package exec",
+            PackageCmd::Uninstall(_) => "package uninstall",
+            PackageCmd::Which(_) => "package which",
+        },
+        Command::Patch(sub) => match sub {
+            PatchCmd::Freeze(_) => "patch freeze",
+            PatchCmd::Sync(_) => "patch sync",
+            PatchCmd::Publish(_) => "patch publish",
+            PatchCmd::Test(_) => "patch test",
+            PatchCmd::Why(_) => "patch why",
+        },
+        Command::Pull(_) => "pull",
+        Command::Remove(_) => "remove",
+        Command::Run(_) => "run",
+        Command::Shell(sub) => match sub {
+            ShellCmd::Completion(_) => "shell completion",
+        },
+        Command::Self_(sub) => match sub {
+            SelfGroup::Activate(_) => "self activate",
+            SelfGroup::Setup(_) => "self setup",
+            SelfGroup::Update(_) => "self update",
+        },
+        Command::Version(_) => "version",
+        Command::External(_) => "external",
     }
 }
 
@@ -397,6 +502,17 @@ mod tests {
             max
         }
 
+        /// Detect a `C-S<digit>` design-clause label (e.g. `C-S1-3`,
+        /// `C-S1-4`). Lower-cased input, so `c-s` immediately followed by a
+        /// digit is the marker. These clause tags are signing-slice ADR
+        /// provenance and must never surface in `--help`.
+        fn has_clause_label(lower: &str) -> bool {
+            lower
+                .as_bytes()
+                .windows(4)
+                .any(|window| window[0] == b'c' && window[1] == b'-' && window[2] == b's' && window[3].is_ascii_digit())
+        }
+
         /// Detect an ISO-8601 calendar date `20dd-dd-dd` (e.g. `2026-05-19`).
         fn has_iso_date(text: &str) -> bool {
             text.as_bytes().windows(10).any(|w| {
@@ -426,6 +542,9 @@ mod tests {
             }
             if lower.contains("amended") {
                 return Some("`amended` (design history)");
+            }
+            if has_clause_label(&lower) {
+                return Some("`C-S<n>` design-clause label");
             }
             if has_iso_date(text) {
                 return Some("ISO date (YYYY-MM-DD)");

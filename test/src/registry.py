@@ -6,6 +6,11 @@ OCI-compliant registry — local registry:2, Artifactory, GHCR, ECR, etc.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 import oras.client
@@ -37,10 +42,6 @@ def fetch_manifest_digest(registry: str, repo: str, tag: str) -> str:
     Uses the Docker-Content-Digest header from a HEAD request, falling back
     to computing the digest from the manifest body.
     """
-    import hashlib
-    import json
-    import urllib.request
-
     url = f"http://{registry}/v2/{repo}/manifests/{tag}"
     # Try with OCI manifest media types
     for media_type in [
@@ -109,6 +110,216 @@ def index_platforms(manifest: dict[str, Any]) -> set[str]:
         if plat:
             platforms.add(f"{plat['os']}/{plat['architecture']}")
     return platforms
+
+
+# ---------------------------------------------------------------------------
+# OCI 1.1 Referrers API helpers (raw HTTP, stdlib only)
+#
+# Used by the referrers smoke test (test_referrers_smoke.py, #195) to push a
+# subject + a referrer and list it back via GET /v2/<name>/referrers/<digest>.
+# Deliberately dependency-free (no oras-py) so the smoke test exercises the
+# registry's referrers endpoint directly rather than a client abstraction.
+# ---------------------------------------------------------------------------
+
+IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+_EMPTY_CONFIG = b"{}"
+_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
+
+
+def _sha256_digest(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _http(
+    method: str,
+    url: str,
+    *,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes, dict[str, str]]:
+    """Issue an HTTP request, returning (status, body, headers) even on 4xx/5xx."""
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        return resp.status, resp.read(), dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), dict(exc.headers)
+
+
+def push_blob(registry: str, repo: str, data: bytes, *, insecure: bool = True) -> str:
+    """Upload a blob (two-step monolithic upload) and return its digest."""
+    scheme = "http" if insecure else "https"
+    digest = _sha256_digest(data)
+    status, _, hdrs = _http("POST", f"{scheme}://{registry}/v2/{repo}/blobs/uploads/")
+    if status not in (201, 202):
+        raise RuntimeError(f"blob upload init failed ({status}) for {repo}")
+    location = hdrs["Location"]
+    if location.startswith("/"):
+        location = f"{scheme}://{registry}{location}"
+    sep = "&" if "?" in location else "?"
+    status, body, _ = _http(
+        "PUT",
+        f"{location}{sep}digest={digest}",
+        data=data,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    if status != 201:
+        raise RuntimeError(f"blob PUT failed ({status}): {body!r}")
+    return digest
+
+
+def push_manifest(
+    registry: str,
+    repo: str,
+    manifest: dict[str, Any],
+    *,
+    reference: str | None = None,
+    insecure: bool = True,
+) -> tuple[str, dict[str, str]]:
+    """PUT a manifest (by digest unless ``reference`` given); return (digest, headers)."""
+    scheme = "http" if insecure else "https"
+    body = json.dumps(manifest).encode()
+    digest = _sha256_digest(body)
+    ref = reference or digest
+    status, resp, hdrs = _http(
+        "PUT",
+        f"{scheme}://{registry}/v2/{repo}/manifests/{ref}",
+        data=body,
+        headers={"Content-Type": manifest["mediaType"]},
+    )
+    if status != 201:
+        raise RuntimeError(f"manifest PUT failed ({status}): {resp!r}")
+    return digest, hdrs
+
+
+def push_minimal_image(
+    registry: str, repo: str, *, payload: bytes = b"subject", insecure: bool = True
+) -> tuple[str, int]:
+    """Push a minimal OCI image manifest (empty config + one layer).
+
+    Returns ``(digest, manifest_byte_size)`` — the size is the exact number of
+    bytes the manifest occupies, needed to build a subject descriptor.
+    """
+    config_digest = push_blob(registry, repo, _EMPTY_CONFIG, insecure=insecure)
+    layer_digest = push_blob(registry, repo, payload, insecure=insecure)
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+        "config": {
+            "mediaType": _EMPTY_CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": len(_EMPTY_CONFIG),
+        },
+        "layers": [
+            {
+                "mediaType": "application/octet-stream",
+                "digest": layer_digest,
+                "size": len(payload),
+            }
+        ],
+    }
+    digest, _ = push_manifest(registry, repo, manifest, insecure=insecure)
+    return digest, len(json.dumps(manifest).encode())
+
+
+def push_referrer(
+    registry: str,
+    repo: str,
+    subject_digest: str,
+    subject_size: int,
+    *,
+    artifact_type: str,
+    payload: bytes = b"referrer",
+    insecure: bool = True,
+) -> tuple[str, dict[str, str]]:
+    """Push an OCI referrer (image manifest with a ``subject``); return (digest, headers).
+
+    The returned headers carry ``OCI-Subject`` when the registry processed the
+    subject — its presence proves native Referrers API support.
+    """
+    config_digest = push_blob(registry, repo, _EMPTY_CONFIG, insecure=insecure)
+    layer_digest = push_blob(registry, repo, payload, insecure=insecure)
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+        "artifactType": artifact_type,
+        "config": {
+            "mediaType": _EMPTY_CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": len(_EMPTY_CONFIG),
+        },
+        "layers": [
+            {
+                "mediaType": "application/octet-stream",
+                "digest": layer_digest,
+                "size": len(payload),
+            }
+        ],
+        "subject": {
+            "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+            "digest": subject_digest,
+            "size": subject_size,
+        },
+    }
+    return push_manifest(registry, repo, manifest, insecure=insecure)
+
+
+def get_manifest(
+    registry: str, repo: str, digest: str, *, insecure: bool = True
+) -> dict[str, Any]:
+    """GET a manifest by digest; return the parsed OCI manifest JSON."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http(
+        "GET",
+        f"{scheme}://{registry}/v2/{repo}/manifests/{digest}",
+        headers={"Accept": IMAGE_MANIFEST_MEDIA_TYPE},
+    )
+    if status != 200:
+        raise RuntimeError(f"manifest GET failed ({status}) for {repo}@{digest}")
+    return json.loads(body)
+
+
+def get_blob(registry: str, repo: str, digest: str, *, insecure: bool = True) -> bytes:
+    """GET a blob by digest; return the raw bytes."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http("GET", f"{scheme}://{registry}/v2/{repo}/blobs/{digest}")
+    if status != 200:
+        raise RuntimeError(f"blob GET failed ({status}) for {repo}@{digest}")
+    return body
+
+
+def delete_manifest(registry: str, repo: str, digest: str, *, insecure: bool = True) -> None:
+    """DELETE a manifest by digest (e.g. to replace a referrer in-place for a tamper test)."""
+    scheme = "http" if insecure else "https"
+    status, body, _ = _http("DELETE", f"{scheme}://{registry}/v2/{repo}/manifests/{digest}")
+    if status not in (200, 202, 204):
+        raise RuntimeError(f"manifest DELETE failed ({status}) for {repo}@{digest}: {body!r}")
+
+
+def list_referrers(
+    registry: str,
+    repo: str,
+    subject_digest: str,
+    *,
+    artifact_type: str | None = None,
+    insecure: bool = True,
+) -> tuple[int, dict[str, Any] | None]:
+    """GET /v2/<repo>/referrers/<subject_digest>.
+
+    Returns ``(status, index)`` where ``index`` is the parsed OCI image index on
+    a 200, else ``None``. A registry without the Referrers API returns a
+    non-200 status (distribution v2 returns 404), so callers can distinguish
+    "supported" from "unsupported" on ``status``.
+    """
+    scheme = "http" if insecure else "https"
+    url = f"{scheme}://{registry}/v2/{repo}/referrers/{subject_digest}"
+    if artifact_type:
+        url += f"?artifactType={urllib.parse.quote(artifact_type, safe='')}"
+    status, body, _ = _http("GET", url, headers={"Accept": IMAGE_INDEX_MEDIA_TYPE})
+    if status != 200:
+        return status, None
+    return status, json.loads(body)
 
 
 def index_platforms_with_features(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -230,12 +441,6 @@ def fetch_blob(registry: str, repo: str, digest: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 TAR_GZ_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
-
-
-def _sha256_digest(data: bytes) -> str:
-    import hashlib
-
-    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
 def _push_blob(registry: str, repo: str, data: bytes) -> str:
