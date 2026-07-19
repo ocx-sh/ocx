@@ -41,14 +41,24 @@ pub struct Config {
     /// without breaking existing configs.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 
-    /// Per-upstream-host registry mirrors (`[mirrors."<host>"]`).
+    /// Per-traffic-host mirrors (`[mirrors."<host>"]`).
     ///
-    /// Maps a canonical upstream registry host (e.g. `"ghcr.io"`) to a
-    /// replacement endpoint so OCX routes read traffic to a corporate mirror
-    /// instead of the firewall-blocked origin. Replace semantics: no origin
-    /// fallback. The canonical identifier and content-addressed digest stay
-    /// unchanged, so an `ocx.lock` produced behind the mirror remains valid
-    /// with direct egress and vice versa.
+    /// Maps a canonical upstream traffic host (e.g. `"ghcr.io"`,
+    /// `"index.ocx.sh"`) to replacement endpoint(s) so OCX routes read
+    /// traffic to a corporate mirror instead of the firewall-blocked origin.
+    /// Each value is a union (`adr_index_indirection.md` F5b): a bare string
+    /// rewrites both traffic roles for that host; a `{registry?, index?}`
+    /// table splits per role — `registry` rewrites OCI distribution traffic
+    /// only, `index` rewrites index-tree traffic only. Replace semantics: no
+    /// origin fallback. The canonical identifier and content-addressed digest
+    /// stay unchanged, so an `ocx.lock` produced behind the mirror remains
+    /// valid with direct egress and vice versa.
+    ///
+    /// Deserialized via [`mirror::deserialize_mirrors_table`] (hand-rolled,
+    /// value-first) rather than a plain derive, so a malformed entry raises a
+    /// named per-host error instead of an opaque `#[serde(untagged)]`
+    /// variant-mismatch.
+    #[serde(default, deserialize_with = "mirror::deserialize_mirrors_table")]
     pub mirrors: Option<HashMap<String, MirrorConfig>>,
 
     /// Site-tier patch configuration (`[patches]`).
@@ -583,26 +593,33 @@ mod tests {
             ("[registries.<name>]", || {
                 let mut system = RegistryConfig {
                     url: Some("system-registry.corp".to_string()),
+                    index: None,
                     system_locked: false,
                 };
                 system.lock_as_system();
                 system.merge(RegistryConfig {
                     url: Some("lower.evil".to_string()),
+                    index: None,
                     system_locked: false,
                 });
                 system.system_locked && system.url.as_deref() == Some("system-registry.corp")
             }),
             ("[mirrors.\"<host>\"]", || {
                 let mut system = MirrorConfig {
-                    url: Some("https://system-mirror.corp/ghcr-remote".to_string()),
-                    system_locked: false,
+                    registry: Some("https://system-mirror.corp/ghcr-remote".to_string()),
+                    index: None,
+                    registry_system_locked: false,
+                    index_system_locked: false,
                 };
                 system.lock_as_system();
                 system.merge(MirrorConfig {
-                    url: Some("https://lower.evil/ghcr-remote".to_string()),
-                    system_locked: false,
+                    registry: Some("https://lower.evil/ghcr-remote".to_string()),
+                    index: None,
+                    registry_system_locked: false,
+                    index_system_locked: false,
                 });
-                system.system_locked && system.url.as_deref() == Some("https://system-mirror.corp/ghcr-remote")
+                system.registry_system_locked
+                    && system.registry.as_deref() == Some("https://system-mirror.corp/ghcr-remote")
             }),
         ];
 
@@ -631,6 +648,7 @@ mod tests {
                     "corp".to_string(),
                     RegistryConfig {
                         url: Some("registry.corp.example".to_string()),
+                        index: None,
                         system_locked: false,
                     },
                 );

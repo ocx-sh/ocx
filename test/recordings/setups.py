@@ -553,8 +553,8 @@ def _alias_managed_config_host(ocx: OcxRunner, path_prefix: str) -> None:
     """
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
-        '[mirrors."internal.company.com"]\n'
-        f'url = "http://{ocx.registry}/{path_prefix}"\n'
+        '[mirrors]\n'
+        f'"internal.company.com" = "http://{ocx.registry}/{path_prefix}"\n'
     )
 
 
@@ -577,7 +577,7 @@ def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> 
     path_prefix = prefix.rstrip("_")
     push_raw_config_package(
         ocx.registry, f"{path_prefix}/ocx-config", "user",
-        b'[mirrors."ghcr.io"]\nurl = "https://ghcr.corp.example.com"\n',
+        b'[mirrors]\n"ghcr.io" = "https://ghcr.corp.example.com"\n',
     )
     _alias_managed_config_host(ocx, path_prefix)
 
@@ -608,7 +608,7 @@ def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[
     path_prefix = prefix.rstrip("_")
     push_raw_config_package(
         ocx.registry, f"{path_prefix}/ocx-config", "ci",
-        b'[mirrors."ghcr.io"]\nurl = "https://ghcr.corp.example.com"\n',
+        b'[mirrors]\n"ghcr.io" = "https://ghcr.corp.example.com"\n',
     )
     _alias_managed_config_host(ocx, path_prefix)
 

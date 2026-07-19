@@ -81,7 +81,20 @@ impl Publisher {
     /// share one identifier by construction, so every platform lands on the
     /// same tag). Errors if the tag does not parse, lacks `X.Y.Z` form, or
     /// already carries build metadata.
-    pub async fn push(&self, infos: Vec<Info>, layers: &[LayerRef], build_meta: Option<&str>) -> Result<PushOutcome> {
+    ///
+    /// When `canonical_tag` is `true` (the default from `ocx package push`),
+    /// each pushed platform manifest additionally gets a digest-named
+    /// `sha256.<hex>` tag pointing directly at it — a pure registry-side
+    /// deletion safety net (`adr_index_indirection.md` Decision E). Applies
+    /// only to the platform manifest pushed by this call, never to
+    /// pre-existing entries the merge picks up from the registry.
+    pub async fn push(
+        &self,
+        infos: Vec<Info>,
+        layers: &[LayerRef],
+        build_meta: Option<&str>,
+        canonical_tag: bool,
+    ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
         for info in infos {
@@ -90,7 +103,14 @@ impl Publisher {
                 info.identifier,
                 info.platform
             );
-            let (digest, _manifest) = self.client.push_package(info, layers).await?;
+            let identifier = info.identifier.clone();
+            let platform = info.platform.clone();
+            let (digest, manifest) = self.client.push_package(info, layers).await?;
+            if canonical_tag {
+                self.client
+                    .push_canonical_tag(&identifier, &manifest, &platform)
+                    .await?;
+            }
             manifest_digest = Some(digest);
         }
         Ok(PushOutcome {
@@ -106,13 +126,15 @@ impl Publisher {
     /// used to compute which rolling tags each platform's push should update
     /// (cascade blocker checks are platform-aware). The same `build_meta`
     /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
-    /// ordered union across platforms.
+    /// ordered union across platforms. `canonical_tag` has the same meaning
+    /// as [`Self::push`].
     pub async fn push_cascade(
         &self,
         infos: Vec<Info>,
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
+        canonical_tag: bool,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
@@ -126,9 +148,15 @@ impl Publisher {
             let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
                 crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string())
             })?;
-            let (digest, tags) =
-                package::cascade::push_with_cascade(&self.client, info, layers, existing_versions.clone(), &version)
-                    .await?;
+            let (digest, tags) = package::cascade::push_with_cascade(
+                &self.client,
+                info,
+                layers,
+                existing_versions.clone(),
+                &version,
+                canonical_tag,
+            )
+            .await?;
             manifest_digest = Some(digest);
             for tag in tags {
                 if !cascade_tags.contains(&tag) {
@@ -283,7 +311,10 @@ mod tests {
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(
             StubTransportData::new(),
         ))));
-        let err = publisher.push(Vec::new(), &[], None).await.expect_err("empty set");
+        let err = publisher
+            .push(Vec::new(), &[], None, false)
+            .await
+            .expect_err("empty set");
         assert!(err.to_string().contains("at least one target platform"), "got: {err}");
     }
 
@@ -298,7 +329,7 @@ mod tests {
         let mut mac = test_info("1.0.0");
         mac.platform = "darwin/arm64".parse().expect("platform parses");
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None)
+            .push(vec![test_info("1.0.0"), mac], &[], None, false)
             .await
             .expect("fan-out push succeeds");
 
@@ -328,6 +359,50 @@ mod tests {
             outcome.manifest_digest.to_string(),
             *digest,
             "outcome digest must be the final (last-merge) index digest"
+        );
+    }
+
+    // ── canonical_tag gating — adr_index_indirection.md Decision E ───────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn canonical_tag_true_pushes_the_sha256_dot_hex_tag() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        publisher
+            .push(vec![test_info("1.0.0")], &[], None, true)
+            .await
+            .expect("push succeeds");
+
+        let inner = data.read();
+        assert!(
+            inner.manifests.keys().any(|key| key.contains(":sha256.")),
+            "canonical_tag=true must push a sha256.<hex> tag: {:?}",
+            inner.manifests.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn canonical_tag_false_skips_the_extra_tag_push() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        publisher
+            .push(vec![test_info("1.0.0")], &[], None, false)
+            .await
+            .expect("push succeeds");
+
+        let inner = data.read();
+        assert!(
+            inner.manifests.keys().all(|key| !key.contains(":sha256.")),
+            "canonical_tag=false must not push the extra tag: {:?}",
+            inner.manifests.keys().collect::<Vec<_>>()
         );
     }
 }

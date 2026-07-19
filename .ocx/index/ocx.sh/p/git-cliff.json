@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/git-cliff",
+  "tags": {
+    "2": {
+      "content": "sha256:4bf5212fbf07f6c8f0cc70311eb079b4c4be0cda32d531eafffcd8dc3edc0ea7",
+      "observed": "2026-07-19T11:14:34.185633178+00:00"
+    }
+  }
+}

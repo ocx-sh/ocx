@@ -83,7 +83,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self` |
 | `package pull PKGS...` | Download to object store only | `-p` |
 | `package create PATH` | Bundle directory into archive | `-o`, `-m`, `-l`, `-j`, `--force` |
-| `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp` |
+| `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp`, `--canonical-tag/--no-canonical-tag` (default on — pushes `sha256.<hex>` per platform manifest, registry-side deletion safety net; `index.ocx.sh` ignores it) |
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
@@ -165,7 +165,7 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 | `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline | `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
 | `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
-| `index update PKGS...` | Sync local index from remote; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
+| `index update PKGS...` | Sync local index collection from remote via `IndexSync::refresh_package` — writes the per-tag dispatch object plus root document (never a leaf manifest, A3), so a version choice resolves fully offline afterwards; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
 | `version` | Print version | — |
 | `about` | Print version + registry + platform + shell + home | — |
 

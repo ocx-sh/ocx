@@ -113,8 +113,7 @@ mod tests {
     fn make_offline_manager(ocx_home: &Path) -> PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(fs, index, None, "localhost:5000")

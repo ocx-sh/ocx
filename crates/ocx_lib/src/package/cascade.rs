@@ -194,12 +194,19 @@ pub async fn resolve_cascade_tags(
 /// Pushes a package to its primary tag, then merges the platform entry
 /// into each cascade tag sequentially (most-specific → least-specific
 /// for partial-failure safety).
+///
+/// When `canonical_tag` is `true`, the just-pushed platform manifest also
+/// gets a digest-named `sha256.<hex>` tag (`adr_index_indirection.md`
+/// Decision E) — looked up once from the primary tag's merged index, so a
+/// cascade never retags a pre-existing entry for a platform this call did
+/// not push.
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
     layers: &[crate::publisher::LayerRef],
     other_versions: BTreeSet<Version>,
     version: &Version,
+    canonical_tag: bool,
 ) -> Result<(oci::Digest, Vec<String>)> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
@@ -210,9 +217,19 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    let (manifest_digest, _index) = client
+    let (manifest_digest, index) = client
         .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags)
         .await?;
+
+    if canonical_tag {
+        client
+            .push_canonical_tag(
+                &package_info.identifier,
+                &oci::Manifest::ImageIndex(index),
+                &package_info.platform,
+            )
+            .await?;
+    }
 
     Ok((manifest_digest, cascade_tags))
 }
@@ -903,6 +920,75 @@ mod tests {
                     .unwrap();
             assert_eq!(tags, vec!["pgo.lto-3.28.0", "pgo.lto-3.28", "pgo.lto-3", "pgo.lto"]);
             assert!(is_latest);
+        }
+
+        // ── push_with_cascade canonical-tag gating ────────────────
+
+        fn test_info(tag: &str, platform_str: &str) -> package::info::Info {
+            use package::metadata::{
+                Entrypoints, Metadata,
+                bundle::{self, Bundle},
+                dependency, env as metadata_env,
+            };
+            let metadata = Metadata::Bundle(Bundle {
+                version: bundle::Version::V1,
+                strip_components: None,
+                env: metadata_env::Env::default(),
+                dependencies: dependency::Dependencies::default(),
+                entrypoints: Entrypoints::default(),
+            });
+            package::info::Info {
+                identifier: test_identifier().clone_with_tag(tag),
+                metadata,
+                platform: platform(platform_str),
+            }
+        }
+
+        #[tokio::test]
+        async fn canonical_tag_true_tags_only_the_pushed_platform() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            // Pre-existing arm64 entry on the "3" cascade target — must never
+            // get retro-tagged by this push (only linux/amd64 was pushed).
+            seed_index(&data, "3", &["linux/arm64"]);
+
+            let info = test_info("3.28.1", "linux/amd64");
+            let version = Version::new_patch(3, 28, 1);
+
+            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true)
+                .await
+                .expect("cascade push succeeds");
+
+            let inner = data.read();
+            let canonical_tags: Vec<&String> = inner.manifests.keys().filter(|key| key.contains(":sha256.")).collect();
+            assert_eq!(
+                canonical_tags.len(),
+                1,
+                "exactly one canonical tag must be pushed, for the platform this call pushed: {canonical_tags:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn canonical_tag_false_pushes_no_extra_tag() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            let info = test_info("3.28.1", "linux/amd64");
+            let version = Version::new_patch(3, 28, 1);
+
+            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false)
+                .await
+                .expect("cascade push succeeds");
+
+            let inner = data.read();
+            assert!(
+                inner.manifests.keys().all(|key| !key.contains(":sha256.")),
+                "canonical_tag=false must not push the extra tag: {:?}",
+                inner.manifests.keys().collect::<Vec<_>>()
+            );
         }
     }
 

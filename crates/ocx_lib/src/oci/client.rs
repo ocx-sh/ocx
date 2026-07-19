@@ -322,6 +322,67 @@ impl Client {
         Ok((index_digest, index))
     }
 
+    // ── Canonical tag (registry-side deletion safety net) ─────────────
+
+    /// Pushes a digest-named `sha256.<hex>` tag pointing directly at
+    /// `platform`'s entry in `merged_manifest`.
+    ///
+    /// `merged_manifest` is the just-returned merge result for
+    /// `(source_identifier, platform)` from `push_package` /
+    /// `push_manifest_and_merge_tags` — `platform`'s entry is expected to be
+    /// present by construction. A missing entry is a no-op rather than a
+    /// hard failure: canonical tagging is a safety net layered on top of an
+    /// already-committed push, never load-bearing for the push itself.
+    ///
+    /// Registry-side deletion safety net (`adr_index_indirection.md`
+    /// Decision E): a stray delete of a rolling/cascade tag can never orphan
+    /// a digest a lock still pins, because the canonical tag names it
+    /// directly. Uses a `.` separator — OCI tags forbid `:`. The local
+    /// snapshot and lock never read or write canonical tags; this is a pure
+    /// registry-side write.
+    pub(crate) async fn push_canonical_tag(
+        &self,
+        source_identifier: &Identifier,
+        merged_manifest: &oci::Manifest,
+        platform: &oci::Platform,
+    ) -> Result<()> {
+        let Some(manifest_digest) = super::manifest::platform_manifest_digest(merged_manifest, platform) else {
+            return Ok(());
+        };
+
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let repo_ref = source_identifier.canonical_reference();
+        self.transport
+            .ensure_auth(&repo_ref, oci::RegistryOperation::Push)
+            .await?;
+
+        // `without_tag()` matters: `push_multi_layer_manifest` pushes the
+        // platform manifest to a bare digest reference (registry/repo@digest,
+        // no tag) — `native::Reference::clone_with_digest` drops the tag by
+        // construction (`oci_spec::distribution::Reference`). Preserving
+        // `source_identifier`'s tag here would build a `tag@digest` reference
+        // that never round-trips to the same key the manifest was pushed
+        // under, so the pull below would spuriously 404.
+        let digest_ref = source_identifier
+            .without_tag()
+            .clone_with_digest(manifest_digest.clone())
+            .canonical_reference();
+        let (manifest_bytes, _digest_str) = self
+            .transport
+            .pull_manifest_raw(&digest_ref, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST])
+            .await?;
+
+        let (algorithm, hex) = manifest_digest.parts();
+        let tag_ref = source_identifier
+            .clone_with_tag(format!("{algorithm}.{hex}"))
+            .canonical_reference();
+        self.transport
+            .push_manifest_raw(&tag_ref, manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .await?;
+
+        Ok(())
+    }
+
     // ── Blob introspection ────────────────────────────────────────────
 
     /// HEAD a blob to verify its existence and retrieve its content length.
@@ -1383,11 +1444,22 @@ impl Client {
     /// Fetches the raw manifest bytes and the parsed [`oci::Manifest`] for
     /// `identifier`.
     ///
+    /// `identifier` may be tag- or digest-addressed — this is the generalized
+    /// raw-bytes fetch: any tag-resolve caller that needs verbatim bytes
+    /// alongside the parsed manifest (not just pinned-digest callers) can use
+    /// it as-is.
+    ///
     /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
     /// Unlike [`Self::fetch_manifest`], this method also returns the raw
     /// manifest bytes so callers can persist them to the CAS blob store
     /// without re-serialisation — the round-trip bytes must be byte-identical
     /// to what the registry served to ensure the stored digest is consistent.
+    ///
+    /// The returned digest is never trusted blindly: `sha256(raw_bytes)` is
+    /// recomputed and compared against the registry-claimed digest before
+    /// this method returns (see [`verify_raw_bytes_digest`]) — the trust
+    /// anchor for any snapshot store that persists these bytes verbatim
+    /// (`adr_index_indirection.md` A3).
     pub(crate) async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &Identifier,
@@ -1408,6 +1480,7 @@ impl Client {
         let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
+        verify_raw_bytes_digest(&raw_bytes, &digest)?;
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
@@ -1480,6 +1553,26 @@ impl Client {
         let manifest: oci::Manifest = serde_json::from_slice(&data).map_err(ClientError::Serialization)?;
         Ok((manifest, digest))
     }
+}
+
+/// Recomputes the digest of `raw_bytes` (using the algorithm `claimed`
+/// carries) and errors if it does not match.
+///
+/// This is the write-path trust anchor for [`Client::fetch_manifest_raw_bytes`]
+/// (ADR `adr_index_indirection.md` A3, "keep raw bytes, recompute + verify
+/// digest"): a registry-claimed digest string is untrusted input until the
+/// bytes actually received hash to it. A mismatch is a hard error, never a
+/// warning — the caller is about to persist `raw_bytes` verbatim under a
+/// filename derived from `claimed`.
+fn verify_raw_bytes_digest(raw_bytes: &[u8], claimed: &Digest) -> std::result::Result<(), ClientError> {
+    let recomputed = claimed.algorithm().hash(raw_bytes);
+    if &recomputed != claimed {
+        return Err(ClientError::DigestMismatch {
+            expected: claimed.to_string(),
+            actual: recomputed.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ── Pagination ───────────────────────────────────────────────────────
@@ -1585,6 +1678,119 @@ mod tests {
         let data = serde_json::to_vec(manifest).unwrap();
         let digest = Algorithm::Sha256.hash(&data).to_string();
         (data, digest)
+    }
+
+    // ── verify_raw_bytes_digest tests ────────────────────────────────
+    //
+    // The recompute-verify trust anchor (ADR `adr_index_indirection.md` A3):
+    // a claimed digest is never trusted without recomputing sha256(bytes)
+    // and comparing.
+
+    #[test]
+    fn verify_raw_bytes_digest_accepts_matching_bytes() {
+        let bytes = b"verbatim manifest bytes".to_vec();
+        let claimed = Algorithm::Sha256.hash(&bytes);
+        assert!(super::verify_raw_bytes_digest(&bytes, &claimed).is_ok());
+    }
+
+    #[test]
+    fn verify_raw_bytes_digest_rejects_tampered_bytes() {
+        let bytes = b"verbatim manifest bytes".to_vec();
+        let claimed = Algorithm::Sha256.hash(&bytes);
+        let tampered = b"tampered manifest bytes".to_vec();
+
+        match super::verify_raw_bytes_digest(&tampered, &claimed) {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(expected, claimed.to_string(), "expected must be the claimed digest");
+                assert_eq!(
+                    actual,
+                    Algorithm::Sha256.hash(&tampered).to_string(),
+                    "actual must be the digest recomputed from the bytes actually received"
+                );
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected ClientError::DigestMismatch, got {other:?}"),
+        }
+    }
+
+    // ── fetch_manifest_raw_bytes tests ───────────────────────────────
+    //
+    // Covers the generalized raw-bytes fetch (works for tag-addressed
+    // identifiers, not just pinned-digest ones) and the A3 recompute-verify
+    // gate wired into it.
+
+    /// A tag-resolve fetch retains the verbatim bytes alongside the parsed
+    /// manifest and digest — the precedent the future snapshot-store write
+    /// path (ADR A3) reuses.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_retains_verbatim_bytes_for_tag_identifier() {
+        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0"); // tag-addressed, not digest-pinned
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data.clone(), digest_str.clone()));
+        let client = stub(&data);
+
+        let (raw_bytes, digest, parsed) = client
+            .fetch_manifest_raw_bytes(&id)
+            .await
+            .expect("fetch should succeed")
+            .expect("tag is present in the stub");
+
+        assert_eq!(
+            raw_bytes, manifest_data,
+            "bytes must be returned verbatim, never re-serialized"
+        );
+        assert_eq!(digest.to_string(), digest_str);
+        assert!(
+            matches!(parsed, oci::Manifest::Image(_)),
+            "parsed manifest must be the Image variant"
+        );
+    }
+
+    /// A missing tag surfaces as `Ok(None)` — not-found is a normal query
+    /// result at this layer, not an error (see `subsystem-oci.md`
+    /// "Option-based results").
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_returns_none_for_missing_tag() {
+        let id = test_identifier("missing");
+        let data = StubTransportData::new();
+        let client = stub(&data);
+
+        let result = client.fetch_manifest_raw_bytes(&id).await.expect("no transport error");
+        assert!(result.is_none());
+    }
+
+    /// A registry (or mirror) that serves bytes not matching its own claimed
+    /// digest must hard-fail, never silently hand back the tampered bytes.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_rejects_registry_claimed_digest_mismatch() {
+        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
+        let (manifest_data, _correct_digest) = serialize_manifest(&manifest);
+        // A digest that does not correspond to `manifest_data` — well-formed
+        // (64 lowercase hex chars) so it parses as a `Digest`, but wrong.
+        let wrong_digest_str = format!("sha256:{}", "f".repeat(64));
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, wrong_digest_str.clone()));
+        let client = stub(&data);
+
+        match client.fetch_manifest_raw_bytes(&id).await {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(
+                    expected, wrong_digest_str,
+                    "expected must be the registry-claimed digest"
+                );
+                assert_ne!(actual, expected, "actual must be the recomputed (correct) digest");
+            }
+            other => panic!("expected Err(ClientError::DigestMismatch), got {other:?}"),
+        }
     }
 
     // ── Pagination tests ─────────────────────────────────────────────
@@ -3242,6 +3448,111 @@ mod tests {
                 inner.manifests.is_empty(),
                 "no manifest should have been pushed on error"
             );
+        }
+    }
+
+    // ── push_canonical_tag tests ─────────────────────────────────────
+
+    mod push_canonical_tag_tests {
+        use super::*;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn platform(s: &str) -> oci::Platform {
+            s.parse().unwrap()
+        }
+
+        fn index_with_entry(digest: &str, platform: oci::Platform) -> oci::Manifest {
+            oci::Manifest::ImageIndex(oci::ImageIndex {
+                schema_version: oci::INDEX_SCHEMA_VERSION,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: None,
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: digest.to_string(),
+                    size: 42,
+                    platform: Some(platform.into()),
+                    artifact_type: None,
+                    annotations: None,
+                }],
+                annotations: None,
+            })
+        }
+
+        #[tokio::test]
+        async fn pushes_dot_separated_sha256_tag_with_the_same_bytes() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let hex = "a".repeat(64);
+            let digest = format!("sha256:{hex}");
+
+            // Seed the platform manifest at its digest-addressed reference,
+            // exactly as `push_multi_layer_manifest` leaves it after a push —
+            // bare `registry/repo@digest`, no tag (see `without_tag()` note
+            // on `push_canonical_tag`).
+            let manifest_bytes = b"platform manifest bytes".to_vec();
+            let digest_ref = id
+                .without_tag()
+                .clone_with_digest(oci::Digest::Sha256(hex.clone()))
+                .canonical_reference();
+            data.write()
+                .manifests
+                .insert(digest_ref.to_string(), (manifest_bytes.clone(), digest.clone()));
+
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&digest, platform("linux/amd64"));
+
+            client
+                .push_canonical_tag(&id, &merged, &platform("linux/amd64"))
+                .await
+                .unwrap();
+
+            let tag_ref = id.clone_with_tag(format!("sha256.{hex}")).canonical_reference();
+            let inner = data.read();
+            let (pushed_bytes, _) = inner
+                .manifests
+                .get(&tag_ref.to_string())
+                .expect("canonical tag manifest not pushed");
+            assert_eq!(
+                pushed_bytes, &manifest_bytes,
+                "canonical tag must carry the exact platform manifest bytes"
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_platform_entry_is_a_no_op() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&format!("sha256:{}", "a".repeat(64)), platform("linux/amd64"));
+
+            // Platform not present in the merged index — no-op, not an error.
+            client
+                .push_canonical_tag(&id, &merged, &platform("linux/arm64"))
+                .await
+                .unwrap();
+
+            assert!(data.read().manifests.is_empty(), "no tag should have been pushed");
+        }
+
+        #[tokio::test]
+        async fn missing_source_manifest_propagates_error() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let client = stub_with_capture(&data);
+            // Entry present in the index, but its digest was never seeded
+            // into the stub's manifest store — the pull must fail.
+            let merged = index_with_entry(&format!("sha256:{}", "b".repeat(64)), platform("linux/amd64"));
+
+            let result = client.push_canonical_tag(&id, &merged, &platform("linux/amd64")).await;
+            assert!(result.is_err(), "must propagate a missing source manifest as an error");
         }
     }
 

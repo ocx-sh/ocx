@@ -20,13 +20,13 @@ again.
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 from src import OcxRunner
 from src.helpers import make_package
+from src.runner import registry_dir
 
 
 def _write_ocx_toml(project: Path, body: str) -> Path:
@@ -91,12 +91,24 @@ def test_pinned_id_exec_offline_succeeds(ocx: OcxRunner, tmp_path: Path) -> None
     leaf_digest = platforms.get("any") or next(iter(platforms.values()))
     pinned_id = f"{repository}@{leaf_digest}"
 
-    # Wipe the local tag store. The pinned-id flow must not need it for
-    # exec — any reach-back to the tag store would fail this assertion
-    # because the directory is gone.
-    tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
-    if tags_root.exists():
-        shutil.rmtree(tags_root)
+    # Wipe the local root document (the tag pointer, A2) only. It lives in
+    # the local index collection (`$OCX_HOME/index/<source>/p/<repo>.json`)
+    # alongside the verbatim dispatch-object CAS (`o/<algo>/<hex>.json`)
+    # that `ocx pull` persisted — that sibling cache must survive, since a
+    # digest-pinned lookup reads it directly and never touches the root doc
+    # (`LocalIndex::fetch_manifest` short-circuits to the digest branch
+    # when the identifier carries one). The pinned-id flow must not need
+    # the tag pointer for exec — any reach-back to it would fail this
+    # assertion because the file is gone.
+    tags_json = (
+        Path(ocx.env["OCX_HOME"])
+        / "index"
+        / registry_dir(ocx.registry)
+        / "p"
+        / f"{repo}.json"
+    )
+    if tags_json.exists():
+        tags_json.unlink()
 
     # Offline exec via the digest-pinned identifier. Resolution must
     # succeed using only the persisted manifest blobs from `ocx pull`.
@@ -117,6 +129,6 @@ def test_pinned_id_exec_offline_succeeds(ocx: OcxRunner, tmp_path: Path) -> None
     assert pkg.marker in exec_result.stdout, (
         f"expected marker {pkg.marker!r} in offline exec output; got: {exec_result.stdout!r}"
     )
-    assert not tags_root.exists(), (
-        "offline exec must not recreate the local tag store under pinned-id flow"
+    assert not tags_json.exists(), (
+        "offline exec must not recreate the local tag pointer under pinned-id flow"
     )

@@ -2,6 +2,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src import OcxRunner, PackageInfo
+from src.runner import registry_dir
 
 
 def test_index_update_succeeds(
@@ -62,7 +63,16 @@ def test_index_catalog_shows_repo(
 def test_index_flag_reads_from_custom_path(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ):
-    """--index redirects index reads and writes to an arbitrary path."""
+    """--index redirects the WHOLE local index collection to an arbitrary path.
+
+    `--index` redirects the collection home (`adr_index_indirection.md`
+    Decision A1/A2): every configured source gets its own subtree
+    `<home>/<slug(source)>/{c/,p/}` holding the hosted wire grammar verbatim
+    (root documents + dispatch-object CAS). The registry is a DERIVED source
+    here (a plain OCI registry, not `index.ocx.sh`), so it carries no
+    `config.json`/`c/index.json` — its catalog is the directory enumeration
+    of `p/` (A2).
+    """
     pkg = published_package
     custom_index = tmp_path / "custom_index"
     custom_index.mkdir()
@@ -76,6 +86,15 @@ def test_index_flag_reads_from_custom_path(
     result = ocx.plain("--index", str(custom_index), "index", "list", pkg.repo)
     assert pkg.tag in result.stdout
 
+    # On-disk layout (A2): `<home>/<slug(source)>/p/<repo>.json` (root doc) +
+    # `<home>/<slug(source)>/p/<repo>/o/<algo>/<hex>.json` (dispatch-object
+    # CAS) — a per-source subtree, not a flat `p/{registry}/{repo}/tags.json`.
+    source_dir = custom_index / registry_dir(ocx.registry)
+    root_doc = source_dir / "p" / f"{pkg.repo}.json"
+    assert root_doc.is_file(), "expected the root document under the redirected index root"
+    objects = list((source_dir / "p" / pkg.repo / "o" / "sha256").glob("*.json"))
+    assert objects, "expected verbatim dispatch objects in the o/sha256/ CAS"
+
     # Reading from a different empty path: tag is absent, proving --index is respected.
     result = ocx.plain("--index", str(empty_index), "index", "list", pkg.repo, check=False)
     assert pkg.tag not in result.stdout
@@ -84,7 +103,7 @@ def test_index_flag_reads_from_custom_path(
 def test_ocx_index_env_var_reads_from_custom_path(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ):
-    """OCX_INDEX env var redirects index reads and writes to an arbitrary path."""
+    """OCX_INDEX env var redirects the whole local index collection to an arbitrary path."""
     pkg = published_package
     custom_index = tmp_path / "custom_index"
     custom_index.mkdir()
@@ -95,6 +114,12 @@ def test_ocx_index_env_var_reads_from_custom_path(
 
         result = ocx.plain("index", "list", pkg.repo)
         assert pkg.tag in result.stdout
+
+        # OCX_INDEX redirects the dispatch-object CAS too, not just the root doc.
+        source_dir = custom_index / registry_dir(ocx.registry)
+        assert list((source_dir / "p" / pkg.repo / "o" / "sha256").glob("*.json")), (
+            "expected verbatim dispatch objects under OCX_INDEX-redirected root"
+        )
     finally:
         del ocx.env["OCX_INDEX"]
 
@@ -131,21 +156,23 @@ def test_index_update_tag_scoped(
     repo = f"t_{short_id}_tag_scoped"
     fq = f"{ocx.registry}/{repo}"
 
-    # Publish two versions but do NOT index them (make_package calls index update,
-    # so we use a separate index to avoid polluting the default one).
-    custom_index = tmp_path / "scoped_index"
-    custom_index.mkdir()
-
-    # Publish v1.0 and v2.0 to the registry.
+    # Publish v1.0 and v2.0 to the registry. `make_package(cascade=False)`
+    # indexes only the tagged identifier it just pushed (`index_target =
+    # short` in `helpers.make_package`), so each call incrementally adds its
+    # own tag to the default source's root document — both tags are already
+    # present at this point, which is why the wipe below is load-bearing for
+    # the "update only 1.0 must not fetch 2.0" assertion.
     make_package(ocx, repo, "1.0", tmp_path, new=True, cascade=False)
     make_package(ocx, repo, "2.0", tmp_path, new=False, cascade=False)
 
-    # Wipe the tag store so we start fresh.
+    # Wipe the default index home so we start fresh (`adr_index_indirection.md`
+    # A1: `$OCX_HOME/index`, not the deleted `$OCX_HOME/tags` or
+    # `$OCX_HOME/state/registry-index`).
     import shutil
     ocx_home = Path(ocx.env["OCX_HOME"])
-    tags_dir = ocx_home / "tags"
-    if tags_dir.exists():
-        shutil.rmtree(tags_dir)
+    index_home = ocx_home / "index"
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     # Update only tag 1.0 — should NOT fetch 2.0.
     ocx.plain("index", "update", f"{fq}:1.0")
@@ -159,9 +186,9 @@ def test_index_update_tag_scoped(
     assert "1.0" in result.stdout
     assert "2.0" in result.stdout
 
-    # Wipe tag store again and update bare (no tag) — should get both.
-    if tags_dir.exists():
-        shutil.rmtree(tags_dir)
+    # Wipe the index home again and update bare (no tag) — should get both.
+    if index_home.exists():
+        shutil.rmtree(index_home)
     ocx.plain("index", "update", fq)
     result = ocx.plain("index", "list", fq)
     assert "1.0" in result.stdout
@@ -171,37 +198,44 @@ def test_index_update_tag_scoped(
 def test_remote_index_list_does_not_write_local_tags(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """`--remote index list` is a pure query — must not mutate $OCX_HOME/tags/.
+    """`--remote index list` is a pure query — must not mutate the local index.
 
     Locks the M3 contract (Phase 11): query callers pass `IndexOperation::Query`
     so `ChainedIndex::fetch_manifest` never walks the source chain on miss
     even in Remote mode. Filesystem-state assertion catches both the
     `walk_chain` path and any future regression that writes tags through a
     different path (e.g. `Index::fetch_candidates`).
+
+    The writable surface under test is the whole default index home
+    (`$OCX_HOME/index/`, `adr_index_indirection.md` Decision A1) — root
+    documents AND the `o/<algo>/<hex>.json` dispatch-object CAS — not the
+    deleted `$OCX_HOME/tags/` or `$OCX_HOME/state/registry-index/`.
     """
     pkg = published_package
-    # Populate the local tag store via install — this is the legitimate
-    # writer; we want to assert the query commands below leave the result
+    # Populate the local index via install — this is the legitimate writer;
+    # we want to assert the query commands below leave the result
     # byte-identical.
     ocx.json("package", "install", pkg.short)
 
-    tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
+    index_home = Path(ocx.env["OCX_HOME"]) / "index"
     before = sorted(
-        (str(p.relative_to(tags_root)), p.read_bytes())
-        for p in tags_root.rglob("*.json")
+        (str(p.relative_to(index_home)), p.read_bytes())
+        for p in index_home.rglob("*")
+        if p.is_file()
     )
-    assert before, "preconditions: install must populate the local tag store"
+    assert before, "preconditions: install must populate the local index"
 
     # Pure-query commands under --remote — both flag forms covered.
     ocx.plain("--remote", "index", "list", pkg.short)
     ocx.plain("--remote", "index", "list", "--platforms", pkg.short)
 
     after = sorted(
-        (str(p.relative_to(tags_root)), p.read_bytes())
-        for p in tags_root.rglob("*.json")
+        (str(p.relative_to(index_home)), p.read_bytes())
+        for p in index_home.rglob("*")
+        if p.is_file()
     )
     assert before == after, (
-        "Pure --remote query must not mutate $OCX_HOME/tags/. "
+        "Pure --remote query must not mutate the local index home. "
         f"Before: {[name for name, _ in before]}, after: {[name for name, _ in after]}"
     )
 
@@ -233,6 +267,44 @@ def test_index_list_rejects_digest_bearing_identifier(
     success = ocx.plain("index", "update", pkg.short)
     assert success.returncode == 0
     assert json_out is not None  # silence ruff unused warning
+
+
+def test_index_list_platforms_accepts_digest_offline(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """`ocx index list <repo>@<digest> --platforms` resolves the platform set
+    for a digest-pinned identifier fully offline (the accepted B1 scope
+    extension). Default mode (no --platforms) still rejects digest-bearing
+    identifiers — see `test_index_list_rejects_digest_bearing_identifier`.
+    """
+    from src.registry import fetch_manifest_digest
+
+    pkg = published_package
+    # The tag's own digest is the image-index manifest (one child per pushed
+    # platform) — `Platform::from_manifest` only reports a real platform list
+    # for an image index, not a flat leaf image manifest (which reports `any`).
+    index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    # Install populates both the local index (root + dispatch object) and the
+    # blob cache, so the offline digest lookup below has no network dependency.
+    ocx.json("package", "install", pkg.short)
+
+    digest_id = f"{pkg.repo}@{index_digest}"
+
+    offline = ocx.plain("--offline", "index", "list", digest_id, "--platforms", check=False)
+    assert offline.returncode == 0, (
+        f"offline digest+--platforms resolve must succeed: rc={offline.returncode}\n{offline.stderr}"
+    )
+    assert pkg.platform in offline.stdout
+    # The digest branch never calls `list_tags` — it must never emit the
+    # ordinary tag-lookup "not found in the index" warning.
+    assert "not found in the index" not in offline.stderr, (
+        f"digest+--platforms must not emit a spurious not-found warning: {offline.stderr}"
+    )
+
+    # Default mode (no --platforms) rejects the same digest-bearing identifier.
+    rejected = ocx.plain("index", "list", digest_id, check=False)
+    assert rejected.returncode != 0, "digest-bearing identifier must exit non-zero without --platforms"
+    assert "does not accept digest-pinned identifiers" in rejected.stderr
 
 
 def test_index_list_excludes_internal_tags(

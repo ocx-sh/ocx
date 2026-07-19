@@ -65,7 +65,7 @@ impl SelfActivate {
     /// Context-free execution path — called from `app.rs` before `Context::try_init`.
     ///
     /// `self activate` runs on every shell startup and must not pay the full
-    /// `Context::try_init` cost (ConfigLoader file walk, OCI client, RemoteIndex,
+    /// `Context::try_init` cost (ConfigLoader file walk, OCI client, OciIndex,
     /// PackageManager). It only needs a `FileStructure` to resolve the absolute
     /// `$OCX_HOME/symlinks/…/bin` path. `FileStructure::new()` reads `OCX_HOME`
     /// from the environment and is cheap to construct — no I/O beyond the env

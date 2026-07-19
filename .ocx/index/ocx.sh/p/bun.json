@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/bun",
+  "tags": {
+    "1": {
+      "content": "sha256:192ac96de23a041242e955b20ca18414e327ca381196aa0818a2ceca6bc7bd23",
+      "observed": "2026-07-19T11:14:34.231646002+00:00"
+    }
+  }
+}

@@ -45,6 +45,12 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// Boolean — when truthy, a tag resolving to a yanked entry on a static-file
+    /// index (`index.ocx.sh`) is allowed instead of refused. A yank is a
+    /// publisher signal, not a delete, so the override is explicit and opt-in.
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`].
+    pub const OCX_ALLOW_YANKED: &str = "OCX_ALLOW_YANKED";
     /// Path to the active patch snapshot file (`patches.snapshot.json`).
     ///
     /// When set, the compose overlay prefers the snapshot's pinned digests
@@ -53,8 +59,11 @@ pub mod keys {
     /// Resolution-affecting → forwarded to child ocx processes via
     /// [`Env::apply_ocx_config`] so launchers apply the same frozen tier.
     pub const OCX_PATCH_SNAPSHOT: &str = "OCX_PATCH_SNAPSHOT";
-    /// JSON object mapping an upstream registry host to its mirror `url`
-    /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
+    /// JSON object mapping an upstream traffic host to its mirror value —
+    /// either a bare string (both traffic roles) or a `{"registry"?, "index"?}`
+    /// object (per-role split), the same F5b union `[mirrors."<host>"]`
+    /// accepts in TOML (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote",
+    /// "index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
     /// object is used (not a comma/`=` list) because mirror values are
     /// structured URLs with no delimiter-safe separator.
@@ -130,12 +139,14 @@ pub struct OcxConfigView {
     /// contract is fully pinned at the unit layer.
     pub global: bool,
     pub index: Option<PathBuf>,
-    /// Per-upstream-host registry mirrors, as `(host, url)` pairs. Resolution-
+    /// Per-traffic-host mirrors, as `(host, MirrorConfig)` pairs — the
+    /// merged-but-not-yet-role-parsed union entries from
+    /// [`crate::config::mirror::ResolvedMirrors::merged`]. Resolution-
     /// affecting → forwarded to child ocx processes via
     /// [`Env::apply_ocx_config`] as the single JSON object [`keys::OCX_MIRRORS`].
     /// The resolved map merges `[mirrors]` config with the inherited
     /// `OCX_MIRRORS` env, env winning per-host key.
-    pub mirrors: Vec<(String, String)>,
+    pub mirrors: Vec<(String, crate::config::mirror::MirrorConfig)>,
     /// Resolved `[patches]` site-tier config. Resolution-affecting → forwarded
     /// to child ocx processes via [`Env::apply_ocx_config`] as a JSON object
     /// in [`keys::OCX_PATCHES`] so launchers apply the same patch tier (C5).
@@ -338,6 +349,16 @@ impl Env {
         match &cfg.managed_config_source {
             Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
             None => self.remove(keys::OCX_MANAGED_CONFIG),
+        }
+        // Resolution-affecting, but a pure env opt-in with no `ContextOptions`
+        // / CLI counterpart (unlike the flags above): its authoritative value
+        // IS the ambient env, which the outer ocx read the same way at the
+        // index-client seam. Forward the parsed bool so a child ocx resolving
+        // an index-sourced yanked tag honours the identical override.
+        if flag(keys::OCX_ALLOW_YANKED, false) {
+            self.set(keys::OCX_ALLOW_YANKED, "1");
+        } else {
+            self.remove(keys::OCX_ALLOW_YANKED);
         }
     }
 
@@ -557,63 +578,90 @@ pub fn insecure_registries() -> Vec<String> {
         .collect()
 }
 
-/// Serializes a `(host, url)` mirror list into the single JSON object written
-/// to [`keys::OCX_MIRRORS`].
+/// Serializes a `(host, MirrorConfig)` mirror list into the single JSON
+/// object written to [`keys::OCX_MIRRORS`].
 ///
 /// Returns `None` for an empty list so [`Env::apply_ocx_config`] removes any
-/// inherited value rather than setting an empty object.
-fn encode_mirrors(mirrors: &[(String, String)]) -> Option<String> {
+/// inherited value rather than setting an empty object. Each entry re-encodes
+/// as the F5b union shape (a bare string when both roles carry the same URL,
+/// a `{registry?, index?}` object otherwise) so a child ocx's [`mirrors`]
+/// parses it back through the same [`crate::config::mirror::parse_mirror_value`]
+/// shared branch as a `[mirrors]` TOML table entry.
+fn encode_mirrors(mirrors: &[(String, crate::config::mirror::MirrorConfig)]) -> Option<String> {
     if mirrors.is_empty() {
         return None;
     }
-    let object: serde_json::Map<String, serde_json::Value> = mirrors
-        .iter()
-        .map(|(host, url)| (host.clone(), serde_json::Value::String(url.clone())))
-        .collect();
+    let mut object = serde_json::Map::with_capacity(mirrors.len());
+    for (host, entry) in mirrors {
+        // Collapse to the bare-string form when both roles carry the same
+        // URL (or one role, mirrored — see doc: F5b "both roles"), matching
+        // the shape `parse_mirror_value` produces for a bare string. A
+        // `{registry?, index?}` object otherwise, carrying only the roles
+        // actually declared.
+        let value = if entry.registry.is_some() && entry.registry == entry.index {
+            serde_json::Value::String(entry.registry.clone().unwrap_or_default())
+        } else {
+            let mut fields = serde_json::Map::new();
+            if let Some(registry) = &entry.registry {
+                fields.insert("registry".to_string(), serde_json::Value::String(registry.clone()));
+            }
+            if let Some(index) = &entry.index {
+                fields.insert("index".to_string(), serde_json::Value::String(index.clone()));
+            }
+            serde_json::Value::Object(fields)
+        };
+        object.insert(host.clone(), value);
+    }
     match serde_json::to_string(&serde_json::Value::Object(object)) {
         Ok(json) => Some(json),
-        Err(e) => {
-            log::warn!("failed to encode OCX_MIRRORS: {e}");
+        Err(error) => {
+            log::warn!("failed to encode OCX_MIRRORS: {error}");
             None
         }
     }
 }
 
-/// Parses [`keys::OCX_MIRRORS`] (a JSON object of upstream-host → mirror url)
-/// into a list of `(host, url)` pairs.
+/// Parses [`keys::OCX_MIRRORS`] (a JSON object of upstream-host → union
+/// mirror value, F5b) into a list of `(host, MirrorConfig)` pairs.
 ///
 /// An absent or empty value yields an empty list. A present-but-broken value is
 /// a hard error: silently degrading a forwarded `OCX_MIRRORS` to an identity map
 /// would route reads to the firewall-blocked origin instead of the mirror — the
 /// exact failure mode replace semantics exist to prevent.
 ///
+/// Each per-host JSON value is fed to
+/// [`crate::config::mirror::parse_mirror_value`] — the same shared branch a
+/// `[mirrors]` TOML table entry parses through
+/// ([`crate::config::mirror::deserialize_mirrors_table`]) — so a string or
+/// `{registry?, index?}` object value parses identically regardless of source
+/// format.
+///
 /// # Errors
 ///
 /// Returns [`MirrorConfigError::MalformedEnvJson`] when the value is not valid
-/// JSON, and [`MirrorConfigError::NonStringEnvValue`] (naming the offending host)
-/// when a per-host value is not a string.
+/// JSON, and [`MirrorConfigError::InvalidShape`] / [`MirrorConfigError::NonStringRoleValue`]
+/// (naming the offending host) when a per-host value has an unrecognized shape.
 ///
 /// [`MirrorConfigError::MalformedEnvJson`]: crate::config::mirror::MirrorConfigError::MalformedEnvJson
-/// [`MirrorConfigError::NonStringEnvValue`]: crate::config::mirror::MirrorConfigError::NonStringEnvValue
-pub fn mirrors() -> Result<Vec<(String, String)>, crate::config::mirror::MirrorConfigError> {
-    use crate::config::mirror::MirrorConfigError;
-
+/// [`MirrorConfigError::InvalidShape`]: crate::config::mirror::MirrorConfigError::InvalidShape
+/// [`MirrorConfigError::NonStringRoleValue`]: crate::config::mirror::MirrorConfigError::NonStringRoleValue
+pub fn mirrors() -> Result<Vec<(String, crate::config::mirror::MirrorConfig)>, crate::config::mirror::MirrorConfigError>
+{
     let Some(raw) = var(keys::OCX_MIRRORS) else {
         return Ok(Vec::new());
     };
     if raw.is_empty() {
         return Ok(Vec::new());
     }
-    let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
-        .map_err(|source| MirrorConfigError::MalformedEnvJson { source })?;
-    let mut pairs = Vec::with_capacity(object.len());
-    for (host, value) in object {
-        let url = value
-            .as_str()
-            .ok_or_else(|| MirrorConfigError::NonStringEnvValue { host: host.clone() })?;
-        pairs.push((host, url.to_string()));
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|source| crate::config::mirror::MirrorConfigError::MalformedEnvJson { source })?;
+
+    let mut result = Vec::with_capacity(map.len());
+    for (host, value) in map {
+        let config = crate::config::mirror::parse_mirror_value(&host, &value)?;
+        result.push((host, config));
     }
-    Ok(pairs)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -993,6 +1041,31 @@ mod tests {
     }
 
     #[test]
+    fn apply_ocx_config_forwards_yanked_optin_from_ambient() {
+        let guard = crate::test::env::lock();
+
+        // A truthy ambient opt-in forwards to the child env so a nested ocx
+        // resolving an index-sourced yanked tag honours the same override.
+        guard.set(keys::OCX_ALLOW_YANKED, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_ALLOW_YANKED).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_ALLOW_YANKED must forward to the child env"
+        );
+
+        // Absent (or falsy) → not set on the child env.
+        guard.remove(keys::OCX_ALLOW_YANKED);
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_ALLOW_YANKED).is_none(),
+            "an absent OCX_ALLOW_YANKED must not be set on the child env"
+        );
+    }
+
+    #[test]
     fn clean_env_carries_no_ocx_keys() {
         // `Env::clean()` returns an empty map; nothing inherited from the
         // running process. Authoritative source for OCX_* on a child env is
@@ -1022,7 +1095,15 @@ mod tests {
     #[test]
     fn ocx_mirrors_json_roundtrip_basic() {
         let env = crate::test::env::lock();
-        let input = vec![("ghcr.io".to_string(), "https://corp.jfrog.io/ghcr-remote".to_string())];
+        let input = vec![(
+            "ghcr.io".to_string(),
+            crate::config::mirror::MirrorConfig {
+                registry: Some("https://corp.jfrog.io/ghcr-remote".to_string()),
+                index: None,
+                registry_system_locked: false,
+                index_system_locked: false,
+            },
+        )];
         // encode_mirrors is private; drive it through apply_ocx_config so we
         // test the public contract (encode → set in env → mirrors() parses).
         let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
@@ -1043,7 +1124,10 @@ mod tests {
         let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         assert_eq!(parsed.len(), 1, "parsed mirrors must have one entry");
         assert_eq!(parsed[0].0, "ghcr.io");
-        assert_eq!(parsed[0].1, "https://corp.jfrog.io/ghcr-remote");
+        assert_eq!(
+            parsed[0].1.registry.as_deref(),
+            Some("https://corp.jfrog.io/ghcr-remote")
+        );
     }
 
     /// `mirrors()` round-trip including a `localhost:5000` host key and a url
@@ -1057,9 +1141,22 @@ mod tests {
         let input = vec![
             (
                 "localhost:5000".to_string(),
-                "https://corp.mirror.io/proxy?region=eu".to_string(),
+                crate::config::mirror::MirrorConfig {
+                    registry: Some("https://corp.mirror.io/proxy?region=eu".to_string()),
+                    index: None,
+                    registry_system_locked: false,
+                    index_system_locked: false,
+                },
             ),
-            ("ghcr.io".to_string(), "https://corp.jfrog.io/ghcr-remote".to_string()),
+            (
+                "ghcr.io".to_string(),
+                crate::config::mirror::MirrorConfig {
+                    registry: Some("https://corp.jfrog.io/ghcr-remote".to_string()),
+                    index: None,
+                    registry_system_locked: false,
+                    index_system_locked: false,
+                },
+            ),
         ];
         let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
         cfg.mirrors = input.clone();
@@ -1086,8 +1183,8 @@ mod tests {
 
         assert!(localhost.is_some(), "localhost:5000 entry must survive round-trip");
         assert_eq!(
-            localhost.unwrap().1,
-            "https://corp.mirror.io/proxy?region=eu",
+            localhost.unwrap().1.registry.as_deref(),
+            Some("https://corp.mirror.io/proxy?region=eu"),
             "url with query string must survive verbatim"
         );
         assert!(ghcr.is_some(), "ghcr.io entry must survive round-trip");
@@ -1136,23 +1233,205 @@ mod tests {
         );
     }
 
-    /// A non-string per-host value in `OCX_MIRRORS` → `mirrors()` is a HARD error
-    /// naming the offending host. A silent `filter_map` drop would degrade the
-    /// map for that host, so the entry must abort instead.
+    /// A per-host value in `OCX_MIRRORS` that is neither a string nor a
+    /// `{registry?, index?}` object → `mirrors()` is a HARD error naming the
+    /// offending host. A silent `filter_map` drop would degrade the map for
+    /// that host, so the entry must abort instead.
     ///
-    /// Traces: review Cluster-1 fail-loud — non-string env value names the host.
+    /// Traces: review Cluster-1 fail-loud — non-string env value names the
+    /// host; F5b — a bare integer is not a recognized union shape.
     #[test]
     fn non_string_ocx_mirrors_value_is_hard_error() {
         use crate::config::mirror::MirrorConfigError;
 
         let env = crate::test::env::lock();
-        // ghcr.io maps to a number, not a string url.
+        // ghcr.io maps to a number, not a string url or a {registry?, index?} object.
         env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":42}"#);
 
         let result = mirrors();
         assert!(
-            matches!(result, Err(MirrorConfigError::NonStringEnvValue { ref host }) if host == "ghcr.io"),
-            "non-string OCX_MIRRORS value must yield NonStringEnvValue naming ghcr.io, got: {result:?}"
+            matches!(result, Err(MirrorConfigError::InvalidShape { ref upstream, .. }) if upstream == "ghcr.io"),
+            "non-string OCX_MIRRORS value must yield InvalidShape naming ghcr.io, got: {result:?}"
+        );
+    }
+
+    /// A plain JSON string per-host value stays valid under the F5b union —
+    /// it sets both traffic roles, parity with a bare `[mirrors."<host>"]`
+    /// TOML string.
+    #[test]
+    fn ocx_mirrors_plain_string_value_sets_both_roles() {
+        let env = crate::test::env::lock();
+        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":"https://mirror.corp/both-roles"}"#);
+
+        let parsed = mirrors().expect("a plain string per-host value must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "ghcr.io");
+        assert_eq!(parsed[0].1.registry.as_deref(), Some("https://mirror.corp/both-roles"));
+        assert_eq!(parsed[0].1.index.as_deref(), Some("https://mirror.corp/both-roles"));
+    }
+
+    /// A `{registry?, index?}` object per-host value splits per role — parity
+    /// with a `[mirrors."<host>"]` TOML table entry.
+    #[test]
+    fn ocx_mirrors_object_value_splits_per_role() {
+        let env = crate::test::env::lock();
+        env.set(
+            keys::OCX_MIRRORS,
+            r#"{"index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}"#,
+        );
+
+        let parsed = mirrors().expect("an object value must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "index.ocx.sh");
+        assert!(
+            parsed[0].1.registry.is_none(),
+            "an index-only object value must leave registry unset"
+        );
+        assert_eq!(parsed[0].1.index.as_deref(), Some("https://artifactory.corp/ocx-index"));
+    }
+
+    /// An absent `OCX_MIRRORS` yields an empty list, not an error.
+    #[test]
+    fn ocx_mirrors_absent_env_yields_empty_vec() {
+        let env = crate::test::env::lock();
+        env.remove(keys::OCX_MIRRORS);
+
+        let parsed = mirrors().expect("an absent OCX_MIRRORS must not error");
+        assert!(parsed.is_empty(), "absent OCX_MIRRORS must yield an empty vec");
+    }
+
+    /// An explicit empty JSON object also yields an empty list.
+    #[test]
+    fn ocx_mirrors_empty_object_yields_empty_vec() {
+        let env = crate::test::env::lock();
+        env.set(keys::OCX_MIRRORS, "{}");
+
+        let parsed = mirrors().expect("an empty object must not error");
+        assert!(parsed.is_empty(), "OCX_MIRRORS=\"{{}}\" must yield an empty vec");
+    }
+
+    // ── encode_mirrors ↔ mirrors() identity round trips (F5b) ────────────────
+
+    /// When `registry == index` for a host, `encode_mirrors` collapses the
+    /// entry to a bare JSON string (not an object) — and `mirrors()` parses
+    /// that bare string back into a `MirrorConfig` with both roles set to the
+    /// same URL, an identity round trip.
+    #[test]
+    fn ocx_mirrors_encode_roundtrip_string_form_collapses_to_bare_json_string() {
+        let env = crate::test::env::lock();
+        let input = vec![(
+            "ghcr.io".to_string(),
+            crate::config::mirror::MirrorConfig {
+                registry: Some("https://corp.jfrog.io/ghcr-remote".to_string()),
+                index: Some("https://corp.jfrog.io/ghcr-remote".to_string()),
+                registry_system_locked: false,
+                index_system_locked: false,
+            },
+        )];
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = input.clone();
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        let encoded = child_env
+            .get(keys::OCX_MIRRORS)
+            .expect("OCX_MIRRORS must be set")
+            .to_str()
+            .expect("OCX_MIRRORS must be valid UTF-8")
+            .to_string();
+
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("encoded OCX_MIRRORS must be valid JSON");
+        assert!(
+            value["ghcr.io"].is_string(),
+            "when registry == index the entry must collapse to a bare JSON string, got: {value}"
+        );
+
+        env.set(keys::OCX_MIRRORS, encoded);
+        let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].1, input[0].1,
+            "the string-form entry must round-trip identically"
+        );
+    }
+
+    /// A registry-only (split) entry round-trips without gaining an index
+    /// value — encode/parse identity for the split form.
+    #[test]
+    fn ocx_mirrors_encode_roundtrip_split_form_preserves_registry_only() {
+        let env = crate::test::env::lock();
+        let input = vec![(
+            "index.ocx.sh".to_string(),
+            crate::config::mirror::MirrorConfig {
+                registry: Some("https://mirror.corp/registry-side".to_string()),
+                index: None,
+                registry_system_locked: false,
+                index_system_locked: false,
+            },
+        )];
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = input.clone();
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        let encoded = child_env
+            .get(keys::OCX_MIRRORS)
+            .expect("OCX_MIRRORS must be set")
+            .to_str()
+            .expect("OCX_MIRRORS must be valid UTF-8")
+            .to_string();
+        env.set(keys::OCX_MIRRORS, encoded);
+
+        let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "index.ocx.sh");
+        assert_eq!(
+            parsed[0].1.registry.as_deref(),
+            Some("https://mirror.corp/registry-side")
+        );
+        assert!(
+            parsed[0].1.index.is_none(),
+            "a registry-only entry must round-trip without gaining an index value"
+        );
+    }
+
+    /// A both-roles-differing entry (registry and index point at distinct
+    /// URLs) round-trips with both values preserved distinctly.
+    #[test]
+    fn ocx_mirrors_encode_roundtrip_both_roles_differing_preserved() {
+        let env = crate::test::env::lock();
+        let input = vec![(
+            "index.ocx.sh".to_string(),
+            crate::config::mirror::MirrorConfig {
+                registry: Some("https://mirror.corp/registry-side".to_string()),
+                index: Some("https://mirror.corp/index-side".to_string()),
+                registry_system_locked: false,
+                index_system_locked: false,
+            },
+        )];
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = input.clone();
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        let encoded = child_env
+            .get(keys::OCX_MIRRORS)
+            .expect("OCX_MIRRORS must be set")
+            .to_str()
+            .expect("OCX_MIRRORS must be valid UTF-8")
+            .to_string();
+        env.set(keys::OCX_MIRRORS, encoded);
+
+        let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].1.registry.as_deref(),
+            Some("https://mirror.corp/registry-side")
+        );
+        assert_eq!(
+            parsed[0].1.index.as_deref(),
+            Some("https://mirror.corp/index-side"),
+            "distinct role URLs must both survive the round trip"
         );
     }
 

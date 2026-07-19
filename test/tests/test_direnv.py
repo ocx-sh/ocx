@@ -23,7 +23,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.helpers import make_package
-from src.runner import OcxRunner
+from src.runner import OcxRunner, PackageInfo
 
 
 # Exit code constant - matches crates/ocx_lib/src/cli/exit_code.rs::ExitCode::ConfigError
@@ -160,6 +160,11 @@ def _run_export(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedP
     )
 
 
+def _tool_exports(stdout: str) -> list[str]:
+    """Export lines for resolved tools."""
+    return [line for line in stdout.splitlines() if line.startswith("export ")]
+
+
 def test_direnv_export_default_installs_missing(ocx: OcxRunner, tmp_path: Path) -> None:
     """Default ``ocx direnv export`` materialises a locked-but-unpulled tool on
     miss, then emits its bash env (mirrors ``ocx env``'s eager default)."""
@@ -167,7 +172,7 @@ def test_direnv_export_default_installs_missing(ocx: OcxRunner, tmp_path: Path) 
 
     result = _run_export(ocx, project)
     assert result.returncode == 0, f"expected exit 0; stderr:\n{result.stderr}"
-    assert "export" in result.stdout, (
+    assert _tool_exports(result.stdout), (
         f"default export must install the missing tool and emit its env\nstdout:\n{result.stdout}"
     )
     assert "not installed" not in result.stderr, result.stderr
@@ -185,7 +190,7 @@ def test_direnv_export_no_pull_stays_offline(ocx: OcxRunner, tmp_path: Path) -> 
     assert "not installed" in result.stderr, (
         f"missing-tool note expected on stderr\nstderr:\n{result.stderr}"
     )
-    assert "export" not in result.stdout, (
+    assert not _tool_exports(result.stdout), (
         f"unmaterialised tool must be omitted\nstdout:\n{result.stdout}"
     )
 
@@ -194,3 +199,131 @@ def test_direnv_export_no_pull_stays_offline(ocx: OcxRunner, tmp_path: Path) -> 
     assert "not installed" in again.stderr, (
         f"--no-pull must never materialise the tool\nstderr:\n{again.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OCX_INDEX negative path — a broken index home (a regular file, not a
+# directory) must never crash `ocx direnv export` or toolchain resolution.
+# Every scenario below is a documented finding of *actual* behaviour, probed
+# directly against the binary before writing the assertions (see PR review
+# W6 follow-up): there is no dedicated ADR clause pinning these exit codes,
+# so each assertion is a regression guard on the current, non-panicking
+# contract rather than a restatement of a written spec.
+# ---------------------------------------------------------------------------
+
+
+def _set_broken_index(ocx: OcxRunner, path: Path) -> None:
+    """Point OCX_INDEX at a regular file so any index read/write under it
+    hits ENOTDIR — the simplest reproducible "invalid index location"."""
+    path.write_text("not a directory")
+    ocx.env["OCX_INDEX"] = str(path)
+
+
+def test_direnv_export_default_survives_broken_ocx_index(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A locked-but-unpulled tool still installs when OCX_INDEX is broken.
+
+    The default eager-pull path (`test_direnv_export_default_installs_missing`)
+    tries the local index first; a broken index home fails that read/write,
+    but the resolver falls back to a live registry fetch instead of
+    aborting. The failure is surfaced as a stderr warning — never silent,
+    never a panic (`quality-rust-exit_codes.md`: no numeric exit code changes
+    when a lower layer self-heals via fallback, so exit stays 0)."""
+    project = _make_locked_unpulled_project(ocx, tmp_path, "export_bad_index")
+
+    _set_broken_index(ocx, tmp_path / "bad_ocx_index")
+    try:
+        result = _run_export(ocx, project)
+    finally:
+        del ocx.env["OCX_INDEX"]
+
+    assert result.returncode == 0, (
+        f"expected exit 0 (network fallback survives a broken index); stderr:\n{result.stderr}"
+    )
+    assert result.returncode != 101, f"must not panic; stderr:\n{result.stderr}"
+    assert "panicked" not in result.stderr.lower(), result.stderr
+    assert _tool_exports(result.stdout), (
+        f"a broken OCX_INDEX must still resolve via network fallback\nstdout:\n{result.stdout}"
+    )
+    assert "index" in result.stderr.lower(), (
+        f"the broken index location must be surfaced on stderr, not swallowed silently\nstderr:\n{result.stderr}"
+    )
+
+
+def test_direnv_export_broken_ocx_index_is_a_noop_once_installed(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A broken OCX_INDEX has zero effect once the tool is already installed.
+
+    Project-tier env composition for an already-pulled lock reads the
+    pinned platform-manifest digest straight from the machine-global
+    blob/package store; it never consults the index
+    (`adr_index_indirection.md` Decision D — locks are index-free). A
+    redirected-but-broken index home must not even be touched, let alone
+    break the export."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_export_noop"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+
+    project = tmp_path / "proj_noop"
+    project.mkdir()
+    (project / "ocx.toml").write_text(f'[tools]\ntool = "{fq}"\n')
+
+    lock = subprocess.run(
+        [str(ocx.binary), "lock"],  # normal lock + pull: tool is installed before the probe
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert lock.returncode == 0, f"lock failed: {lock.stderr}"
+
+    _set_broken_index(ocx, tmp_path / "bad_ocx_index_noop")
+    try:
+        result = _run_export(ocx, project)
+    finally:
+        del ocx.env["OCX_INDEX"]
+
+    assert result.returncode == 0, f"expected exit 0; stderr:\n{result.stderr}"
+    assert "panicked" not in result.stderr.lower(), result.stderr
+    assert _tool_exports(result.stdout), (
+        f"an already-installed tool must still resolve\nstdout:\n{result.stdout}"
+    )
+
+
+def test_toolchain_add_fails_cleanly_not_panic_on_broken_ocx_index(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """Toolchain resolution (`ocx add`) fails cleanly, never panics, when
+    OCX_INDEX names a broken location.
+
+    `ocx add` resolves a fresh binding: the local index write fails, the
+    resolver falls back to the OCI chain, and that fallback also cannot
+    write its dispatch object into the broken location. The whole chain
+    must surface as a clean nonzero exit with a diagnosable stderr message
+    — not a crash and not a silently-empty `ocx.toml`."""
+    pkg = published_package
+    project = tmp_path / "proj_add_bad_index"
+    project.mkdir()
+    (project / "ocx.toml").write_text("[tools]\n")
+
+    _set_broken_index(ocx, tmp_path / "bad_ocx_index_add")
+    try:
+        result = subprocess.run(
+            [str(ocx.binary), "add", pkg.short],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+        )
+    finally:
+        del ocx.env["OCX_INDEX"]
+
+    assert result.returncode != 0, (
+        f"a broken OCX_INDEX must fail the resolve, not silently succeed\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode != 101, f"must not panic; stderr:\n{result.stderr}"
+    assert "panicked" not in result.stderr.lower(), result.stderr
+    assert result.stderr.strip(), "a clean failure must leave a diagnosable message on stderr"

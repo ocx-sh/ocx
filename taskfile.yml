@@ -2,6 +2,13 @@
 
 version: '3'
 
+# Restores the committed project index (`adr_index_indirection.md` A1) as the
+# active snapshot store for every task in this repository — removed in
+# `3d13af27` when the project toolchain moved off `ocx package exec --self`,
+# and re-added now that the snapshot is self-contained and git-tracked.
+env:
+  OCX_INDEX: '{{.ROOT_DIR}}/.ocx/index'
+
 vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
 
@@ -33,6 +40,12 @@ includes:
 tasks:
   ocx:index-update:
     desc: Updates this repository's index lock.
+    # Runs the released `ocx` resolved off PATH (via direnv/setup-ocx), not this
+    # branch's build. After a wire-grammar change (root/dispatch-object shape,
+    # digest typing, etc.) that PATH binary writes the *old* shape into
+    # `.ocx/index/` -- regenerate against the branch build instead, e.g.
+    # `direnv exec . target/release/ocx index update ...` or `ocx run --
+    # target/release/ocx index update ...`.
     cmds:
       - rm -rf .ocx/index
       - ocx index update shellcheck:0.11 shfmt:3 lychee:0 bun:1 uv:0 git-cliff:2

@@ -146,7 +146,7 @@ def test_mirror_install_routes_to_configured_mirror(
     success is only possible if routing worked.
 
     Traces: plan scenario 1 — "push tool to mirror only; configure
-    ``[mirrors."<upstream>"] url=<mirror>``; ``ocx package install <upstream>``
+    ``[mirrors] "<upstream>" = "<mirror>"``; ``ocx package install <upstream>``
     → served by mirror"; ADR R2 (replace semantics).
     """
     # Create a runner that targets the mirror registry for pushing.
@@ -162,7 +162,7 @@ def test_mirror_install_routes_to_configured_mirror(
     # Configure the mirror: upstream registry → mirror registry.
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     # Install using the upstream identifier — OCX must route to the mirror.
@@ -235,7 +235,7 @@ def test_mirror_push_targets_canonical_registry_not_mirror(
     # tag-listing read can reach it; the push itself stays canonical (ADR Q5).
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
@@ -320,7 +320,7 @@ def test_mirror_ocx_lock_records_canonical_host_and_digest(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
     # Plain-HTTP mirror host must be in OCX_INSECURE_REGISTRIES (ADR F2) so the
     # lock resolution read can reach it.
@@ -396,7 +396,7 @@ def test_mirror_library_prefix_repo_routes_verbatim(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     # Install with the library/ prefix in the identifier. The plain-HTTP mirror
@@ -450,7 +450,7 @@ def test_plain_http_mirror_with_insecure_flag_succeeds(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     fq = f"{registry}/{unique_repo}:1.0.0"
@@ -508,7 +508,7 @@ def test_plain_http_mirror_without_insecure_flag_gives_actionable_error(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     fq = f"{registry}/{unique_repo}:1.0.0"

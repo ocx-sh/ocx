@@ -14,7 +14,10 @@ pub use config::managed::{
     ManagedConfig, ManagedConfigError, RefreshPolicy, ResolvedManagedConfig, check_locked_managed_override,
     enforce_required_snapshot, parse_interval, resolve_managed_config, resolve_managed_target, snapshot_matches_source,
 };
-pub use config::mirror::{MirrorConfig, MirrorConfigError, ParsedMirror, ResolvedMirrors, resolve_mirror_map};
+pub use config::mirror::{
+    MirrorConfig, MirrorConfigError, MirrorValueShape, ParsedMirror, ResolvedMirrors, parse_mirror_value, parse_url,
+    resolve_mirror_map,
+};
 pub use config::patch::{
     PatchConfig, PatchConfigError, ResolvedPatchConfig, expand_patch_path, patches_from_env, resolve_patch_config,
 };

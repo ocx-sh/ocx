@@ -135,7 +135,7 @@ Global flags: `--offline`, `--remote`, `--format json`.
 ├── blobs/{registry}/                     # Raw OCI blobs (manifests, referrers, image indexes)
 ├── layers/{registry}/                    # Extracted OCI tar layers (content-addressed, shared across packages)
 ├── packages/{registry}/                  # Assembled packages (content/ hardlinked from layers/)
-├── tags/{registry}/                      # Tag-to-digest mappings (local metadata mirror)
+├── index/{source}/                       # Local index collection — one dispatch-object-only copy per source
 ├── symlinks/{registry}/                  # Install symlinks (candidates + current)
 └── temp/                                 # Download staging directories
 ```

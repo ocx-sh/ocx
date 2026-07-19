@@ -151,7 +151,7 @@ mod tests {
     use std::path::Path;
 
     use crate::{
-        file_structure::{BlobStore, FileStructure, TagStore, write_digest_file},
+        file_structure::{FileStructure, IndexStore, write_digest_file},
         oci::{
             self,
             index::{ChainMode, Index, LocalConfig, LocalIndex},
@@ -165,8 +165,7 @@ mod tests {
     fn make_offline_manager(ocx_home: &Path) -> PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(ocx_home.join("tags")),
-            blob_store: BlobStore::new(ocx_home.join("blobs")),
+            snapshot_store: IndexStore::new(ocx_home.join("index")),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(fs, index, None, "ocx.sh")

@@ -24,6 +24,13 @@ pub struct PackagePush {
     #[clap(long = "new", short = 'n')]
     new: bool,
 
+    /// Push a `sha256.<hex>` tag pointing at each pushed platform manifest
+    /// (default). A stray delete of a rolling or cascade tag can then never
+    /// orphan a digest something else still pins, since the canonical tag
+    /// names it directly. Pass `--no-canonical-tag` to skip it.
+    #[clap(flatten)]
+    canonical_tag: options::CanonicalTag,
+
     /// Append a UTC build-metadata segment to the published tag.
     ///
     /// `datetime` appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`,
@@ -139,6 +146,7 @@ impl PackagePush {
         }];
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
+        let canonical_tag = self.canonical_tag.enabled();
 
         let outcome = if self.cascade {
             let existing_tags = match publisher.list_tags(identifier.clone()).await {
@@ -158,10 +166,18 @@ impl PackagePush {
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher
-                .push_cascade(infos, &self.layers, existing_versions, build_meta.as_deref())
+                .push_cascade(
+                    infos,
+                    &self.layers,
+                    existing_versions,
+                    build_meta.as_deref(),
+                    canonical_tag,
+                )
                 .await?
         } else {
-            publisher.push(infos, &self.layers, build_meta.as_deref()).await?
+            publisher
+                .push(infos, &self.layers, build_meta.as_deref(), canonical_tag)
+                .await?
         };
 
         // Emit the structured push report. Plain output is a one-row table

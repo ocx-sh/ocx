@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/shellcheck",
+  "tags": {
+    "0.11": {
+      "content": "sha256:5238fef0a91ac20b8b51b56c2e8152bee56deef1ea606e70c987b4747200a8c3",
+      "observed": "2026-07-19T11:14:34.186016687+00:00"
+    }
+  }
+}

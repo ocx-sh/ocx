@@ -189,12 +189,13 @@ impl ClientBuilder {
 ///
 /// [`Config`]: crate::config::Config
 fn mirrors_from_env() -> Result<MirrorMap, MirrorConfigError> {
-    let (entries, _pairs) = crate::config::mirror::resolve_mirror_map(
+    let resolved = crate::config::mirror::resolve_mirror_map(
         &crate::config::Config::default(),
         crate::env::mirrors()?,
         &crate::env::insecure_registries(),
     )?;
-    Ok(MirrorMap::new(entries))
+    // Registry role only — an index-only mirror must never rewrite OCI traffic.
+    Ok(MirrorMap::new(resolved.registry))
 }
 
 #[cfg(test)]

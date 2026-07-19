@@ -684,7 +684,9 @@ impl ConfigLoader {
     /// inside `PatchConfig::lock_as_system`), `[registry]` (unconditional),
     /// each `[registries.<name>]` entry (unconditional, per name — closes
     /// the indirection `resolved_default_registry` resolves through), each
-    /// `[mirrors."<host>"]` entry (unconditional, per host), and `[managed]`
+    /// `[mirrors."<host>"]` entry (per host, per role — `MirrorConfig::lock_as_system`
+    /// locks only the `registry`/`index` role(s) that entry actually declares,
+    /// `adr_index_indirection.md` F5b), and `[managed]`
     /// (required-gated inside `ManagedConfig::lock_as_system`, like
     /// `[patches]` — a system-scope `required = true` seed must not be
     /// loosenable/clearable by the home tier's fence; ADR Decision G,
@@ -2424,7 +2426,7 @@ mod tests {
             "[patches]\nregistry = \"patches.corp.example\"\nrequired = true\n",
             "[registry]\ndefault = \"corp\"\n",
             "[registries.corp]\nurl = \"registry.corp.example\"\n",
-            "[mirrors.\"docker.io\"]\nurl = \"https://mirror.corp.example\"\n",
+            "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
         ))
         .unwrap();
@@ -2441,8 +2443,12 @@ mod tests {
             "every [registries.<name>] entry must lock"
         );
         assert!(
-            config.mirrors.unwrap().values().all(|mirror| mirror.system_locked),
-            "every [mirrors.\"<host>\"] entry must lock"
+            config
+                .mirrors
+                .unwrap()
+                .values()
+                .all(|mirror| mirror.registry_system_locked && mirror.index_system_locked),
+            "every [mirrors.\"<host>\"] entry must lock every role it declares"
         );
         assert!(
             config.managed.unwrap().system_locked,
@@ -2480,6 +2486,7 @@ mod tests {
         registry.lock_as_system();
         let mut corp_entry = crate::config::RegistryConfig {
             url: Some("system-locked-registry.example".to_string()),
+            index: None,
             system_locked: false,
         };
         corp_entry.lock_as_system();

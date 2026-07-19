@@ -55,10 +55,6 @@ def _blobs_dir(ocx: OcxRunner) -> Path:
     return _ocx_home(ocx) / "blobs"
 
 
-def _tags_dir(ocx: OcxRunner) -> Path:
-    return _ocx_home(ocx) / "tags"
-
-
 def _refs_blobs_dir(content_path: Path) -> Path:
     """Given a package content path, return its refs/blobs/ directory.
 
@@ -113,13 +109,6 @@ def _wipe_blobs(ocx: OcxRunner) -> None:
     blobs = _blobs_dir(ocx)
     if blobs.exists():
         shutil.rmtree(blobs)
-
-
-def _wipe_tags(ocx: OcxRunner) -> None:
-    """Remove the tags/ directory to simulate a fresh machine."""
-    tags = _tags_dir(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
 
 
 # ── Test 47 — AC1: refs/blobs/ populated after install ───────────────────
@@ -318,12 +307,15 @@ def test_offline_reresolve_survives_clean_after_full_chain_capture(
 def test_index_update_writes_only_tag_files_not_blobs(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """AC7: ocx index update <pkg> writes only to $OCX_HOME/tags/, never to
-    $OCX_HOME/blobs/.
+    """AC7: ocx index update <pkg> writes only into the local index collection
+    (`$OCX_HOME/index/`), never to $OCX_HOME/blobs/ — the separate BlobStore
+    that holds raw OCI layer bytes fetched during install.
 
     Design record AC7: "ocx index update <pkg> writes only to $OCX_HOME/tags/,
     never to $OCX_HOME/blobs/. Verified by walking blobs/ before and after
-    and asserting it is unchanged."
+    and asserting it is unchanged." (The design record predates the wire-grammar
+    index collection; "tags/" there names the local tag index, now
+    `$OCX_HOME/index/`, `adr_index_indirection.md` Decision A1.)
     """
     pkg = published_package
 
@@ -569,7 +561,7 @@ def test_missing_manifest_after_index_update_recovers_on_install(
     """
     pkg = published_package
 
-    # Step 1: install online to populate tags/ and blobs/.
+    # Step 1: install online to populate the index snapshot store and blobs/.
     ocx.plain("package", "install", pkg.short)
 
     # Step 2: wipe the entire blobs/ directory — leaves tag files in place.
@@ -878,16 +870,21 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, new=True, cascade=False)
     ocx.json("package", "install", pkg_v1.short)
 
+    # The root document (`adr_index_indirection.md` A2) is the tag → content
+    # pointer file now — the wire-grammar successor to the deleted flat
+    # `tags.json`. Same "tag pointer" role, `content` field instead of
+    # `digest`.
     tag_file = (
         Path(ocx.env["OCX_HOME"])
-        / "tags"
+        / "index"
         / registry_dir(ocx.registry)
+        / "p"
         / f"{unique_repo}.json"
     )
-    assert tag_file.exists(), "prerequisite: tag file must exist after install"
+    assert tag_file.exists(), "prerequisite: root document must exist after install"
     v1_snapshot = tag_file.read_text()
     cached_data = json.loads(v1_snapshot)
-    digest_a = cached_data["tags"].get(pkg_v1.tag)
+    digest_a = cached_data["tags"].get(pkg_v1.tag, {}).get("content")
     assert digest_a is not None, "prerequisite: digest_A must be cached"
 
     # Push v2 to the same repo:tag → registry now resolves 1.0.0 to digest_B.
@@ -910,7 +907,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     )
     after_remote = tag_file.read_text()
     assert after_remote == v1_snapshot, (
-        "Pure --remote query must not mutate the local tag file.\n"
+        "Pure --remote query must not mutate the local root document.\n"
         f"Tag file changed after --remote index list. Snapshot diff:\n"
         f"  before: {v1_snapshot!r}\n"
         f"  after:  {after_remote!r}"
@@ -923,7 +920,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     )
     after_default = tag_file.read_text()
     assert after_default == v1_snapshot, (
-        "Default-mode query must not mutate the local tag file.\n"
+        "Default-mode query must not mutate the local root document.\n"
         f"Tag file changed after default index list. Snapshot diff:\n"
         f"  before: {v1_snapshot!r}\n"
         f"  after:  {after_default!r}"
@@ -937,7 +934,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
         f"stderr: {update_result.stderr}"
     )
     after_update = json.loads(tag_file.read_text())
-    stored_after_update = after_update["tags"].get(pkg_v1.tag)
+    stored_after_update = after_update["tags"].get(pkg_v1.tag, {}).get("content")
     assert stored_after_update == digest_b, (
         "index update must refresh the tag file to the registry digest.\n"
         f"Expected (registry) digest_B: {digest_b}\n"

@@ -30,6 +30,13 @@ schemars.workspace = true
 tokio.workspace = true
 
 oci-client.workspace = true
+reqwest.workspace = true
+# Bundled Mozilla CA roots seeded into the static-file index HTTP client so TLS
+# works without a system trust store (minimal container / CI runner). The OCI
+# half gets the same set via the `oci-client` fork's `ClientConfig::default()`;
+# the plain-`reqwest` index transport must seed them itself, else reqwest 0.13's
+# empty-store platform verifier panics (`No CA certificates were loaded`).
+webpki-root-certs.workspace = true
 lzma-rust2.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
@@ -106,10 +113,6 @@ windows-sys.workspace = true
 # runtime `use anyhow` a compile error. Placement locked by
 # `script::dependency_hygiene_tests::anyhow_is_dev_dependency_only`.
 anyhow.workspace = true
-# Test-only. `oci::client::builder` tests assert the client inherits the fork's
-# bundled Mozilla CA roots; the roots themselves are seeded by the vendored
-# `oci-client` fork's `ClientConfig::default()`, not by ocx_lib at runtime.
-webpki-root-certs.workspace = true
 
 [lints]
 workspace = true

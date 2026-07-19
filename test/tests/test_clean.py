@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
+from src.helpers import make_package
 
 
 def test_clean_removes_unreferenced_objects(
@@ -132,4 +133,44 @@ def test_clean_preserves_config_blob_of_installed_package(
             f"ocx clean deleted the config blob at {blob_data} while the package "
             "is installed; refs/blobs/ edge is missing for manifest.config.digest"
         ),
+    )
+
+
+def test_clean_preserves_committed_index_home(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """B1 (`adr_index_indirection.md` #5): `ocx clean` never inspects or
+    collects any file under the index home.
+
+    The `SnapshotStore` is deliberately outside the GC reachability graph
+    (Decision B1) — it is git/user-managed reproducibility data with its own
+    lifecycle, not a `CasTier` the sweep walks. Populate a committed index
+    home via `--index` (simulating a project's committed `.ocx/index/`), run
+    `ocx clean` against the ordinary `$OCX_HOME` (no `--index`), and assert
+    every file under the index home survives bit-identical — a machine-local
+    GC must never be able to eat committed, git-tracked snapshot data.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+
+    index_home = tmp_path / "committed_index"
+    index_home.mkdir()
+    ocx.plain("--index", str(index_home), "index", "update", pkg.short)
+
+    before = sorted(
+        (str(path.relative_to(index_home)), path.read_bytes())
+        for path in index_home.rglob("*")
+        if path.is_file()
+    )
+    assert before, "precondition: index update must populate the index home"
+
+    ocx.plain("clean")
+
+    after = sorted(
+        (str(path.relative_to(index_home)), path.read_bytes())
+        for path in index_home.rglob("*")
+        if path.is_file()
+    )
+    assert before == after, (
+        "ocx clean must not touch any file under the committed index home. "
+        f"Before: {[name for name, _ in before]}, after: {[name for name, _ in after]}"
     )
