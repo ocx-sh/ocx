@@ -16,28 +16,36 @@ pub struct IndexUpdate {
 
 impl IndexUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // `ocx index update` is strictly a tag refresh: it locks the
-        // tag → digest pointer into the local index file without persisting
-        // any manifest blobs. Install-time ChainedIndex write-through owns
-        // the manifest chain persistence contract.
+        // `ocx index update` refreshes tags AND persists their manifest
+        // chain via `IndexSync::refresh_package` (wraps `LocalIndex::refresh_tags`,
+        // `adr_index_indirection.md` Decision H): writes the tag → digest
+        // pointer plus the verbatim, digest-verified manifest bytes into the
+        // snapshot store's object CAS (A1/A3), so the committed snapshot
+        // resolves fully offline afterwards.
         let remote_index = index::Index::from_remote(context.remote_index()?.clone());
+        // Per-namespace static-file index sources, when online. A package in an
+        // index-bearing namespace refreshes through the two-hop index path
+        // rather than the registry (`adr_index_indirection.md` F5a — kind per
+        // NAMESPACE); every other package refreshes against the registry.
+        let index_sources = context.index_sources();
         let packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         // Tag each refresh with its input index so any failures can be surfaced
-        // in input order. `refresh_tags` returns `crate::Result<()>` (not a
-        // PackageManager op), so `drain_package_tasks` does not fit; the
+        // in input order. `IndexSync::refresh_package` returns `crate::Result<()>`
+        // (not a PackageManager op), so `drain_package_tasks` does not fit; the
         // index-tagged fan-out is inlined here (same shape as `package info`).
         let mut join_set: tokio::task::JoinSet<(usize, ocx_lib::Result<()>)> = tokio::task::JoinSet::new();
         for (index, identifier) in packages.iter().enumerate() {
-            let remote_index = remote_index.clone();
+            // Route to the index source whose namespace serves this package, if
+            // any; otherwise refresh against the registry.
+            let source = index_sources
+                .iter()
+                .find(|source| source.namespace() == identifier.registry())
+                .map(|source| index::Index::from_source(source.clone()))
+                .unwrap_or_else(|| remote_index.clone());
             let context = context.clone();
             let identifier = identifier.clone();
-            join_set.spawn(async move {
-                (
-                    index,
-                    context.local_index().refresh_tags(&identifier, &remote_index).await,
-                )
-            });
+            join_set.spawn(async move { (index, context.index_sync().refresh_package(&identifier, &source).await) });
         }
 
         let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
@@ -65,6 +73,27 @@ impl IndexUpdate {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
             return Err(error.into());
+        }
+
+        // ── Piggyback: sync the static-file index catalog when online. ──
+        //
+        // Conditional-GET `c/index.json`, re-snapshot only the packages whose
+        // root digest moved, and persist the catalog map at `{index-home}/c/index.json`
+        // — the offline catalog source and the next diff basis (F2). Best-effort:
+        // an absent index (config.json 404) yields an empty catalog with no error,
+        // and any transport failure warns rather than failing the tag refresh.
+        for source in context.index_sources() {
+            match context.index_sync().sync_catalog(source).await {
+                Ok(outcome) => log::debug!(
+                    "index update: catalog sync complete for '{}' ({} package(s) re-snapshotted)",
+                    source.namespace(),
+                    outcome.moved.len()
+                ),
+                Err(error) => log::warn!(
+                    "index update: catalog sync for '{}' failed (non-fatal): {error}",
+                    source.namespace()
+                ),
+            }
         }
 
         // ── Piggyback: refresh site-patch descriptors when the patch tier is active. ──

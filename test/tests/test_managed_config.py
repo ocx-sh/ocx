@@ -505,11 +505,11 @@ def test_managed_fetch_honors_local_mirror_ignores_payload_mirror(
     # refresh, a second update would 404 there.
     payload = (
         '[registry]\ndefault = "via-local-mirror.example"\n'
-        f'[mirrors."{managed_host}"]\nurl = "http://{registry}"\n'
+        f'[mirrors]\n"{managed_host}" = "http://{registry}"\n'
     ).encode()
     push_raw_config_package(mirror_registry, unique_repo, "v1", payload)
 
-    write_home_config(ocx, f'[mirrors."{managed_host}"]\nurl = "http://{mirror_registry}"\n')
+    write_home_config(ocx, f'[mirrors]\n"{managed_host}" = "http://{mirror_registry}"\n')
     env_overrides = {
         "OCX_INSECURE_REGISTRIES": f"{registry},{mirror_registry},{managed_host}"
     }

@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/lychee",
+  "tags": {
+    "0": {
+      "content": "sha256:a5687479bd9e80eca98453b07b07a8ec76534f42a3648e0eb1367cf474420c93",
+      "observed": "2026-07-19T11:14:34.185679022+00:00"
+    }
+  }
+}

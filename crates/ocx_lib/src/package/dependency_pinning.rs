@@ -296,11 +296,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::file_structure::{BlobStore, TagStore};
-    use crate::oci::index::{ChainMode, LocalConfig, LocalIndex};
-    use crate::oci::{Digest, Identifier};
+    use crate::Result;
+    use crate::file_structure::{FileStructure, IndexStore};
+    use crate::oci::index::{ChainMode, IndexImpl, LocalConfig, LocalIndex};
+    use crate::oci::{Algorithm, Digest};
 
     const REGISTRY: &str = "example.com";
+    const FLAT_MANIFEST_JSON: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
 
     fn hex(ch: char) -> String {
         ch.to_string().repeat(64)
@@ -314,37 +316,49 @@ mod tests {
         value.parse().expect("platform parses")
     }
 
+    fn snapshot(dir: &TempDir) -> IndexStore {
+        FileStructure::with_root(dir.path().to_path_buf()).index
+    }
+
     fn make_index(dir: &TempDir, mode: ChainMode) -> Index {
         Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                snapshot_store: snapshot(dir),
             }),
             Vec::new(),
             mode,
         )
     }
 
-    fn write_tag_lock(dir: &TempDir, repo: &str, tag: &str, top: &Digest) {
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        let id = Identifier::new_registry(repo, REGISTRY).clone_with_tag(tag);
-        let tag_path = tag_store.tags(&id);
-        std::fs::create_dir_all(tag_path.parent().unwrap()).unwrap();
-        let json = format!(r#"{{"version":1,"repository":"{REGISTRY}/{repo}","tags":{{"{tag}":"{top}"}}}}"#);
-        std::fs::write(tag_path, json).unwrap();
+    /// Author a DERIVED root document (`adr_index_indirection.md` A2) recording
+    /// `repo:tag → digest`.
+    fn seed_tag(dir: &TempDir, repo: &str, tag: &str, top: &Digest) {
+        let store = snapshot(dir);
+        let root_path = store.root_document_path(REGISTRY, repo);
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        let doc = serde_json::json!({
+            "repository": format!("oci://{REGISTRY}/{repo}"),
+            "tags": { tag: { "content": top.to_string(), "observed": "2026-07-18T00:00:00Z" } }
+        });
+        std::fs::write(&root_path, serde_json::to_vec(&doc).unwrap()).unwrap();
     }
 
-    fn write_blob(dir: &TempDir, blob_digest: &Digest, content: &str) {
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-        let blob_path = blob_store.data(REGISTRY, blob_digest);
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        std::fs::write(blob_path, content).unwrap();
+    /// Write `bytes` verbatim into the snapshot dispatch-object CAS under
+    /// their own digest (bytes hash to filename, A3) and return it.
+    /// Dispatch-shaped fixtures only (image indexes) — a leaf manifest is
+    /// never locally cached, see `FlatManifestSource` for that case.
+    async fn seed_object(dir: &TempDir, repo: &str, bytes: &[u8]) -> Digest {
+        let store = snapshot(dir);
+        let d = Algorithm::Sha256.hash(bytes);
+        store.write_dispatch_object(REGISTRY, repo, &d, bytes).await.unwrap();
+        d
     }
 
     /// Seed `repo:tag` as an image INDEX whose children are
-    /// `(digest, platform-json-or-none)` pairs.
-    fn seed_image_index(dir: &TempDir, repo: &str, tag: &str, top: &Digest, children: &[(Digest, Option<&str>)]) {
-        write_tag_lock(dir, repo, tag, top);
+    /// `(digest, platform-json-or-none)` pairs. Returns the computed index
+    /// digest (the child manifests are only *referenced*, never read, so they
+    /// are not stored).
+    async fn seed_image_index(dir: &TempDir, repo: &str, tag: &str, children: &[(Digest, Option<&str>)]) -> Digest {
         let manifests = children
             .iter()
             .map(|(child, platform_json)| {
@@ -357,30 +371,86 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(",");
-        write_blob(
-            dir,
-            top,
-            &format!(
-                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{manifests}]}}"#
-            ),
+        let index_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{manifests}]}}"#
         );
-        for (child, _) in children {
-            write_blob(
-                dir,
-                child,
-                r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#,
-            );
+        let top = seed_object(dir, repo, index_json.as_bytes()).await;
+        seed_tag(dir, repo, tag, &top);
+        top
+    }
+
+    /// A minimal fake source serving one `repo:tag → FLAT_MANIFEST_JSON`
+    /// mapping — used with `ChainMode::Default` so `pin_dependencies` can
+    /// recover a LEAF platform manifest for a single-platform dependency. A
+    /// leaf is never locally cached (A3), so an offline-only pre-seeded
+    /// fixture cannot answer a resolve for content that names one; this fake
+    /// source drives the same AbsentLeaf-recovery path a live registry would.
+    #[derive(Clone)]
+    struct FlatManifestSource {
+        repo: String,
+        tag: String,
+    }
+
+    #[async_trait::async_trait]
+    impl IndexImpl for FlatManifestSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: oci::index::IndexOperation,
+        ) -> Result<Option<(Digest, oci::Manifest)>> {
+            if identifier.repository() != self.repo || identifier.tag_or_latest() != self.tag {
+                return Ok(None);
+            }
+            let digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+            Ok(Some((digest, serde_json::from_str(FLAT_MANIFEST_JSON).unwrap())))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: oci::index::IndexOperation,
+        ) -> Result<Option<Digest>> {
+            if identifier.repository() != self.repo || identifier.tag_or_latest() != self.tag {
+                return Ok(None);
+            }
+            Ok(Some(Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes())))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &oci::Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, oci::Manifest)>> {
+            Ok(self
+                .fetch_manifest(identifier, oci::index::IndexOperation::Resolve)
+                .await?
+                .map(|(digest, manifest)| (FLAT_MANIFEST_JSON.as_bytes().to_vec(), digest, manifest)))
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
         }
     }
 
-    /// Seed `repo:tag` as a flat `ImageManifest` (no index).
-    fn seed_flat_manifest(dir: &TempDir, repo: &str, tag: &str, top: &Digest) {
-        write_tag_lock(dir, repo, tag, top);
-        write_blob(
-            dir,
-            top,
-            r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#,
-        );
+    /// Build a `ChainMode::Default` index chained to a [`FlatManifestSource`]
+    /// for `repo:tag`, so a `pin_dependencies` resolve of a single-platform
+    /// dependency recovers its (never-locally-cached) leaf manifest.
+    fn make_index_with_flat_source(dir: &TempDir, repo: &str, tag: &str) -> Index {
+        Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                snapshot_store: snapshot(dir),
+            }),
+            vec![Index::from_impl(FlatManifestSource {
+                repo: repo.to_string(),
+                tag: tag.to_string(),
+            })],
+            ChainMode::Default,
+        )
     }
 
     fn metadata_with_deps(deps: &[&str]) -> AuthoringMetadata {
@@ -414,9 +484,9 @@ mod tests {
             &dir,
             "java",
             "21",
-            &digest('a'),
             &[(digest('b'), Some(LINUX_AMD64)), (digest('c'), Some(DARWIN_ARM64))],
-        );
+        )
+        .await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -438,29 +508,26 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn flat_dependency_pins_manifest_for_concrete_platform() {
         // A flat ImageManifest fans out to a single `any` candidate — a
-        // concrete platform can run it, so it pins directly.
+        // concrete platform can run it, so it pins directly. A leaf platform
+        // manifest is never locally cached (A3), so the index is chained to
+        // a live fake source under `ChainMode::Default` that recovers it —
+        // mirrors a real single-platform dependency resolve.
         let dir = TempDir::new().unwrap();
-        seed_flat_manifest(&dir, "tool", "1.0", &digest('a'));
-        let index = make_index(&dir, ChainMode::Offline);
+        let tool_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+        let index = make_index_with_flat_source(&dir, "tool", "1.0");
         let metadata = metadata_with_deps(&["example.com/tool:1.0"]);
 
         let pinned = pin_dependencies(metadata, &index, &platform("linux/amd64"))
             .await
             .expect("pinning succeeds");
-        assert_eq!(dep(&pinned, 0).identifier.digest(), Some(digest('a')));
+        assert_eq!(dep(&pinned, 0).identifier.digest(), Some(tool_digest));
         assert!(dep(&pinned, 0).platforms.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn no_compatible_platform_lists_available() {
         let dir = TempDir::new().unwrap();
-        seed_image_index(
-            &dir,
-            "java",
-            "21",
-            &digest('a'),
-            &[(digest('b'), Some(LINUX_AMD64_GLIBC))],
-        );
+        seed_image_index(&dir, "java", "21", &[(digest('b'), Some(LINUX_AMD64_GLIBC))]).await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -485,12 +552,12 @@ mod tests {
             &dir,
             "java",
             "21",
-            &digest('a'),
             &[
                 (digest('b'), Some(LINUX_AMD64_GLIBC)),
                 (digest('c'), Some(LINUX_AMD64_MUSL)),
             ],
-        );
+        )
+        .await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -516,9 +583,9 @@ mod tests {
             &dir,
             "java",
             "21",
-            &digest('a'),
             &[(digest('b'), Some(LINUX_AMD64)), (digest('c'), Some(ANY_PLATFORM))],
-        );
+        )
+        .await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -545,9 +612,9 @@ mod tests {
             &dir,
             "java",
             "21",
-            &digest('a'),
             &[(digest('b'), Some(LINUX_AMD64)), (digest('c'), Some(LINUX_AMD64_GLIBC))],
-        );
+        )
+        .await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -565,9 +632,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn any_platform_with_agnostic_dep_pins_into_map() {
+        // A leaf platform manifest is never locally cached (A3); a live fake
+        // source under `ChainMode::Default` recovers it.
         let dir = TempDir::new().unwrap();
-        seed_flat_manifest(&dir, "tool", "1.0", &digest('a'));
-        let index = make_index(&dir, ChainMode::Offline);
+        let tool_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+        let index = make_index_with_flat_source(&dir, "tool", "1.0");
         let metadata = metadata_with_deps(&["example.com/tool:1.0"]);
 
         let pinned = pin_dependencies(metadata, &index, &Platform::any())
@@ -579,7 +648,7 @@ mod tests {
             "an any-targeted pin must NOT be a bare digest (D5: unverifiable provenance)"
         );
         let map = tool.platforms.as_ref().expect("any pin recorded in the platforms map");
-        assert_eq!(map.get("any"), Some(&digest('a')));
+        assert_eq!(map.get("any"), Some(&tool_digest));
         assert_eq!(map.len(), 1);
     }
 
@@ -592,9 +661,9 @@ mod tests {
             &dir,
             "java",
             "21",
-            &digest('a'),
             &[(digest('b'), Some(LINUX_AMD64)), (digest('c'), Some(DARWIN_ARM64))],
-        );
+        )
+        .await;
         let index = make_index(&dir, ChainMode::Offline);
         let metadata = metadata_with_deps(&["example.com/java:21"]);
 
@@ -638,8 +707,9 @@ mod tests {
     /// validation pass inspects every declared dependency up front.
     #[tokio::test(flavor = "multi_thread")]
     async fn any_target_rejects_direct_digest_among_mixed_dependencies() {
+        // "tool" is deliberately unseeded — the digest-pin validation fires
+        // before any dependency is resolved, so it must never be queried.
         let dir = TempDir::new().unwrap();
-        seed_flat_manifest(&dir, "tool", "1.0", &digest('a'));
         let index = make_index(&dir, ChainMode::Offline);
         let pinned_identifier = format!("example.com/pinned:1@sha256:{}", hex('e'));
         let metadata: AuthoringMetadata = serde_json::from_str(&format!(

@@ -58,6 +58,37 @@ The `env.*` shims **and** the dedicated fish/nushell files (`~/.config/fish/conf
 >
 > Global toolchain activation is now handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx --global env --shell=sh)"`. Project toolchain activation uses [`ocx direnv`][cmd-direnv].
 
+### `OCX_ALLOW_YANKED` {#ocx-allow-yanked}
+
+When set to a [truthy value](#truthy-values), opts in to resolving a tag that
+[`index.ocx.sh`][in-depth-indices-public] has marked `yanked`. Without it, a
+tag resolve against a yanked entry is refused — a yank is a publisher signal,
+not a delete, so OCX treats it as a hard stop by default rather than silently
+installing withdrawn content.
+
+```sh
+export OCX_ALLOW_YANKED=1
+```
+
+The gate applies identically online and offline: a live `index.ocx.sh` fetch
+and a tag resolve against a committed or shipped local copy of it — with zero
+network — both read the same `yanked` field from the root document and, without
+this variable, both refuse with exit code `65`. Populating a local index by
+`ocx index update` or shipping one inside a devcontainer feature does not
+bypass the check; a yanked entry stays refused until this variable is set or
+the reference is pinned by digest.
+
+Only affects resolution through the public index — a digest-pinned reference
+already identifies exact content and never needs this variable, yanked or not.
+The bypass is digest-pin-only, stricter than an ecosystem that treats an exact
+version pin as sufficient rather than a content digest: `ocx.lock` always
+stores digests, so a project resolved from a lock is unaffected by a yank
+either way.
+
+This is **resolution-affecting**: it is forwarded to every subprocess `ocx`
+spawns via `apply_ocx_config`, so child invocations — generated launchers,
+nested `ocx run` calls — honor the same opt-in.
+
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
 The authentication type for the registry.
@@ -158,19 +189,27 @@ OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [
 
 ### `OCX_INDEX` {#ocx-index}
 
-Override the path to the [local index][fs-index] directory.
-By default, OCX reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+Override the path to the [local index][fs-index] collection directory.
+By default, OCX reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`) — a
+directory holding one subtree per source (`ocx.sh/`, `ghcr.io/`, …).
 
 ```sh
 export OCX_INDEX="/path/to/bundled/index"
 ```
 
-This variable is intended for environments where the index snapshot is bundled alongside a tool
-rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
-[Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features].
+Setting this variable swaps the *whole* collection for a shipped one — never a partial overlay of
+the two. It is intended for environments where an index copy is bundled alongside a tool rather
+than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
+[Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features]. A project that commits
+its own `.ocx/index/` copy exports this variable for the project's shell, pointing at that
+committed directory. It is never set ambiently by [`ocx direnv export`][cmd-direnv-export] — an
+explicit `--index` or a deployment-set `OCX_INDEX` are the only channels that redirect it.
 
 The command line option [`--index`][arg-index] takes precedence over this variable.
-This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
+Under [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote], tag- and catalog-addressed
+lookups bypass the redirected collection and query the registry directly, so this variable has no
+effect on those. Digest-addressed lookups still consult the redirected collection first in every
+mode, so it keeps mattering for anything already pinned by digest.
 
 ### `OCX_PATCH_SNAPSHOT` {#ocx-patch-snapshot}
 
@@ -213,33 +252,42 @@ A comma-separated list of registry hostnames (with optional port) that should be
 export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
 ```
 
+The same list gates a second case: a plain-`http://` [`[mirrors]`][config-mirrors] target. A
+mirror value — for either the `registry` role or the `index` role — that starts with `http://` is
+refused unless the mirror's own host appears here; `https://` mirror targets never need this
+variable, regardless of which role they cover.
+
 ::: warning
 This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
 :::
 
 ### `OCX_MIRRORS` {#ocx-mirrors}
 
-A JSON object that maps upstream registry hostnames to mirror endpoints. Each key is an upstream hostname; each value is the mirror `url` in the form `scheme://host[/repo-key-prefix]`.
+A JSON object that maps hosts to mirror endpoints. Each key is a host being redirected; each
+value is either a plain string — redirecting both the `registry` and `index` roles for that host
+— or an object `{"registry"?: "...", "index"?: "..."}` that splits the two, the same union
+[`[mirrors]`][config-mirrors] takes in the config file. Each role's value has the form
+`scheme://host[/repo-key-prefix]`.
 
 ```sh
-export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote","docker.io":"https://company.jfrog.io/dockerhub-remote"}'
+export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote","index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}'
 ```
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same mirror map.
 
-`OCX_MIRRORS` overrides the [`[mirrors."<host>"]`][config-mirrors] config key on a per-host basis. A host present in `OCX_MIRRORS` replaces the config entry for that host; hosts absent from `OCX_MIRRORS` still come from `[mirrors]` in the config file.
+`OCX_MIRRORS` overrides the [`[mirrors]`][config-mirrors] config key on a per-host, per-role basis. A role present in a host's `OCX_MIRRORS` entry replaces the config entry for that role only; roles and hosts absent from `OCX_MIRRORS` still come from `[mirrors]` in the config file.
 
 ::: warning Malformed values abort at startup
 A malformed `OCX_MIRRORS` value is a **hard startup error**. OCX aborts with an error message naming the problem:
 
 - The value is not valid JSON
-- A per-host value is not a string URL
-- A mirror `url` starts with `http://` but the mirror host is not listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries-ref]
+- A per-host value is neither a string URL nor an object with only `registry`/`index` string fields
+- A mirror value starts with `http://` but the mirror host is not listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries-ref]
 
 OCX never silently continues with an empty mirror map when `OCX_MIRRORS` is set — falling back to no mirrors would silently route reads to the firewall-blocked origin, which is the exact failure replace semantics are designed to prevent.
 :::
 
-For the full mirror semantics (replace behavior, auth, lockfile portability, interaction with `--offline`), see the [`[mirrors."<host>"]`][config-mirrors] configuration reference.
+For the full mirror semantics (replace behavior, auth, lockfile portability, interaction with `--offline`), see the [`[mirrors]`][config-mirrors] configuration reference.
 
 ### `OCX_PATCHES` {#ocx-patches}
 
@@ -613,6 +661,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-direnv]: command-line.md#direnv
+[cmd-direnv-export]: command-line.md#direnv-export
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag
@@ -639,6 +688,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [exec-modes-ref]: ../in-depth/environments.md#visibility-views
 [entrypoints-ref]: ../in-depth/entry-points.md
 [windows-shim-ref]: ../user-guide.md#stable-paths-windows
+[in-depth-indices-public]: ../in-depth/indices.md#public-index
 
 <!-- reference -->
 [config-ref]: ./configuration.md

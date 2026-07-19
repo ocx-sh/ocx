@@ -10,8 +10,8 @@ cd "$SCENARIO_TMP"
 # `corp/ocx-config` resolves against the runner's default registry, exactly
 # like a registry-less identifier does on an operator machine.
 cat >config.toml <<'TOML'
-[mirrors."ghcr.io"]
-url = "https://ghcr.corp.example.com"
+[mirrors]
+"ghcr.io" = "https://ghcr.corp.example.com"
 TOML
 
 # region cast

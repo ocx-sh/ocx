@@ -130,6 +130,7 @@ impl DirenvExport {
         let (entries, _, _) = offline
             .resolve_env_with_patch_boundary(&applied.infos, false, scope)
             .await?;
+
         // Delegate to the shared emit helper (C5 / conventions.rs).
         // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash
         // sub-shell regardless of the user's interactive shell.  There is no

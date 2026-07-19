@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/shfmt",
+  "tags": {
+    "3": {
+      "content": "sha256:011244340dd2ab9e216c44c0da8ae3e1efede1fad713fa8e2e2d290af52f2e7b",
+      "observed": "2026-07-19T11:14:34.177272578+00:00"
+    }
+  }
+}

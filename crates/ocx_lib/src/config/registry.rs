@@ -3,10 +3,11 @@
 
 //! Per-registry configuration.
 //!
-//! Home for all `[registries.<name>]` settings. The struct is live in v1
-//! with only `url` defined, but is where future per-registry fields land —
-//! `insecure`, `location` rewrite, `timeout`, auth — without forcing
-//! migration of existing configs.
+//! Home for all `[registries.<name>]` settings: a hostname alias (`url`) for
+//! `[registry] default`, and — since `adr_index_indirection.md` F5a — the
+//! `index` field that selects the resolution protocol for this namespace.
+//! Future per-registry fields (`insecure`, `location` rewrite, `timeout`,
+//! auth) land here too, without forcing migration of existing configs.
 
 use serde::Deserialize;
 
@@ -22,6 +23,17 @@ pub struct RegistryConfig {
     /// entry, OCX uses this value as the effective default registry hostname
     /// for bare package identifiers.
     pub url: Option<String>,
+
+    /// Base URL of the `index.ocx.sh`-protocol index this namespace resolves
+    /// through (`adr_index_indirection.md` F5a), e.g.
+    /// `"https://index.ocx.sh"`. **Field presence is the kind marker**: a
+    /// `[registries."<ns>"]` entry that carries `index` resolves via the
+    /// ocx-index protocol (root → obs → `select_best`); an entry without
+    /// `index` (or no entry at all) resolves as plain OCI. There is exactly
+    /// one resolution protocol per namespace — no index-then-OCI-tags
+    /// fallback chain, no runtime format probing. Independent of `url`: an
+    /// entry may carry a hostname alias, an `index` URL, or both.
+    pub index: Option<String>,
 
     /// Runtime provenance marker: this entry was declared at the SYSTEM config
     /// scope (`/etc/ocx/config.toml`), so it is NON-OVERRIDABLE by any lower
@@ -55,15 +67,20 @@ impl RegistryConfig {
     /// override `self`'s; `other`'s `None` values do not clobber `self`.
     ///
     /// A system-locked entry (`self.system_locked`) ignores ALL lower-tier
-    /// overrides. The locked flag stays on `self` (sticky). The loader folds
-    /// the system tier in FIRST as the accumulator base, so `self` is the
-    /// system entry when locked.
+    /// overrides — `url` and `index` alike, since `system_locked` is a
+    /// per-entry lock, not a per-field one (mirroring the pre-F5a contract).
+    /// The locked flag stays on `self` (sticky). The loader folds the system
+    /// tier in FIRST as the accumulator base, so `self` is the system entry
+    /// when locked.
     pub fn merge(&mut self, other: RegistryConfig) {
         if self.system_locked {
             return;
         }
         if other.url.is_some() {
             self.url = other.url;
+        }
+        if other.index.is_some() {
+            self.index = other.index;
         }
     }
 }
@@ -81,10 +98,12 @@ mod tests {
         // After merge, lower's URL must be preserved (None never wins).
         let mut lower = RegistryConfig {
             url: Some("ghcr.io".to_string()),
+            index: None,
             system_locked: false,
         };
         let higher = RegistryConfig {
             url: None,
+            index: None,
             system_locked: false,
         };
         lower.merge(higher);
@@ -100,10 +119,12 @@ mod tests {
         // When higher has Some(url), it wins over lower's value.
         let mut lower = RegistryConfig {
             url: Some("old.example".to_string()),
+            index: None,
             system_locked: false,
         };
         let higher = RegistryConfig {
             url: Some("new.example".to_string()),
+            index: None,
             system_locked: false,
         };
         lower.merge(higher);
@@ -111,6 +132,35 @@ mod tests {
             lower.url.as_deref(),
             Some("new.example"),
             "Some in higher should override lower's url"
+        );
+    }
+
+    /// `index` merges independently of `url` — a lower tier's `url`-only
+    /// entry keeps its `url` when a higher tier adds only `index` (F5a:
+    /// hostname alias and protocol selector are independent fields on one
+    /// entry).
+    #[test]
+    fn registry_config_merge_index_field_independent_of_url() {
+        let mut lower = RegistryConfig {
+            url: Some("ghcr.io".to_string()),
+            index: None,
+            system_locked: false,
+        };
+        let higher = RegistryConfig {
+            url: None,
+            index: Some("https://index.ocx.sh".to_string()),
+            system_locked: false,
+        };
+        lower.merge(higher);
+        assert_eq!(
+            lower.url.as_deref(),
+            Some("ghcr.io"),
+            "url must survive a higher tier that only sets index"
+        );
+        assert_eq!(
+            lower.index.as_deref(),
+            Some("https://index.ocx.sh"),
+            "index from the higher tier must win when lower had none"
         );
     }
 
@@ -122,6 +172,7 @@ mod tests {
     fn registry_config_lock_as_system_sets_locked() {
         let mut registry = RegistryConfig {
             url: Some("ghcr.io".to_string()),
+            index: None,
             system_locked: false,
         };
         registry.lock_as_system();
@@ -134,6 +185,7 @@ mod tests {
     fn registry_config_merge_system_locked_ignores_lower_tier() {
         let mut system = RegistryConfig {
             url: Some("system-registry.corp".to_string()),
+            index: None,
             system_locked: false,
         };
         system.lock_as_system();
@@ -141,6 +193,7 @@ mod tests {
 
         let user = RegistryConfig {
             url: Some("user-registry.corp".to_string()),
+            index: None,
             system_locked: false,
         };
         system.merge(user);
@@ -151,5 +204,78 @@ mod tests {
             "locked system registry entry must not be redirected by a lower tier"
         );
         assert!(system.system_locked, "lock flag stays sticky after merge");
+    }
+
+    /// The lock is per-entry (not per-field, unlike `MirrorConfig`): a
+    /// system-locked entry ignores a lower-tier override on `index` too, not
+    /// just `url` — `system_locked` gates the whole entry.
+    #[test]
+    fn registry_config_merge_system_locked_ignores_lower_tier_index_field_too() {
+        let mut system = RegistryConfig {
+            url: Some("system-registry.corp".to_string()),
+            index: Some("https://system-index.corp".to_string()),
+            system_locked: false,
+        };
+        system.lock_as_system();
+
+        let user = RegistryConfig {
+            url: Some("user-registry.corp".to_string()),
+            index: Some("https://user-index.corp".to_string()),
+            system_locked: false,
+        };
+        system.merge(user);
+
+        assert_eq!(
+            system.url.as_deref(),
+            Some("system-registry.corp"),
+            "locked system registry entry must not be redirected by a lower tier"
+        );
+        assert_eq!(
+            system.index.as_deref(),
+            Some("https://system-index.corp"),
+            "the locked entry's index field must also ignore a lower-tier override"
+        );
+    }
+
+    // ── `index` field TOML presence/absence (F5a) ────────────────────────────
+
+    /// `[registries."ocx.sh"] index = "..."` parses into
+    /// `RegistryConfig.index`; an entry that only sets `index` leaves `url`
+    /// unset.
+    #[test]
+    fn registries_table_parses_index_field_when_present() {
+        let config: crate::config::Config =
+            toml::from_str("[registries.\"ocx.sh\"]\nindex = \"https://index.ocx.sh\"\n").unwrap();
+        let registries = config.registries.expect("registries table must be present");
+        let entry = registries.get("ocx.sh").expect("ocx.sh entry must exist");
+        assert_eq!(entry.index.as_deref(), Some("https://index.ocx.sh"));
+        assert!(entry.url.is_none(), "an index-only entry must leave url unset");
+    }
+
+    /// An entry that only sets `url` leaves `index` absent — presence of
+    /// `index` is the sole protocol-kind marker (F5a); it is never inferred
+    /// from `url`.
+    #[test]
+    fn registries_table_index_field_absent_when_not_declared() {
+        let config: crate::config::Config = toml::from_str("[registries.ghcr]\nurl = \"ghcr.io\"\n").unwrap();
+        let registries = config.registries.expect("registries table must be present");
+        let entry = registries.get("ghcr").expect("ghcr entry must exist");
+        assert!(
+            entry.index.is_none(),
+            "an entry declaring only url must leave index absent, not inferred"
+        );
+    }
+
+    /// `deny_unknown_fields` still rejects a typo'd field name near `index`
+    /// (e.g. `indx`) — the F5a addition does not loosen the existing
+    /// typo-rejection contract.
+    #[test]
+    fn registries_table_rejects_typo_of_index_field() {
+        let result: Result<crate::config::Config, _> =
+            toml::from_str("[registries.\"ocx.sh\"]\nindx = \"https://index.ocx.sh\"\n");
+        assert!(
+            result.is_err(),
+            "a typo'd 'indx' field inside [registries.<name>] must be rejected by deny_unknown_fields"
+        );
     }
 }

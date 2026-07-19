@@ -73,19 +73,27 @@ impl PatchTestArgs {
 /// the running `Context`'s remote sources (index + client) and patch tier.
 ///
 /// Companion pulls and seeded descriptor blobs land in the scratch CAS so the
-/// real `$OCX_HOME` is never mutated by `ocx patch test`.
+/// real `$OCX_HOME`'s package/blob store is never mutated by `ocx patch test`.
+/// The local index is a separate, self-contained store outside `FileStructure`
+/// (`adr_index_indirection.md` Decision A) and is deliberately NOT
+/// scratch-isolated: it reuses `context.local_index()`, so a companion pull
+/// benefits from (and grows) the same resolved index home every other
+/// command shares.
 fn build_scratch_manager(
     context: &crate::app::Context,
     scratch_root: &std::path::Path,
     patches: &ocx_lib::ResolvedPatchConfig,
 ) -> ocx_lib::package_manager::PackageManager {
-    use ocx_lib::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+    use ocx_lib::oci::index::{ChainMode, Index};
 
     let file_structure = ocx_lib::file_structure::FileStructure::with_root(scratch_root.to_path_buf());
-    let local_index = LocalIndex::new(LocalConfig {
-        tag_store: file_structure.tags.clone(),
-        blob_store: file_structure.blobs.clone(),
-    });
+    // Reuse the running context's already-resolved local index — same home
+    // precedence `Context::try_init` applies (`--index` ▸ `OCX_INDEX` ▸
+    // `$OCX_HOME/index`) — instead of constructing a fresh one bound to the
+    // scratch root's own `index/` subdir. The scratch-bound construction
+    // always started empty and silently ignored any `--index`/`OCX_INDEX`
+    // override the rest of this same invocation honours.
+    let local_index = context.local_index().clone();
 
     // Share the running context's remote sources so companions can be pulled
     // into the scratch CAS. Offline → no source (the scratch manager is offline
@@ -98,10 +106,18 @@ fn build_scratch_manager(
         ),
         Err(_) => (ChainMode::Offline, Vec::new(), None),
     };
-    let index = Index::from_chained(local_index, sources, mode);
+    let index = Index::from_chained_with_content_store(local_index, sources, mode, file_structure.blobs.clone());
 
     ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
         .with_patches(Some(patches.clone()))
+        // Route the guaranteed-local companion / site-patch lookups
+        // (`effective_index_snapshot`) through the SAME index home the reused
+        // `local_index` (and thus `pull`) writes tag pointers to. Without this the
+        // manager falls back to the scratch root's empty `index/`, so a
+        // registry-pulled companion's tag pointer — committed to the context's
+        // real home — is invisible to `find_companion_local`, which then reports
+        // the required companion as not found (exit 79).
+        .with_index(context.local_index().snapshot().clone())
 }
 
 /// Implementation of `ocx patch test`.

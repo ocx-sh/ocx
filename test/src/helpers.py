@@ -127,6 +127,7 @@ def make_package(
     outputs: dict[str, dict[str, str]] | None = None,
     bin_scripts: dict[str, str] | None = None,
     dependencies: list[dict] | None = None,
+    extra_push_args: list[str] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -168,6 +169,10 @@ def make_package(
         instead of the generated trap script.  Takes precedence over
         ``outputs`` for the same name.  Ignored on Windows (``outputs``
         behaviour is Windows-incompatible anyway).
+    extra_push_args:
+        Extra flags appended to the ``ocx package push`` invocation (e.g.
+        ``["--no-canonical-tag"]``), after ``-n``/``--cascade`` and before
+        ``-i``.
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -300,6 +305,8 @@ def make_package(
         push_args.append("-n")
     if cascade:
         push_args.append("--cascade")
+    if extra_push_args:
+        push_args += extra_push_args
     push_args += ["-i", fq] + [str(b) for b in all_bundles]
     ocx.plain(*push_args)
 

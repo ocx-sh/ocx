@@ -101,7 +101,7 @@ pub async fn enumerate_installed_bases(
 ) -> crate::Result<Vec<oci::Identifier>> {
     use crate::utility::fs::path_exists_lossy;
 
-    let tag_store = &file_structure.tags;
+    let snapshot = &file_structure.index;
     let symlink_root = file_structure.symlinks.root().to_path_buf();
 
     let mut slug_base_ids: Vec<oci::Identifier> = Vec::new();
@@ -136,7 +136,7 @@ pub async fn enumerate_installed_bases(
     // Restore real registry hostnames (slug → canonical form).
     let mut real_base_ids: Vec<oci::Identifier> = Vec::with_capacity(slug_base_ids.len());
     for slug_id in &slug_base_ids {
-        real_base_ids.push(super::resolve::recover_base_with_real_registry(tag_store, slug_id).await);
+        real_base_ids.push(super::resolve::recover_base_with_real_registry(snapshot, slug_id).await);
     }
 
     Ok(real_base_ids)
@@ -268,7 +268,7 @@ impl PackageManager {
         let installed_bases = enumerate_installed_bases(self.file_structure()).await?;
         let total_checked = installed_bases.len() + 1; // +1 for the global root
 
-        let tag_store = &self.file_structure().tags;
+        let file_structure = self.file_structure();
 
         // Summed across every base's `discover_and_install_patches_with_mode`
         // call below — each call returns the count of companions it installed.
@@ -285,7 +285,7 @@ impl PackageManager {
         // exactly once, never once per installed version tag (which would over-report
         // `descriptors_updated`).
         let global_id = global_descriptor_id(patches);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = file_structure.patch_descriptor_path(&global_id);
 
         let mut sources: std::collections::BTreeMap<std::path::PathBuf, (oci::Identifier, PatchDiscoveryState)> =
             std::collections::BTreeMap::new();
@@ -293,7 +293,7 @@ impl PackageManager {
         sources.insert(global_tags_path.clone(), (global_id.clone(), global_before));
         for base_id in &installed_bases {
             let pkg_id = patch_descriptor_id(patches, base_id);
-            let pkg_tags_path = tag_store.tags(&pkg_id);
+            let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_id);
             if let std::collections::btree_map::Entry::Vacant(slot) = sources.entry(pkg_tags_path.clone()) {
                 let before = read_tag_state_best_effort(&pkg_tags_path, base_id).await;
                 slot.insert((base_id.clone(), before));
@@ -409,8 +409,7 @@ mod tests {
     fn make_offline_manager(ocx_home: &Path) -> PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(fs, index, None, "localhost:5000")
@@ -420,8 +419,7 @@ mod tests {
         use crate::oci::ClientBuilder;
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         let client = ClientBuilder::new().build();
@@ -743,7 +741,7 @@ mod tests {
 
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // OCI artifact manifests require a `config` field for valid serde deserialization.
         let empty_config_descriptor = serde_json::json!({
@@ -778,7 +776,7 @@ mod tests {
             .await
             .unwrap();
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &manifest_digest.to_string(),
@@ -801,8 +799,7 @@ mod tests {
         }
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager =
@@ -893,13 +890,13 @@ mod tests {
         // Offline manager — we use it for the LAZY test.
         let offline_manager = make_offline_manager(tmp.path()).with_patches(Some(patch_config.clone()));
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         let base_id = crate::oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
 
         // Seed LookedNoDescriptor for the global descriptor.
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_no_descriptor(&global_tags_path)
             .await
             .unwrap();
@@ -1003,7 +1000,7 @@ mod tests {
 
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // Build a valid descriptor and seed it into CAS + tag-store.
         let layer_json = serde_json::json!({
@@ -1031,7 +1028,7 @@ mod tests {
             .unwrap();
 
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &manifest_digest.to_string(),
@@ -1215,7 +1212,7 @@ mod tests {
 
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // OCI artifact manifests require a `config` field for valid serde deserialization.
         // We use the standard empty-artifact config descriptor per OCI Image Spec v1.1.
@@ -1262,7 +1259,7 @@ mod tests {
 
         // Seed the global tag-store with LookedHasDescriptor (old digest).
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
@@ -1335,8 +1332,7 @@ mod tests {
         // Reuse `fs` (built above, pointing at the same tmp dir where we seeded
         // tag-store and blobs) for the manager's stores.
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager =
@@ -1375,7 +1371,7 @@ mod tests {
 
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // OCI artifact manifests require a `config` field for valid serde deserialization.
         // We use the standard empty-artifact config descriptor per OCI Image Spec v1.1.
@@ -1410,7 +1406,7 @@ mod tests {
             .unwrap();
 
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
@@ -1457,8 +1453,7 @@ mod tests {
         // Reuse `fs` (built above, pointing at the same tmp dir where we seeded
         // tag-store and blobs) for the manager's stores.
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager = PackageManager::new(fs, index, Some(stub_client), "localhost:5000")
@@ -1529,7 +1524,7 @@ mod tests {
 
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // OCI artifact manifests require a `config` field for valid serde deserialization.
         let empty_config_descriptor = serde_json::json!({
@@ -1566,7 +1561,7 @@ mod tests {
             .unwrap();
 
         let global_id = crate::package_manager::tasks::patch_discovery::global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         crate::package_manager::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
@@ -1623,8 +1618,7 @@ mod tests {
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
 
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager = PackageManager::new(fs, index, Some(stub_client), "localhost:5000")
@@ -1754,10 +1748,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config(); // required = true at tier level.
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         // Prior state: NeverLooked — the tag-store file does not exist yet.
         assert!(
             !global_tags_path.exists(),
@@ -1784,8 +1778,7 @@ mod tests {
         }
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager = PackageManager::new(fs.clone(), index, Some(stub_client), "localhost:5000")
@@ -1871,7 +1864,7 @@ mod tests {
         };
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // ── v1: the prior recorded descriptor (unique content, no companions). ──
         let (v1_manifest_bytes, v1_manifest_digest, v1_layer_bytes, v1_layer_digest) =
@@ -1885,7 +1878,7 @@ mod tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &v1_manifest_digest.to_string())
             .await
             .unwrap();
@@ -1916,8 +1909,7 @@ mod tests {
         }
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager =
@@ -1965,7 +1957,7 @@ mod tests {
         let patch_config = test_patch_config(); // required = true at tier level.
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // Seed one installed base candidate → sync uses the Both scope for it.
         let symlink_store = crate::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
@@ -1999,9 +1991,9 @@ mod tests {
             blob_store.write_blob("patches.corp.com", ld, lb).await.unwrap();
         }
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         let pkg_id = patch_descriptor_id(&patch_config, &base_id);
-        let pkg_tags_path = tag_store.tags(&pkg_id);
+        let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &g1_manifest_digest.to_string())
             .await
             .unwrap();
@@ -2044,8 +2036,7 @@ mod tests {
         }
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: blob_store.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager =
@@ -2114,14 +2105,14 @@ mod tests {
             required: false,
         };
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
-        let tag_store = &fs.tags;
+        let tag_store = &fs;
 
         // ── Prior state: LookedHasDescriptor with a valid-FORMAT digest whose CAS
         //    blob is deliberately NEVER written. `Digest::try_from` succeeds, so lazy
         //    discovery reaches the CAS-load-fail site (not the invalid-digest site). ──
         let corrupt_digest = crate::oci::Algorithm::Sha256.hash(b"corrupt-prior-descriptor");
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &corrupt_digest.to_string())
             .await
             .unwrap();
@@ -2149,8 +2140,7 @@ mod tests {
         }
         let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data)));
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: tag_store.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: tag_store.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         let manager = PackageManager::new(fs.clone(), index, Some(stub_client), "localhost:5000")

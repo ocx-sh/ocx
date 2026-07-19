@@ -1451,11 +1451,12 @@ def test_frozen_tag_pin_uncached_exits_81(
     """
     _make_self_packages(ocx, unique_repo, tmp_path)
     # `make_package` indexes the tag as part of publishing, so clear the local
-    # index (the `tags/` store under OCX_HOME) to recreate the "published but
-    # not locally cached" state. `--frozen` must then refuse to resolve the tag.
-    tags_dir = Path(ocx.env["OCX_HOME"]) / "tags"
-    if tags_dir.exists():
-        shutil.rmtree(tags_dir)
+    # index collection (`$OCX_HOME/index`, `adr_index_indirection.md` A1) to
+    # recreate the "published but not locally cached" state. `--frozen` must
+    # then refuse to resolve the tag.
+    index_home = Path(ocx.env["OCX_HOME"]) / "index"
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     result = _setup_pinned(ocx, unique_repo, "0.9.2", "--frozen", fmt_json=False)
     assert result.returncode == 81, (

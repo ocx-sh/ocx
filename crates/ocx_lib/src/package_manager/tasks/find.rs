@@ -89,7 +89,7 @@ impl PackageManager {
 #[cfg(test)]
 mod tests {
     use crate::{
-        file_structure::{self, BlobStore, FileStructure, TagStore},
+        file_structure::{self, FileStructure, IndexStore},
         oci,
         oci::index::{Index, LocalConfig, LocalIndex},
         package_manager::PackageManager,
@@ -114,8 +114,7 @@ mod tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                snapshot_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             crate::oci::index::ChainMode::Offline,

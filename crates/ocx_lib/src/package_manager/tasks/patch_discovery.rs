@@ -338,8 +338,8 @@ impl PackageManager {
         // At this point we know we're online and patches are configured.
         // The OCI client is available — require_client() will succeed.
         // Individual sub-functions call require_client() at their call sites.
-        let tag_store = &self.file_structure().tags;
-        let blob_store = &self.file_structure().blobs;
+        let file_structure = self.file_structure();
+        let blob_store = &file_structure.blobs;
 
         // Build identifiers for the two descriptor sources:
         // (a) global descriptor — reserved `global` repository at the patch registry
@@ -366,7 +366,7 @@ impl PackageManager {
         let mut pending_tag_writes: Vec<PendingDescriptorCommit> = Vec::new();
 
         for descriptor_id in &descriptor_ids {
-            let tags_path = tag_store.tags(descriptor_id);
+            let tags_path = file_structure.patch_descriptor_path(descriptor_id);
             let state = PatchTagMap::read(&tags_path)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
@@ -1068,8 +1068,7 @@ mod tests {
     fn make_offline_manager(ocx_home: &Path) -> super::super::super::PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         super::super::super::PackageManager::new(fs, index, None, "localhost:5000")
@@ -1095,8 +1094,7 @@ mod tests {
         use crate::oci::ClientBuilder;
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         // Client is Some → is_offline() = false, even though network calls would fail.
@@ -1682,8 +1680,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let fs = FileStructure::with_root(tmp.path().to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            snapshot_store: fs.index.clone(),
         });
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
         assert!(
@@ -1889,13 +1886,13 @@ mod tests {
         // for this companion's patch repo, using the same logic as the discovery code.
         // If discovery were invoked for the companion, it would compute:
         //   patch_descriptor_id(&patches, &companion_id) → Identifier at patches.corp.com
-        // and then write the three-state record at tag_store.tags(descriptor_id).
+        // and then write the three-state record at tag_store.patch_descriptor_path(descriptor_id).
         //
         // We need to know the tag-store path for the companion's patch descriptor.
         // Use the same helper as production code.
         let pkg_specific_descriptor_id = patch_descriptor_id(&patches, &companion_id);
-        let tag_store = &manager.file_structure().tags;
-        let companion_patch_tags_path = tag_store.tags(&pkg_specific_descriptor_id);
+        let tag_store = manager.file_structure();
+        let companion_patch_tags_path = tag_store.patch_descriptor_path(&pkg_specific_descriptor_id);
 
         // Verify the tag-store file is absent before the call.
         assert!(
@@ -1925,7 +1922,7 @@ mod tests {
 
         // Also verify the global descriptor path was not written.
         let global_descriptor_id = global_descriptor_id(&patches);
-        let global_patch_tags_path = tag_store.tags(&global_descriptor_id);
+        let global_patch_tags_path = tag_store.patch_descriptor_path(&global_descriptor_id);
         assert!(
             !global_patch_tags_path.exists(),
             "install_companion must NOT write to the global patch tag store — recursion guard violated"
@@ -1987,9 +1984,9 @@ mod tests {
         // Compute the tag-store paths for the companion's patch repos.
         let pkg_specific_descriptor_id = patch_descriptor_id(&patches, &companion_id);
         let global_descriptor = global_descriptor_id(&patches);
-        let tag_store = &manager.file_structure().tags;
-        let companion_pkg_tags_path = tag_store.tags(&pkg_specific_descriptor_id);
-        let companion_global_tags_path = tag_store.tags(&global_descriptor);
+        let tag_store = manager.file_structure();
+        let companion_pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_descriptor_id);
+        let companion_global_tags_path = tag_store.patch_descriptor_path(&global_descriptor);
 
         // Verify tag-store files are absent before the call.
         assert!(

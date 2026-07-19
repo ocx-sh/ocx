@@ -15,7 +15,7 @@ mod resolve_env_package_root_tests {
 
     use crate::{
         file_structure::FileStructure,
-        file_structure::{BlobStore, TagStore},
+        file_structure::IndexStore,
         oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
     };
 
@@ -23,8 +23,7 @@ mod resolve_env_package_root_tests {
     fn make_test_manager(ocx_home: &Path) -> super::PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(ocx_home.join("tags")),
-            blob_store: BlobStore::new(ocx_home.join("blobs")),
+            snapshot_store: IndexStore::new(ocx_home.join("index")),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         super::PackageManager::new(
@@ -92,18 +91,43 @@ mod install_info_identifier_tests {
     use tempfile::tempdir;
 
     use crate::{
-        file_structure::{BlobStore, FileStructure, TagStore},
+        file_structure::{FileStructure, IndexStore},
         oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
     };
 
     fn make_test_manager(ocx_home: &Path) -> super::PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(ocx_home.join("tags")),
-            blob_store: BlobStore::new(ocx_home.join("blobs")),
+            snapshot_store: IndexStore::new(ocx_home.join("index")),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         super::PackageManager::new(fs, index, None, "localhost:5000")
+    }
+
+    /// The guaranteed-local companion / site-patch lookups must read the
+    /// `--index` / `OCX_INDEX` redirected snapshot home when one is injected,
+    /// and fall back to `$OCX_HOME/index` otherwise.
+    #[test]
+    fn effective_index_snapshot_prefers_redirected_home_over_default() {
+        let ocx_home = tempdir().unwrap();
+        let index_home = tempdir().unwrap();
+        let manager = make_test_manager(ocx_home.path());
+
+        // Default: falls back to the file structure's snapshot home.
+        assert_eq!(
+            manager.effective_index_snapshot().root(),
+            manager.file_structure().index.root(),
+            "without a redirect the lookup reads $OCX_HOME/index"
+        );
+
+        // Redirected: the guaranteed-local lookups follow the redirect.
+        let redirected = IndexStore::new(index_home.path().join("index"));
+        let manager = manager.with_index(redirected.clone());
+        assert_eq!(
+            manager.effective_index_snapshot().root(),
+            redirected.root(),
+            "with a redirect the lookup must read the redirected snapshot home"
+        );
     }
 
     /// Write the minimal set of files that make `install_info_from_package_root`
@@ -307,6 +331,12 @@ pub struct PackageManager {
     /// map, managed payload included, for every other OCI operation).
     /// `None` when offline.
     managed_config_client: Option<oci::Client>,
+    /// The effective index snapshot home (`--index` / `OCX_INDEX` redirected),
+    /// used by the guaranteed-local companion / site-patch lookups so they read
+    /// the SAME store the main `index` resolves through. `None` (the default)
+    /// falls back to `file_structure.index` — correct for tests and for any
+    /// invocation without a redirect. Set by `Context::try_init`.
+    index_snapshot: Option<file_structure::IndexStore>,
 }
 
 impl PackageManager {
@@ -331,7 +361,25 @@ impl PackageManager {
             patches: None,
             patch_snapshot: None,
             managed_config_client: None,
+            index_snapshot: None,
         }
+    }
+
+    /// Inject the effective index collection home (`--index` / `OCX_INDEX`
+    /// redirected). Called from `Context::try_init` so the guaranteed-local
+    /// companion / site-patch lookups read the same store the main `index`
+    /// resolves through, not the default `$OCX_HOME/index`.
+    pub fn with_index(mut self, snapshot: file_structure::IndexStore) -> Self {
+        self.index_snapshot = Some(snapshot);
+        self
+    }
+
+    /// The effective index snapshot home for guaranteed-local lookups: the
+    /// `--index` / `OCX_INDEX` redirect when set, else `file_structure.index`.
+    pub(crate) fn effective_index_snapshot(&self) -> file_structure::IndexStore {
+        self.index_snapshot
+            .clone()
+            .unwrap_or_else(|| self.file_structure.index.clone())
     }
 
     /// Injects the dedicated managed-config-fetch client (built from the
@@ -518,7 +566,19 @@ impl PackageManager {
     /// `Context` already exposes `local_index().clone()`, so the call site
     /// is `context.manager().offline_view(context.local_index().clone())`.
     pub fn offline_view(&self, local_index: oci::index::LocalIndex) -> Self {
-        let offline_index = oci::index::Index::from_chained(local_index, Vec::new(), oci::index::ChainMode::Offline);
+        // Attach the machine-global blob store so a lock-pinned tool's leaf
+        // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
+        // never the local index, A3) resolves offline with zero network: an
+        // `AbsentLeaf` is recovered from the blob store before the (absent)
+        // source chain (`adr_index_indirection.md` A3 step 2 / B2). Without this
+        // the global-toolchain / direnv exporters silently omit every installed
+        // tool whose leaf is not in `o/`.
+        let offline_index = oci::index::Index::from_chained_with_content_store(
+            local_index,
+            Vec::new(),
+            oci::index::ChainMode::Offline,
+            self.file_structure.blobs.clone(),
+        );
         Self {
             file_structure: self.file_structure.clone(),
             index: offline_index,
@@ -551,6 +611,9 @@ impl PackageManager {
             // An offline view has no network route at all — the managed-config
             // fetch client is dropped along with the main client.
             managed_config_client: None,
+            // Carry the effective index-snapshot redirect so an offline view's
+            // guaranteed-local lookups read the same home as the parent.
+            index_snapshot: self.index_snapshot.clone(),
         }
     }
 }

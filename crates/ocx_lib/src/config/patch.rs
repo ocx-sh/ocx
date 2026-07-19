@@ -138,7 +138,8 @@ pub enum PatchConfigError {
     /// The `OCX_PATCHES` value was valid JSON but the `registry` field is
     /// absent or not a string. A value not produced by [`encode_patches`] is
     /// treated as corrupted or externally injected — a hard error matching the
-    /// `MirrorConfigError::NonStringEnvValue` precedent in `env.rs`.
+    /// `MirrorConfigError::NonStringRoleValue`/`InvalidShape` precedent in
+    /// `config/mirror.rs`.
     #[error("OCX_PATCHES 'registry' field is absent or not a string")]
     MissingRegistryField,
 }
@@ -345,8 +346,9 @@ pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigErro
     // A missing or non-string `registry` means the value was not produced by
     // `encode_patches` (i.e. externally injected / corrupted). Treat that as a
     // hard error: silently dropping a forwarded `OCX_PATCHES` would run entry
-    // points without their operator-mandated companion env (C7). Mirrors
-    // `MirrorConfigError::NonStringEnvValue` in `env.rs:573`.
+    // points without their operator-mandated companion env (C7). Mirrors the
+    // `MirrorConfigError::NonStringRoleValue`/`InvalidShape` fail-closed
+    // contract in `config/mirror.rs`.
     let registry = map
         .get("registry")
         .and_then(|v| v.as_str())
@@ -1195,7 +1197,8 @@ mod tests {
     ///
     /// A value not produced by `encode_patches` (externally injected or corrupted)
     /// must be a hard error, not silently dropped to `Ok(None)`. Mirrors the
-    /// `MirrorConfigError::NonStringEnvValue` precedent in the mirrors path.
+    /// `MirrorConfigError::NonStringRoleValue`/`InvalidShape` precedent in the
+    /// mirrors path.
     #[test]
     fn patches_from_env_errors_on_valid_json_missing_registry() {
         let env_guard = crate::test::env::lock();

@@ -7,15 +7,24 @@ use crate::{oci, prelude::*};
 
 pub mod error;
 
+pub use index_sync::IndexSync;
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
-pub use remote_index::Config as RemoteConfig;
-pub use remote_index::Index as RemoteIndex;
+pub use oci_index::OciIndex;
+pub use oci_index::OciIndexConfig;
+pub use ocx_index::{
+    CatalogSyncOutcome, DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig,
+    ReqwestIndexTransport, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
+};
+pub use wire::{CatalogIndex, IndexRoot, Observation, ObservationPlatform, RootTag};
 
 mod chained_index;
 mod index_impl;
+mod index_sync;
 mod local_index;
-mod remote_index;
+mod oci_index;
+mod ocx_index;
+mod wire;
 
 /// Re-export the private `IndexImpl` trait for sibling-module tests.
 ///
@@ -140,9 +149,19 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn from_remote(remote_index: RemoteIndex) -> Self {
+    pub fn from_remote(oci_index: OciIndex) -> Self {
         Self {
-            inner: Box::new(remote_index),
+            inner: Box::new(oci_index),
+        }
+    }
+
+    /// Wrap an [`OcxIndex`] (an `index.ocx.sh`-style static-file source) as a
+    /// chain source. Registered alongside [`OciIndex`] in the default chain
+    /// so a logical `ocx.sh/<ns>/<pkg>` reference the registry does not serve
+    /// resolves through the two-hop index path (`adr_index_indirection.md` F).
+    pub fn from_source(source: OcxIndex) -> Self {
+        Self {
+            inner: Box::new(source),
         }
     }
 
@@ -170,6 +189,24 @@ impl Index {
     pub fn from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode)),
+        }
+    }
+
+    /// Like [`Self::from_chained`], but attaches the machine-global blob store
+    /// (`$OCX_HOME/blobs`) so an `AbsentLeaf` recovers its leaf platform
+    /// manifest from installed content before any source walk
+    /// (`adr_index_indirection.md` A3 step 2 / B2). This is the production
+    /// construction (`context.rs`); the blob store is opt-in here so the
+    /// signature-stable [`Self::from_chained`] keeps every unit-test caller
+    /// unchanged (no blob store → recovery is a no-op).
+    pub fn from_chained_with_content_store(
+        cache: LocalIndex,
+        sources: Vec<Index>,
+        mode: ChainMode,
+        content_store: crate::file_structure::BlobStore,
+    ) -> Self {
+        Self {
+            inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode).with_content_store(content_store)),
         }
     }
 
@@ -242,6 +279,58 @@ impl Index {
     pub async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
         log::trace!("Fetching blob '{blob_ref}'.");
         self.inner.fetch_blob(blob_ref).await
+    }
+
+    /// The physical transport identifier for `identifier`, or `None` when no
+    /// source rewrites it (registry-backed: physical == logical). Transport-only
+    /// (`adr_index_indirection.md` C2) — the pull pipeline fetches layer content
+    /// from this location; storage paths stay keyed on the logical identifier.
+    pub async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        self.inner.physical_reference(identifier).await
+    }
+
+    /// Fetch a published index root document verbatim (bytes + parsed
+    /// [`IndexRoot`](wire::IndexRoot)) so a published source's local copy can be
+    /// grown byte-for-byte (copy-a-mirror, `adr_index_indirection.md` A2). A
+    /// derived source returns `None` — its root is OCX-authored, not copied. See
+    /// [`index_impl::IndexImpl::fetch_root_document`].
+    pub async fn fetch_root_document(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, wire::IndexRoot)>> {
+        self.inner.fetch_root_document(identifier).await
+    }
+
+    /// Whether a source in this index is the authoritative resolver for
+    /// `identifier`'s namespace (its refusal must not be bypassed).
+    pub fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
+        self.inner.is_authoritative_for(identifier)
+    }
+
+    /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`
+    /// for an `index.ocx.sh`-style source, `Derived` for everything else. Cheap,
+    /// synchronous, no I/O. [`ChainedIndex`](chained_index::ChainedIndex) uses
+    /// this to pick the local dispatch-object read/recovery routing.
+    ///
+    /// `oci::index`-internal (no `pub`, default visibility reaches every
+    /// descendant module including `chained_index`) — `SourceKind` itself is
+    /// `pub(super)` inside `local_index`, so this stays unexported at the
+    /// crate boundary.
+    fn source_kind(&self) -> local_index::SourceKind {
+        self.inner.source_kind()
+    }
+
+    /// Fetch the verbatim manifest bytes alongside the parsed manifest and its
+    /// digest — the seam [`LocalIndex::persist_dispatch`] uses to write a
+    /// self-contained, verifiable dispatch object (`adr_index_indirection.md` A3).
+    ///
+    /// Returns `Ok(None)` when the tag/manifest is absent.
+    pub async fn fetch_manifest_raw_bytes(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
+        log::trace!("Fetching raw manifest bytes for identifier '{}'.", identifier);
+        self.inner.fetch_manifest_raw_bytes(identifier).await
     }
 
     pub async fn fetch_candidates(

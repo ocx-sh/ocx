@@ -110,8 +110,6 @@ impl BlobStore {
     /// file. F1 (cross-process read of locked blob data) cannot recur because
     /// the lock has been removed entirely, not relocated.
     pub(crate) async fn write_blob(&self, registry: &str, digest: &oci::Digest, bytes: &[u8]) -> crate::Result<()> {
-        #[cfg(test)]
-        WRITE_BLOB_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let target = self.data(registry, digest);
         // Check-first: idempotent fast path (content-addressed invariant).
         // A zero-byte file is a crash artifact (kill-9 recovery window); treat
@@ -119,34 +117,81 @@ impl BlobStore {
         if tokio::fs::metadata(&target).await.map(|m| m.len() > 0).unwrap_or(false) {
             return Ok(());
         }
+        self.persist_bytes(&target, bytes).await
+    }
+
+    /// Unconditionally replaces the CAS `data` file for `(registry, digest)`
+    /// via the same tempfile + atomic-rename publish [`Self::write_blob`]
+    /// uses, but WITHOUT its check-first existence fast path: a fresh
+    /// tempfile is always written and renamed over whatever is at `target` —
+    /// corrupt bytes or nothing — so there is no absence window and no
+    /// separate removal step that could itself fail and leave the corrupt
+    /// bytes in place.
+    ///
+    /// Caller MUST have verified `digest == sha256(bytes)` upstream, same
+    /// contract as [`Self::write_blob`].
+    ///
+    /// Exists for a caller that has already discovered a present-but-corrupt
+    /// entry (a digest-verify failure on read) and wants to heal it in place:
+    /// `write_blob`'s check-first fast path would short-circuit on the
+    /// still-present tampered file and never actually replace it (this was a
+    /// real regression caught in review — a remove-then-`write_blob` two-step
+    /// left a failure window where a removal error left the corrupt bytes in
+    /// place while `write_blob`'s own fast path would then re-accept them). A
+    /// single atomic replace has no such window.
+    pub(crate) async fn replace_blob(&self, registry: &str, digest: &oci::Digest, bytes: &[u8]) -> crate::Result<()> {
+        let target = self.data(registry, digest);
+        self.persist_bytes(&target, bytes).await
+    }
+
+    /// Shared tempfile + atomic-rename publish body for [`Self::write_blob`]
+    /// (behind its check-first fast path) and [`Self::replace_blob`]
+    /// (unconditional) — one write body, no copy-pasted logic. Increments
+    /// [`WRITE_BLOB_CALL_COUNT`] (test-only) once per genuine write attempt,
+    /// whichever public entry point triggered it.
+    async fn persist_bytes(&self, target: &Path, bytes: &[u8]) -> crate::Result<()> {
+        #[cfg(test)]
+        WRITE_BLOB_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let parent = target
             .parent()
-            .ok_or_else(|| crate::error::file_error(&target, std::io::Error::other("blob data path has no parent")))?
+            .ok_or_else(|| crate::error::file_error(target, std::io::Error::other("blob data path has no parent")))?
             .to_path_buf();
         tokio::fs::create_dir_all(&parent)
             .await
             .map_err(|e| crate::error::file_error(&parent, e))?;
         let bytes_owned = bytes.to_vec();
-        let target_for_blocking = target.clone();
+        let target_for_blocking = target.to_path_buf();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
             std::io::Write::write_all(&mut tmp, &bytes_owned)?;
             tmp.as_file().sync_data()?;
             match crate::utility::fs::persist_temp_file(tmp, &target_for_blocking) {
                 Ok(()) => Ok(()),
-                // Content-addressed idempotency: the CAS path is immutable
-                // (same digest ⇒ same bytes), so a concurrent writer that
-                // published it during our retry window produced byte-equivalent
-                // content — an existing target IS success. This re-check is
-                // valid ONLY because the path is content-addressed; it is
-                // deliberately NOT baked into the generic `persist_temp_file`.
-                Err(_) if target_for_blocking.exists() => Ok(()),
-                Err(err) => Err(err),
+                // A failed persist is success ONLY when the target now holds the
+                // exact bytes we meant to publish. `write_blob` reaches here past
+                // its check-first fast path (target absent/zero-byte) and
+                // `replace_blob` reaches it unconditionally to heal a
+                // present-but-corrupt entry — in the heal case the corrupt bytes
+                // are still on disk after a failed rename, so a bare `exists()`
+                // check would report success while leaving corruption behind.
+                // Re-read and byte-compare against the content we wrote: a
+                // genuine concurrent CAS writer published byte-equivalent content
+                // (same digest ⇒ same bytes) and matches; corrupt or absent
+                // content propagates the original error. Byte-compare rather than
+                // re-hash because `persist_bytes` has the intended bytes in hand
+                // but no digest — the check is equivalent under content
+                // addressing and needs no extra parameter. This re-check is valid
+                // ONLY because the path is content-addressed; it is deliberately
+                // NOT baked into the generic `persist_temp_file`.
+                Err(err) => match std::fs::read(&target_for_blocking) {
+                    Ok(current) if current == bytes_owned => Ok(()),
+                    _ => Err(err),
+                },
             }
         })
         .await
-        .map_err(|join_err| crate::error::file_error(&target, std::io::Error::other(join_err)))?
-        .map_err(|io_err| crate::error::file_error(&target, io_err))?;
+        .map_err(|join_err| crate::error::file_error(target, std::io::Error::other(join_err)))?
+        .map_err(|io_err| crate::error::file_error(target, io_err))?;
         Ok(())
     }
 
@@ -171,6 +216,28 @@ impl BlobStore {
         match tokio::fs::read(&target).await {
             Ok(b) => Ok(Some(b)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(crate::error::file_error(&target, e)),
+        }
+    }
+
+    /// Removes the CAS `data` file for `(registry, digest)`, tolerating an
+    /// already-absent target (`Ok(())` when the file does not exist).
+    ///
+    /// A present-but-corrupt entry (bytes that no longer hash to `digest`) must
+    /// be removed before a re-fetch: [`Self::write_blob`]'s check-first fast
+    /// path would otherwise re-accept the corrupt file untouched. Callers that
+    /// discover corruption on a digest-verified read heal by remove-then-refetch
+    /// — the chain's leaf recovery ([`ChainedIndex::recover_absent_leaf`](crate::oci::index))
+    /// and the install-staging shortcut (`stage_and_link_chain_blobs`).
+    ///
+    /// Removes only the `data` file — the write path stores no sibling `digest`
+    /// file, and the next write repopulates `data` in place; an orphaned shard
+    /// directory is reaped by GC.
+    pub(crate) async fn remove_blob(&self, registry: &str, digest: &oci::Digest) -> crate::Result<()> {
+        let target = self.data(registry, digest);
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(crate::error::file_error(&target, e)),
         }
     }
@@ -478,6 +545,36 @@ mod tests {
         assert!(
             !lock_file.exists(),
             "write_blob must not create a data.lock sidecar; BlobGuard has been deleted"
+        );
+    }
+
+    /// `replace_blob` heals a present-but-corrupt entry, but a FAILED persist
+    /// must NOT report success while the corrupt bytes stay on disk (CWE-345).
+    /// The target `data` path is pre-seeded as a non-empty directory: renaming
+    /// the tempfile over it fails deterministically and the re-read byte-compare
+    /// sees no match — the old `Err(_) if target.exists() => Ok(())` arm would
+    /// have masked this heal failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replace_blob_propagates_a_failed_heal_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+
+        // Pre-seed the exact `data` path as a NON-EMPTY directory so a file→dir
+        // rename fails while the target still "exists".
+        let data_path = store.data("example.com", &d);
+        std::fs::create_dir_all(&data_path).unwrap();
+        std::fs::write(data_path.join("occupant"), b"blocks the rename").unwrap();
+
+        let result = store.replace_blob("example.com", &d, b"healed content").await;
+        assert!(
+            result.is_err(),
+            "a failed heal persist must propagate an error, not report success; got {result:?}"
+        );
+        assert!(
+            data_path.is_dir(),
+            "the corrupt target must be left untouched, never silently 'healed'"
         );
     }
 

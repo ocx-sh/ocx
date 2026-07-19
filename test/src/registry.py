@@ -225,6 +225,65 @@ def fetch_blob(registry: str, repo: str, digest: str) -> bytes:
         return resp.read()
 
 
+def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) -> None:
+    """Copies a manifest chain (image index -> child manifest -> config +
+    layer blobs) from ``from_repo`` to ``to_repo`` verbatim, so the
+    destination serves byte-identical content under the exact same digests.
+
+    Used to simulate an index `repository` pointer migrating to a new
+    physical host while the content it names stays put (same digests, new
+    location) — the scenario a public-index `repository`-migration must
+    survive without breaking a committed lock.
+    """
+    import json
+
+    import requests
+
+    def get_manifest(ref_: str) -> tuple[bytes, str]:
+        for media_type in (
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.oci.image.manifest.v1+json",
+        ):
+            response = requests.get(
+                f"http://{registry}/v2/{from_repo}/manifests/{ref_}",
+                headers={"Accept": media_type},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                return response.content, response.headers.get("Content-Type", media_type)
+        raise RuntimeError(f"could not fetch manifest {from_repo}:{ref_}")
+
+    def put_manifest(ref_: str, body: bytes, content_type: str) -> None:
+        response = requests.put(
+            f"http://{registry}/v2/{to_repo}/manifests/{ref_}",
+            data=body,
+            headers={"Content-Type": content_type},
+            timeout=10,
+        )
+        response.raise_for_status()
+
+    def copy_blob(digest: str) -> None:
+        head = requests.head(f"http://{registry}/v2/{to_repo}/blobs/{digest}", timeout=10)
+        if head.status_code == 200:
+            return
+        _push_blob(registry, to_repo, fetch_blob(registry, from_repo, digest))
+
+    # Leaf-first: a registry may reject an index PUT that references child
+    # manifests it cannot find yet, so every blob and child manifest lands in
+    # `to_repo` before the top-level index does.
+    index_body, index_content_type = get_manifest(ref)
+    index_doc = json.loads(index_body)
+    for entry in index_doc.get("manifests", []):
+        child_digest = entry["digest"]
+        child_body, child_content_type = get_manifest(child_digest)
+        child_doc = json.loads(child_body)
+        copy_blob(child_doc["config"]["digest"])
+        for layer in child_doc.get("layers", []):
+            copy_blob(layer["digest"])
+        put_manifest(child_digest, child_body, child_content_type)
+    put_manifest(ref, index_body, index_content_type)
+
+
 # ---------------------------------------------------------------------------
 # Managed-config package push (raw registry HTTP, no oras dependency)
 # ---------------------------------------------------------------------------

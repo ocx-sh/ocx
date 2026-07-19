@@ -337,7 +337,7 @@ impl ManagedConfig {
 ///
 /// Returns `None` when no source is configured (no managed tier active) — an
 /// **empty** source string is a hard error (same footgun as an empty
-/// `[patches].registry` / `[mirrors."<host>"].url`).
+/// `[patches].registry` / a `[mirrors."<host>"]` `registry` or `index` field).
 ///
 /// # Errors
 ///

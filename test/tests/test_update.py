@@ -6,7 +6,7 @@
 resolution is against the LIVE registry: a declared tag re-resolves to
 whatever it points at right now, with no prior ``ocx index update`` needed.
 ``ocx update`` writes ONLY ``ocx.lock`` — it never writes a local index tag
-pointer under ``$OCX_HOME/tags/``. ``--remote`` is accepted but redundant
+pointer (a root document under ``$OCX_HOME/index/``). ``--remote`` is accepted but redundant
 (already the default). ``--frozen`` restricts resolution to the local
 snapshot only — a tag never captured by a prior ``ocx index update`` is
 unresolvable under ``--frozen`` and exits 81 (PolicyBlocked); ``--offline``
@@ -96,17 +96,31 @@ def _read_lock_text(project_dir: Path) -> str:
 
 
 def _tags_snapshot(ocx: OcxRunner) -> list[tuple[str, bytes]]:
-    """Return a sorted ``(relative_path, bytes)`` snapshot of every tag
-    pointer file under ``$OCX_HOME/tags/`` — ``[]`` when the directory is
+    """Return a sorted ``(relative_path, bytes)`` snapshot of every root
+    document (tag pointer, ``adr_index_indirection.md`` A2) under the local
+    index collection (``$OCX_HOME/index/``) — ``[]`` when the directory is
     absent. Used to prove a command never writes a local index tag pointer.
+
+    The collection also holds the verbatim dispatch-object CAS
+    (``p/<repo>/o/<algo>/<hex>.json``) and, for a published source, a
+    ``c/index.json`` catalog — both `.json`-suffixed siblings/cousins of a
+    root document (``p/<repo>.json``) post-A2, unlike the old extensionless
+    object cache the ``*.json`` glob alone used to exclude for free. Filter
+    out any path with an ``o`` or ``c`` path segment so this snapshot stays
+    scoped to tag pointers exactly as before the wire-grammar rework, even
+    though object-cache / catalog writes underneath the same root are fine
+    (the analogue of the old "blob additions are fine" carve-out).
     """
-    tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
+    tags_root = Path(ocx.env["OCX_HOME"]) / "index"
     if not tags_root.exists():
         return []
-    return sorted(
-        (str(p.relative_to(tags_root)), p.read_bytes())
-        for p in tags_root.rglob("*.json")
-    )
+    snapshot = []
+    for p in tags_root.rglob("*.json"):
+        rel = p.relative_to(tags_root)
+        if {"o", "c"} & set(rel.parts):
+            continue
+        snapshot.append((str(rel), p.read_bytes()))
+    return sorted(snapshot)
 
 
 # Lock shape: each ``[[tool]]`` carries a bare ``repository`` plus a
@@ -306,9 +320,11 @@ def test_update_does_not_write_local_tag_pointers(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx update`` writes ONLY ``ocx.lock`` — it must never write a local
-    index tag pointer under ``$OCX_HOME/tags/``, even when the update
-    actually performs a live re-resolution that advances the lock. Blob
-    additions under ``blobs/`` are fine; only ``tags/`` must stay untouched.
+    index tag pointer (a root document), even when the update actually
+    performs a live re-resolution that advances the lock. Dispatch-object
+    additions under the index collection's ``o/`` CAS are fine (the analogue
+    of the old "blob additions are fine" carve-out); only the root document
+    must stay untouched.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_no_tag_write"
@@ -344,7 +360,7 @@ tool = "{ocx.registry}/{repo}:latest"
 
     after = _tags_snapshot(ocx)
     assert before == after, (
-        "ocx update must never write $OCX_HOME/tags/ — it writes only "
+        "ocx update must never write a local root-document tag pointer — it writes only "
         f"ocx.lock. Before: {[n for n, _ in before]}, after: {[n for n, _ in after]}"
     )
 
