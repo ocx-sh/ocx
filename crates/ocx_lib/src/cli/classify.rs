@@ -92,6 +92,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::layer_layout::LayerLayoutError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
+    use crate::package::bin_scan::BinScanError;
     use crate::package::dependency_pinning::DependencyPinningError;
     use crate::package::error::Error as PackageError;
     use crate::package::metadata::authoring::AuthoringError;
@@ -144,6 +145,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PackageError);
     try_downcast!(AuthoringError);
     try_downcast!(DependencyPinningError);
+    try_downcast!(BinScanError);
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
@@ -765,6 +767,51 @@ mod tests {
             classify(wrapped),
             ExitCode::UsageError,
             "a symlinked-intermediate-dir refusal must classify as UsageError (64), not IoError (74)"
+        );
+    }
+
+    // ── BinScanError registration (regression) ───────────────────────────────
+
+    /// Regression: `BinScanError` (the `--bin-scan` Verify-mode diff error)
+    /// was never registered in the `try_classify` ladder, so `ocx package
+    /// create --bin-scan` printed the right message but exited 1 (Failure)
+    /// instead of 65 (DataError). The type itself always implemented
+    /// `ClassifyExitCode` correctly — the ladder just never downcast to it.
+    #[test]
+    fn bin_scan_error_maps_to_data_error() {
+        use crate::package::bin_scan::BinScanError;
+        use crate::package::metadata::binary::BinaryName;
+
+        let name = BinaryName::try_from("cmake").unwrap();
+        let not_executable = BinScanError::DeclaredNotExecutable {
+            name: name.clone(),
+            path: PathBuf::from("/pkg/bin/cmake"),
+        };
+        assert_eq!(classify(not_executable), ExitCode::DataError);
+
+        let undeclared = BinScanError::UndeclaredBinary {
+            name,
+            path: PathBuf::from("/pkg/bin/ninja"),
+        };
+        assert_eq!(classify(undeclared), ExitCode::DataError);
+    }
+
+    /// `BinScanError::Scan` itself returns `None` from `classify()` (see
+    /// `bin_scan.rs`'s `ClassifyExitCode` impl) so the chain walker continues
+    /// via `source()` into the wrapped `crate::Error`. This test wraps a
+    /// cause with a known, distinct classification (`OfflineMode` ->
+    /// `PolicyBlocked`, not `DataError`/`Failure`) and asserts the *inner*
+    /// cause's exit code wins — locking in the delegation contract rather
+    /// than a hardcoded fallback to `Failure` (1).
+    #[test]
+    fn bin_scan_error_scan_variant_delegates_to_inner_cause() {
+        use crate::package::bin_scan::BinScanError;
+
+        let err = BinScanError::Scan(crate::Error::OfflineMode);
+        assert_eq!(
+            classify(err),
+            ExitCode::PolicyBlocked,
+            "BinScanError::Scan must delegate classification to its inner crate::Error cause"
         );
     }
 }

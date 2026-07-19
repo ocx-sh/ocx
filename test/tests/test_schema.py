@@ -179,6 +179,70 @@ def test_schema_entrypoints_propertyNames_has_slug_pattern() -> None:
 
 
 # ---------------------------------------------------------------------------
+# adr_declared_binaries_metadata.md §1 — `binaries` schema surface
+# ---------------------------------------------------------------------------
+
+
+def test_schema_includes_binaries_as_additive_optional_property() -> None:
+    """Bundle schema must contain `binaries` as a non-required property.
+
+    ADR §1: `binaries` is `Option<Binaries>` with
+    `skip_serializing_if = "Option::is_none"` — absent means undeclared (a
+    distinct, valid wire state from a declared empty array) — so the JSON
+    Schema must NOT list it in the `required` array.
+    """
+    schema = load_schema()
+    bundle = find_bundle_definition(schema)
+
+    props = bundle.get("properties", {})
+    assert "binaries" in props, (
+        f"Bundle schema must include 'binaries' property. "
+        f"Found properties: {list(props.keys())}"
+    )
+
+    required = bundle.get("required", [])
+    assert "binaries" not in required, (
+        "binaries must NOT be in required[] (undeclared is a distinct, valid wire state)"
+    )
+
+
+def test_schema_binaries_is_array_of_unique_strings() -> None:
+    """`binaries` in the schema must be `array<string>` with `uniqueItems`.
+
+    Per ADR §1, the write contract is always a plain array of bare strings —
+    the read-side `string | object` leniency (`BinaryElement`) is an
+    internal Rust affordance and never appears in the published schema.
+    """
+    schema = load_schema()
+    bundle = find_bundle_definition(schema)
+    bin_schema = bundle["properties"]["binaries"]
+
+    # `Option<Binaries>` renders as `anyOf: [<ref>, {"type": "null"}]` —
+    # unwrap to the non-null branch before resolving the $ref.
+    if "anyOf" in bin_schema:
+        non_null = [branch for branch in bin_schema["anyOf"] if branch.get("type") != "null"]
+        assert len(non_null) == 1, (
+            f"expected exactly one non-null anyOf branch for binaries, got: {bin_schema}"
+        )
+        bin_schema = non_null[0]
+
+    if "$ref" in bin_schema:
+        ref_key = bin_schema["$ref"].split("/")[-1]
+        defs = schema.get("$defs", schema.get("definitions", {}))
+        bin_schema = defs.get(ref_key, bin_schema)
+
+    assert bin_schema.get("type") == "array", (
+        f"binaries must have type=array in schema, got: {bin_schema}"
+    )
+    assert bin_schema.get("items", {}).get("type") == "string", (
+        f"binaries items must be type=string, got: {bin_schema}"
+    )
+    assert bin_schema.get("uniqueItems") is True, (
+        f"binaries must declare uniqueItems=true, got: {bin_schema}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3.10 Round-trip: metadata JSON with omitted / empty / populated entrypoints
 # ---------------------------------------------------------------------------
 

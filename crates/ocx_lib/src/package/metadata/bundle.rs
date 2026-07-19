@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-use super::{dependency::Dependencies, entrypoint::Entrypoints, env};
+use super::{binary::Binaries, dependency::Dependencies, entrypoint::Entrypoints, env};
 
 /// Known versions of the bundle metadata format.
 ///
@@ -66,6 +66,24 @@ pub struct Bundle {
     /// Absent or empty means no launchers are generated (backward-compat default).
     #[serde(skip_serializing_if = "Entrypoints::is_empty", default)]
     pub entrypoints: Entrypoints,
+
+    /// Publisher-declared, unverified claim of interface-surface executable
+    /// names exposed on `PATH` by this package. `None` means undeclared
+    /// (predates this field); `Some([])` means the publisher asserts zero
+    /// interface binaries. Deliberately distinct wire states — see
+    /// `adr_declared_binaries_metadata.md` §1. NOT the `Entrypoints`/`Env`/
+    /// `Dependencies` pattern (`X::is_empty` skip) — `None` and empty carry
+    /// different meaning here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binaries: Option<Binaries>,
+}
+
+impl Bundle {
+    /// The publisher-declared interface-binaries claim, or `None` if
+    /// undeclared.
+    pub fn binaries(&self) -> Option<&Binaries> {
+        self.binaries.as_ref()
+    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use serde::{Serialize, ser::SerializeStruct};
 use ocx_lib::{
     cli::{Annotation, DataInterface, Theme, TreeItem, human_bytes},
     oci,
-    package::metadata::{Metadata, env::modifier::ModifierKind, visibility::Visibility},
+    package::metadata::{Binaries, Metadata, env::modifier::ModifierKind, visibility::Visibility},
     package_manager::{InspectResult, ResolvedChain},
 };
 
@@ -383,7 +383,21 @@ fn metadata_node(metadata: &Metadata) -> Node {
         children.push(Node::branch("entrypoints", names));
     }
 
+    // `None` = undeclared (omit the node); `Some(empty)` = publisher asserts
+    // zero interface executables (render explicitly, distinct from absence).
+    if let Some(binaries) = metadata.binaries() {
+        children.push(binaries_node(binaries));
+    }
+
     Node::branch("metadata", children)
+}
+
+fn binaries_node(binaries: &Binaries) -> Node {
+    if binaries.is_empty() {
+        return Node::leaf("binaries (none declared)");
+    }
+    let names = binaries.iter().map(|name| Node::leaf(name.to_string())).collect();
+    Node::branch("binaries", names)
 }
 
 fn candidates_node(candidates: &[CandidateOut]) -> Node {
@@ -506,5 +520,74 @@ impl Printable for PackageInspects {
         for (_, inspect) in &self.entries {
             inspect.print_plain(data);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use ocx_lib::package::metadata::{
+        BinaryName, Entrypoints,
+        bundle::{Bundle, Version},
+        dependency::Dependencies,
+        env::Env,
+    };
+
+    use super::*;
+
+    fn bundle_metadata(binaries: Option<Binaries>) -> Metadata {
+        Metadata::Bundle(Bundle {
+            binaries,
+            version: Version::V1,
+            strip_components: None,
+            env: Env::default(),
+            dependencies: Dependencies::default(),
+            entrypoints: Entrypoints::default(),
+        })
+    }
+
+    #[test]
+    fn metadata_node_omits_binaries_when_undeclared() {
+        let metadata = bundle_metadata(None);
+        let node = metadata_node(&metadata);
+        assert!(
+            !node
+                .children
+                .iter()
+                .any(|child| child.label == "binaries" || child.label == "binaries (none declared)"),
+            "undeclared binaries must not render a node"
+        );
+    }
+
+    #[test]
+    fn metadata_node_renders_declared_empty_binaries_as_leaf() {
+        let binaries = Binaries::try_from(BTreeSet::new()).expect("empty set is valid");
+        let metadata = bundle_metadata(Some(binaries));
+        let node = metadata_node(&metadata);
+        let leaf = node
+            .children
+            .iter()
+            .find(|child| child.label == "binaries (none declared)")
+            .expect("declared-empty binaries renders as a single leaf");
+        assert!(leaf.children.is_empty());
+    }
+
+    #[test]
+    fn metadata_node_lists_declared_binary_names() {
+        let names: BTreeSet<BinaryName> = ["ctest", "cmake"]
+            .into_iter()
+            .map(|name| BinaryName::try_from(name).expect("valid binary name"))
+            .collect();
+        let binaries = Binaries::try_from(names).expect("no case-fold collisions");
+        let metadata = bundle_metadata(Some(binaries));
+        let node = metadata_node(&metadata);
+        let branch = node
+            .children
+            .iter()
+            .find(|child| child.label == "binaries")
+            .expect("declared binaries renders as a branch");
+        let labels: Vec<_> = branch.children.iter().map(|child| child.label.clone()).collect();
+        assert_eq!(labels, vec!["cmake", "ctest"], "names render in sorted order");
     }
 }

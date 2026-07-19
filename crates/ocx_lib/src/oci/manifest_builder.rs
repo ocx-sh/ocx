@@ -221,6 +221,7 @@ mod tests {
 
     fn fixture_metadata() -> Metadata {
         Metadata::Bundle(Bundle {
+            binaries: None,
             version: Version::V1,
             strip_components: None,
             env: Env::default(),

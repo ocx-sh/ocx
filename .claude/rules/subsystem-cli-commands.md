@@ -68,7 +68,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
 | `update [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock against the LIVE registry by default (update-family verb: writes `ocx.lock` only, never tag pointers; `--remote` redundant-but-accepted; `--frozen` caps at snapshot, unknown tag exit 81); whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64). ADR `adr_toolchain_update_family.md` | `-g/--group`, `--check`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
-| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
+| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (never in `--shell`/`--ci` output) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 
 ### OCI-Tier Commands (`ocx package`)
@@ -80,9 +80,9 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package select PKGS...` | Set `current` symlink | `-p` |
 | `package deselect PKGS...` | Remove `current` symlink | — |
 | `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self` |
-| `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self` |
+| `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (`{name, package}`, `package` = canonical resolved identifier, possibly tagless digest-pinned; never in `--shell`/`--ci` output; plain mode gets a hint line) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self` |
 | `package pull PKGS...` | Download to object store only | `-p` |
-| `package create PATH` | Bundle directory into archive | `-o`, `-m`, `-l`, `-j`, `--force` |
+| `package create PATH` | Bundle directory into archive; `--bin-scan`/`--no-bin-scan` fill or verify the `binaries` claim | `-o`, `-m`, `-l`, `-j`, `--force`, `--bin-scan`/`--no-bin-scan` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp` |
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |

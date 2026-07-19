@@ -29,6 +29,7 @@ from uuid import uuid4
 import pytest
 
 from src.helpers import make_package
+from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
 
@@ -73,11 +74,21 @@ def _make_project(
     tmp_path: Path,
     label: str,
     bin_name: str = "tool",
+    *,
+    no_bin_scan: bool = False,
 ) -> tuple[Path, str]:
-    """Publish a package, create a locked + pulled project, return (project_dir, fq)."""
+    """Publish a package, create a locked + pulled project, return (project_dir, fq).
+
+    ``no_bin_scan``: pass ``--no-bin-scan`` to ``ocx package create`` so the
+    default Auto-mode scan never fills a `binaries` claim from `bin_name`'s
+    interface-visible executable — for fixtures that must stay genuinely
+    claim-less.
+    """
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name])
+    make_package(
+        ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name], no_bin_scan=no_bin_scan
+    )
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / f"proj_{label}"
@@ -1409,3 +1420,180 @@ def test_env_pull_flags_last_wins(ocx: OcxRunner, tmp_path: Path) -> None:
     assert "PATH" in eager.stdout, (
         f"--no-pull --pull must materialise\nstdout:\n{eager.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# adr_declared_binaries_metadata.md §4 — `binaries`/`entrypoints` JSON arrays
+# ---------------------------------------------------------------------------
+
+
+def _make_project_with_binaries(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    label: str,
+    *,
+    binaries: list[str],
+    bin_name: str = "tool",
+    dependencies: list[dict] | None = None,
+):
+    """Like `_make_project` but declares a `binaries` claim (and optionally
+    dependencies) on the tool package before locking + pulling the project."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_{label}"
+    pkg = make_package(
+        ocx,
+        repo,
+        "1.0.0",
+        tmp_path,
+        new=True,
+        cascade=False,
+        bins=[bin_name],
+        binaries=binaries,
+        dependencies=dependencies,
+    )
+
+    project = tmp_path / f"proj_{label}"
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\n{bin_name} = "{pkg.fq}"\n')
+
+    assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    return project, pkg
+
+
+def test_env_json_binaries_attribution_for_transitive_interface_dep(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx --format json env``'s ``binaries``/``entrypoints`` arrays include
+    a transitively admitted interface dependency's claims, attributed to the
+    dependency — not just the project's own root tool (ADR §4 Decision A:
+    admitted-set closure via ``compose()``, not roots-only)."""
+    dep = make_package(
+        ocx,
+        f"tenvbin_dep_{uuid4().hex[:8]}",
+        "1.0.0",
+        tmp_path,
+        bins=["depbin"],
+        binaries=["depbin"],
+        cascade=False,
+    )
+    dep_digest = fetch_platform_manifest_digest(ocx.registry, dep.repo, dep.tag)
+    project, root = _make_project_with_binaries(
+        ocx,
+        tmp_path,
+        "rootcl",
+        binaries=["roottool"],
+        bin_name="roottool",
+        dependencies=[{"identifier": dep.fq, "visibility": "interface"}],
+    )
+
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "env"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --format json env must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    data = json.loads(result.stdout)
+
+    names = {b["name"]: b["package"] for b in data["binaries"]}
+    # The root resolves from the project lock into a tagless pinned form
+    # (`repo@sha256:...`), unlike the dep's tag-bearing `repo:tag@sha256:...`
+    # — both are canonical identifiers, so assert repo prefix + digest
+    # presence rather than the exact tag shape.
+    root_name = names.get("roottool", "")
+    assert root_name.startswith(f"{ocx.registry}/{root.repo}"), (
+        f"root's own claim must attribute to the root package; got: {names}"
+    )
+    assert "@sha256:" in root_name, (
+        f"root's own claim must carry a resolved digest; got: {names}"
+    )
+    assert names.get("depbin", "").endswith(f"@{dep_digest}"), (
+        f"transitive interface dep's claim must attribute to the dep, not the root; got: {names}"
+    )
+    assert data["entrypoints"] == [], data["entrypoints"]
+
+
+def test_env_shell_output_excludes_binaries_and_entrypoints(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--shell`` stays the eval-safe channel only — a declared ``binaries``
+    claim never leaks into it (ADR §4: both sinks return before ``EnvVars``
+    is even constructed)."""
+    project, _pkg = _make_project_with_binaries(
+        ocx, tmp_path, "shellnoleak", binaries=["roottool"], bin_name="roottool"
+    )
+
+    result = _run(ocx, project, "env", "--shell=bash")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "export" in result.stdout, result.stdout
+    assert "binaries" not in result.stdout.lower(), result.stdout
+    assert "roottool" not in result.stdout, result.stdout
+
+
+def test_env_ci_github_output_excludes_binaries_and_entrypoints(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--ci=github`` stays a CI persistence sink only — a declared ``binaries``
+    claim never leaks into the ``$GITHUB_ENV`` / ``$GITHUB_PATH`` sink files
+    (ADR §4: both sinks return before ``EnvVars`` is even constructed)."""
+    project, _pkg = _make_project_with_binaries(
+        ocx, tmp_path, "cighnoleak", binaries=["roottool"], bin_name="roottool"
+    )
+
+    github_path = tmp_path / "cigh_github_path"
+    github_env = tmp_path / "cigh_github_env"
+    github_path.write_text("")
+    github_env.write_text("")
+
+    result = _run(
+        ocx,
+        project,
+        "env",
+        "--ci=github",
+        extra_env={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_PATH": str(github_path),
+            "GITHUB_ENV": str(github_env),
+        },
+    )
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    sink_text = github_path.read_text() + github_env.read_text()
+    assert "binaries" not in sink_text.lower(), sink_text
+    assert "roottool" not in sink_text, sink_text
+
+
+def test_env_plain_shows_hint_when_binaries_present(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Decision C: the plain ``entries`` table stays byte-stable; a hint line
+    below it announces binary/entrypoint availability when the admitted set
+    carries any claims."""
+    project, _pkg = _make_project_with_binaries(
+        ocx, tmp_path, "planthint", binaries=["roottool"], bin_name="roottool"
+    )
+
+    result = _run(ocx, project, "env")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "roottool" in result.stdout, result.stdout
+    assert "available" in result.stdout.lower(), result.stdout
+
+
+def test_env_plain_omits_hint_without_claims(ocx: OcxRunner, tmp_path: Path) -> None:
+    """No hint line renders when the admitted set carries no binaries or
+    entrypoints (the common case, unaffected by this feature).
+
+    `--no-bin-scan` keeps the claim genuinely absent despite an
+    interface-visible executable in `bin/` — Auto mode (the default) would
+    otherwise fill it, which is exactly the behavior under test elsewhere.
+    """
+    project, _fq = _make_project(ocx, tmp_path, "planthintless", no_bin_scan=True)
+
+    result = _run(ocx, project, "env")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "available" not in result.stdout.lower(), result.stdout

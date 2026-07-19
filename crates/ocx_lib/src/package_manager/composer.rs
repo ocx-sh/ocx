@@ -12,6 +12,11 @@
 //! `has_private()` (`--self`). No recursive walk at compose time.
 //!
 //! See `adr_two_env_composition.md` for the full design rationale.
+//!
+//! `ComposeOutput` also carries `admitted_binaries` / `admitted_entrypoints`
+//! — the admitted set's declared-name claim attribution consumed by `ocx
+//! env` / `ocx package env`'s `binaries` / `entrypoints` JSON arrays. See
+//! `adr_declared_binaries_metadata.md` §4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -26,6 +31,7 @@ use crate::{
         install_info::InstallInfo,
         metadata::{
             self,
+            binary::BinaryName,
             dependency::DependencyName,
             entrypoint::EntrypointName,
             env::{dep_context::DependencyContext, entry::Entry, modifier::ModifierKind, resolver::EnvResolver},
@@ -69,6 +75,22 @@ pub struct ComposeOutput {
     /// dedup is applied: a shared dep appears only once, at its first-seen
     /// position across all roots.
     pub admitted: Vec<oci::PinnedIdentifier>,
+
+    /// Declared `binaries` claims contributed by each admitted identifier.
+    ///
+    /// One entry per (identifier, claimed name) pair, restricted to packages
+    /// that passed the same surface gate as `admitted` (root packages
+    /// unconditionally; deps iff `has_interface()`/`has_private()`). Consumed
+    /// by `ocx env` / `ocx package env`'s `binaries` JSON array. See
+    /// `adr_declared_binaries_metadata.md` §4 Decision A.
+    pub admitted_binaries: Vec<(oci::PinnedIdentifier, BinaryName)>,
+
+    /// Declared `entrypoints` claims contributed by each admitted identifier.
+    ///
+    /// Same shape and admission rule as `admitted_binaries`, sourced from
+    /// `Metadata::entrypoints()`. Consumed by `ocx env` / `ocx package
+    /// env`'s `entrypoints` JSON array.
+    pub admitted_entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
 }
 
 /// Compose the runtime env from one or more root packages.
@@ -126,6 +148,11 @@ pub(crate) async fn compose(
     // patch overlay can iterate admitted identifiers in the same topological
     // order without a second walk.
     let mut admitted: Vec<oci::PinnedIdentifier> = Vec::new();
+    // Declared `binaries`/`entrypoints` claims for every admitted identifier
+    // (root or dep), collected alongside `admitted` under the identical
+    // surface gate. See `adr_declared_binaries_metadata.md` §4 Decision A.
+    let mut admitted_binaries: Vec<(oci::PinnedIdentifier, BinaryName)> = Vec::new();
+    let mut admitted_entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)> = Vec::new();
 
     // Pre-compute root keys (stripped identifiers) so a TC entry that is
     // also an explicit root is deferred to the root-emission pass instead
@@ -222,6 +249,17 @@ pub(crate) async fn compose(
             let dep_pkg = store.package_dir(&dep_id);
             let dep_content = dep_pkg.content();
 
+            // Same admission rule as `admitted` above — this dep already
+            // passed the surface gate to reach `visible_entries`. `None`
+            // binaries means undeclared (contributes nothing); entrypoints
+            // are always the declared map's keys.
+            if let Some(binaries) = meta.binaries() {
+                admitted_binaries.extend(binaries.iter().map(|name| (dep_id.clone(), name.clone())));
+            }
+            if let Some(entrypoints) = meta.entrypoints() {
+                admitted_entrypoints.extend(entrypoints.names().map(|name| (dep_id.clone(), name.clone())));
+            }
+
             // Build the dep's own direct-dep context map for
             // `${deps.NAME.installPath}` interpolation. Scoped to the dep's
             // own declared deps, not the root's — each package resolves its
@@ -246,6 +284,19 @@ pub(crate) async fn compose(
             // the patch overlay can match tag-anchored descriptor rules.
             admitted.push(root.identifier().clone());
 
+            // Root claims unconditionally, mirroring the `admitted` push
+            // above — no surface gate for the root's own contributions.
+            if let Some(binaries) = root.metadata().binaries() {
+                admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
+            }
+            if let Some(entrypoints) = root.metadata().entrypoints() {
+                admitted_entrypoints.extend(
+                    entrypoints
+                        .names()
+                        .map(|name| (root.identifier().clone(), name.clone())),
+                );
+            }
+
             // Build root's direct-dep context map for `${deps.NAME.installPath}`
             // interpolation in root's own env vars.
             let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store);
@@ -263,7 +314,12 @@ pub(crate) async fn compose(
         }
     }
 
-    Ok(ComposeOutput { entries, admitted })
+    Ok(ComposeOutput {
+        entries,
+        admitted,
+        admitted_binaries,
+        admitted_entrypoints,
+    })
 }
 
 /// Uniqueness check on entrypoint names across the interface projection of
@@ -714,6 +770,7 @@ mod tests {
     fn make_install_info(repo: &str, hex_char: char, resolved: ResolvedPackage) -> InstallInfo {
         let id = pinned(repo, hex_char);
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env: metadata_env::Env::default(),
@@ -751,6 +808,7 @@ mod tests {
         builder.add_var(var);
         let env = builder.build();
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -778,6 +836,7 @@ mod tests {
         let id = pinned(repo, hex_char);
         let entrypoints = Entrypoints::from_names([ep_name]);
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env: metadata_env::Env::default(),
@@ -957,6 +1016,67 @@ mod tests {
         assert!(
             out.entries.is_empty(),
             "no env vars + no entrypoints declared; composed env must be empty regardless of dedup"
+        );
+    }
+
+    /// Diamond dep declaring both `binaries` and `entrypoints`, shared by two
+    /// roots: each claim must be admitted exactly once, not once per root.
+    ///
+    /// Same shared-dep shape as `compose_multi_root_diamond_dep_emitted_once`,
+    /// but asserts on `admitted_binaries`/`admitted_entrypoints` instead of
+    /// `entries` — the cross-root dedup applies identically to claim
+    /// attribution (`adr_declared_binaries_metadata.md` §4 Decision A).
+    #[tokio::test]
+    async fn compose_multi_root_diamond_dep_claims_emitted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let c_id = pinned("c", 'c');
+        let pkg_path = store.path(&c_id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        let meta = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "binaries": ["ctool"],
+            "entrypoints": { "ctool": {} },
+        });
+        std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+        std::fs::write(
+            pkg_path.join("resolve.json"),
+            serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+        )
+        .unwrap();
+
+        let a_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: c_id.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+        let b_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: c_id.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+
+        let a = Arc::new(make_install_info("a", 'a', a_resolved));
+        let b = Arc::new(make_install_info("b", 'b', b_resolved));
+
+        let out = compose(&[a, b], &store, false).await.unwrap();
+        let binary_claims: Vec<_> = out.admitted_binaries.iter().filter(|(id, _)| *id == c_id).collect();
+        let entrypoint_claims: Vec<_> = out.admitted_entrypoints.iter().filter(|(id, _)| *id == c_id).collect();
+        assert_eq!(
+            binary_claims.len(),
+            1,
+            "shared dep's binaries claim must be admitted exactly once across roots: {:?}",
+            out.admitted_binaries
+        );
+        assert_eq!(
+            entrypoint_claims.len(),
+            1,
+            "shared dep's entrypoints claim must be admitted exactly once across roots: {:?}",
+            out.admitted_entrypoints
         );
     }
 
@@ -1539,6 +1659,7 @@ mod tests {
         }
         let env = builder.build();
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -1596,6 +1717,7 @@ mod tests {
         }
         let env = builder.build();
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2338,6 +2460,7 @@ mod tests {
         let entrypoints = Entrypoints::from_names(["mytool"]);
 
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2710,6 +2833,7 @@ mod tests {
         let env = env_builder.build();
 
         let dep_metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2782,6 +2906,7 @@ mod tests {
         let env = env_builder.build();
 
         let dep_metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2851,6 +2976,7 @@ mod tests {
         let env = env_builder.build();
 
         let root_metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2921,6 +3047,7 @@ mod tests {
         let env = env_builder.build();
 
         let root_metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -2955,6 +3082,405 @@ mod tests {
             "emit_root_path_block with self_view=true must NOT emit synth-PATH; \
              got entrypoints PATH values: {:?}",
             synth_values
+        );
+    }
+
+    // ── admitted_binaries / admitted_entrypoints (adr_declared_binaries_metadata.md §4 Decision A) ──
+    //
+    // Same admission rule as `admitted`: root claims unconditional, dep
+    // claims gated by the active surface (has_interface()/has_private()).
+    // The entrypoints-flavored tests below exercise the rule end-to-end
+    // through the already-working `Entrypoints` machinery (no dependency on
+    // WP1's still-stubbed `BinaryName`/`Binaries`); the binaries-flavored
+    // tests pin the identical contract for the new `BinaryName` type.
+
+    /// An explicit root's own declared entrypoints are admitted
+    /// unconditionally — mirrors `admitted`'s unconditional root emission.
+    #[tokio::test]
+    async fn compose_admitted_entrypoints_includes_root_claims_unconditionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let root = Arc::new(make_install_info_with_ep(
+            dir.path(),
+            "root",
+            'r',
+            ResolvedPackage::new(),
+            "cmake",
+        ));
+        let root_id = root.identifier().clone();
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        let claimed: Vec<&str> = out
+            .admitted_entrypoints
+            .iter()
+            .filter(|(id, _)| *id == root_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            vec!["cmake"],
+            "an explicit root's own entrypoint claims must be admitted unconditionally"
+        );
+    }
+
+    /// A dep whose TC entry has `has_interface()==true` (PUBLIC) contributes
+    /// its declared entrypoints to `admitted_entrypoints` in default exec.
+    #[tokio::test]
+    async fn compose_admitted_entrypoints_includes_interface_visible_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let dep_id = pinned("ninja", 'n');
+        let pkg_path = store.path(&dep_id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        let meta = serde_json::json!({"type": "bundle", "version": 1, "entrypoints": { "ninja": {} }});
+        std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+        std::fs::write(
+            pkg_path.join("resolve.json"),
+            serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+        )
+        .unwrap();
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dep_id.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        let claimed: Vec<&str> = out
+            .admitted_entrypoints
+            .iter()
+            .filter(|(id, _)| *id == dep_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            vec!["ninja"],
+            "PUBLIC.has_interface()==true dep's declared entrypoints must be admitted"
+        );
+    }
+
+    /// PRIVATE and SEALED deps' declared entrypoints never reach
+    /// `admitted_entrypoints` on the default (interface) surface — both fail
+    /// `has_interface()`, so the per-root loop never even visits them.
+    #[tokio::test]
+    async fn compose_admitted_entrypoints_excludes_private_and_sealed_dep_default_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let priv_id = pinned("priv-tool", 'p');
+        let sealed_id = pinned("sealed-tool", 's');
+        for (id, name) in [(&priv_id, "privtool"), (&sealed_id, "sealedtool")] {
+            let pkg_path = store.path(id);
+            std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+            let meta = serde_json::json!({"type": "bundle", "version": 1, "entrypoints": { name: {} }});
+            std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+            std::fs::write(
+                pkg_path.join("resolve.json"),
+                serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![
+                ResolvedDependency {
+                    identifier: priv_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                },
+                ResolvedDependency {
+                    identifier: sealed_id.clone(),
+                    visibility: Visibility::SEALED,
+                },
+            ],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        assert!(
+            out.admitted_entrypoints.is_empty(),
+            "PRIVATE and SEALED deps' claims must never be admitted on the default (interface) surface: {:?}",
+            out.admitted_entrypoints
+        );
+    }
+
+    /// `--self` flips admission: a PRIVATE dep (has_private()==true) is
+    /// admitted, an INTERFACE-only dep (has_private()==false) is excluded —
+    /// the mirror image of the default-exec gate.
+    #[tokio::test]
+    async fn compose_admitted_entrypoints_self_view_flips_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let priv_id = pinned("priv-tool", 'p');
+        let iface_id = pinned("iface-tool", 'i');
+        for (id, name) in [(&priv_id, "privtool"), (&iface_id, "ifacetool")] {
+            let pkg_path = store.path(id);
+            std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+            let meta = serde_json::json!({"type": "bundle", "version": 1, "entrypoints": { name: {} }});
+            std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+            std::fs::write(
+                pkg_path.join("resolve.json"),
+                serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![
+                ResolvedDependency {
+                    identifier: priv_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                },
+                ResolvedDependency {
+                    identifier: iface_id.clone(),
+                    visibility: Visibility::INTERFACE,
+                },
+            ],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, true).await.unwrap();
+        let claimed: Vec<&str> = out.admitted_entrypoints.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(
+            claimed,
+            vec!["privtool"],
+            "--self must admit PRIVATE.has_private()==true deps and exclude INTERFACE.has_private()==false deps"
+        );
+    }
+
+    /// Same unconditional-root rule as the entrypoints test above, pinned
+    /// for the new `BinaryName`-typed `admitted_binaries` array.
+    #[tokio::test]
+    async fn compose_admitted_binaries_includes_root_claims_unconditionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let root_meta: metadata::Metadata =
+            serde_json::from_str(r#"{"type":"bundle","version":1,"binaries":["cmake"]}"#).expect("fixture parses");
+        let root_id = pinned("root", 'r');
+        let pkg_root = dir.path().join("root");
+        std::fs::create_dir_all(pkg_root.join("content")).unwrap();
+        let root = Arc::new(InstallInfo::new(
+            root_id.clone(),
+            root_meta,
+            ResolvedPackage::new(),
+            crate::file_structure::PackageDir { dir: pkg_root },
+        ));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        let claimed: Vec<&str> = out
+            .admitted_binaries
+            .iter()
+            .filter(|(id, _)| *id == root_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            vec!["cmake"],
+            "an explicit root's declared binaries must be admitted unconditionally"
+        );
+    }
+
+    /// Same interface-surface gate as the entrypoints test above, pinned
+    /// for the new `BinaryName`-typed `admitted_binaries` array.
+    #[tokio::test]
+    async fn compose_admitted_binaries_dep_gated_by_interface_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let dep_id = pinned("ninja", 'n');
+        let pkg_path = store.path(&dep_id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        let meta = serde_json::json!({"type": "bundle", "version": 1, "binaries": ["ninja"]});
+        std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+        std::fs::write(
+            pkg_path.join("resolve.json"),
+            serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+        )
+        .unwrap();
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dep_id.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        let claimed: Vec<&str> = out
+            .admitted_binaries
+            .iter()
+            .filter(|(id, _)| *id == dep_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            vec!["ninja"],
+            "PUBLIC.has_interface()==true dep's declared binaries must be admitted"
+        );
+    }
+
+    /// Same PRIVATE/SEALED exclusion as `compose_admitted_entrypoints_excludes_private_and_sealed_dep_default_exec`,
+    /// pinned for the new `BinaryName`-typed `admitted_binaries` array.
+    #[tokio::test]
+    async fn compose_admitted_binaries_excludes_private_and_sealed_dep_default_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let priv_id = pinned("priv-tool", 'p');
+        let sealed_id = pinned("sealed-tool", 's');
+        for (id, name) in [(&priv_id, "privtool"), (&sealed_id, "sealedtool")] {
+            let pkg_path = store.path(id);
+            std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+            let meta = serde_json::json!({"type": "bundle", "version": 1, "binaries": [name]});
+            std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+            std::fs::write(
+                pkg_path.join("resolve.json"),
+                serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![
+                ResolvedDependency {
+                    identifier: priv_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                },
+                ResolvedDependency {
+                    identifier: sealed_id.clone(),
+                    visibility: Visibility::SEALED,
+                },
+            ],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+        assert!(
+            out.admitted_binaries.is_empty(),
+            "PRIVATE and SEALED deps' binaries claims must never be admitted on the default (interface) surface: {:?}",
+            out.admitted_binaries
+        );
+    }
+
+    /// Same `--self` admission flip as `compose_admitted_entrypoints_self_view_flips_admission`,
+    /// pinned for the new `BinaryName`-typed `admitted_binaries` array.
+    #[tokio::test]
+    async fn compose_admitted_binaries_self_view_flips_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let priv_id = pinned("priv-tool", 'p');
+        let iface_id = pinned("iface-tool", 'i');
+        for (id, name) in [(&priv_id, "privtool"), (&iface_id, "ifacetool")] {
+            let pkg_path = store.path(id);
+            std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+            let meta = serde_json::json!({"type": "bundle", "version": 1, "binaries": [name]});
+            std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+            std::fs::write(
+                pkg_path.join("resolve.json"),
+                serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![
+                ResolvedDependency {
+                    identifier: priv_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                },
+                ResolvedDependency {
+                    identifier: iface_id.clone(),
+                    visibility: Visibility::INTERFACE,
+                },
+            ],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        let out = compose(&[root], &store, true).await.unwrap();
+        let claimed: Vec<&str> = out.admitted_binaries.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(
+            claimed,
+            vec!["privtool"],
+            "--self must admit PRIVATE.has_private()==true deps and exclude INTERFACE.has_private()==false deps"
+        );
+    }
+
+    /// A SEALED dependency and a PRIVATE dependency, each declaring both
+    /// `binaries` and `entrypoints` claims, contribute nothing to either
+    /// admitted-claim array — while the root's own (unrelated) env-var
+    /// contribution still reaches `entries` in the same compose call. Guards
+    /// `adr_declared_binaries_metadata.md` §4 Decision A: a non-interface
+    /// dependency's claims never leak into the env report, and the exclusion
+    /// does not collaterally swallow the root's own surface contribution.
+    #[tokio::test]
+    async fn compose_sealed_and_private_dep_claims_excluded_while_root_contributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let sealed_id = pinned("sealed-tool", 's');
+        let private_id = pinned("private-tool", 'p');
+        for id in [&sealed_id, &private_id] {
+            let pkg_path = store.path(id);
+            std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+            let meta = serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "binaries": ["secret"],
+                "entrypoints": { "secret": {} },
+            });
+            std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+            std::fs::write(
+                pkg_path.join("resolve.json"),
+                serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![
+                ResolvedDependency {
+                    identifier: sealed_id.clone(),
+                    visibility: Visibility::SEALED,
+                },
+                ResolvedDependency {
+                    identifier: private_id.clone(),
+                    visibility: Visibility::PRIVATE,
+                },
+            ],
+        };
+        let root = Arc::new(make_install_info_with_var(
+            dir.path(),
+            "root",
+            'r',
+            root_resolved,
+            "OWN_VAR",
+            Visibility::PUBLIC,
+        ));
+
+        let out = compose(&[root], &store, false).await.unwrap();
+
+        assert!(
+            out.admitted_binaries.is_empty(),
+            "SEALED and PRIVATE deps' binaries claims must never be admitted: {:?}",
+            out.admitted_binaries
+        );
+        assert!(
+            out.admitted_entrypoints.is_empty(),
+            "SEALED and PRIVATE deps' entrypoints claims must never be admitted: {:?}",
+            out.admitted_entrypoints
+        );
+        assert!(
+            out.entries.iter().any(|e| e.key == "OWN_VAR"),
+            "the root's own env-var contribution must still reach entries, unaffected by dep claim exclusion: {:?}",
+            out.entries
         );
     }
 }

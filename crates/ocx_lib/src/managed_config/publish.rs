@@ -238,6 +238,7 @@ pub async fn publish_managed_config(
             env: Default::default(),
             dependencies: Default::default(),
             entrypoints: Default::default(),
+            binaries: None,
         }),
         platform: options.platform,
     };

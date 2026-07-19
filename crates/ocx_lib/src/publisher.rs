@@ -206,6 +206,7 @@ mod tests {
     fn test_info(tag: &str) -> Info {
         let identifier = oci::Identifier::new_registry("ocx", "ocx.sh").clone_with_tag(tag);
         let metadata = Metadata::Bundle(Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env: metadata_env::Env::default(),

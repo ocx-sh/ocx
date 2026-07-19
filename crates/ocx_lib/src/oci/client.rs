@@ -3424,6 +3424,7 @@ mod tests {
             let info = Info {
                 identifier: id,
                 metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    binaries: None,
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),
@@ -3507,6 +3508,7 @@ mod tests {
             let info = Info {
                 identifier: test_identifier("1.0"),
                 metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    binaries: None,
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),
@@ -3541,6 +3543,7 @@ mod tests {
             let info = Info {
                 identifier: id,
                 metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    binaries: None,
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),
@@ -3599,6 +3602,7 @@ mod tests {
 
         fn bundle_metadata() -> metadata::Metadata {
             metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                binaries: None,
                 version: package::metadata::bundle::Version::V1,
                 strip_components: None,
                 env: Default::default(),
@@ -3746,6 +3750,7 @@ mod tests {
             Info {
                 identifier: test_identifier(tag),
                 metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    binaries: None,
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),

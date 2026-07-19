@@ -46,10 +46,17 @@ pub struct PackageCreate {
     /// Number of compression threads (0 = auto-detect, 1 = single-threaded)
     #[arg(short = 'j', long, default_value_t = 0)]
     threads: u32,
+    /// Scan the content tree for executables the package puts on `PATH` to
+    /// fill or verify the `binaries` metadata claim; see
+    /// `--bin-scan`/`--no-bin-scan`.
+    #[clap(flatten)]
+    bin_scan: options::BinScan,
 }
 
 impl PackageCreate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        self.validate_bin_scan()?;
+
         let identifier = options::Identifier::transform_optional(self.identifier.clone(), context.default_registry())?;
         let output = match &self.output {
             Some(output) => {
@@ -80,6 +87,7 @@ impl PackageCreate {
                 let metadata = AuthoringMetadata::read_json(metadata_source.as_path()).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context).await?;
                 let platform = self.validation_platform();
+                let metadata = self.resolve_binaries(metadata, &platform).await?;
                 // Validate the projection the publisher will actually push:
                 // run the publish-time env/entrypoint checks against the
                 // declared platform.
@@ -125,6 +133,21 @@ impl PackageCreate {
         Ok(ExitCode::SUCCESS)
     }
 
+    /// Rejects an explicit `--bin-scan` given without `--metadata` (`-m`):
+    /// the flag has nothing to verify, and silently no-op'ing would defeat
+    /// its purpose as an explicit verification switch. `--no-bin-scan`
+    /// without `--metadata` stays a harmless no-op — there is nothing to
+    /// disable.
+    fn validate_bin_scan(&self) -> anyhow::Result<()> {
+        if self.bin_scan.mode() == options::BinScanMode::Verify && self.metadata.is_none() {
+            return Err(ocx_lib::cli::UsageError::new(
+                "--bin-scan requires --metadata (-m); nothing to verify without a metadata sidecar",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Pick the platform to run publish-time validation against: the declared
     /// `--platform`, or the host platform (falling back to `any`) when a
     /// pre-pinned sidecar was supplied without one.
@@ -159,6 +182,22 @@ impl PackageCreate {
         Ok(package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
     }
 
+    /// Runs the create-time interface-binaries scan/fill/verify step
+    /// against `self.path`'s content tree, per `self.bin_scan`'s resolved
+    /// mode (`adr_declared_binaries_metadata.md` §2 / §2.1 ordering block).
+    async fn resolve_binaries(
+        &self,
+        metadata: AuthoringMetadata,
+        platform: &oci::Platform,
+    ) -> anyhow::Result<AuthoringMetadata> {
+        let mode = match self.bin_scan.mode() {
+            options::BinScanMode::Auto => package::bin_scan::ScanMode::Auto,
+            options::BinScanMode::Verify => package::bin_scan::ScanMode::Verify,
+            options::BinScanMode::Off => package::bin_scan::ScanMode::Off,
+        };
+        Ok(package::bin_scan::resolve_binaries(&self.path, metadata, platform, mode).await?)
+    }
+
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
     fn infer_filename(&self, identifier: Option<&oci::Identifier>) -> String {
         let mut name = match identifier {
@@ -174,5 +213,50 @@ impl PackageCreate {
             name.push_str(&format!("-{}", platform.ascii_segments().join("-")));
         }
         format!("{}.tar.xz", name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--bin-scan` without `--metadata` has nothing to verify — Cluster 2
+    /// (arch-Warn) flagged the prior behavior as a silent no-op that exits 0
+    /// without scanning anything.
+    #[test]
+    fn bin_scan_without_metadata_is_rejected() {
+        let create = PackageCreate::try_parse_from(["package-create", "--bin-scan", "."]).expect("parse");
+        let err = create
+            .validate_bin_scan()
+            .expect_err("--bin-scan without --metadata must be a usage error");
+        let message = err.to_string();
+        assert!(
+            message.contains("--bin-scan") && message.contains("--metadata"),
+            "usage error must name both flags: {message}"
+        );
+    }
+
+    /// `--bin-scan` with `--metadata` present has a declaration to verify.
+    #[test]
+    fn bin_scan_with_metadata_is_accepted() {
+        let create =
+            PackageCreate::try_parse_from(["package-create", "--bin-scan", "-m", "metadata.json", "."]).expect("parse");
+        assert!(create.validate_bin_scan().is_ok());
+    }
+
+    /// `--no-bin-scan` without `--metadata` stays a harmless no-op: there is
+    /// nothing to disable, so it is not an error.
+    #[test]
+    fn no_bin_scan_without_metadata_is_accepted() {
+        let create = PackageCreate::try_parse_from(["package-create", "--no-bin-scan", "."]).expect("parse");
+        assert!(create.validate_bin_scan().is_ok());
+    }
+
+    /// Neither flag (Auto mode) without `--metadata` is unaffected — Auto
+    /// never verifies, only `--bin-scan` does.
+    #[test]
+    fn auto_mode_without_metadata_is_accepted() {
+        let create = PackageCreate::try_parse_from(["package-create", "."]).expect("parse");
+        assert!(create.validate_bin_scan().is_ok());
     }
 }

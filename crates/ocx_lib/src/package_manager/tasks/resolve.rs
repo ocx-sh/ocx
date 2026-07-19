@@ -8,7 +8,10 @@ use tokio::task::JoinSet;
 use crate::{
     log, oci,
     oci::index::{IndexOperation, SelectResult},
-    package::{install_info::InstallInfo, metadata::env::entry::Entry},
+    package::{
+        install_info::InstallInfo,
+        metadata::{binary::BinaryName, entrypoint::EntrypointName, env::entry::Entry},
+    },
     package_manager::{self, composer, error::PackageError, error::PackageErrorKind},
     patch::PatchDescriptor,
 };
@@ -195,6 +198,19 @@ impl ResolvedChain {
     pub fn blobs(&self) -> impl Iterator<Item = &oci::PinnedIdentifier> {
         self.chain.iter().map(|blob| &blob.identifier)
     }
+}
+
+/// Admitted-set claim attribution for `ocx env` / `ocx package env`'s
+/// `binaries` / `entrypoints` JSON arrays.
+///
+/// A straight passthrough of `ComposeOutput::admitted_binaries` /
+/// `admitted_entrypoints` — each pair names a declared claim together with
+/// the admitted [`oci::PinnedIdentifier`] that contributed it. See
+/// `adr_declared_binaries_metadata.md` §4 Decision A.
+#[derive(Debug, Clone, Default)]
+pub struct AdmittedBinaries {
+    pub binaries: Vec<(oci::PinnedIdentifier, BinaryName)>,
+    pub entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
 }
 
 impl PackageManager {
@@ -467,16 +483,42 @@ impl PackageManager {
     /// `"registry/repository"` keys, tag/digest excluded); `NoProjectContext`
     /// supplies an empty opt-out by construction. An opted-out base gets NO
     /// companion overlay UNLESS the tier is system-required (enforcement wins).
+    ///
+    /// Delegates to [`Self::resolve_env_with_attribution`] and drops the
+    /// admitted-claim attribution.
     pub async fn resolve_env_with_patch_boundary(
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
         scope: PatchScope,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>)> {
+        let (entries, compose_count, provenance, _attribution) =
+            self.resolve_env_with_attribution(packages, self_view, scope).await?;
+        Ok((entries, compose_count, provenance))
+    }
+
+    /// Like [`Self::resolve_env_with_patch_boundary`], additionally surfacing
+    /// the admitted-set `binaries` / `entrypoints` claim attribution.
+    ///
+    /// Consumers: `ocx env`, `ocx package env` (the `binaries` / `entrypoints`
+    /// JSON arrays, ADR `adr_declared_binaries_metadata.md` §4 Decision A).
+    /// Every other caller of `resolve_env` / `resolve_env_with_patch_boundary`
+    /// is unaffected — those signatures are unchanged and this is a new,
+    /// additive accessor, not a replacement.
+    pub async fn resolve_env_with_attribution(
+        &self,
+        packages: &[Arc<InstallInfo>],
+        self_view: bool,
+        scope: PatchScope,
+    ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedBinaries)> {
         // Convert the scope to its opt-out set exactly once; the overlay logic
         // below (and `build_site_patch_set`) keeps consuming a plain reference.
         let no_patches = scope.opt_out();
         let out = composer::compose(packages, &self.file_structure().packages, self_view).await?;
+        let attribution = AdmittedBinaries {
+            binaries: out.admitted_binaries,
+            entrypoints: out.admitted_entrypoints,
+        };
         let mut entries = out.entries;
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
@@ -501,7 +543,7 @@ impl PackageManager {
             }
         }
 
-        Ok((entries, compose_count, provenance))
+        Ok((entries, compose_count, provenance, attribution))
     }
 
     /// Build the [`SitePatchSet`] for the given admitted identifiers.
@@ -2213,6 +2255,7 @@ mod phase4_spec_tests {
     fn make_install_info(dir: &std::path::Path, repo: &str, hex_char: char, resolved: ResolvedPackage) -> InstallInfo {
         let id = pinned(repo, hex_char);
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env: metadata_env::Env::default(),
@@ -2252,6 +2295,7 @@ mod phase4_spec_tests {
         builder.add_var(var);
         let env = builder.build();
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env,
@@ -3825,6 +3869,7 @@ mod phase4_spec_tests {
             builder.add_var(path_var);
             let env = builder.build();
             let metadata = crate::package::metadata::Metadata::Bundle(crate::package::metadata::bundle::Bundle {
+                binaries: None,
                 version: crate::package::metadata::bundle::Version::V1,
                 strip_components: None,
                 env,
@@ -3865,6 +3910,7 @@ mod phase4_spec_tests {
             builder.add_var(path_var);
             let env = builder.build();
             let metadata = crate::package::metadata::Metadata::Bundle(crate::package::metadata::bundle::Bundle {
+                binaries: None,
                 version: crate::package::metadata::bundle::Version::V1,
                 strip_components: None,
                 env,

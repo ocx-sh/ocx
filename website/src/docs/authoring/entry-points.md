@@ -86,6 +86,10 @@ A meta-package that exposes a tool from a dependency without re-bundling it — 
 A typo in an entry-point name (e.g. `cmke` instead of `cmake`) will install cleanly and only fail when the launcher is invoked and the PATH search comes up empty. Test every launcher with `ocx exec <pkg> -- <name>` after install to catch missing-binary bugs early.
 :::
 
+::: tip Entry points are never `binaries`
+An entrypoint name is an invocable by definition — the map key is what a consumer types at the shell — never a claim that a file exists. It's therefore never listed in the separate [`binaries`][reference-binaries] field, which claims the opposite: files the publisher shipped, not launchers OCX generates. The two lists can share a name without contradiction (`cmake` as both a binary and an entry point wrapping it); see [Executables vs Entry Points][reference-executables-vs-entry-points] for the full distinction.
+:::
+
 ### Worked Example: Python Script with a Pinned Interpreter {#target-python-example}
 
 The encapsulation story is sharpest when the executable is a script rather than a native binary. Imagine packaging `mytool`, a [Python][python] CLI whose only file is `bin/mytool` containing:
@@ -141,6 +145,7 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 ## See Also {#see-also}
 
 - [Entry points reference][reference-entry-points] — every field, every constraint
+- [Executables][reference-binaries] — the `binaries` claim, and how it differs from entrypoints
 - [Entry points in depth][in-depth-entry-points] — launcher mechanics, synth-PATH, multi-owner reporting
 - [Env surface][authoring-env-surface] — when to demote `bin/` from public to private
 - [`select` reference][select-collision] — collision detection at select time
@@ -159,6 +164,8 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 
 <!-- reference -->
 [reference-entry-points]: ../reference/metadata.md#entry-points
+[reference-binaries]: ../reference/metadata.md#executables
+[reference-executables-vs-entry-points]: ../reference/metadata.md#executables-vs-entry-points
 [select-collision]: ../reference/command-line.md#select-entry-point-collision
 
 <!-- commands -->

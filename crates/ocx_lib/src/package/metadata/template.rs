@@ -15,6 +15,7 @@ use crate::oci;
 use super::env::dep_context::DependencyContext;
 use super::slug::DEP_TOKEN_PATTERN;
 use crate::package::metadata::dependency::DependencyName;
+use crate::utility::fs::path::RelativePath;
 
 /// Caller-facing intent: what surface is interpolation serving?
 ///
@@ -64,6 +65,35 @@ pub(super) fn disallowed_dep_token(s: &str) -> Option<String> {
     let idx = s.find("${deps.")?;
     let end = s[idx..].find('}').map(|e| idx + e + 1).unwrap_or(s.len());
     Some(s[idx..end].to_string())
+}
+
+/// Classifies a `Path`-modifier env var's raw value template as an
+/// `${installPath}`-rooted `PATH` directory, extracting the relative
+/// directory under the install root.
+///
+/// Returns `Some(rel)` only when `value` is *exactly* `${installPath}/<rel>`
+/// — no `${deps.*}` combination, no extra literal segments before or after
+/// the token. Any other shape (a bare `${installPath}`, a combined-path var,
+/// a literal path) returns `None`: best-effort scan scope, not an error.
+/// `rel` is parsed through [`RelativePath::parse`] so a malformed or
+/// escaping `<rel>` is excluded the same way, not surfaced as an error.
+///
+/// Consumed by `package::bin_scan::scan_interface_binaries` (create-time
+/// executable auto-scan) to identify which declared `Path` vars are scan
+/// targets. Does not itself check `modifier`/`visibility` — those live on
+/// the `Var` struct, not the raw value string, and are the caller's
+/// responsibility. See `adr_declared_binaries_metadata.md` §2 steps 1-2.
+pub fn classify_install_path_rooted_dir(value: &str) -> Option<RelativePath> {
+    const INSTALL_PATH_DIR_PREFIX: &str = "${installPath}/";
+    let rel = value.strip_prefix(INSTALL_PATH_DIR_PREFIX)?;
+    // A second `${` marker means the value combines `${installPath}` with
+    // another token (typically `${deps.*}` in a `:`-joined PATH value) —
+    // not the exact single-token shape this classifier targets. Best-effort
+    // exclusion from scan scope, not an error (ADR §2 step 1).
+    if rel.contains("${") {
+        return None;
+    }
+    RelativePath::parse(rel).ok()
 }
 
 /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in template strings.
@@ -700,5 +730,43 @@ mod tests {
             format!("{install}/x"),
             "${{installPath}}/x must resolve to <content_path>/x"
         );
+    }
+
+    // ── classify_install_path_rooted_dir ──────────────────────────────────────
+
+    /// A bare `${installPath}` with no trailing slash is not the
+    /// `${installPath}/<rel>` shape — no `<rel>` to classify.
+    #[test]
+    fn classify_install_path_rooted_dir_bare_token_returns_none() {
+        assert_eq!(classify_install_path_rooted_dir("${installPath}"), None);
+    }
+
+    /// `${installPath}/` (trailing slash, nothing after) yields an empty,
+    /// non-escaping relative path — the containment root itself.
+    #[test]
+    fn classify_install_path_rooted_dir_trailing_slash_yields_empty_rel() {
+        let rel = classify_install_path_rooted_dir("${installPath}/").expect("empty rel must parse");
+        assert_eq!(rel.as_path(), Path::new(""));
+    }
+
+    /// The token must lead the value; a prefix before `${installPath}` means
+    /// this is not the exact single-token shape the classifier targets.
+    #[test]
+    fn classify_install_path_rooted_dir_prefix_mid_string_returns_none() {
+        assert_eq!(classify_install_path_rooted_dir("foo/${installPath}/bin"), None);
+    }
+
+    /// A `<rel>` that escapes the containment root via `..` is rejected —
+    /// best-effort scan-scope exclusion, not an error.
+    #[test]
+    fn classify_install_path_rooted_dir_escaping_rel_returns_none() {
+        assert_eq!(classify_install_path_rooted_dir("${installPath}/../etc"), None);
+    }
+
+    /// Happy path: `${installPath}/bin` classifies to the relative dir `bin`.
+    #[test]
+    fn classify_install_path_rooted_dir_happy_path_returns_rel() {
+        let rel = classify_install_path_rooted_dir("${installPath}/bin").expect("bin must parse");
+        assert_eq!(rel.as_path(), Path::new("bin"));
     }
 }

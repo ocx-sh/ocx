@@ -122,4 +122,67 @@ mod tests {
             "authoring schema must not define the digest-required PinnedIdentifier"
         );
     }
+
+    /// `AuthoringBundle.binaries` is additive-optional (never `required`) and
+    /// its resolved shape is the write contract only — `array<string>` with
+    /// `uniqueItems`. The read-side `string | object` leniency
+    /// (`BinaryElement`) is a Rust-only `Deserialize` affordance and must
+    /// never leak into the published schema. See
+    /// `adr_declared_binaries_metadata.md` §1 and the manual
+    /// `impl JsonSchema for Binaries` in `binary.rs`.
+    #[test]
+    fn metadata_schema_pins_binaries_field_as_optional_string_array() {
+        let schema = schema_for("metadata").expect("metadata schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+        let defs = value.get("$defs").expect("schema has $defs");
+
+        let bundle = defs.get("AuthoringBundle").expect("authoring bundle def");
+        let binaries_property = bundle
+            .pointer("/properties/binaries")
+            .expect("bundle must declare a `binaries` property");
+
+        let required = bundle
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("bundle def has a `required` array");
+        assert!(
+            !required.iter().any(|v| v.as_str() == Some("binaries")),
+            "`binaries` must be additive-optional, not required: {required:?}"
+        );
+
+        // `Option<Binaries>` schemas as `anyOf: [$ref, null]` — resolve the
+        // `$ref` arm to the underlying `Binaries` def.
+        let binaries_ref = binaries_property
+            .get("anyOf")
+            .and_then(|v| v.as_array())
+            .and_then(|arms| arms.iter().find_map(|arm| arm.get("$ref").and_then(|r| r.as_str())))
+            .expect("optional `binaries` property must carry a `$ref` arm in `anyOf`");
+        let name = binaries_ref
+            .strip_prefix("#/$defs/")
+            .expect("`binaries` $ref must point into #/$defs/");
+        let binaries_def = defs
+            .get(name)
+            .unwrap_or_else(|| panic!("$ref target {name} missing from $defs"));
+
+        assert_eq!(
+            binaries_def.get("type").and_then(|v| v.as_str()),
+            Some("array"),
+            "`binaries` must resolve to a JSON array"
+        );
+        assert_eq!(
+            binaries_def.pointer("/items/type").and_then(|v| v.as_str()),
+            Some("string"),
+            "`binaries` items must be bare strings — no read-side object leniency in the published schema"
+        );
+        assert_eq!(
+            binaries_def.get("uniqueItems").and_then(|v| v.as_bool()),
+            Some(true),
+            "`binaries` must declare `uniqueItems: true`"
+        );
+
+        assert!(
+            defs.get("BinaryElement").is_none(),
+            "the read-side string|object element union must never appear in the published schema"
+        );
+    }
 }

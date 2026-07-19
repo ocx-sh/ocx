@@ -148,6 +148,7 @@ mod tests {
         let info = Arc::new(InstallInfo::new(
             id.clone(),
             Metadata::Bundle(Bundle {
+                binaries: None,
                 version: Version::V1,
                 strip_components: None,
                 env: Env::default(),

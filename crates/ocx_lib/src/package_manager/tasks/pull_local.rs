@@ -582,6 +582,7 @@ mod tests {
         let identifier =
             oci::Identifier::new_registry(format!("test/{dir_name}"), "example.com").clone_with_tag("1.0.0");
         let metadata = Metadata::Bundle(Bundle {
+            binaries: None,
             version: Version::V1,
             strip_components: None,
             env: Env::default(),

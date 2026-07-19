@@ -119,6 +119,29 @@ distinguishing a local resource from a registry identifier belongs in the domain
 
 `--shell=sh` resolves to `Shell::Dash` via a `PossibleValue::new("sh")` alias — **no new enum variant**, zero new match arms (handshake C5).
 
+## Cross-Cutting: Paired Boolean Toggles (`--X`/`--no-X`)
+
+Standing convention (owner request) for any flag pair expressing a boolean or tri-state
+mode as `--X`/`--no-X` (e.g. `options::Pull`, `options::BinScan`, `options::Completion`):
+flatten a dedicated struct into the command with `#[clap(flatten)]`, declare both flags
+with `overrides_with` pointing at each other (POSIX last-wins — combining both is not an
+error, the `git --[no-]verify` idiom), and resolve to a typed value via a method on the
+struct — never read the two raw booleans at the call site.
+
+- **Struct location**: `crates/ocx_cli/src/options/<name>.rs` — one file per pair, flat
+  layout (same rule as command modules, see "Command Module Structure" above). Templates:
+  `options/pull.rs` (bistate, `enabled(default: bool) -> bool`), `options/bin_scan.rs`
+  (tri-state, `mode() -> BinScanMode`).
+- **Bistate vs tri-state**: a pair is bistate when "neither flag given" resolves to one
+  fixed default and the two flags only override it (`--pull`/`--no-pull` around an eager
+  default). It's tri-state when "neither given" is its own distinct behavior, not simply
+  "off" (`--bin-scan`/`--no-bin-scan`: neither given is `Auto` — a mode of its own, not
+  equivalent to `--no-bin-scan`'s `Off`). Model tri-state as an enum returned from a
+  `mode()` method; never overload a single `bool` to mean three things.
+- **Never read the raw booleans directly** in a command's `execute` — always go through
+  the struct's resolution method, so the mode name (not two independently-checked flags)
+  is what call sites and tests reason about.
+
 ## Cross-Cutting: CI Env Export (`--ci`)
 
 `--ci[=PROVIDER]` is a third emit branch on `ocx env` and `ocx package env`,

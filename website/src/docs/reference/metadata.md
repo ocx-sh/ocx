@@ -36,6 +36,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `env` | array | No | [Environment variable declarations](#env). |
 | `dependencies` | array | No | [Package dependencies](#dependencies). |
 | `entrypoints` | object | No | [Named entry points](#entry-points), keyed by command name. |
+| `binaries` | array | No | [Declared executable names the package puts on `PATH`](#executables). |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -91,6 +92,7 @@ A language runtime with multiple environment variables, archive stripping, a dep
       "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
     }
   ],
+  "binaries": ["cmake", "cpack", "ctest"],
   "entrypoints": {
     "cmake": {},
     "fmt": { "command": "cmake-format" }
@@ -98,7 +100,7 @@ A language runtime with multiple environment variables, archive stripping, a dep
 }
 ```
 
-Here `cmake` dispatches to a binary named `cmake` (empty object, the common case), while the `fmt` launcher dispatches to a differently-named binary `cmake-format`.
+Here `cmake` dispatches to a binary named `cmake` (empty object, the common case), while the `fmt` launcher dispatches to a differently-named binary `cmake-format`. `binaries` separately declares that `cmake`, `cpack`, and `ctest` exist as executables on the interface `PATH` — see [Executables](#executables).
 
 ## Environment Variables {#env}
 
@@ -503,6 +505,135 @@ packages are detected at select time.
 resolved on the composed `PATH`. `mytool` uses `args` to bake the script path: invoking
 `mytool x y` runs `python <content>/app/main.py x y`.
 
+## Executables {#executables}
+
+CI matrices, [Bazel][bazel] toolchain rules, and devcontainer features often need one narrow
+answer before they trust a package: does `cmake` actually resolve on `PATH` once this package
+is installed? The composed environment ([`env`](#env)) tells a caller how `PATH` gets built, not
+what resolves on it — answering that today means installing the package and probing `PATH`
+directly.
+
+The `binaries` array closes that gap. It is an optional, publisher-declared array of bare
+executable names the package exposes on its interface `PATH` surface — a name a consumer can
+look up without a round trip through installation.
+
+```json
+{
+  "$schema": "https://ocx.sh/schemas/metadata/v1.json",
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public" }
+  ],
+  "binaries": ["cmake", "cpack", "ctest"]
+}
+```
+
+### A Claim, Not a Guarantee {#executables-claim}
+
+`binaries` is unverified by default. [`ocx package push`][cmd-package-push] streams archives
+straight to the registry — it never decompresses a layer — and a package can compose several
+layers, including ones [reused by digest][cmd-package-push-layout] from an earlier push. No
+point in the pipeline ([`create`][cmd-package-create], [`push`][cmd-package-push], or
+[`install`][cmd-package-install]) ever has every layer's content tree materialized at once, so
+full validation of the claim against disk is structurally impossible without breaking the
+streaming-push, lazy-pull model the rest of OCX relies on.
+
+:::info Same trust model as `package.json`
+[npm's `bin` field][npm-bin], [Cargo's `[[bin]]` target name][cargo-bin], and [nixpkgs'
+`meta.mainProgram`][nixpkgs-main-program] all make the identical trade: the field documents what
+a consumer will find, and none of them are verified against the built artifact at publish time.
+`binaries` follows the same convention on purpose — every packaging ecosystem surveyed converges
+on a bare, unverified, documentation-grade name claim.
+:::
+
+On Windows, the claim reflects the **default** executable-resolution set (`.exe`, `.com`,
+`.bat`, `.cmd`) — the fixed allowlist the create-time scan uses. A hardened child environment
+with a customized `PATHEXT` may resolve fewer of these, so a claimed name backed only by a
+`.bat`/`.cmd`/`.com` file is not guaranteed to resolve in every composed environment.
+
+[`ocx package create`][cmd-package-create]'s `--bin-scan`/`--no-bin-scan` flags can fill or
+verify the claim against the local content tree at publish time, closing the gap for content
+`create` can actually see. A foreign or reused layer added later at `push` time was never part
+of that scan — declaring its binaries is the publisher's job, by hand. See
+[`package create`][cmd-package-create] for the scan modes.
+
+### Interface Surface, Own Package Only {#executables-scope}
+
+Only names reachable through a `${installPath}`-rooted [`path`](#env-path) variable with
+[interface visibility](#env-entry-visibility) are eligible. Private, `libexec`-style
+directories are never candidates — a name only a package's own launchers can see was never part
+of the public contract `binaries` describes.
+
+The claim is **own-package only, never transitive**: a package never lists a dependency's
+executables. What is reachable *through* a dependency chain is a composition question — answered
+by [`ocx env`][cmd-env-root] / [`ocx package env`][cmd-package-env]'s `binaries` array, attributed
+per admitted package, not by a per-package metadata fact.
+
+### `None` vs an Empty Array {#executables-none-vs-empty}
+
+The two wire states carry different meaning, kept deliberately distinct:
+
+```json
+// undeclared — omitted entirely; predates this field, or the publisher never set it
+{ "type": "bundle", "version": 1 }
+
+// declared: the publisher asserts zero executables on PATH (e.g. an env-only package)
+{ "type": "bundle", "version": 1, "binaries": [] }
+```
+
+A consumer reading `metadata.json` directly — an SBOM scanner, say — can tell "nobody has
+declared this yet" apart from "the publisher looked, and there genuinely are none."
+
+### Executables vs Entry Points {#executables-vs-entry-points}
+
+`binaries` and [`entrypoints`](#entry-points) describe two different things and are never
+confused with each other. `binaries` names files the publisher shipped in the content tree;
+`entrypoints` names launchers OCX *generates* at install time. **A generated launcher name never
+appears inside `binaries`** — it is not a file the publisher's archive contains, it is something
+`ocx install` writes.
+
+The same name can legitimately appear in both, without contradiction: `binaries: ["cmake"]`
+declares that the underlying `cmake` binary exists, and `entrypoints: {"cmake": {}}` declares
+that a generated launcher wraps it. At runtime the generated `entrypoints/` directory is
+prepended ahead of `bin/` on the composed `PATH` (see [Disk Layout](#entry-points-disk-layout)),
+so the launcher — not the raw binary — is what actually resolves; `binaries` still documents that
+the wrapped binary is there.
+
+### Writing the Field {#executables-writing}
+
+`binaries` is always written as a plain array of bare strings, sorted and de-duplicated:
+
+```json
+{ "binaries": ["cmake", "cpack", "ctest"] }
+```
+
+There is no per-entry object form in the published schema — a `binaries` entry is a name,
+nothing else. [`ocx package create --bin-scan`][cmd-package-create] can generate this array for
+you from the content tree; a hand-authored `metadata.json` writes it exactly the same way.
+
+Each name is validated against a grammar looser than an [entry point key](#entry-points-wire-shape)
+— it admits names like `python3.13`, `c++`, and `MSBuild` that the entry-point slug pattern would
+reject:
+
+- ASCII printable characters only, no whitespace anywhere.
+- Forbidden characters: `/ \ < > : " | ? *` — the Windows-reserved filename characters, since OCX
+  materializes binary names as real files on Windows.
+- No leading `-` (shell flag-lookalike hazard).
+- No leading or trailing `.` (Unix hidden-file ambiguity; a trailing dot that Windows silently
+  strips would otherwise collide on disk).
+- Non-empty, at most 64 bytes.
+- Reserved Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`) are
+  rejected case-insensitively, checked against the basename before the first `.` — so a suffixed
+  alias like `CON.txt` is rejected too, matching how Windows reserves the device name regardless
+  of extension.
+- Two names in the same `binaries` array that differ only by case (`Cmake` and `cmake`) are
+  rejected — a case-insensitive target filesystem would collide on them even though the two
+  strings are distinct.
+- Bare names only — never `.exe` or any other extension. Extension handling belongs to the
+  platform-specific resolve step (see [A Claim, Not a Guarantee](#executables-claim)), never to
+  the metadata.
+
 ## Extraction {#extraction}
 
 ### `strip_components` {#extraction-strip-components}
@@ -569,6 +700,7 @@ The metadata format carries an integer `version` field reserved for future schem
 - `env` — optional declarations of environment variables.
 - `dependencies` — optional package dependencies, digest-pinned in the published form. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), optional `visibility` controlling env propagation through the chain, and — authoring sidecar only — an optional `platforms` pin map. See [Dependencies](#dependencies).
 - `entrypoints` — optional object keyed by the invocable name. Each value object carries two optional fields. `command`: the binary the generated launcher dispatches to when it differs from the invocable name (e.g. expose `fmt` while running `cargo-fmt`); follows the same slug constraint as the key (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes); not interpolated; omitted means the invocable name is the dispatch target. `args`: array of fixed leading arguments prepended before user-supplied arguments at dispatch time; each element is one argv token; `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time; omitted or empty are wire-identical — the field is absent in the serialized form when the array is empty.
+- `binaries` — optional array of bare executable-name strings, sorted and unique: a publisher-declared, unverified claim of executables the package puts on `PATH`. Absent means undeclared; `[]` means the publisher asserts zero. Never lists a dependency's executables, and never lists an `entrypoints` launcher name. See [Executables](#executables).
 
 Visibility model:
 
@@ -626,6 +758,7 @@ Behavioral changes made within `version: 1` since the initial release:
 | **Entry-axis addition** | `Var.visibility` gained the `"interface"` value: env entries visible on the interface surface but not the private surface. Previously only `"private"` and `"public"` were recognized; `"interface"` entries in older parsers will be rejected at deserialization. |
 | **Baked entry-point arguments** | Entry-point values now accept an optional `args` array of fixed leading arguments prepended before user-supplied arguments at dispatch time. `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time. An absent or empty `args` array is wire-identical to prior behavior — packages without `args` are unaffected. |
 | **Dependency manifest pinning** | The authoring sidecar accepts a digest-optional dependency identifier (`ocx package create --platform` resolves it) and a per-dependency `platforms` pin map — see [Per-Platform Pins](#dependencies-per-platform-pins). The sidecar-only field is stripped at publish; the published wire format is unchanged. The published digest must reference a platform manifest, never an OCI Image Index — see [Manifest Pins, Never Index Pins](#dependencies-manifest-pins). `ocx package push` rejects an index-pinned or unpinned dependency (exit 65). |
+| **Declared executables** | New optional `binaries` field: a sorted, unique array of bare executable-name strings, publisher-declared and unverified. Additive — absent is wire-identical to every package published before this field existed. `None` and `[]` are deliberately distinct wire states (unlike `entrypoints`, which collapses absent and empty). See [Executables](#executables). |
 
 ::: warning These changes affect existing packages
 If you published packages before the visibility-default flip, their untagged env entries will no longer appear on the consumer surface. Add `"visibility": "public"` explicitly to vars that consumers should see.
@@ -643,6 +776,10 @@ If you published packages before the visibility-default flip, their untagged env
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [glibc]: https://www.gnu.org/software/libc/
 [musl]: https://musl.libc.org/
+[bazel]: https://bazel.build/
+[npm-bin]: https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bin
+[cargo-bin]: https://doc.rust-lang.org/cargo/reference/cargo-targets.html#binaries
+[nixpkgs-main-program]: https://nixos.org/manual/nixpkgs/stable/#var-meta-mainProgram
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json
@@ -658,6 +795,8 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-exec]: ./command-line.md#exec
 [cmd-launcher-exec]: ./command-line.md#launcher-exec
 [cmd-env]: ./command-line.md#env
+[cmd-env-root]: ./command-line.md#env-root
+[cmd-package-env]: ./command-line.md#package-env
 [cmd-package-create]: ./command-line.md#package-create
 [cmd-package-push]: ./command-line.md#package-push
 [cmd-package-push-layout]: ./command-line.md#package-push-layout

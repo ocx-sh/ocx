@@ -545,6 +545,8 @@ Export the composed toolchain environment for the active project or global toolc
 
 This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
+With `--format json`, the document carries `binaries`/`entrypoints` sibling arrays alongside `entries` — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
+
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
 **Usage**
@@ -635,7 +637,7 @@ The global tier is lenient: `ocx --global env` never fails on an unconfigured or
 Print the resolved environment variables for one or more OCI-tier packages.
 
 With the root `--format plain` (default), outputs an aligned table with `Key`, `Type` and `Value` columns.
-With `--format json`, outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+With `--format json`, outputs `{"entries": [...], "binaries": [...], "entrypoints": [...]}` — see [`package env`](#package-env) for the full shape.
 Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
@@ -2036,6 +2038,44 @@ dependency tag absent from the selected index fails with exit 79. See
 [Resolving Dependency Pins][authoring-building-pushing-dependency-pins] for the full workflow and the
 [Dependencies reference][reference-dependencies] for the sidecar field shapes.
 
+`create` is also the compiler for the [`binaries`][reference-binaries] claim: `--bin-scan` /
+`--no-bin-scan` control whether it scans the content tree for executables the package puts on
+`PATH` to fill or verify that field. `--bin-scan` and `--no-bin-scan` are a paired, last-wins flag (same
+shape as every other `--X`/`--no-X` pair in this reference) with a **tri-state** resolution —
+neither flag given is its own mode, not simply "default off":
+
+| Mode | `binaries` absent in the sidecar | `binaries` declared (including `[]`) |
+|---|---|---|
+| **Auto** (neither flag — default) | Scans; writes the discovered names into the resolved sidecar. | Scan not run; the declared list passes through verbatim. |
+| `--bin-scan` | Same as Auto — verification needs a declaration to check against. | Scans; a discovered executable missing from the declared list fails with exit 65 (`UndeclaredBinary`); a declared name present on disk but not executable fails with exit 65 (`DeclaredNotExecutable`); a declared name simply absent from disk is legal. On success the declared list passes through verbatim. |
+| `--no-bin-scan` | No scan; the field stays absent. | No scan; the declared list passes through verbatim. |
+
+`--bin-scan` requires `--metadata`/`-m` — a usage error otherwise (exit 64): the flag exists to
+verify a declaration, and there is nothing to verify without a metadata sidecar. `--no-bin-scan`
+needs no sidecar either way, since it never scans.
+
+Filling or verifying the field needs a scan, and a scan needs a host that can evaluate the
+**target platform's** executable-file convention. The Windows extension allowlist is pure string
+matching — any host can apply it — but the Unix exec-bit convention can only be read on a Unix
+host. When the host cannot (e.g. a Windows host creating a `linux/amd64`-targeted package),
+`--bin-scan` fails with exit 65 (`UnsupportedHostScan`); under the Auto default the same
+situation is not an error — the field is left undeclared (absent, not `[]`) rather than risk a
+false "publisher asserts zero" claim. Hand-author `binaries` or pass `--no-bin-scan` to work
+around a cross-host scan gap.
+
+An unreadable scan-target directory (e.g. permission denied) fails with exit 74
+([`IoError`][exit-codes]) rather than silently producing an empty list; only a target directory
+that does not exist yields zero candidates.
+
+The scan only ever fills the **resolved sidecar** written next to `-o` — the same rail
+[dependency pins][reference-dependencies-authoring] already ride from `create` to `push`; the
+authored `-m` input file is never rewritten. It only considers `${installPath}`-rooted
+[`path`][reference-env-path] variables carrying [interface visibility][reference-env-visibility] —
+a `path` value combined with a `${deps.*}` segment is out of scan scope entirely, and a foreign or
+reused layer added later at `push` time was never part of the content tree `create` scanned; both
+cases need the publisher to hand-author `binaries` instead. See
+[Executables][reference-binaries] for the full field semantics.
+
 **Usage**
 
 ```shell
@@ -2055,6 +2095,7 @@ ocx package create [OPTIONS] <PATH>
 - `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Dependencies without a digest are pinned to platform manifest digests (requires `--platform`, see above); the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
+- `--bin-scan`, `--no-bin-scan`: Scan the content tree for executables the package puts on `PATH` to fill or verify the [`binaries`][reference-binaries] metadata claim — see the mode table above. Paired, last-wins flags; neither given (the default) fills an absent claim and passes a declared one through untouched.
 - `-h`, `--help`: Print help information.
 
 #### `pull` {#package-pull}
@@ -2360,19 +2401,25 @@ ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.[
 
 **Plain output**
 
-With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier. The candidate listing shows one node per platform child; the single-manifest view shows the `metadata` branch (`env`, `dependencies`, and `entrypoints`) followed by a `layers` branch listing each layer by index, annotated with media type and a human-readable size. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation:
+With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier. The candidate listing shows one node per platform child; the single-manifest view shows the `metadata` branch (`env`, `dependencies`, `entrypoints`, and — when declared — [`binaries`][reference-binaries]) followed by a `layers` branch listing each layer by index, annotated with media type and a human-readable size. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation. `binaries` renders the same [undeclared vs. declared-empty][reference-binaries-none-vs-empty] distinction the field carries on the wire: an undeclared claim produces no `binaries` node at all, a declared-but-empty claim renders a `binaries (none declared)` leaf, and a non-empty claim renders a `binaries` branch listing each name. JSON output is unaffected by this rendering split — the `metadata` field is the full metadata document, so the `binaries` key is present or absent exactly as declared:
 
 ```text
 registry/repo@sha256:…
 ├─ metadata
-│  └─ entrypoints
-│     ├─ fmt → cargo-fmt
-│     └─ build
+│  ├─ entrypoints
+│  │  ├─ fmt → cargo-fmt
+│  │  └─ build
+│  └─ binaries
+│     ├─ build
+│     └─ cargo-fmt
 └─ layers
    └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
 ```
 
-Here `fmt` dispatches to the `cargo-fmt` binary while `build` dispatches to a binary named `build`.
+Here `fmt` dispatches to the `cargo-fmt` binary while `build` dispatches to a binary named `build`;
+`binaries` lists both underlying names the entry points wrap. A package that never declared the
+field renders no `binaries` node at all; one that declared it empty renders a single
+`binaries (none declared)` leaf instead of the branch shown above.
 
 With `--resolve`, a `resolution` branch is added alongside `metadata` and `layers`, listing each chain blob by its `role` (`index`, `manifest`, `config`), annotated with media type and a human-readable size. The layers stay under the manifest — they are content the manifest references, not steps in the walk:
 
@@ -2579,7 +2626,9 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 Print the resolved environment variables for one or more OCI-tier packages.
 
-Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`. Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
+Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty. Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
+
+In plain format, the `Key`/`Type`/`Value` table itself is unchanged — a hint line follows it summarizing availability whenever any binaries or entry points are admitted, e.g. `5 binaries available (cmake, ctest, cpack, ...); use --format json for the full list`. Neither array ever appears in `--shell`/`--ci` output — those channels emit only shell-export lines / CI sink writes.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
@@ -3212,6 +3261,13 @@ or a registry error) — the report then degrades to a local-state-only summary
 [reference-manifest-pins]: ./metadata.md#dependencies-manifest-pins
 [reference-dependencies]: ./metadata.md#dependencies
 [reference-platforms]: ./platforms.md
+
+<!-- reference (package-create --bin-scan / env binaries+entrypoints attribution) -->
+[reference-binaries]: ./metadata.md#executables
+[reference-binaries-none-vs-empty]: ./metadata.md#executables-none-vs-empty
+[reference-env-path]: ./metadata.md#env-path
+[reference-env-visibility]: ./metadata.md#env-entry-visibility
+[reference-dependencies-authoring]: ./metadata.md#dependencies-authoring-vs-published
 
 <!-- global flag -->
 [global-flag]: #global-flag

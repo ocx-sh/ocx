@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod bin_scan;
 mod completion;
 mod compression_level;
 mod content_path;
@@ -10,6 +11,7 @@ mod platform;
 mod pull;
 mod verify;
 
+pub use bin_scan::{BinScan, BinScanMode};
 pub use completion::Completion;
 pub use compression_level::CompressionLevel;
 pub use content_path::ContentPath;

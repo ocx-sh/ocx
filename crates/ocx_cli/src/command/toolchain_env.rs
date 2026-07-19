@@ -65,8 +65,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
-    oci::Platform,
-    package::metadata::env::entry::Entry,
+    oci::{PinnedIdentifier, Platform},
+    package::metadata::{BinaryName, EntrypointName, env::entry::Entry},
     package_manager::PatchProvenance,
     project::{ALL_GROUP, DEFAULT_GROUP, ProjectLock, compose_tool_set, expand_all_keyword, lock::lock_path_for},
 };
@@ -222,7 +222,7 @@ impl ToolchainEnv {
         // Phase 4 overlay from local state and return the boundary: the global
         // path's `offline_view` preserves the patch tier (only the network is
         // disabled), so already-installed companions overlay the global env too.
-        let (entries, patch_start, provenance) = if context.global() {
+        let (entries, patch_start, provenance, admitted_binaries, admitted_entrypoints) = if context.global() {
             // OFFLINE lock-pinned resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             //
@@ -246,8 +246,10 @@ impl ToolchainEnv {
             // PROJECT tier (the `else` arm) stays strict throughout: an explicit
             // project's missing/stale/corrupt `ocx.lock` IS an error.
             match resolve_global_pinned_env(&context, &target, self.groups.as_slice()).await {
-                Ok(Some((entries, patch_start, provenance))) => (entries, patch_start, provenance),
-                Ok(None) => (Vec::new(), 0, Vec::new()),
+                Ok(Some((entries, patch_start, provenance, binaries, entrypoints))) => {
+                    (entries, patch_start, provenance, binaries, entrypoints)
+                }
+                Ok(None) => (Vec::new(), 0, Vec::new(), Vec::new(), Vec::new()),
                 Err(error) => return Err(error),
             }
         } else {
@@ -315,7 +317,15 @@ impl ToolchainEnv {
             };
             // Per-package opt-out from the in-scope project `ocx.toml`.
             let scope = ocx_lib::package_manager::PatchScope::Project(ctx.config.no_patches_repositories());
-            manager.resolve_env_with_patch_boundary(&infos, false, scope).await?
+            let (entries, patch_start, provenance, attribution) =
+                manager.resolve_env_with_attribution(&infos, false, scope).await?;
+            (
+                entries,
+                patch_start,
+                provenance,
+                attribution.binaries,
+                attribution.entrypoints,
+            )
         };
 
         // ── Emit ─────────────────────────────────────────────────────────────
@@ -369,7 +379,12 @@ impl ToolchainEnv {
             ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
         }
 
-        context.api().report(&api::data::env::EnvVars::new(env_data))?;
+        let binaries = api::data::env::BinaryAttribution::from_pairs(&admitted_binaries);
+        let entrypoints = api::data::env::BinaryAttribution::from_pairs(&admitted_entrypoints);
+
+        context
+            .api()
+            .report(&api::data::env::EnvVars::new(env_data, binaries, entrypoints))?;
 
         Ok(ExitCode::SUCCESS)
     }
@@ -417,15 +432,29 @@ impl ToolchainEnv {
 ///
 /// # Errors
 ///
-/// Propagates a `resolve_env_with_patch_boundary` failure (C7 fail-closed or env
+/// Propagates a `resolve_env_with_attribution` failure (C7 fail-closed or env
 /// composition) for a resolved toolchain. Benign toolchain faults (no/corrupt
 /// lock, nothing materialised) return `Ok(None)`, not `Err`. Never contacts the
 /// network.
+///
+/// The last two tuple elements are the admitted-set `binaries`/`entrypoints`
+/// claim attribution (`AdmittedBinaries::binaries` / `::entrypoints`,
+/// `adr_declared_binaries_metadata.md` §4 Decision A), returned as raw
+/// `(identifier, name)` pairs rather than the `ocx_lib` struct so this
+/// `ocx_cli`-local signature only names already-public leaf types.
 pub(crate) async fn resolve_global_pinned_env(
     context: &crate::app::Context,
     target: &Platform,
     groups: &[String],
-) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>)>> {
+) -> anyhow::Result<
+    Option<(
+        Vec<Entry>,
+        usize,
+        Vec<PatchProvenance>,
+        Vec<(PinnedIdentifier, BinaryName)>,
+        Vec<(PinnedIdentifier, EntrypointName)>,
+    )>,
+> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
@@ -493,8 +522,15 @@ pub(crate) async fn resolve_global_pinned_env(
     // Return the companion-overlay boundary so `--show-patches` can annotate
     // companion entries on the global path, exactly as on the project path.
     let scope = ocx_lib::package_manager::PatchScope::Project(no_patches);
-    let (entries, patch_start, provenance) = manager.resolve_env_with_patch_boundary(&infos, false, scope).await?;
-    Ok(Some((entries, patch_start, provenance)))
+    let (entries, patch_start, provenance, attribution) =
+        manager.resolve_env_with_attribution(&infos, false, scope).await?;
+    Ok(Some((
+        entries,
+        patch_start,
+        provenance,
+        attribution.binaries,
+        attribution.entrypoints,
+    )))
 }
 
 /// Resolve the raw `-g` values into the concrete global-tier group set.

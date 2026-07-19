@@ -37,6 +37,7 @@ use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::oci;
 
 use super::Metadata;
+use super::binary::Binaries;
 use super::bundle::{Bundle, Version};
 use super::dependency::{Dependencies, DependencyError};
 use super::entrypoint::Entrypoints;
@@ -90,12 +91,26 @@ pub struct AuthoringBundle {
     /// Named entrypoints that `ocx package install` generates launchers for.
     #[serde(skip_serializing_if = "Entrypoints::is_empty", default)]
     pub entrypoints: Entrypoints,
+
+    /// The interface-binaries claim, hand-authored or baked in by `ocx
+    /// package create`'s auto-scan step. Mirrors [`Bundle::binaries`] — see
+    /// `adr_declared_binaries_metadata.md` §1, §2.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binaries: Option<Binaries>,
 }
 
 impl AuthoringMetadata {
     pub fn dependencies(&self) -> &AuthoringDependencies {
         match self {
             AuthoringMetadata::Bundle(bundle) => &bundle.dependencies,
+        }
+    }
+
+    /// The interface-binaries claim, or `None` if undeclared / not yet
+    /// scanned.
+    pub fn binaries(&self) -> Option<&Binaries> {
+        match self {
+            AuthoringMetadata::Bundle(bundle) => bundle.binaries.as_ref(),
         }
     }
 
@@ -116,6 +131,22 @@ impl AuthoringMetadata {
         match self {
             AuthoringMetadata::Bundle(bundle) => AuthoringMetadata::Bundle(AuthoringBundle {
                 platform: Some(platform),
+                ..bundle
+            }),
+        }
+    }
+
+    /// Returns `self` with the interface-binaries claim set to `binaries`.
+    ///
+    /// Called by `ocx package create`'s auto-scan step (Auto/Verify modes)
+    /// to bake the scanned or authored claim into the sidecar before
+    /// `to_published` projects it. See `adr_declared_binaries_metadata.md`
+    /// §2.1.
+    #[must_use]
+    pub fn with_binaries(self, binaries: Binaries) -> Self {
+        match self {
+            AuthoringMetadata::Bundle(bundle) => AuthoringMetadata::Bundle(AuthoringBundle {
+                binaries: Some(binaries),
                 ..bundle
             }),
         }
@@ -178,6 +209,7 @@ impl AuthoringMetadata {
                     env: bundle.env.clone(),
                     dependencies: Dependencies::new(dependencies)?,
                     entrypoints: bundle.entrypoints.clone(),
+                    binaries: bundle.binaries.clone(),
                 }))
             }
         }
@@ -558,5 +590,52 @@ mod tests {
                 "dependencies":[{"identifier":"ocx.sh/java:21","platforms":{}}]}"#,
         );
         assert!(!metadata.is_fully_pinned(), "empty map must not count as pinned");
+    }
+
+    // ── binaries: with_binaries builder + to_published projection ───────
+    //
+    // `adr_declared_binaries_metadata.md` §2.1: `with_binaries` is a
+    // consuming builder (exact `with_platform` precedent); `to_published`'s
+    // signature is unchanged, its struct literal carries
+    // `binaries: bundle.binaries.clone()` verbatim.
+
+    /// Builds a real `Binaries` value through the public parse API (a
+    /// bare `Bundle` JSON blob), since `Binaries`'s tuple field is private
+    /// to `binary.rs` and cannot be constructed directly from this module.
+    fn some_binaries() -> Binaries {
+        let bundle: crate::package::metadata::bundle::Bundle =
+            serde_json::from_str(r#"{"version":1,"binaries":["cmake","ctest"]}"#).expect("fixture bundle parses");
+        bundle.binaries().expect("fixture declares binaries").clone()
+    }
+
+    #[test]
+    fn with_binaries_bakes_field_and_to_published_carries_it() {
+        let metadata = parse(r#"{"type":"bundle","version":1}"#);
+        assert!(metadata.binaries().is_none(), "fixture starts undeclared");
+
+        let metadata = metadata.with_binaries(some_binaries());
+        assert_eq!(
+            metadata.binaries().map(Binaries::len),
+            Some(2),
+            "with_binaries must bake the claim into the sidecar value"
+        );
+
+        let published = metadata.to_published(&Platform::any()).unwrap();
+        let published_binaries = published
+            .binaries()
+            .expect("to_published must carry the baked binaries field through");
+        assert_eq!(published_binaries.len(), 2);
+    }
+
+    #[test]
+    fn absent_binaries_stays_absent_through_to_published() {
+        let metadata = parse(r#"{"type":"bundle","version":1}"#);
+        assert!(metadata.binaries().is_none());
+
+        let published = metadata.to_published(&Platform::any()).unwrap();
+        assert!(
+            published.binaries().is_none(),
+            "an undeclared binaries field must stay None through to_published, never default to Some(empty)"
+        );
     }
 }

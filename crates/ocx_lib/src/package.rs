@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod bin_scan;
 pub mod bundle;
 pub mod cascade;
 pub mod dependency_pinning;

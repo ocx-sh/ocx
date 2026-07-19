@@ -47,10 +47,11 @@ for the field is restricted to `["private", "public", "interface"]` via
 
 ## Custom `JsonSchema` Implementations
 
-Two types require a manual `impl schemars::JsonSchema` — they deviate from default schemars inference:
+Three types require a manual `impl schemars::JsonSchema` — they deviate from default schemars inference:
 
 1. **`Version`** — semver-inspired struct with custom string serialization. Schema hand-authored to match the string pattern accepted by the parser.
 2. **`Entrypoints`** — custom `MapAccess` `Deserialize` rejects duplicate keys (serde_json last-wins default is unsafe for registry data). Manual schema emits an `additionalProperties` + `propertyNames` object schema with a `description` that documents both the `command` field and the `args` array (fixed leading args, `${installPath}` interpolation only, `${deps.*}` not permitted).
+3. **`Binaries`** (`metadata/binary.rs`) — custom `Deserialize` accepts an untagged `string | object` element union (forward-compat read leniency for a hypothetical future per-binary object shape). Manual schema emits the **write contract only**: `{"type":"array","items":{"type":"string"},"uniqueItems":true}` — the read-side object-element leniency is an internal Rust affordance and never appears in the published schema. `BinaryElement` (the internal read-side enum) needs no schema of its own — it is never constructed by the writer and never reachable from a published field type.
 
 One field uses `#[schemars(schema_with = "...")]` to override the inferred schema:
 

@@ -418,6 +418,7 @@ mod tests {
         let pkg_path = store.path(&id);
         std::fs::create_dir_all(pkg_path.join("content")).unwrap();
         let meta = metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
             version: bundle::Version::V1,
             strip_components: None,
             env: metadata_env::Env::default(),

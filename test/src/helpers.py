@@ -20,6 +20,19 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
+# Sentinel distinguishing "caller passed nothing" from "caller passed None" /
+# an explicit list for `make_package(binaries=...)`. The wire format
+# deliberately gives `Option<Binaries>` absent (undeclared) and `Some([])`
+# (declared empty) different meanings (adr_declared_binaries_metadata.md §1),
+# so the helper needs a third state beyond Python's `None`.
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
+
 # ---------------------------------------------------------------------------
 # Docker-compose helpers
 # ---------------------------------------------------------------------------
@@ -127,6 +140,9 @@ def make_package(
     outputs: dict[str, dict[str, str]] | None = None,
     bin_scripts: dict[str, str] | None = None,
     dependencies: list[dict] | None = None,
+    binaries: list[str] | _Unset = _UNSET,
+    bin_exec: dict[str, bool] | None = None,
+    no_bin_scan: bool = False,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -168,6 +184,25 @@ def make_package(
         instead of the generated trap script.  Takes precedence over
         ``outputs`` for the same name.  Ignored on Windows (``outputs``
         behaviour is Windows-incompatible anyway).
+    binaries:
+        Sets the metadata sidecar's ``binaries`` claim field.  Omit entirely
+        (default) to leave the field undeclared; pass a list (including
+        ``[]``) to declare it explicitly — the two are distinct wire states
+        (``adr_declared_binaries_metadata.md`` §1).  Passed straight through
+        to ``ocx package create``, so scan/verify behaviour follows whatever
+        ``--bin-scan``/``--no-bin-scan`` semantics are in effect (default
+        Auto: a declared field is never scanned or verified, only an absent
+        one is filled).
+    bin_exec:
+        Maps binary name to whether that bundled file gets the executable
+        bit (``0o755``).  Defaults to executable for every name in ``bins``
+        when omitted.  Ignored on Windows (no exec-bit concept — scan there
+        uses an extension allowlist instead).
+    no_bin_scan:
+        Passes ``--no-bin-scan`` to ``ocx package create``, so the default
+        Auto-mode scan never fills a ``binaries`` claim even when ``bin/``
+        holds an interface-visible executable.  Use this to build a
+        genuinely claim-less (pre-ADR / legacy-shaped) fixture package.
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -188,18 +223,22 @@ def make_package(
         script = bin_dir / name
         bin_outputs = (outputs or {}).get(name)
         bin_body = (bin_scripts or {}).get(name)
+        executable = (bin_exec or {}).get(name, True)
         if sys.platform == "win32":
             script = script.with_suffix(".bat")
             script.write_text(f"@echo {marker}\n")
         elif bin_body is not None:
             script.write_text(bin_body)
-            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+            if executable:
+                script.chmod(script.stat().st_mode | stat.S_IEXEC)
         elif bin_outputs:
             script.write_text(_build_trap_script(bin_outputs, marker))
-            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+            if executable:
+                script.chmod(script.stat().st_mode | stat.S_IEXEC)
         else:
             script.write_text(f"#!/bin/sh\necho {marker}\n")
-            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+            if executable:
+                script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     # Add random padding for realistic download sizes.
     # For single-layer packages all padding lives in pkg_dir/lib/data.bin.
@@ -243,6 +282,8 @@ def make_package(
     }
     if dependencies:
         metadata_obj["dependencies"] = dependencies
+    if binaries is not _UNSET:
+        metadata_obj["binaries"] = binaries
     metadata_path.write_text(json.dumps(metadata_obj))
 
     # Create bundles.  For multi-layer packages, build one bundle per layer:
@@ -268,6 +309,7 @@ def make_package(
         str(bundle_l0),
         "-p",
         plat,
+        *(["--no-bin-scan"] if no_bin_scan else []),
         str(pkg_dir),
     )
 

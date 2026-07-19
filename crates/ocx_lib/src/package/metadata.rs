@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod authoring;
+pub mod binary;
 pub mod bundle;
 pub mod dependency;
 pub mod entrypoint;
@@ -13,6 +14,8 @@ pub mod template;
 pub mod validation;
 pub mod visibility;
 
+// Re-export binary public API so callers can use `metadata::Binaries` etc.
+pub use binary::{Binaries, BinaryError, BinaryName};
 // Re-export entrypoint public API so callers can use `metadata::Entrypoint` etc.
 pub use entrypoint::{Entrypoint, EntrypointError, EntrypointName, Entrypoints};
 // Re-export ValidMetadata so callers continue to use `metadata::ValidMetadata`.
@@ -63,6 +66,16 @@ impl Metadata {
     pub fn entrypoints(&self) -> Option<&entrypoint::Entrypoints> {
         match self {
             Metadata::Bundle(bundle) => Some(&bundle.entrypoints),
+        }
+    }
+
+    /// Returns the declared `binaries` claims for bundle metadata.
+    ///
+    /// `None` means the field is absent (legacy/unknown publisher) — distinct
+    /// from `Some` of an empty set, which is an explicit "declares none" claim.
+    pub fn binaries(&self) -> Option<&binary::Binaries> {
+        match self {
+            Metadata::Bundle(bundle) => bundle.binaries.as_ref(),
         }
     }
 }

@@ -114,14 +114,15 @@ impl Env {
 
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             info.into_iter().map(std::sync::Arc::new).collect();
-        // Use `resolve_env_with_patch_boundary` when `--show-patches` is requested so
-        // the CLI can annotate which entries came from companion overlays. For all
-        // other paths (--ci, --shell, structured report without --show-patches) the
-        // boundary information is unused and `resolve_env` would be equivalent.
+        // `resolve_env_with_attribution` additionally surfaces the admitted-set
+        // `binaries`/`entrypoints` claim attribution for the structured report's
+        // `binaries`/`entrypoints` arrays; the patch boundary is used the same
+        // way `resolve_env_with_patch_boundary` used it (annotate `--show-patches`
+        // entries). For `--ci`/`--shell` output the extra data is simply unused.
         //
         // OCI-tier (`ocx package env`): no `ocx.toml`, so no per-package opt-out.
-        let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(
+        let (entries, patch_start, provenance, attribution) = manager
+            .resolve_env_with_attribution(
                 &info,
                 self.self_view,
                 ocx_lib::package_manager::PatchScope::NoProjectContext,
@@ -174,9 +175,14 @@ impl Env {
             ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
         }
 
+        let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
+        let entrypoints = api::data::env::BinaryAttribution::from_pairs(&attribution.entrypoints);
+
         // Structured report. Format is a context-level concern (root
         // `--format`); this command does not override it.
-        context.api().report(&api::data::env::EnvVars::new(all_entries))?;
+        context
+            .api()
+            .report(&api::data::env::EnvVars::new(all_entries, binaries, entrypoints))?;
 
         Ok(ExitCode::SUCCESS)
     }
