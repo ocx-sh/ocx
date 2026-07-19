@@ -7,7 +7,7 @@ use ocx_lib::{
     ConfigInputs, ConfigLoader,
     cli::{ColorModeConfig, Printer, UserInterface},
     env,
-    file_structure::{self, BlobStore, TagStore},
+    file_structure::{self, IndexStore},
     log,
     oci::{self, index},
     package_manager,
@@ -22,8 +22,20 @@ pub struct Context {
     offline: bool,
     project_path: Option<PathBuf>,
     remote_client: Option<oci::Client>,
-    remote_index: Option<oci::index::RemoteIndex>,
+    oci_index: Option<oci::index::OciIndex>,
+    /// One `index.ocx.sh`-protocol source per index-bearing namespace, built
+    /// when online from every merged `[registries."<ns>"]` entry that carries
+    /// an `index` field (`adr_index_indirection.md` F5a — kind per NAMESPACE,
+    /// see `build_index_sources`). Each is chained ahead of the plain-OCI
+    /// `oci_index` and reused for catalog sync (`ocx index update`); empty
+    /// under `--offline` or when no namespace is configured as index-kind.
+    index_sources: Vec<oci::index::OcxIndex>,
     local_index: oci::index::LocalIndex,
+    /// Separately-consumable local-index refresh seam (`adr_index_indirection.md`
+    /// Decision H) — wraps `local_index`'s per-package refresh and per-source
+    /// catalog sync. `ocx index update` consumes this instead of calling
+    /// `local_index` write methods directly.
+    index_sync: oci::index::IndexSync,
     file_structure: file_structure::FileStructure,
     api: api::Api,
     ui: UserInterface,
@@ -140,15 +152,16 @@ impl Context {
         // Resolve the per-host mirror map once via the lib resolver
         // (`ocx_lib::resolve_mirror_map`): `[mirrors]` config merged with the
         // inherited `OCX_MIRRORS` env (env wins per-host key), every entry parsed
-        // and the plain-HTTP gate enforced in one place. The same resolved set
-        // feeds both the OCI client (transport rewrite) and the `OcxConfigView`
-        // (subprocess forwarding), so parent and forwarded children agree on the
-        // mirror map. The lib `thiserror` error is re-wrapped into `anyhow` at
-        // this CLI boundary.
-        let (mirror_entries, mirror_pairs) =
-            ocx_lib::resolve_mirror_map(&config, env::mirrors()?, &env::insecure_registries())
-                .map_err(anyhow::Error::new)?;
-        let mirror_map = oci::MirrorMap::new(mirror_entries);
+        // and the plain-HTTP gate enforced in one place, split by traffic role.
+        // The registry role feeds the OCI client (transport rewrite) ONLY; the
+        // merged (pre-role-parse) union feeds the `OcxConfigView` (subprocess
+        // forwarding), so parent and forwarded children agree on the mirror map
+        // and a forwarded child re-parses + re-validates it the same way a
+        // `[mirrors]` TOML entry would. The lib `thiserror` error is re-wrapped
+        // into `anyhow` at this CLI boundary.
+        let resolved_mirrors = ocx_lib::resolve_mirror_map(&config, env::mirrors()?, &env::insecure_registries())
+            .map_err(anyhow::Error::new)?;
+        let mirror_map = oci::MirrorMap::new(resolved_mirrors.registry.clone());
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
@@ -160,7 +173,7 @@ impl Context {
         // divergence).
         let api = options.build_api(color_config);
 
-        let (remote_client, remote_index) = if options.offline {
+        let (remote_client, oci_index) = if options.offline {
             (None, None)
         } else {
             // Explicit builder (not `from_env_with_progress`) so the
@@ -177,23 +190,37 @@ impl Context {
                 .build();
             (
                 Some(client.clone()),
-                Some(index::RemoteIndex::new(index::RemoteConfig { client })),
+                Some(index::OciIndex::new(index::OciIndexConfig { client })),
             )
         };
         let file_structure = file_structure::FileStructure::new();
-        let tag_root = options
+        // Index home precedence (`adr_index_indirection.md` A1): `--index` ▸
+        // `OCX_INDEX` ▸ `$OCX_HOME/index`. This redirects the whole
+        // collection — every configured source's subtree (root documents +
+        // dispatch-object CAS), not a single source in isolation.
+        // A redirected index home may be a user-committed or read-only shipped
+        // copy, so its cross-process locks stay machine-global under
+        // `$OCX_HOME/locks` (never inside the redirected home).
+        let index_store = options
             .index
             .clone()
             .or_else(|| env::var(env::keys::OCX_INDEX).map(std::path::PathBuf::from))
-            .unwrap_or_else(|| file_structure.tags.root().to_path_buf());
+            .map(|home| IndexStore::new(home).with_locks_root(file_structure.locks.clone()))
+            .unwrap_or_else(|| file_structure.index.clone());
+        // The yanked opt-in (`OCX_ALLOW_YANKED`) gates OFFLINE status surfacing:
+        // a committed root's yanked tag is refused on a local resolve unless it is
+        // set (`adr_index_indirection.md` F3) — the offline counterpart to the
+        // `OcxIndex` `allow_yanked` the index sources below read.
+        let allow_yanked = env::flag(env::keys::OCX_ALLOW_YANKED, false);
         let local_index = index::LocalIndex::new(index::LocalConfig {
-            tag_store: TagStore::new(tag_root),
-            blob_store: BlobStore::new(file_structure.blobs.root().to_path_buf()),
-        });
+            index_store: index_store.clone(),
+        })
+        .with_allow_yanked(allow_yanked);
+        let index_sync = index::IndexSync::new(local_index.clone());
 
         // Single `Index::from_chained` entry point; see
         // `chain_mode_and_sources` for the offline/online derivation.
-        // Precedence (offline wins by producing no remote_index): frozen ▸
+        // Precedence (offline wins by producing no oci_index): frozen ▸
         // remote ▸ default. Frozen keeps the remote source so digest-pinned
         // content still fetches; only unpinned-tag resolution is refused.
         let online_mode = if options.frozen {
@@ -203,8 +230,24 @@ impl Context {
         } else {
             index::ChainMode::Default
         };
-        let (mode, sources) = Self::chain_mode_and_sources(remote_index.as_ref(), online_mode);
-        let selected_index = index::Index::from_chained(local_index.clone(), sources, mode);
+        let index_sources = Self::build_index_sources(
+            remote_client.as_ref(),
+            &config,
+            &resolved_mirrors.index,
+            &env::insecure_registries(),
+        )?;
+        let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
+        // Attach the machine-global blob store so an installed tool's leaf
+        // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
+        // never the local index, A3) resolves offline with zero network: an
+        // `AbsentLeaf` is recovered from the blob store before any source walk
+        // (`adr_index_indirection.md` A3 step 2 / B2).
+        let selected_index = index::Index::from_chained_with_content_store(
+            local_index.clone(),
+            sources,
+            mode,
+            file_structure.blobs.clone(),
+        );
 
         let default_registry = env::string(
             "OCX_DEFAULT_REGISTRY",
@@ -290,10 +333,10 @@ impl Context {
         let managed_config_client = if options.offline || !needs_managed_config_client {
             None
         } else {
-            let (local_mirror_entries, _local_mirror_pairs) =
+            let local_resolved_mirrors =
                 ocx_lib::resolve_mirror_map(&local_only_config, env::mirrors()?, &env::insecure_registries())
                     .map_err(anyhow::Error::new)?;
-            let local_mirror_map = oci::MirrorMap::new(local_mirror_entries);
+            let local_mirror_map = oci::MirrorMap::new(local_resolved_mirrors.registry);
             Some(
                 oci::ClientBuilder::new()
                     .plain_http_registries(env::insecure_registries())
@@ -356,7 +399,10 @@ impl Context {
         .with_progress(progress.clone())
         .with_patches(resolved_patches.clone())
         .with_patch_snapshot(patch_snapshot)
-        .with_managed_config_client(managed_config_client);
+        .with_managed_config_client(managed_config_client)
+        // Guaranteed-local companion / site-patch lookups must read the same
+        // (`--index` / `OCX_INDEX` redirected) snapshot the main index uses.
+        .with_index(index_store);
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -369,9 +415,10 @@ impl Context {
             std::path::PathBuf::from("ocx")
         });
         let mut config_view = options.as_view(self_exe);
-        // Feed the same resolved mirror map into the forwarding view so a child
-        // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
-        config_view.mirrors = mirror_pairs;
+        // Feed the same resolved (merged, pre-role-parse) mirror map into the
+        // forwarding view so a child ocx inherits `OCX_MIRRORS` matching the
+        // parent's transport rewrite.
+        config_view.mirrors = resolved_mirrors.merged.into_iter().collect();
         // Thread the already-resolved patches into the config forwarding view
         // so child ocx processes (launcher exec) inherit the same patch tier
         // via `OCX_PATCHES` (C5 — forwarding across process boundaries).
@@ -393,13 +440,15 @@ impl Context {
 
         Ok(Context {
             remote_client,
-            remote_index,
+            oci_index,
+            index_sources,
             offline: options.offline,
             project_path,
             file_structure,
             api,
             ui,
             local_index,
+            index_sync,
             default_index: selected_index,
             manager,
             default_registry,
@@ -446,12 +495,29 @@ impl Context {
         self.remote_client.as_ref().ok_or(ocx_lib::Error::OfflineMode)
     }
 
-    pub fn remote_index(&self) -> ocx_lib::Result<&oci::index::RemoteIndex> {
-        self.remote_index.as_ref().ok_or(ocx_lib::Error::OfflineMode)
+    pub fn oci_index(&self) -> ocx_lib::Result<&oci::index::OciIndex> {
+        self.oci_index.as_ref().ok_or(ocx_lib::Error::OfflineMode)
     }
 
     pub fn local_index(&self) -> &oci::index::LocalIndex {
         &self.local_index
+    }
+
+    /// Separately-consumable local-index refresh seam (`adr_index_indirection.md`
+    /// Decision H): per-package tag refresh + per-source catalog sync, with
+    /// no daemon and no scheduling policy. `ocx index update` consumes this
+    /// instead of calling [`Self::local_index`] write methods directly.
+    pub fn index_sync(&self) -> &oci::index::IndexSync {
+        &self.index_sync
+    }
+
+    /// Every configured `index.ocx.sh`-protocol source — one per index-bearing
+    /// `[registries."<ns>"]` namespace, when online. Empty under `--offline` or
+    /// when no namespace is configured as index-kind. Used by `ocx index
+    /// update` to route a package to its namespace's source and to sync each
+    /// source's catalog.
+    pub fn index_sources(&self) -> &[oci::index::OcxIndex] {
+        &self.index_sources
     }
 
     pub fn default_index(&self) -> &oci::index::Index {
@@ -470,7 +536,7 @@ impl Context {
         } else {
             index::ChainMode::Remote
         };
-        let (mode, sources) = Self::chain_mode_and_sources(self.remote_index.as_ref(), online_mode);
+        let (mode, sources) = Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode);
         oci::index::Index::from_chained_lock_scoped(self.local_index.clone(), sources, mode)
     }
 
@@ -478,16 +544,88 @@ impl Context {
     /// no remote index (`--offline`) forces `Offline` with no sources; online
     /// wraps the remote as the single chain source under the caller-chosen
     /// mode. Deriving mode and sources from the same value prevents the
-    /// `(offline, remote_index = Some)` contradiction a bool-based match
+    /// `(offline, oci_index = Some)` contradiction a bool-based match
     /// could produce.
     fn chain_mode_and_sources(
-        remote_index: Option<&index::RemoteIndex>,
+        oci_index: Option<&index::OciIndex>,
+        index_sources: &[index::OcxIndex],
         online_mode: index::ChainMode,
     ) -> (index::ChainMode, Vec<index::Index>) {
-        match remote_index {
+        match oci_index {
             None => (index::ChainMode::Offline, Vec::new()),
-            Some(remote) => (online_mode, vec![index::Index::from_remote(remote.clone())]),
+            Some(remote) => {
+                let mut sources = Vec::with_capacity(index_sources.len() + 1);
+                // Every index-bearing namespace's static-file source is
+                // registered BEFORE the registry so a logical reference in that
+                // namespace always resolves through the verified two-hop path
+                // (root -> sha256-verified obs -> physical) and the yank gate —
+                // never bypassed by a registry that happens to serve the same
+                // name (`adr_index_indirection.md` F, Codex R3). `is_authoritative_for`
+                // routes each source to its own namespace and stops fall-through,
+                // so exactly one remote resolves any given namespace (Decision H).
+                // A namespace nobody configured as index-kind is absent here and
+                // chains the registry alone, so an index-site outage can never
+                // hard-block it.
+                for source in index_sources {
+                    sources.push(index::Index::from_source(source.clone()));
+                }
+                sources.push(index::Index::from_remote(remote.clone()));
+                (online_mode, sources)
+            }
         }
+    }
+
+    /// Builds one `index.ocx.sh`-protocol source per index-bearing namespace,
+    /// when online (`adr_index_indirection.md` F5a — kind per NAMESPACE).
+    ///
+    /// `[registries."<ns>"] index` presence is the sole protocol-kind marker
+    /// (Decision H): every merged `[registries]` entry carrying a non-empty
+    /// `index` field resolves via the ocx-index protocol against that base
+    /// URL — not just `ocx.sh`. A namespace with no `index` field resolves as
+    /// plain OCI and gets no source here, so [`Self::chain_mode_and_sources`]
+    /// chains the registry alone for it and an index-site outage can never
+    /// hard-block a namespace nobody configured as index-kind. Sources are
+    /// returned sorted by namespace so the chain order is deterministic.
+    ///
+    /// Each source's base URL honours its `[registries."<ns>"] index` value
+    /// plus the `[mirrors."<host>"] index` role override for that base's
+    /// traffic host (F5c); the yanked opt-in reads
+    /// [`OCX_ALLOW_YANKED`](env::keys::OCX_ALLOW_YANKED). This is the single
+    /// place the index clients are minted. A plain-`http://` final target is
+    /// refused unless its host is in `insecure_hosts`
+    /// (`OCX_INSECURE_REGISTRIES`), the same gate the registry role applies.
+    fn build_index_sources(
+        remote_client: Option<&oci::Client>,
+        config: &ocx_lib::Config,
+        mirrors_index: &std::collections::BTreeMap<String, ocx_lib::ParsedMirror>,
+        insecure_hosts: &[String],
+    ) -> ocx_lib::Result<Vec<index::OcxIndex>> {
+        // Offline (no remote client) or no `[registries]` table ⇒ no sources.
+        let (Some(client), Some(registries)) = (remote_client, config.registries.as_ref()) else {
+            return Ok(Vec::new());
+        };
+
+        // Deterministic chain order: sort namespaces so the built sources — and
+        // therefore the resolution chain — are stable across runs.
+        let mut namespaces: Vec<&String> = registries
+            .iter()
+            .filter(|(_, entry)| entry.index.as_deref().is_some_and(|url| !url.is_empty()))
+            .map(|(namespace, _)| namespace)
+            .collect();
+        namespaces.sort();
+
+        let allow_yanked = env::flag(env::keys::OCX_ALLOW_YANKED, false);
+        let mut sources = Vec::with_capacity(namespaces.len());
+        for namespace in namespaces {
+            sources.push(index::OcxIndex::new(index::OcxIndexConfig {
+                transport: Box::new(index::ReqwestIndexTransport::new()),
+                base_url: index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts)?,
+                namespace: namespace.clone(),
+                client: client.clone(),
+                allow_yanked,
+            }));
+        }
+        Ok(sources)
     }
 
     pub fn default_registry(&self) -> &str {
@@ -710,28 +848,269 @@ mod tests {
         );
     }
 
+    // ── `registries."<ns>".index` presence gates `OcxIndex` construction,
+    //    per NAMESPACE (`adr_index_indirection.md` F5a) ──────────────────────
+    //
+    // `build_index_sources` constructs one `OcxIndex` per merged
+    // `[registries."<ns>"]` entry that carries a non-empty `index` field —
+    // NOT just `ocx.sh` (the earlier hard-coding). A namespace configured as
+    // index-kind resolves through its own two-hop source; a namespace with no
+    // `index` field gets no source and `chain_mode_and_sources` chains the
+    // registry alone for it, so an outage on an unconfigured index endpoint
+    // can never hard-block a plain-OCI namespace.
+
+    /// Builds a `Config` with the given `(namespace, url, index)` registry
+    /// entries.
+    fn config_with_registries(entries: &[(&str, Option<&str>, Option<&str>)]) -> ocx_lib::Config {
+        let mut registries = std::collections::HashMap::new();
+        for (namespace, url, index) in entries {
+            registries.insert(
+                namespace.to_string(),
+                ocx_lib::RegistryConfig {
+                    url: url.map(str::to_string),
+                    index: index.map(str::to_string),
+                    system_locked: false,
+                },
+            );
+        }
+        ocx_lib::Config {
+            registries: Some(registries),
+            ..Default::default()
+        }
+    }
+
+    fn source_namespaces(sources: &[index::OcxIndex]) -> Vec<String> {
+        sources.iter().map(|source| source.namespace().to_string()).collect()
+    }
+
+    #[test]
+    fn build_index_sources_is_empty_without_an_index_bearing_registry() {
+        // No `[registries]` table, and an entry carrying only `url` (a plain
+        // hostname alias, no `index`), both yield no index sources — presence
+        // of `index` specifically is the sole selector (ADR F5a).
+        let client = oci::ClientBuilder::new().build();
+        let mirrors = std::collections::BTreeMap::new();
+
+        let empty = Context::build_index_sources(Some(&client), &ocx_lib::Config::default(), &mirrors, &[]).unwrap();
+        assert!(empty.is_empty(), "no [registries] table must build no index sources");
+
+        let url_only = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("ghcr.io"), None)]);
+        let built = Context::build_index_sources(Some(&client), &url_only, &mirrors, &[]).unwrap();
+        assert!(
+            built.is_empty(),
+            "a registries entry lacking `index` must not build an index source"
+        );
+    }
+
+    #[test]
+    fn build_index_sources_is_empty_when_offline() {
+        // Offline is modelled as no remote client; without a physical fetch
+        // client there is nothing to build an index source's leaf fetches on.
+        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh"))]);
+        let built = Context::build_index_sources(None, &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert!(
+            built.is_empty(),
+            "offline (no remote client) must build no index sources"
+        );
+    }
+
+    #[test]
+    fn build_index_sources_builds_one_per_index_bearing_namespace() {
+        // Two namespaces configured as index-kind (including a non-ocx.sh one)
+        // plus one plain-OCI namespace ⇒ exactly two sources, keyed by their
+        // own namespaces, in deterministic (sorted) order. This is the fix: a
+        // `[registries."<other-ns>"] index` entry is no longer silently ignored.
+        let client = oci::ClientBuilder::new().build();
+        let config = config_with_registries(&[
+            (oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh")),
+            ("corp.example", None, Some("https://index.corp.example")),
+            ("plain.example", Some("ghcr.io"), None),
+        ]);
+
+        let sources =
+            Context::build_index_sources(Some(&client), &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+
+        assert_eq!(
+            source_namespaces(&sources),
+            vec!["corp.example".to_string(), oci::OCX_SH_REGISTRY.to_string()],
+            "one index source per index-bearing namespace, sorted, and never for a plain-OCI entry"
+        );
+    }
+
+    // ── `build_index_sources` threads `mirrors_index` (F5c) ──────────────────
+    //
+    // Traces: mirror-invariant audit 2026-07-19, gap G8. `build_index_sources`
+    // hands its `mirrors_index` and `insecure_hosts` parameters straight
+    // through to `OcxIndex::resolve_base_url` per namespace — the same
+    // parameters, unmodified, not an empty stand-in. `OcxIndex` exposes no
+    // base-URL accessor (by design — see `ocx_index.rs`'s own
+    // `resolve_base_url_applies_mirrors_index_role_override` for the unit
+    // level), so these observe the wiring the only way available without
+    // adding one: the plain-HTTP gate's success/failure, which only flips if
+    // the override actually reached `resolve_base_url`.
+
+    #[test]
+    fn build_index_sources_reflects_the_mirrors_index_override_for_its_own_host() {
+        // The registries entry alone is safe (https) and would never gate.
+        // The mirrors_index override rewrites the SAME traffic host to a
+        // DIFFERENT, plain-http physical host. If `build_index_sources`
+        // dropped `mirrors_index` en route (e.g. passed an empty map
+        // instead), this would resolve the untouched https base and succeed;
+        // instead it must fail, and the gate error must name the OVERRIDE's
+        // host — proving the built source's resolution used the mirror, not
+        // the original `[registries] index` value.
+        let client = oci::ClientBuilder::new().build();
+        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        mirrors_index.insert(
+            "index.example".to_string(),
+            ocx_lib::parse_url("http://mirror.example").unwrap(),
+        );
+
+        // `OcxIndex` carries no `Debug` impl (only `Clone`), so `expect_err`
+        // is unavailable here — match explicitly instead.
+        let error = match Context::build_index_sources(Some(&client), &config, &mirrors_index, &[]) {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "a mirrors_index override to a non-allowlisted http host must gate, proving the override reached resolution"
+            ),
+        };
+
+        assert!(
+            error.to_string().contains("mirror.example"),
+            "expected the gate to name the override's host (mirror.example), not the original (index.example); got: {error}"
+        );
+    }
+
+    #[test]
+    fn build_index_sources_ignores_a_mirrors_index_entry_keyed_by_an_unrelated_host() {
+        // The mirrors_index entry is keyed by a host that is NOT this
+        // namespace's traffic host — host-keyed precision, proven at the
+        // wiring level (not just inside `resolve_base_url`, already covered
+        // by `resolve_base_url_applies_mirrors_index_role_override` in
+        // ocx_index.rs). Were the unrelated entry to leak into this
+        // namespace's resolution, the plain-http gate below would fire since
+        // its target is also http and unlisted; instead `build_index_sources`
+        // must succeed, keeping the original https base untouched.
+        let client = oci::ClientBuilder::new().build();
+        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        mirrors_index.insert(
+            "unrelated.example".to_string(),
+            ocx_lib::parse_url("http://unrelated.example").unwrap(),
+        );
+
+        let sources = Context::build_index_sources(Some(&client), &config, &mirrors_index, &[])
+            .expect("a mirrors_index entry keyed by an unrelated host must not affect this namespace's resolution");
+
+        assert_eq!(
+            source_namespaces(&sources),
+            vec!["ns".to_string()],
+            "the unrelated-host override must not block or otherwise affect the \"ns\" source"
+        );
+    }
+
+    #[test]
+    fn build_index_sources_surfaces_the_plain_http_gate_error_through_the_wiring() {
+        // Same override `OcxIndex::resolve_base_url`'s own
+        // `resolve_base_url_gates_plain_http_target` unit test exercises
+        // directly — replicated here through `build_index_sources` to prove
+        // the gate error propagates all the way out of the wiring call, not
+        // only inside the unit-tested function in isolation.
+        let client = oci::ClientBuilder::new().build();
+        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        mirrors_index.insert(
+            "index.example".to_string(),
+            ocx_lib::parse_url("http://index.example").unwrap(),
+        );
+
+        // Ground truth: the exact call `build_index_sources` makes internally.
+        let direct = index::OcxIndex::resolve_base_url(&config, "ns", &mirrors_index, &[])
+            .expect_err("ground truth: resolve_base_url itself must gate this http override");
+
+        // `OcxIndex` carries no `Debug` impl (only `Clone`), so `expect_err`
+        // is unavailable here — match explicitly instead.
+        let wired = match Context::build_index_sources(Some(&client), &config, &mirrors_index, &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("build_index_sources must propagate the same gate error, not silently succeed"),
+        };
+
+        assert_eq!(
+            direct.to_string(),
+            wired.to_string(),
+            "build_index_sources's error must match the direct resolve_base_url call"
+        );
+    }
+
+    #[test]
+    fn chain_mode_and_sources_chains_every_index_source_before_the_registry() {
+        // Two index sources ⇒ the chain is [source, source, registry]: each
+        // index source is registered ahead of the plain-OCI registry so a
+        // logical reference in its namespace resolves through the verified
+        // two-hop path, and `is_authoritative_for` stops fall-through so
+        // exactly one remote resolves each namespace (Decision H).
+        let client = oci::ClientBuilder::new().build();
+        let config = config_with_registries(&[
+            (oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh")),
+            ("corp.example", None, Some("https://index.corp.example")),
+        ]);
+        let index_sources =
+            Context::build_index_sources(Some(&client), &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+        let oci_index = index::OciIndex::new(index::OciIndexConfig {
+            client: oci::ClientBuilder::new().build(),
+        });
+
+        let (mode, sources) =
+            Context::chain_mode_and_sources(Some(&oci_index), &index_sources, index::ChainMode::Default);
+
+        assert_eq!(mode, index::ChainMode::Default);
+        assert_eq!(
+            sources.len(),
+            3,
+            "two index sources must chain ahead of the single registry source"
+        );
+    }
+
+    #[test]
+    fn chain_mode_and_sources_chains_the_registry_alone_when_no_index_sources() {
+        // With no index-kind namespace, the chain carries exactly one source —
+        // the OCI registry — never a second, absent-but-implied index source.
+        let client = oci::ClientBuilder::new().build();
+        let oci_index = index::OciIndex::new(index::OciIndexConfig { client });
+
+        let (mode, sources) = Context::chain_mode_and_sources(Some(&oci_index), &[], index::ChainMode::Default);
+
+        assert_eq!(mode, index::ChainMode::Default);
+        assert_eq!(
+            sources.len(),
+            1,
+            "no index sources must chain the registry alone, resolving via OciIndex only"
+        );
+    }
+
     #[test]
     fn frozen_and_offline_together_produces_offline_chain_mode() {
         // `--frozen --offline` is a valid combination: the guard accepts it, and
         // the mode-selection logic collapses it to `ChainMode::Offline` (the
         // stronger constraint). The key invariant: when `offline=true` the
-        // `remote_index` is `None`, and the `match &remote_index` arm for `None`
+        // `oci_index` is `None`, and the `match &oci_index` arm for `None`
         // always emits `ChainMode::Offline` regardless of the `frozen` flag.
         // This mirrors the precedence comment in `try_init`:
-        // "offline already won via the `None` arm — it produced no remote_index".
+        // "offline already won via the `None` arm — it produced no oci_index".
         let mut view = ocx_lib::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
         view.frozen = true;
-        // offline=true → remote_index=None; the guard must accept the combination.
+        // offline=true → oci_index=None; the guard must accept the combination.
         assert!(
             check_frozen_remote_exclusivity(&view).is_ok(),
             "--frozen + --offline must pass the exclusivity guard"
         );
 
         // Replicate the mode-selection match from try_init:
-        // offline=true produces remote_index=None → Offline wins, ignoring frozen.
-        let remote_index: Option<index::RemoteIndex> = None; // simulates offline=true
+        // offline=true produces oci_index=None → Offline wins, ignoring frozen.
+        let oci_index: Option<index::OciIndex> = None; // simulates offline=true
         let frozen = true;
-        let mode: index::ChainMode = match &remote_index {
+        let mode: index::ChainMode = match &oci_index {
             None => index::ChainMode::Offline,
             Some(_) => {
                 if frozen {
@@ -744,7 +1123,7 @@ mod tests {
         assert_eq!(
             mode,
             index::ChainMode::Offline,
-            "offline (remote_index=None) must produce ChainMode::Offline even when frozen=true"
+            "offline (oci_index=None) must produce ChainMode::Offline even when frozen=true"
         );
     }
 }

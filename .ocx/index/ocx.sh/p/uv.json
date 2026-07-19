@@ -1,0 +1,9 @@
+{
+  "repository": "oci://ocx.sh/uv",
+  "tags": {
+    "0": {
+      "content": "sha256:48b4de3c97c07db0b9861bebb9eff273a2dcfb9fd6981ee31f7f76859c1dbfbb",
+      "observed": "2026-07-19T11:14:34.185626755+00:00"
+    }
+  }
+}

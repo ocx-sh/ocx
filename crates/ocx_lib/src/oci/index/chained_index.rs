@@ -5,10 +5,50 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::index_impl::IndexImpl;
+use super::local_index::{DispatchResolution, SourceKind};
 use super::{ChainMode, Index, IndexOperation, LocalIndex, index_impl};
+use crate::file_structure::BlobStore;
 use crate::utility::singleflight;
 use crate::{Result, log, oci};
+
+/// Whether `err` reports a present-but-corrupt dispatch object — its on-disk
+/// bytes no longer hash to the digest that names them (`adr_index_indirection.md`
+/// A3, CWE-345). Distinct from an absent object, which the local read path
+/// reports as `Ok(None)`. `ChainedIndex` uses this to decide whether a corrupt
+/// local read can be healed by a source re-fetch (online `Resolve`) or must be
+/// escalated to a hard `DataError` (`--offline`, or any pure `Query`).
+fn is_corrupt_index_object(err: &crate::Error) -> bool {
+    matches!(
+        err,
+        crate::Error::FileStructure(crate::file_structure::error::Error::DigestMismatch { .. })
+    )
+}
+
+/// Whether `err` is a human-lane refusal surfaced from the COMMITTED local root
+/// — a tag resolving to a yanked entry without the opt-in
+/// (`adr_index_indirection.md` F3). Unlike a corrupt object (healable by a
+/// source re-fetch) or a plain local miss (fall through to a source), a yank is
+/// an authoritative publisher signal: it must propagate as a hard `DataError`
+/// straight out of the local read, never fall through to a source that would
+/// serve the same name and silently bypass the refusal. This is the offline
+/// counterpart to the authoritative-source refusal `fetch_and_persist_chain`
+/// already stops the walk on.
+fn is_local_status_refusal(err: &crate::Error) -> bool {
+    matches!(err, crate::Error::OciIndex(super::error::Error::YankedRefused { .. }))
+}
+
+/// Recompute-verify: does `bytes` genuinely hash to `digest`?
+///
+/// `BlobStore` is a stateless CAS — it does not self-verify on read or write
+/// (see its own doc comment's "Trust" section) — so every caller reading
+/// content out of it is responsible for checking the bytes against the digest
+/// that names them (CWE-345 trust-boundary check). Shared by
+/// [`ChainedIndex::recover_absent_leaf`] (leaf-manifest recovery) and
+/// [`index_impl::IndexImpl::fetch_blob`] (config-blob cache-first read and
+/// post-fetch verify) so the recompute logic lives in exactly one place.
+fn digest_matches(bytes: &[u8], digest: &oci::Digest) -> bool {
+    digest.algorithm().hash(bytes) == *digest
+}
 
 /// A curated local index plus an ordered list of upstream sources
 /// queried on miss for `Resolve` callers.
@@ -46,14 +86,38 @@ pub struct ChainedIndex {
     mode: ChainMode,
     /// Singleflight group for de-duplicating concurrent cache-miss fetches
     /// against the same (mode, identifier) key. Shared across clones so all
-    /// `box_clone` spawned waiters converge on the same leader.
-    singleflight: singleflight::Group<String, Option<oci::Digest>>,
+    /// `box_clone` spawned waiters converge on the same leader. Carries the
+    /// full resolved `(digest, manifest)` — not just the digest — because a
+    /// leaf platform manifest is never written into the local index (A3), so
+    /// a post-walk local read-back cannot recover it; the walk's own fetch is
+    /// the only place the manifest bytes ever exist locally.
+    singleflight: singleflight::Group<String, Option<(oci::Digest, oci::Manifest)>>,
     /// When set, `fetch_and_persist_chain` never commits a tag pointer into
     /// the local index — resolution lands only in the caller's own record
     /// (e.g. `ocx.lock`). Content-addressed blob writes still happen. Set by
     /// [`Self::new_lock_scoped`] for the update-verb family; see
     /// `adr_toolchain_update_family.md`.
     suppress_tag_commit: bool,
+    /// The machine-global blob store (`$OCX_HOME/blobs`) that holds installed
+    /// **content** — leaf platform manifests and their layers — distinct from
+    /// the local index, which holds resolution **dispatch** only
+    /// (`adr_index_indirection.md` B2). A leaf platform manifest is never
+    /// written into the local index (A3), but it is cached here at install time
+    /// (`stage_and_link_chain_blobs`), so a [`DispatchResolution::AbsentLeaf`]
+    /// (content absent from `o/`) is recovered from this store **before** any
+    /// source walk — the step that makes offline exec of an installed tool
+    /// resolve with zero network (A3 step 2). `None` for constructions that
+    /// have no machine-global content to consult (unit fakes, the lock-scoped
+    /// update index); the store lives here rather than on [`LocalIndex`] because
+    /// it is machine-global content the chain orchestrates over, not part of the
+    /// travels-with-a-copy local index (Decision H).
+    ///
+    /// Also the sole route [`index_impl::IndexImpl::fetch_blob`] uses for
+    /// config-blob content — the index-home flat blob CAS has been retired
+    /// (`adr_index_indirection.md` B2). `content_store: None` is a **test-only
+    /// affordance**: production always attaches `fs.blobs` via
+    /// [`super::Index::from_chained_with_content_store`] (`context.rs`).
+    content_store: Option<BlobStore>,
 }
 
 /// Max in-flight singleflight keys. Scoped per ChainedIndex instance —
@@ -72,6 +136,7 @@ impl ChainedIndex {
             mode,
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
             suppress_tag_commit: false,
+            content_store: None,
         }
     }
 
@@ -86,21 +151,56 @@ impl ChainedIndex {
         }
     }
 
+    /// Attach the machine-global blob store so an [`DispatchResolution::AbsentLeaf`]
+    /// recovers its leaf platform manifest from `$OCX_HOME/blobs` before any
+    /// source walk (`adr_index_indirection.md` A3 step 2 / B2). Consuming
+    /// builder — keeps the `new` / `from_chained` signatures unchanged so the
+    /// blob store is opt-in at the one production construction site
+    /// (`context.rs`) without churning every caller.
+    pub fn with_content_store(mut self, content_store: BlobStore) -> Self {
+        self.content_store = Some(content_store);
+        self
+    }
+
+    /// Provenance for `identifier`'s namespace (`adr_index_indirection.md`
+    /// A2/H) — the configured source authoritative for it, if any, asked for
+    /// its cheap, synchronous [`Index::source_kind`]. No configured source
+    /// claims the namespace (e.g. `--offline`, where `self.sources` is empty
+    /// by construction) defaults to [`SourceKind::Derived`]: the uncatalogued
+    /// read shares the exact root-document path with the catalogued one and
+    /// only skips the catalog cross-check/self-heal, never resolution
+    /// correctness.
+    fn kind_for(&self, identifier: &oci::Identifier) -> SourceKind {
+        self.sources
+            .iter()
+            .find(|source| source.is_authoritative_for(identifier))
+            .map(Index::source_kind)
+            .unwrap_or(SourceKind::Derived)
+    }
+
+    /// [`Self::kind_for`] for a bare registry (no repository) —
+    /// `list_repositories`'s namespace-only query. `is_authoritative_for`
+    /// inspects only `.registry()`, so the placeholder repository segment is
+    /// never actually read.
+    fn kind_for_registry(&self, registry: &str) -> SourceKind {
+        self.kind_for(&oci::Identifier::new_registry("_", registry))
+    }
+
     /// Policy probe for no-resolve modes: an unpinned identifier whose
-    /// tag→digest mapping is absent from the local index raises
+    /// tag/digest is absent from the local index raises
     /// `PolicyResolutionBlocked`. Genuine local-index I/O / parse errors
     /// propagate (must not be masked as a policy block).
     ///
     /// Called from `walk_chain` for both `Offline` (unpinned path) and
     /// `Frozen` (all unpinned paths). Each mode decides what to do after
     /// the probe returns `Ok(())` — Offline early-returns; Frozen falls
-    /// through to the source walk.
+    /// through to the source walk. A dispatch object being present is not
+    /// required — [`DispatchResolution::AbsentLeaf`] still names a known
+    /// digest, so it counts as locally resolvable too; only a genuinely
+    /// unknown root/tag (`Ok(None)`) is a policy block.
     async fn ensure_locally_resolvable(&self, identifier: &oci::Identifier) -> Result<()> {
-        let locally_resolvable = self
-            .local_index
-            .fetch_manifest_digest(identifier, IndexOperation::Query)
-            .await?
-            .is_some();
+        let kind = self.kind_for(identifier);
+        let locally_resolvable = self.local_index.resolve_dispatch(identifier, kind).await?.is_some();
         if !locally_resolvable {
             return Err(super::error::Error::PolicyResolutionBlocked {
                 identifier: identifier.to_string(),
@@ -111,18 +211,119 @@ impl ChainedIndex {
         Ok(())
     }
 
-    /// Walk the source chain for an identifier — fetch the manifest (by tag
-    /// or digest) and persist the full chain into the cache. Wrapped in a
-    /// singleflight guard so concurrent waiters share the leader's result.
+    /// Recover an [`DispatchResolution::AbsentLeaf`]'s `content` from the
+    /// machine-global blob store (`adr_index_indirection.md` A3 step 2 / B2).
     ///
-    /// Returns `Ok(Some(head))` when one source successfully persisted the
-    /// chain (`head` = the persisted chain's head digest, so callers that
-    /// suppress the tag-pointer commit can still read the blob back), or
-    /// `Ok(None)` when nothing was fetched (not found, no sources, or an
-    /// Offline early-return). Returns `Err(_)` when every source errored —
-    /// preserves the trust boundary between "not found" (cache retry →
-    /// `None`) and "registry outage".
-    async fn walk_chain(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+    /// A leaf platform manifest is never written into the local index (A3), so a
+    /// tag/digest whose `content` is absent from `o/` reports `AbsentLeaf`. That
+    /// content is not lost: it was cached into `$OCX_HOME/blobs` at install time
+    /// (`stage_and_link_chain_blobs`, `ChainRole::Manifest`). This read is tried
+    /// **before** the source walk so an installed tool resolves offline with
+    /// zero network — the "installed-tool offline exec is unaffected by A3"
+    /// guarantee (B2).
+    ///
+    /// The read is digest-verified (`sha256(bytes) == content`, A4): a
+    /// content-addressed store should hash to its key, and re-verifying keeps a
+    /// corrupt or truncated blob from masquerading as a valid leaf. A verify or
+    /// decode failure returns `Ok(None)` (a clean recovery miss) so the caller
+    /// falls through to the source walk (online) or the offline/policy path,
+    /// exactly as if the blob were absent — never a hard error swallowing a
+    /// genuine miss.
+    ///
+    /// If the recovered bytes decode as an **image index** rather than a leaf
+    /// (an incomplete snapshot whose dispatch object was evicted from `o/` but
+    /// still lingers in the blob store), the object self-heals back into the
+    /// local index (`stage_dispatch_bytes`) so the next dispatch reads it
+    /// locally (A3 step 2 fallback), then is returned so the current resolve
+    /// proceeds without a network round-trip.
+    ///
+    /// Returns `Ok(None)` when no blob store is attached (unit fakes, the
+    /// lock-scoped update index) or the content is not cached locally.
+    async fn recover_absent_leaf(
+        &self,
+        identifier: &oci::Identifier,
+        content: &oci::Digest,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+        let Some(content_store) = &self.content_store else {
+            return Ok(None);
+        };
+        let Some(bytes) = content_store.read_blob(identifier.registry(), content).await? else {
+            return Ok(None);
+        };
+        // Digest-verify the recovered bytes against the content digest they are
+        // keyed by (A4). A published-source AbsentLeaf names an observation-object
+        // digest that no registry blob endpoint serves, so this store misses for
+        // it (returns above) — the leaf-trap the ADR warns against cannot fire here.
+        if !digest_matches(&bytes, content) {
+            log::warn!(
+                "blob-store manifest for '{content}' failed digest verification (recomputed {}); \
+                 removing the corrupt object and falling through to the source walk",
+                content.algorithm().hash(&bytes)
+            );
+            // Remove the present-but-corrupt blob before returning the miss
+            // (subsystem-oci.md: a corrupt entry is removed before the source
+            // walk so the write-through that follows a successful fetch heals
+            // it). Leaving it in place would let `write_blob`'s check-first fast
+            // path re-accept the corrupt file on the next resolve, so an offline
+            // resolve would keep loading tampered bytes. Best-effort — a removal
+            // failure must not fail the resolve, whose manifest the source walk
+            // still supplies; the install-staging shortcut re-verifies too.
+            if let Err(error) = content_store.remove_blob(identifier.registry(), content).await {
+                log::warn!("failed to remove corrupt blob-store object '{content}': {error}");
+            }
+            return Ok(None);
+        }
+        let manifest: oci::Manifest = match serde_json::from_slice(&bytes) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                // Not an OCI manifest — e.g. a published-source obs digest that
+                // happens to name a cached blob of another shape. Not a leaf
+                // recovery; fall through so the source-kind-routed walk decides.
+                log::debug!("blob-store object for '{content}' is not an OCI manifest ({error}); not a leaf recovery");
+                return Ok(None);
+            }
+        };
+        // Self-heal an incomplete snapshot: an image index present in the blob
+        // store but missing from `o/` is staged back so the next dispatch reads
+        // it locally (A3 step 2 fallback). Best-effort — a heal failure must not
+        // fail the resolve, whose manifest is already in hand.
+        if matches!(manifest, oci::Manifest::ImageIndex(_))
+            && let Err(error) = self.local_index.stage_dispatch_bytes(identifier, content, &bytes).await
+        {
+            log::warn!("failed to self-heal dispatch object '{content}' into the local index: {error}");
+        }
+        Ok(Some((content.clone(), manifest)))
+    }
+
+    /// Walk the source chain for an identifier — fetch the manifest (by tag
+    /// or digest) and persist the dispatch object into the local index.
+    /// Wrapped in a singleflight guard so concurrent waiters share the
+    /// leader's result.
+    ///
+    /// `grow_root` distinguishes the two miss shapes a caller can observe
+    /// locally before walking (`adr_index_indirection.md` "Grow ≠ refresh"):
+    /// a genuinely unknown root/tag (`true` — the walk also grows the local
+    /// copy, symmetric across published/derived) versus an already-known
+    /// root whose dispatch object is merely absent
+    /// ([`DispatchResolution::AbsentLeaf`], `false` — recovery only, the
+    /// root is never re-copied). Invariant 1 (a published root is never
+    /// auto-refreshed under Default) is preserved because `grow_root` is
+    /// only ever `true` on a genuine first-time miss, never on an
+    /// AbsentLeaf recovery of an already-present root.
+    ///
+    /// Returns `Ok(Some((digest, manifest)))` when one source successfully
+    /// resolved the identifier — the manifest is returned directly, not
+    /// re-read from local storage, because a leaf platform manifest is never
+    /// written into the local index (A3) and a read-back would find nothing
+    /// for that shape — or `Ok(None)` when nothing was fetched (not found,
+    /// no sources, or an Offline early-return). Returns `Err(_)` when every
+    /// source errored — preserves the trust boundary between "not found"
+    /// (cache retry → `None`) and "registry outage".
+    async fn walk_chain(
+        &self,
+        identifier: &oci::Identifier,
+        grow_root: bool,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         // No-resolve policies (offline, frozen) refuse to resolve an unpinned
         // (tag-only) reference whose tag→digest mapping is genuinely absent from
         // the local index. A digest-bearing identifier is an already-known
@@ -215,7 +416,7 @@ impl ChainedIndex {
         // the same `SourceWalkFailed(ArcError)` variant to waiters. The
         // leader also propagates that wrapped variant to its caller so both
         // ends see a consistent, typed error with the original source chain.
-        match self.fetch_and_persist_chain(&walked).await {
+        match self.fetch_and_persist_chain(&walked, grow_root).await {
             Ok(head) => {
                 handle.complete(head.clone());
                 Ok(head)
@@ -229,46 +430,96 @@ impl ChainedIndex {
         }
     }
 
-    /// Leader-side chain walk: iterates sources, fetches tag digest and
-    /// manifest chain from the first success, persists both into the cache.
+    /// Leader-side chain walk: iterates sources, fetches + persists the
+    /// dispatch object from the first success, then (kind-routed, `grow_root`
+    /// gated) grows the local root.
     ///
     /// Sources are tried sequentially in priority order; the first success short-circuits.
     /// Parallel-peer fallback is intentionally not supported — peer registries are out of scope.
     ///
-    /// Returns `Ok(Some(head))` when one source persisted the chain, or
-    /// `Ok(None)` when every source returned a clean not-found with no
-    /// errors. Returns `Err(_)` when any source errored and no source
-    /// succeeded — we do not treat a later `Ok(false)` as disproving an
-    /// earlier failure.
-    async fn fetch_and_persist_chain(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+    /// Returns `Ok(Some((digest, manifest)))` when one source resolved the
+    /// identifier, or `Ok(None)` when every source returned a clean
+    /// not-found with no errors. Returns `Err(_)` when any source errored
+    /// and no source succeeded — we do not treat a later `Ok(false)` as
+    /// disproving an earlier failure.
+    async fn fetch_and_persist_chain(
+        &self,
+        identifier: &oci::Identifier,
+        grow_root: bool,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
-            match self.local_index.persist_manifest_chain(source, identifier).await {
-                Ok(Some(digest)) => {
-                    // Tag-pointer commit gated on identifier shape:
-                    //   - tag-only (`cmake:1.0`)            → commit
+            match self.local_index.persist_dispatch(source, identifier).await {
+                Ok(Some((digest, manifest))) => {
+                    // Root growth gated on identifier shape (same contract as
+                    // the legacy tag-pointer commit):
+                    //   - tag-only (`cmake:1.0`)            → grow
                     //   - digest-only (`cmake@sha256:...`)  → skip (no tag to pin)
                     //   - tag+digest (`cmake:1.0@sha256:`)  → skip (pinned-id pull;
                     //                                        `ocx.lock` is canonical)
                     //   - bare repo (`cmake`)               → normalised to `latest`
-                    //                                        in walk_chain → commits
+                    //                                        in walk_chain → grows
                     // The `tag+digest` skip is the post-pin contract change: the
                     // caller already has the digest pinned in `ocx.lock`, so a
-                    // tag-pointer write here is redundant and silently shadows
-                    // the lock. See `adr_index_routing_semantics.md`.
+                    // root write here is redundant and silently shadows the lock.
+                    // See `adr_index_routing_semantics.md`.
                     // `suppress_tag_commit` extends the same principle to
                     // tag-only resolution performed on behalf of a lock
                     // (`ocx update`); see `adr_toolchain_update_family.md`.
-                    if !self.suppress_tag_commit && identifier.tag().is_some() && identifier.digest().is_none() {
-                        self.local_index.commit_tag(identifier, &digest).await?;
+                    // `grow_root` further gates on the miss shape the caller
+                    // observed locally — an AbsentLeaf recovery of an
+                    // already-known root must never re-copy it (Invariant 1).
+                    if grow_root
+                        && !self.suppress_tag_commit
+                        && identifier.tag().is_some()
+                        && identifier.digest().is_none()
+                    {
+                        match source.source_kind() {
+                            // C2 policy: a Default write-through resolve of a
+                            // published package ALSO grows the local copy —
+                            // symmetric with derived, removing the
+                            // install→offline asymmetry.
+                            SourceKind::Published => {
+                                if let Some((root_bytes, _root)) = source.fetch_root_document(identifier).await? {
+                                    self.local_index.persist_published_root(identifier, &root_bytes).await?;
+                                }
+                            }
+                            SourceKind::Derived => {
+                                self.local_index.commit_root_tag(identifier, &digest).await?;
+                            }
+                        }
                     }
                     log::debug!("Fetched '{}' from chained source, persisted to cache.", identifier);
-                    return Ok(Some(digest));
+                    return Ok(Some((digest, manifest)));
                 }
                 Ok(None) => {
+                    // A clean miss from the one source authoritative for this
+                    // identifier's namespace (Decision H) is terminal — it must
+                    // never fall through to a lower, non-authoritative source
+                    // (the `OciIndex` catch-all) that could answer the same
+                    // name over a different protocol. Falling through here
+                    // would re-introduce the index->OCI-tags fallback chain
+                    // `adr_index_indirection.md` Decision H dissolved. Mirrors
+                    // the `Err` arm's authoritative-stop just below; a
+                    // non-authoritative source's miss keeps the fall-through
+                    // behaviour so foreign-namespace routing is unaffected.
+                    if source.is_authoritative_for(identifier) {
+                        log::debug!("Authoritative source has no '{}' — stopping.", identifier);
+                        return Ok(None);
+                    }
                     log::debug!("Source has no '{}' — trying next source.", identifier);
                 }
                 Err(e) => {
+                    // An authoritative source's refusal (yanked tag, obs tamper,
+                    // fail-closed format) must STOP the walk — never fall through
+                    // to a lower source that could answer the same name and both
+                    // bypass the refusal and leak induced-error traffic to it
+                    // (`adr_index_indirection.md` F3). Transient errors from a
+                    // non-authoritative source keep the fall-through behaviour.
+                    if source.is_authoritative_for(identifier) {
+                        log::warn!("Authoritative source refused '{}': {e}", identifier);
+                        return Err(e);
+                    }
                     log::warn!("Could not fetch '{}' from chained source: {e}", identifier);
                     last_error = Some(e);
                 }
@@ -293,8 +544,10 @@ impl ChainedIndex {
     /// routing `list_tags` already uses in Remote mode) yet never mutate the
     /// local index. First `Some` wins; if every source errors the failure is
     /// propagated rather than masked as a clean miss (trust boundary — a
-    /// registry outage must not look like "not found"). See
-    /// `adr_index_routing_semantics.md`.
+    /// registry outage must not look like "not found"). A clean miss from the
+    /// source authoritative for `identifier`'s namespace is likewise terminal —
+    /// it never falls through to a lower, non-authoritative source (Decision
+    /// H: exactly one remote per namespace). See `adr_index_routing_semantics.md`.
     async fn query_sources_manifest(
         &self,
         identifier: &oci::Identifier,
@@ -303,6 +556,10 @@ impl ChainedIndex {
         for source in &self.sources {
             match source.fetch_manifest(identifier, IndexOperation::Query).await {
                 Ok(Some(result)) => return Ok(Some(result)),
+                // Same authoritative-stop as `fetch_and_persist_chain`: a clean
+                // miss from the namespace's one authoritative source is
+                // terminal, never a fall-through to the `OciIndex` catch-all.
+                Ok(None) if source.is_authoritative_for(identifier) => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest failed for '{}': {e}", identifier);
@@ -320,6 +577,8 @@ impl ChainedIndex {
         for source in &self.sources {
             match source.fetch_manifest_digest(identifier, IndexOperation::Query).await {
                 Ok(Some(digest)) => return Ok(Some(digest)),
+                // Same authoritative-stop as `query_sources_manifest`.
+                Ok(None) if source.is_authoritative_for(identifier) => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest_digest failed for '{}': {e}", identifier);
@@ -356,7 +615,9 @@ impl index_impl::IndexImpl for ChainedIndex {
             }
             return last_error.map_or_else(|| Ok(Vec::new()), Err);
         }
-        self.local_index.list_repositories(registry).await
+        self.local_index
+            .list_local_repositories(registry, self.kind_for_registry(registry))
+            .await
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
@@ -364,7 +625,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         // index only; Remote queries sources directly without write-through.
         // A pure query must never mutate local state — write paths live on
         // `LocalIndex::refresh_tags` (called from `ocx index update`) and
-        // the `persist_manifest_chain` + `commit_tag` pair driven by
+        // the `persist_dispatch` + root-growth pair driven by
         // `fetch_and_persist_chain` (called from install / pull). First Ok
         // wins; if every source errors we propagate.
         //
@@ -387,7 +648,9 @@ impl index_impl::IndexImpl for ChainedIndex {
             }
             return last_error.map_or(Ok(None), Err);
         }
-        self.local_index.list_tags(identifier).await
+        self.local_index
+            .list_local_tags(identifier, self.kind_for(identifier))
+            .await
     }
 
     async fn fetch_manifest(
@@ -399,17 +662,63 @@ impl index_impl::IndexImpl for ChainedIndex {
         // content cannot be wrong. Mutable (tag-based) reads in `Remote`
         // mode go straight to the chain walk, skipping the local read.
         let is_digest_addressed = identifier.digest().is_some();
-        if is_digest_addressed || self.mode != ChainMode::Remote {
-            match self.local_index.fetch_manifest(identifier, op).await {
-                Ok(Some(result)) => return Ok(Some(result)),
-                Ok(None) => {}
+        let kind = self.kind_for(identifier);
+        // Set only when the local read hit a *recoverable* corrupt dispatch
+        // object (root/tag already known, only the object is tampered) — the
+        // walk below must heal ONLY that object, never re-copy/re-grow an
+        // already-known root (Invariant 1, F1 never-auto-refreshed).
+        let mut corrupt_known = false;
+        let local = if is_digest_addressed || self.mode != ChainMode::Remote {
+            match self.local_index.resolve_dispatch(identifier, kind).await {
+                Ok(resolution) => resolution,
                 Err(e) => {
+                    // A yanked-tag refusal from the committed local root is an
+                    // authoritative publisher signal (F3) — propagate it straight
+                    // out rather than fall through to a source that would serve the
+                    // same name and bypass the refusal.
+                    if is_local_status_refusal(&e) {
+                        return Err(e);
+                    }
+                    // A present-but-corrupt dispatch object is only recoverable
+                    // by a Resolve walk that actually re-fetches and overwrites
+                    // it. A pure Query never persists, and Offline consults no
+                    // source — surface the corruption as a hard error (DataError)
+                    // rather than a silent cache miss. Default/Remote/Frozen
+                    // Resolve fall through: the walk re-fetches and self-heals
+                    // the object.
+                    let corrupt = is_corrupt_index_object(&e);
+                    if corrupt && !(op == IndexOperation::Resolve && self.mode != ChainMode::Offline) {
+                        return Err(e);
+                    }
+                    corrupt_known = corrupt;
                     log::warn!(
                         "Local index read failed for '{}', falling back to chained source: {e}",
                         identifier
                     );
+                    None
                 }
             }
+        } else {
+            None
+        };
+        // A locally-cached dispatch object answers the read directly; an
+        // `AbsentLeaf` (the digest/tag is known but its bytes are not
+        // locally cached, A3) falls through to source recovery below, same
+        // as a genuine local miss.
+        if let Some(DispatchResolution::Dispatch { content, manifest }) = local {
+            return Ok(Some((content, *manifest)));
+        }
+        // Order: local index dispatch → blob store → sources
+        // (`adr_index_indirection.md` A3 step 2). An `AbsentLeaf` names a known
+        // `content` digest whose bytes are absent from `o/` — a leaf platform
+        // manifest, which is CONTENT cached into `$OCX_HOME/blobs` at install
+        // (B2), never the local index. Consult that store before any source
+        // walk so an installed tool resolves offline with zero network. A miss
+        // (or no attached store) falls through unchanged.
+        if let Some(DispatchResolution::AbsentLeaf { content }) = &local
+            && let Some(recovered) = self.recover_absent_leaf(identifier, content).await?
+        {
+            return Ok(Some(recovered));
         }
         // Remote-mode pure queries read through to the source without
         // persisting — `--remote` forces a live lookup for mutable
@@ -425,18 +734,14 @@ impl index_impl::IndexImpl for ChainedIndex {
         match op {
             IndexOperation::Query => Ok(None),
             IndexOperation::Resolve => {
-                let head = self.walk_chain(identifier).await?;
-                // With the tag-pointer commit suppressed, a tag-addressed
-                // read-back cannot go through the tag store — address the
-                // freshly persisted blob by the walk's head digest instead.
-                if self.suppress_tag_commit
-                    && identifier.digest().is_none()
-                    && let Some(digest) = head
-                {
-                    let pinned = identifier.clone_with_digest(digest);
-                    return self.local_index.fetch_manifest(&pinned, op).await;
-                }
-                self.local_index.fetch_manifest(identifier, op).await
+                // `AbsentLeaf` or a recoverable corrupt object both mean the
+                // root/tag is already known locally — recover ONLY the
+                // dispatch content (`grow_root = false`, Invariant 1: never
+                // re-copy an already-present published root). Only a genuine
+                // miss (`None`, no corruption) grows the local root on
+                // success (C2 policy).
+                let grow_root = !corrupt_known && !matches!(local, Some(DispatchResolution::AbsentLeaf { .. }));
+                self.walk_chain(identifier, grow_root).await
             }
         }
     }
@@ -447,11 +752,50 @@ impl index_impl::IndexImpl for ChainedIndex {
         op: IndexOperation,
     ) -> Result<Option<oci::Digest>> {
         let is_digest_addressed = identifier.digest().is_some();
+        let kind = self.kind_for(identifier);
+        // See `fetch_manifest`'s identical flag — a recoverable corrupt
+        // dispatch object means the root/tag is already known, so the walk
+        // must not re-grow the root.
+        let mut corrupt_known = false;
         if is_digest_addressed || self.mode != ChainMode::Remote {
-            match self.local_index.fetch_manifest_digest(identifier, op).await {
-                Ok(Some(digest)) => return Ok(Some(digest)),
+            match self.local_index.resolve_dispatch(identifier, kind).await {
+                Ok(Some(DispatchResolution::Dispatch { content, .. })) => return Ok(Some(content)),
+                // Unlike `fetch_manifest`, a TAG-addressed digest read is
+                // answerable from `AbsentLeaf` too — the root lookup already
+                // confirmed the tag exists and names this content, only the
+                // dispatch bytes are uncached. A DIGEST-addressed `AbsentLeaf`
+                // is just the caller's own input echoed back with no existence
+                // confirmation, so it needs the object locally present, a
+                // cached leaf blob, or a source to confirm existence.
+                Ok(Some(DispatchResolution::AbsentLeaf { content })) if !is_digest_addressed => {
+                    return Ok(Some(content));
+                }
+                // A DIGEST-addressed `AbsentLeaf`: confirm existence from the
+                // machine-global blob store (installed content, A3 step 2 / B2)
+                // before falling through to the source walk, so an offline
+                // digest query resolves with zero network when the leaf is
+                // cached. A miss falls through unchanged.
+                Ok(Some(DispatchResolution::AbsentLeaf { content })) => {
+                    if let Some((digest, _)) = self.recover_absent_leaf(identifier, &content).await? {
+                        return Ok(Some(digest));
+                    }
+                }
                 Ok(None) => {}
                 Err(e) => {
+                    // Same authoritative-refusal propagation as `fetch_manifest`:
+                    // a yanked-tag refusal from the committed local root is a hard
+                    // `DataError`, never a fall-through to a source (F3).
+                    if is_local_status_refusal(&e) {
+                        return Err(e);
+                    }
+                    // Same corrupt-object routing as `fetch_manifest`: escalate a
+                    // present-but-corrupt local object to a hard error unless an
+                    // online Resolve walk can re-fetch and heal it.
+                    let corrupt = is_corrupt_index_object(&e);
+                    if corrupt && !(op == IndexOperation::Resolve && self.mode != ChainMode::Offline) {
+                        return Err(e);
+                    }
+                    corrupt_known = corrupt;
                     log::warn!(
                         "Local index read failed for '{}', falling back to chained source: {e}",
                         identifier
@@ -464,34 +808,105 @@ impl index_impl::IndexImpl for ChainedIndex {
         }
         match op {
             IndexOperation::Query => Ok(None),
-            IndexOperation::Resolve => {
-                let head = self.walk_chain(identifier).await?;
-                // Suppressed tag commit: the walk's head digest IS the
-                // resolution — the tag store deliberately has no pointer.
-                if self.suppress_tag_commit && identifier.digest().is_none() && head.is_some() {
-                    return Ok(head);
-                }
-                self.local_index.fetch_manifest_digest(identifier, op).await
-            }
+            // Reaches the walk either on a genuine local miss (`AbsentLeaf`
+            // already answered above for the tag-addressed case) or a
+            // recoverable corrupt object — root growth applies only for the
+            // former (C2 policy); a corrupt-object recovery must not re-grow
+            // an already-known root (Invariant 1).
+            IndexOperation::Resolve => Ok(self
+                .walk_chain(identifier, !corrupt_known)
+                .await?
+                .map(|(digest, _)| digest)),
         }
     }
 
+    /// Fetches genuine content-addressed blob bytes (config blobs) through the
+    /// machine-global blob store (`$OCX_HOME/blobs`), never the local index —
+    /// the index-home flat blob CAS has been retired (`adr_index_indirection.md`
+    /// B2). `content_store: None` (unit-test constructions via [`super::Index::from_chained`])
+    /// skips the local read and write-through silently, matching the pre-B2
+    /// no-cache contract for those callers.
+    ///
+    /// - **Cache-first**: an attached store's local hit is digest-verified
+    ///   (`BlobStore` does not self-verify — [`digest_matches`]). A verified
+    ///   hit returns immediately; a corrupt hit escalates to a hard
+    ///   `DigestMismatch` under `--offline` (no source to heal with), or online
+    ///   warns and falls through to the source walk, marking the entry for an
+    ///   atomic in-place heal (`BlobStore::replace_blob` — see below).
+    /// - **Offline + local miss** → `Ok(None)` (the `OfflineManifestMissing` →
+    ///   exit 81 contract lives downstream at the policy boundary).
+    /// - **Source walk (online)**: first `Some` wins. Fetched bytes are
+    ///   digest-verified against `blob_ref.digest()` BEFORE being returned
+    ///   (CWE-345 — never trust unverified remote bytes), then written
+    ///   through to the content store — `BlobStore::replace_blob` (unconditional
+    ///   atomic tempfile+rename, no existence check) when the cache-first read
+    ///   found a corrupt entry, `BlobStore::write_blob` (idempotent fast path)
+    ///   otherwise. A **remove-then-`write_blob`** two-step was tried and
+    ///   rejected in review: a removal failure would leave the corrupt file in
+    ///   place while the subsequent `write_blob` fast path re-accepts it
+    ///   unchanged, so the heal silently never happens. `replace_blob` has no
+    ///   such window — one atomic rename replaces whatever is there. A
+    ///   write-through/replace failure is logged, not fatal — the fetch still
+    ///   returns the verified bytes to the caller; a stuck heal is retried on
+    ///   the next online fetch. Propagates the last error if every source
+    ///   erred (trust boundary).
     async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-        // Cache-first: content-addressed, local hit is authoritative.
-        if let Some(bytes) = self.local_index.fetch_blob(blob_ref).await? {
-            return Ok(Some(bytes));
+        let digest = blob_ref.digest();
+        // Set when the cache-first read found a present-but-corrupt entry —
+        // the write-through below must heal it via an unconditional atomic
+        // replace, not `write_blob`'s existence-checked fast path (which would
+        // silently re-accept the still-corrupt file untouched).
+        let mut heal_corrupt = false;
+        if let Some(content_store) = &self.content_store
+            && let Some(bytes) = content_store.read_blob(blob_ref.registry(), &digest).await?
+        {
+            if digest_matches(&bytes, &digest) {
+                return Ok(Some(bytes));
+            }
+            // Present-but-corrupt: only a source re-fetch can heal it. Offline
+            // has no source, so escalate to a hard error rather than silently
+            // discarding tampered content.
+            if self.mode == ChainMode::Offline {
+                return Err(crate::file_structure::error::Error::DigestMismatch {
+                    claimed: digest.clone(),
+                    computed: digest.algorithm().hash(&bytes),
+                }
+                .into());
+            }
+            log::warn!("Blob-store copy of '{blob_ref}' is corrupt, re-fetching from source.");
+            heal_corrupt = true;
         }
         if self.mode == ChainMode::Offline {
             return Ok(None);
         }
-        // Walk sources; first `Some` wins, write-through on hit.
-        // Propagate last error if every source erred (trust boundary).
+        // Walk sources; first `Some` wins. Verify BEFORE returning or
+        // write-through — a source must never smuggle unverified bytes past
+        // this boundary. Propagate last error if every source erred (trust
+        // boundary).
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
             match source.fetch_blob(blob_ref).await {
                 Ok(Some(bytes)) => {
-                    if let Err(e) = self.local_index.stage_blob_bytes(blob_ref, &bytes).await {
-                        log::warn!("Write-through stage failed for '{blob_ref}': {e}");
+                    if !digest_matches(&bytes, &digest) {
+                        return Err(crate::file_structure::error::Error::DigestMismatch {
+                            claimed: digest.clone(),
+                            computed: digest.algorithm().hash(&bytes),
+                        }
+                        .into());
+                    }
+                    if let Some(content_store) = &self.content_store {
+                        // `replace_blob` (unconditional atomic rename) heals a
+                        // known-corrupt entry in one step; `write_blob`
+                        // (existence-checked fast path) is the ordinary,
+                        // cheaper write-through for a genuine cache miss.
+                        let write_through = if heal_corrupt {
+                            content_store.replace_blob(blob_ref.registry(), &digest, &bytes).await
+                        } else {
+                            content_store.write_blob(blob_ref.registry(), &digest, &bytes).await
+                        };
+                        if let Err(e) = write_through {
+                            log::warn!("Write-through to blob store failed for '{blob_ref}': {e}");
+                        }
                     }
                     return Ok(Some(bytes));
                 }
@@ -505,6 +920,54 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
+    /// Fetches verbatim manifest bytes straight from the source chain —
+    /// never through the local dispatch-object cache. That cache holds
+    /// bytes only for dispatch-shaped digests (image index / observation
+    /// object); a leaf platform manifest is never copied into it
+    /// (`adr_index_indirection.md` A3/B2 — leaf manifests are content,
+    /// fetched on demand). The trait default re-serialises the parsed
+    /// manifest instead of returning wire-exact bytes, which is wrong for a
+    /// caller (chain-blob staging) that persists the result under the
+    /// source-claimed digest — a re-serialised JSON body will not, in
+    /// general, hash back to that digest.
+    async fn fetch_manifest_raw_bytes(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
+        if self.mode == ChainMode::Offline {
+            return Ok(None);
+        }
+        let mut last_error: Option<crate::Error> = None;
+        for source in &self.sources {
+            match source.fetch_manifest_raw_bytes(identifier).await {
+                Ok(Some(result)) => return Ok(Some(result)),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Source fetch_manifest_raw_bytes failed for '{}': {e}", identifier);
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
+    async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        // Delegate to the sources in priority order; the first that maps the
+        // identifier to a physical location wins (only `OcxIndex` does).
+        for source in &self.sources {
+            if let Some(physical) = source.physical_reference(identifier).await? {
+                return Ok(Some(physical));
+            }
+        }
+        Ok(None)
+    }
+
+    fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.is_authoritative_for(identifier))
+    }
+
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
             local_index: self.local_index.clone(),
@@ -513,6 +976,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             // Singleflight group is shared across clones so waiters coalesce.
             singleflight: self.singleflight.clone(),
             suppress_tag_commit: self.suppress_tag_commit,
+            content_store: self.content_store.clone(),
         })
     }
 }
@@ -531,37 +995,67 @@ mod chain_refs_tests {
 
     use crate::{
         Result,
-        file_structure::{BlobStore, TagStore},
+        file_structure::{BlobStore, IndexStore},
         oci::index::{ChainMode, Index, IndexOperation, LocalConfig, LocalIndex, index_impl},
-        oci::{Digest, Identifier, ImageManifest, Manifest},
+        oci::{Algorithm, Digest, Identifier, ImageManifest, Manifest},
     };
 
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
-    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn tagged_id() -> Identifier {
         Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
     fn digest_only_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(Digest::Sha256(HEX_A.to_string()))
+        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
+    }
+    // Two distinct single-child image INDEXES — distinct bytes so their
+    // digests differ, and (A3) the bytes genuinely hash to the digest the
+    // source serves. Dispatch-shaped (never a bare leaf manifest) so a
+    // routing test's "cache hit" fixtures are genuinely locally-cacheable
+    // under the dispatch-only local index (A3 headline: a leaf platform
+    // manifest is never written to `o/`, so a flat-manifest fixture could
+    // never be a real local hit here) — see `plan_one_index.md` WP-C2's
+    // persist-shape rewrite note. The routing assertions these fixtures back
+    // (mode gates, singleflight, authoritative-stop) are unchanged; only the
+    // wire shape backing them moved from a legacy flat manifest to a dispatch
+    // object.
+    fn manifest_a_bytes() -> &'static [u8] {
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2,"platform":{"os":"linux","architecture":"amd64"}}]}"#
+    }
+    fn manifest_b_bytes() -> &'static [u8] {
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":3,"platform":{"os":"linux","architecture":"amd64"}}]}"#
     }
     fn digest_a() -> Digest {
-        Digest::Sha256(HEX_A.to_string())
+        Algorithm::Sha256.hash(manifest_a_bytes())
     }
     fn digest_b() -> Digest {
-        Digest::Sha256(HEX_B.to_string())
+        Algorithm::Sha256.hash(manifest_b_bytes())
     }
-    fn make_image_manifest() -> Manifest {
-        Manifest::Image(ImageManifest::default())
+    fn bytes_for(digest: &Digest) -> Vec<u8> {
+        if *digest == digest_a() {
+            manifest_a_bytes().to_vec()
+        } else if *digest == digest_b() {
+            manifest_b_bytes().to_vec()
+        } else {
+            panic!("unknown test digest {digest}")
+        }
+    }
+    fn manifest_for(digest: &Digest) -> Manifest {
+        serde_json::from_slice(&bytes_for(digest)).unwrap()
+    }
+
+    /// The index store `make_local_index` reads/writes (the default
+    /// machine-local home under the temp root). Persisted objects and tags land
+    /// here — the index manifest CAS, not `$OCX_HOME/blobs` (A1).
+    fn index_store(dir: &TempDir) -> IndexStore {
+        IndexStore::new(dir.path().join("index"))
     }
 
     fn make_local_index(dir: &TempDir) -> LocalIndex {
         LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: BlobStore::new(dir.path().join("blobs")),
+            index_store: index_store(dir),
         })
     }
 
@@ -612,7 +1106,7 @@ mod chain_refs_tests {
         ) -> Result<Option<(Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
-            Ok(self.known_tags.get(tag).map(|d| (d.clone(), make_image_manifest())))
+            Ok(self.known_tags.get(tag).map(|d| (d.clone(), manifest_for(d))))
         }
         async fn fetch_manifest_digest(
             &self,
@@ -626,6 +1120,17 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _blob_ref: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             *self.call_count.lock().unwrap() += 1;
             Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            let tag = identifier.tag_or_latest();
+            *self.call_count.lock().unwrap() += 1;
+            Ok(self
+                .known_tags
+                .get(tag)
+                .map(|d| (bytes_for(d), d.clone(), manifest_for(d))))
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -644,17 +1149,18 @@ mod chain_refs_tests {
         (src, idx)
     }
 
-    /// Seed the cache with the full chain (tag pointer + manifest blob) so
-    /// subsequent cache-only reads succeed. Equivalent to what a successful
-    /// `ChainedIndex` walk would leave behind.
+    /// Seed the cache with the full dispatch chain (root tag pointer +
+    /// dispatch object) so subsequent cache-only reads succeed. Equivalent to
+    /// what a successful `ChainedIndex` walk would leave behind
+    /// (`adr_index_indirection.md` A3 — `persist_dispatch` + `commit_root_tag`).
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let digest = cache
-            .persist_manifest_chain(source, identifier)
+        let (digest, _manifest) = cache
+            .persist_dispatch(source, identifier)
             .await
             .unwrap()
             .expect("source must know the seeded tag");
         if identifier.tag().is_some() {
-            cache.commit_tag(identifier, &digest).await.unwrap();
+            cache.commit_root_tag(identifier, &digest).await.unwrap();
         }
     }
 
@@ -689,7 +1195,7 @@ mod chain_refs_tests {
     async fn default_mode_cache_miss_walks_source_and_persists_chain_on_disk() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
-        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
+        let blob_store = index_store(&cache_dir);
 
         let (_, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
@@ -699,11 +1205,11 @@ mod chain_refs_tests {
             .unwrap();
         assert!(result.is_some(), "cache-miss source fetch must return Some");
 
-        // Property: the blob data file must exist after a successful fetch.
-        let expected_blob = blob_store.data(REGISTRY, &digest_a());
+        // Property: the dispatch object must exist on disk after a successful fetch.
+        let expected_blob = blob_store.dispatch_object_path(REGISTRY, REPO, &digest_a());
         assert!(
             expected_blob.exists(),
-            "Default mode: blob data file must be on disk after fetch_manifest; missing: {}",
+            "Default mode: dispatch object must be on disk after fetch_manifest; missing: {}",
             expected_blob.display()
         );
     }
@@ -716,7 +1222,7 @@ mod chain_refs_tests {
     async fn remote_mode_bypasses_cache_for_tag_lookup_but_still_persists_blobs() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
-        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
+        let blob_store = index_store(&cache_dir);
 
         // Seed the cache with digest_b so a Default-mode lookup would hit b.
         let (_, seed) = make_source(TAG, digest_b());
@@ -733,11 +1239,11 @@ mod chain_refs_tests {
         assert!(result.is_some());
         assert!(spy.calls() > 0, "Remote mode must consult source for tag lookup");
 
-        // Blob must be persisted even under Remote mode.
-        let expected_blob = blob_store.data(REGISTRY, &digest_a());
+        // The dispatch object must be persisted even under Remote mode.
+        let expected_blob = blob_store.dispatch_object_path(REGISTRY, REPO, &digest_a());
         assert!(
             expected_blob.exists(),
-            "Remote mode: blob must be persisted after fetch_manifest"
+            "Remote mode: dispatch object must be persisted after fetch_manifest"
         );
     }
 
@@ -751,13 +1257,12 @@ mod chain_refs_tests {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
 
-        // Pre-write the blob data directly so cache has it.
-        // Construct a parallel BlobStore over the same root — LocalIndex.blob_store is private.
-        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
-        let blob_path = blob_store.data(REGISTRY, &digest_a());
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        let manifest = Manifest::Image(ImageManifest::default());
-        serde_json::to_writer(std::fs::File::create(&blob_path).unwrap(), &manifest).unwrap();
+        // Pre-write the dispatch object directly into the dispatch-object CAS
+        // so the cache has it. The bytes must hash to `digest_a` (A3 verify on read).
+        index_store(&cache_dir)
+            .write_dispatch_object(REGISTRY, REPO, &digest_a(), manifest_a_bytes())
+            .await
+            .unwrap();
 
         let (spy, src_idx) = make_source(TAG, digest_a());
         let id_with_digest = digest_only_id(); // digest-addressed, no tag
@@ -787,7 +1292,7 @@ mod chain_refs_tests {
     async fn lock_scoped_resolve_persists_blobs_but_never_commits_tag_pointer() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
-        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
+        let blob_store = index_store(&cache_dir);
 
         let (spy, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained_lock_scoped(cache, vec![src_idx], ChainMode::Remote);
@@ -798,12 +1303,12 @@ mod chain_refs_tests {
         assert!(result.is_some(), "lock-scoped resolve must reach the source");
         assert!(spy.calls() > 0, "lock-scoped Remote resolve must consult the source");
 
-        // Blob still persisted — content-addressed, immutable, pre-warms
-        // materialization.
-        let expected_blob = blob_store.data(REGISTRY, &digest_a());
+        // Dispatch object still persisted — content-addressed, immutable,
+        // pre-warms materialization.
+        let expected_blob = blob_store.dispatch_object_path(REGISTRY, REPO, &digest_a());
         assert!(
             expected_blob.exists(),
-            "lock-scoped resolve must still persist the manifest blob"
+            "lock-scoped resolve must still persist the dispatch object"
         );
 
         // Tag pointer must NOT have been committed: an offline probe over the
@@ -1020,11 +1525,11 @@ mod chain_refs_tests {
             let cache_dir = TempDir::new().unwrap();
             let cache = make_local_index(&cache_dir);
 
-            // Seed only the tag pointer — skip `persist_manifest_chain` so the
-            // manifest blob is never written.  `commit_tag` is `pub(super)` and
-            // accessible here because `chain_refs_tests` lives in the same
-            // `index` parent module.
-            cache.commit_tag(&tagged_id(), &digest_a()).await.unwrap();
+            // Seed only the root's tag pointer — skip `persist_dispatch` so the
+            // dispatch object is never written (the AbsentLeaf shape).
+            // `commit_root_tag` is `pub(super)` and accessible here because
+            // `chain_refs_tests` lives in the same `index` parent module.
+            cache.commit_root_tag(&tagged_id(), &digest_a()).await.unwrap();
 
             let (spy, src_idx) = make_source(TAG, digest_a());
             let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
@@ -1060,7 +1565,7 @@ mod chain_refs_tests {
             let cache = make_local_index(&cache_dir);
 
             // Same tag-only seed; Frozen permits content fetches for known tags.
-            cache.commit_tag(&tagged_id(), &digest_a()).await.unwrap();
+            cache.commit_root_tag(&tagged_id(), &digest_a()).await.unwrap();
 
             let (spy, src_idx) = make_source(TAG, digest_a());
             let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Frozen);
@@ -1308,8 +1813,8 @@ mod chain_refs_tests {
                 spy.calls()
             );
             assert!(
-                !cache_dir.path().join("tags").join(REGISTRY).exists(),
-                "Op::Query in mode {mode:?} must not create the tag store"
+                !index_store(&cache_dir).root_document_path(REGISTRY, REPO).exists(),
+                "Op::Query in mode {mode:?} must not create the root document"
             );
         }
 
@@ -1338,20 +1843,19 @@ mod chain_refs_tests {
         );
         assert!(spy.calls() > 0, "Op::Query in Remote mode must consult the source");
         assert!(
-            !cache_dir.path().join("tags").join(REGISTRY).exists(),
-            "Op::Query in Remote mode must not create the tag store (no write-through)"
+            !index_store(&cache_dir).root_document_path(REGISTRY, REPO).exists(),
+            "Op::Query in Remote mode must not create the root document (no write-through)"
         );
     }
 
     // ── pinned-id pull: tag+digest identifier must skip tag-pointer commit ──
 
     /// A pinned-id pull (`cmake:1.0@sha256:...`) carries both tag and
-    /// digest. Persisting the manifest chain is fine — content-addressed
-    /// blobs are immutable — but committing the tag pointer would
-    /// silently shadow `ocx.lock` (which is the canonical record). The
-    /// post-pin contract is to skip the tag commit and let the lock own
-    /// the tag→digest mapping. Asserted by checking that the tag store
-    /// directory is never created.
+    /// digest. Persisting the dispatch object is fine — content-addressed
+    /// objects are immutable — but growing the root would silently shadow
+    /// `ocx.lock` (which is the canonical record). The post-pin contract is
+    /// to skip the root growth and let the lock own the tag→digest mapping.
+    /// Asserted by checking that the root document is never created.
     #[tokio::test(flavor = "multi_thread")]
     async fn pinned_id_pull_skips_tag_pointer_commit() {
         let cache_dir = TempDir::new().unwrap();
@@ -1371,23 +1875,21 @@ mod chain_refs_tests {
             .unwrap();
         assert!(result.is_some(), "pinned-id resolve must succeed and return manifest");
 
-        // Manifest blobs are persisted (content-addressed), but the tag
-        // store must not be written.
-        let tags_root = cache_dir.path().join("tags");
-        let registry_dir = tags_root.join(REGISTRY);
+        // Dispatch objects are persisted (content-addressed), but the root
+        // document must not be written.
+        let root_path = index_store(&cache_dir).root_document_path(REGISTRY, REPO);
         assert!(
-            !registry_dir.exists(),
-            "tag+digest pull must not create the tag store registry dir at {}",
-            registry_dir.display()
+            !root_path.exists(),
+            "tag+digest pull must not create the root document at {}",
+            root_path.display()
         );
     }
 
     // ── regression: Remote-mode list_tags must not mutate the local index ──
 
-    /// A pure `--remote` query must never write to the local index. The tag
-    /// store layout is `{root}/{registry_slug}/{repository}.json`, so a
-    /// Remote-mode `list_tags` call must not create the registry directory
-    /// nor any per-repository tag file.
+    /// A pure `--remote` query must never write to the local index. A
+    /// Remote-mode `list_tags` call must not create the repository's root
+    /// document.
     #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_list_tags_does_not_mutate_local_index() {
         let cache_dir = TempDir::new().unwrap();
@@ -1395,25 +1897,16 @@ mod chain_refs_tests {
         let (_, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
 
-        let tags_root = cache_dir.path().join("tags");
-        let registry_dir = tags_root.join(REGISTRY);
-        let repo_file = registry_dir.join(format!("{REPO}.json"));
-        assert!(!repo_file.exists(), "preconditions: tag file must not exist");
+        let root_path = index_store(&cache_dir).root_document_path(REGISTRY, REPO);
+        assert!(!root_path.exists(), "preconditions: root document must not exist");
 
         let result = chained.list_tags(&tagged_id()).await.unwrap();
         assert!(result.is_some(), "Remote-mode list_tags must return source tags");
 
         assert!(
-            !repo_file.exists(),
-            "Remote-mode list_tags must not create the local tag file at {}",
-            repo_file.display()
-        );
-        // Registry-dir creation is also a write; reject it explicitly so a
-        // future regression that creates the dir but no file still fails.
-        assert!(
-            !registry_dir.exists(),
-            "Remote-mode list_tags must not create the registry directory at {}",
-            registry_dir.display()
+            !root_path.exists(),
+            "Remote-mode list_tags must not create the local root document at {}",
+            root_path.display()
         );
     }
 
@@ -1559,14 +2052,15 @@ mod chain_refs_tests {
     // ── test 32 ───────────────────────────────────────────────────────────
 
     /// Design record §32: property — for any mode, after a successful
-    /// fetch_manifest returning Some((digest, _)), the blob data file must
-    /// exist on disk (digest is guaranteed on disk).
+    /// fetch_manifest returning Some((digest, _)) for a dispatch-shaped
+    /// fixture, the dispatch object must exist on disk (digest is
+    /// guaranteed on disk).
     #[tokio::test(flavor = "multi_thread")]
     async fn fetch_manifest_post_persist_is_guaranteed_on_disk() {
         // Test with Default mode (the main case; Remote is covered in test 24).
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
-        let blob_store = BlobStore::new(cache_dir.path().join("blobs"));
+        let blob_store = index_store(&cache_dir);
 
         let (_, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
@@ -1576,10 +2070,10 @@ mod chain_refs_tests {
             .await
             .unwrap()
         {
-            let blob_path = blob_store.data(REGISTRY, &digest);
+            let blob_path = blob_store.dispatch_object_path(REGISTRY, REPO, &digest);
             assert!(
                 blob_path.exists(),
-                "property violated: fetch_manifest returned digest {:?} but blob is not on disk at {}",
+                "property violated: fetch_manifest returned digest {:?} but the dispatch object is not on disk at {}",
                 digest,
                 blob_path.display()
             );
@@ -1666,27 +2160,31 @@ mod chain_refs_tests {
         crate::oci::PinnedIdentifier::try_from(digest_only_id()).unwrap()
     }
 
-    /// Cache hit: blob already in `blobs/{registry}/.../data` — returns the
-    /// bytes without consulting any source. Proves the offline-rehydration
-    /// path works when the local CAS already holds the blob.
+    /// Cache hit: blob already in the machine-global blob store (`fs.blobs`)
+    /// — returns the bytes without consulting any source. Proves the
+    /// offline-rehydration path works when the local CAS already holds the
+    /// blob (the index-home flat blob CAS has been retired, `adr_index_indirection.md` B2).
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_cache_hit_no_source_call() {
         // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). `stage_blob_bytes` calls
-        // `BlobStore::write_blob` which increments it; holding this lock prevents our
-        // call from inflating the coalescing-test delta.
+        // (WRITE_BLOB_CALL_COUNT is a process-global static). This test seeds the
+        // cache via `BlobStore::write_blob` directly, which increments it; holding
+        // this lock prevents our call from inflating the coalescing-test delta.
         let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
+        let blobs = BlobStore::new(cache_dir.path().join("blobs"));
         let pinned = pinned_for_test();
-        let blob_digest = digest_b();
         let bytes = b"cached config blob".to_vec();
+        // A staged blob must hash to its digest (`BlobStore::write_blob` trusts
+        // the caller to have verified this upstream).
+        let blob_digest = Algorithm::Sha256.hash(&bytes);
         let blob_ref = pinned.clone_with_digest(blob_digest.clone());
-        cache
-            .stage_blob_bytes(&blob_ref, &bytes)
+        blobs
+            .write_blob(blob_ref.registry(), &blob_digest, &bytes)
             .await
-            .expect("stage_blob_bytes must succeed");
+            .expect("write_blob must succeed");
 
         let spy = BlobOnlySource {
             digest: blob_digest.clone(),
@@ -1695,7 +2193,7 @@ mod chain_refs_tests {
         };
         let spy_calls = spy.call_count.clone();
         let src_idx = super::super::Index::from_impl(spy);
-        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Default, blobs);
 
         let got = chained
             .fetch_blob(&blob_ref)
@@ -1732,16 +2230,20 @@ mod chain_refs_tests {
     }
 
     /// Default mode + local miss → walks the source chain, returns the
-    /// bytes, AND persists them into the local CAS so a subsequent offline
-    /// read hits without a network round-trip. This is the regression
-    /// guarantee for `ocx clean; rm -rf packages installs; --offline install`.
+    /// bytes, AND persists them into the machine-global blob store (`fs.blobs`)
+    /// so a subsequent offline read hits without a network round-trip. This is
+    /// the regression guarantee for `ocx clean; rm -rf packages installs;
+    /// --offline install`.
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_walks_chain_and_persists() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
+        let blobs = BlobStore::new(cache_dir.path().join("blobs"));
         let pinned = pinned_for_test();
-        let blob_digest = digest_b();
         let bytes = b"freshly fetched config blob".to_vec();
+        // The write-through verifies sha256(bytes) == digest before persisting
+        // (CWE-345 — never trust unverified remote bytes).
+        let blob_digest = Algorithm::Sha256.hash(&bytes);
 
         let spy = BlobOnlySource {
             digest: blob_digest.clone(),
@@ -1750,14 +2252,13 @@ mod chain_refs_tests {
         };
         let spy_calls = spy.call_count.clone();
         let src_idx = super::super::Index::from_impl(spy);
-        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
 
         // Pre-condition: not on disk yet.
-        let inspect_store = BlobStore::new(cache_dir.path().join("blobs"));
-        let on_disk = inspect_store.data(REGISTRY, &blob_digest);
+        let on_disk = blobs.data(blob_ref.registry(), &blob_digest);
         assert!(!on_disk.exists(), "blob must be absent before the chain walk");
 
-        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Default, blobs);
         let got = chained
             .fetch_blob(&blob_ref)
             .await
@@ -1766,7 +2267,8 @@ mod chain_refs_tests {
         assert_eq!(got, bytes);
         assert_eq!(*spy_calls.lock().unwrap(), 1, "source must be called exactly once");
 
-        // Post-condition: blob persisted into local CAS for offline rehydration.
+        // Post-condition: blob persisted into the machine-global blob store
+        // for offline rehydration.
         assert!(
             on_disk.exists(),
             "write-through must persist the blob at {}",
@@ -1774,6 +2276,671 @@ mod chain_refs_tests {
         );
         let staged = std::fs::read(&on_disk).unwrap();
         assert_eq!(staged, bytes, "staged bytes must match fetched bytes");
+    }
+
+    /// Corrupt-online heal, end-to-end: a tampered blob-store entry (bytes
+    /// that do NOT hash to the digest naming them — written directly at the
+    /// CAS `data` path, bypassing `write_blob`'s own verify-free contract) is
+    /// atomically replaced by a subsequent source re-fetch (`replace_blob`),
+    /// not left immortal by `write_blob`'s check-first fast path (which
+    /// short-circuits on any existing non-empty target without re-hashing).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chained_fetch_blob_corrupt_online_heals_via_source_refetch() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static) — this test's
+        // write-through calls `BlobStore::write_blob` directly.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let blobs = BlobStore::new(cache_dir.path().join("blobs"));
+        let pinned = pinned_for_test();
+        let good_bytes = b"the genuine config blob".to_vec();
+        let blob_digest = Algorithm::Sha256.hash(&good_bytes);
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+
+        // Tamper: write WRONG bytes directly at the CAS data path, bypassing
+        // `write_blob` (which would refuse to overwrite this non-empty file on
+        // a later legitimate call — exactly the immortality this test guards
+        // against).
+        let on_disk = blobs.data(blob_ref.registry(), &blob_digest);
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(&on_disk, b"tampered bytes that do not hash to blob_digest").unwrap();
+
+        let spy = BlobOnlySource {
+            digest: blob_digest.clone(),
+            bytes: good_bytes.clone(),
+            call_count: Arc::new(Mutex::new(0)),
+        };
+        let spy_calls = spy.call_count.clone();
+        let src_idx = super::super::Index::from_impl(spy);
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Default, blobs);
+
+        let got = chained
+            .fetch_blob(&blob_ref)
+            .await
+            .expect("fetch_blob must succeed")
+            .expect("corrupt-online must fall through to the source and return Some(bytes)");
+        assert_eq!(
+            got, good_bytes,
+            "the returned bytes must be the genuine, source-fetched content"
+        );
+        assert_eq!(*spy_calls.lock().unwrap(), 1, "source must be consulted exactly once");
+
+        // The on-disk copy must now genuinely hash to the digest — proving
+        // the corrupt entry was actually replaced, not left in place under a
+        // no-op `write_blob` fast path.
+        let healed = std::fs::read(&on_disk).unwrap();
+        assert_eq!(
+            healed, good_bytes,
+            "the on-disk blob must be healed to the genuine bytes"
+        );
+        assert_eq!(
+            Algorithm::Sha256.hash(&healed),
+            blob_digest,
+            "the healed on-disk bytes must hash to the digest naming them"
+        );
+    }
+
+    /// Corrupt-offline: a tampered blob-store entry with no source to heal
+    /// from is a hard `DigestMismatch` error, never a silent miss or a
+    /// silently-served tampered read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chained_fetch_blob_corrupt_offline_hard_errors() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let blobs = BlobStore::new(cache_dir.path().join("blobs"));
+        let pinned = pinned_for_test();
+        let claimed_digest = digest_a();
+        let blob_ref = pinned.clone_with_digest(claimed_digest.clone());
+
+        let on_disk = blobs.data(blob_ref.registry(), &claimed_digest);
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(&on_disk, b"tampered bytes that do not hash to claimed_digest").unwrap();
+
+        // A source is configured but must never be consulted in Offline mode.
+        let (spy, src_idx) = make_source(TAG, digest_b());
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Offline, blobs);
+
+        let err = chained
+            .fetch_blob(&blob_ref)
+            .await
+            .expect_err("a corrupt local blob under --offline must hard-error, not return Ok");
+        assert!(
+            matches!(
+                err,
+                crate::Error::FileStructure(crate::file_structure::error::Error::DigestMismatch { .. })
+            ),
+            "expected DigestMismatch, got {err:?}"
+        );
+        assert_eq!(spy.calls(), 0, "Offline mode must never consult sources");
+    }
+
+    /// Terra-gate regression: if the atomic-replace heal write ITSELF fails
+    /// (permission denied — reproduced here by chmod'ing the blob's parent
+    /// directory read-only, so `tempfile::NamedTempFile::new_in` cannot create
+    /// the replacement file), `fetch_blob` must still return the genuine,
+    /// verified bytes to the caller — a stuck heal must not fail the fetch,
+    /// only leave the on-disk copy corrupt for the next attempt to retry.
+    /// Pins the fix for the review finding that a naive remove-then-write
+    /// two-step (or a `write_blob` re-accept of a still-corrupt file) could
+    /// silently leave the tampered blob in place forever while claiming success.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chained_fetch_blob_corrupt_online_heal_write_failure_still_returns_verified_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // (WRITE_BLOB_CALL_COUNT is a process-global static) — this test's
+        // (failed) write-through attempt still calls the shared `persist_bytes`
+        // helper.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        /// RAII guard that restores directory permissions on drop so a test
+        /// failure doesn't leave a read-only dir behind and break `TempDir`
+        /// cleanup (mirrors `project::lock::tests::save_preserves_original_on_write_failure`).
+        struct RestorePerms {
+            dir: std::path::PathBuf,
+            original: std::fs::Permissions,
+        }
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.dir, self.original.clone());
+            }
+        }
+
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let blobs = BlobStore::new(cache_dir.path().join("blobs"));
+        let pinned = pinned_for_test();
+        let good_bytes = b"the genuine config blob, heal write will fail".to_vec();
+        let blob_digest = Algorithm::Sha256.hash(&good_bytes);
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+
+        // Tamper: wrong bytes directly at the CAS data path.
+        let on_disk = blobs.data(blob_ref.registry(), &blob_digest);
+        let blob_dir = on_disk.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        let corrupt_bytes = b"tampered bytes that do not hash to blob_digest".to_vec();
+        std::fs::write(&on_disk, &corrupt_bytes).unwrap();
+
+        // Make the blob's own directory read-only (no write bit) so
+        // `tempfile::NamedTempFile::new_in` cannot create the replacement file
+        // there — the replace attempt fails with a permission error.
+        let original_perms = std::fs::metadata(&blob_dir).unwrap().permissions();
+        let _restore = RestorePerms {
+            dir: blob_dir.clone(),
+            original: original_perms.clone(),
+        };
+        std::fs::set_permissions(&blob_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let spy = BlobOnlySource {
+            digest: blob_digest.clone(),
+            bytes: good_bytes.clone(),
+            call_count: Arc::new(Mutex::new(0)),
+        };
+        let spy_calls = spy.call_count.clone();
+        let src_idx = super::super::Index::from_impl(spy);
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Default, blobs);
+
+        let got = chained
+            .fetch_blob(&blob_ref)
+            .await
+            .expect("a failed heal write must not fail the fetch itself")
+            .expect("corrupt-online must still fall through to the source and return Some(bytes)");
+        assert_eq!(
+            got, good_bytes,
+            "the returned bytes must be the genuine, source-fetched content even though the heal write failed"
+        );
+        assert_eq!(*spy_calls.lock().unwrap(), 1, "source must be consulted exactly once");
+
+        // Restore write access before reading back, so the assertion itself
+        // doesn't depend on read-only semantics.
+        std::fs::set_permissions(&blob_dir, original_perms).unwrap();
+        let still_on_disk = std::fs::read(&on_disk).unwrap();
+        assert_eq!(
+            still_on_disk, corrupt_bytes,
+            "the on-disk copy must remain the corrupt bytes — the heal write failed and must not be masked as success"
+        );
+    }
+
+    // ── corrupt-known recovery must never re-grow an already-known root ────
+
+    /// A fake PUBLISHED-kind source (`is_authoritative_for` claims `REGISTRY`,
+    /// `source_kind() == Published`) serving a fixed dispatch object for
+    /// `TAG`. Records `fetch_root_document` calls so a test can assert
+    /// corrupt-object recovery never re-fetches/re-copies an already-known
+    /// root.
+    #[derive(Clone)]
+    struct PublishedSource {
+        fetch_root_document_calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for PublishedSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(vec![TAG.to_string()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            _identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            Ok(Some((
+                manifest_a_bytes().to_vec(),
+                digest_a(),
+                manifest_for(&digest_a()),
+            )))
+        }
+        async fn fetch_root_document(
+            &self,
+            _identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
+            *self.fetch_root_document_calls.lock().unwrap() += 1;
+            Ok(None)
+        }
+        fn is_authoritative_for(&self, identifier: &Identifier) -> bool {
+            identifier.registry() == REGISTRY
+        }
+        fn source_kind(&self) -> super::super::local_index::SourceKind {
+            super::super::local_index::SourceKind::Published
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Regression for a Block finding: a corrupt-but-known dispatch object
+    /// (the root/tag is already resolved locally, only the `o/` object is
+    /// tampered) must self-heal ONLY the object. It must never re-fetch or
+    /// re-copy an already-known published root — that would violate the
+    /// binding "Resolve never overwrites an existing published root" ruling
+    /// and F1's never-auto-refreshed invariant.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn corrupt_known_published_root_recovers_object_without_regrowing_root() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let store = index_store(&cache_dir);
+
+        // Seed a KNOWN published root + its dispatch object, exactly as
+        // `persist_published_root`/`persist_dispatch` would leave behind.
+        let root_bytes = format!(
+            r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"{TAG}":{{"content":"{}","observed":"2026-07-18T00:00:00Z"}}}}}}"#,
+            digest_a()
+        )
+        .into_bytes();
+        store
+            .write_dispatch_object(REGISTRY, REPO, &digest_a(), manifest_a_bytes())
+            .await
+            .unwrap();
+        store.write_root_document(REGISTRY, REPO, &root_bytes).await.unwrap();
+
+        // Tamper the dispatch object so `resolve_dispatch` reports a
+        // recoverable `DigestMismatch` — the root itself stays untouched.
+        let dispatch_path = store.dispatch_object_path(REGISTRY, REPO, &digest_a());
+        std::fs::write(&dispatch_path, b"tampered garbage").unwrap();
+
+        let fetch_root_document_calls = Arc::new(Mutex::new(0));
+        let source = PublishedSource {
+            fetch_root_document_calls: fetch_root_document_calls.clone(),
+        };
+        let src_idx = super::super::Index::from_impl(source);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect("corrupt dispatch object must self-heal, not error");
+        assert!(result.is_some(), "healed Resolve must return the manifest");
+
+        // The dispatch object was healed back to the correct verbatim bytes.
+        let healed = std::fs::read(&dispatch_path).unwrap();
+        assert_eq!(
+            healed,
+            manifest_a_bytes(),
+            "the recovery must have re-persisted the correct dispatch bytes"
+        );
+
+        // The root document was NEVER rewritten...
+        let root_after = std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap();
+        assert_eq!(
+            root_after, root_bytes,
+            "corrupt-object recovery must not rewrite an already-known published root"
+        );
+        // ...and the source's fetch_root_document was never even called.
+        assert_eq!(
+            *fetch_root_document_calls.lock().unwrap(),
+            0,
+            "corrupt-object recovery must never re-fetch the published root"
+        );
+    }
+
+    // ── flat / single-platform-tag routing (A3: no dispatch object) ────────
+
+    /// A fake DERIVED-kind source serving a fixed flat (single-platform)
+    /// `Manifest::Image` for `TAG`. Records call count so a test can assert
+    /// the source is never consulted under Offline.
+    #[derive(Clone)]
+    struct FlatManifestSource {
+        bytes: &'static [u8],
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl FlatManifestSource {
+        fn digest(&self) -> Digest {
+            Algorithm::Sha256.hash(self.bytes)
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for FlatManifestSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(vec![TAG.to_string()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            _identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Some((self.digest(), serde_json::from_slice(self.bytes).unwrap())))
+        }
+        async fn fetch_manifest_digest(&self, _identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Some(self.digest()))
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            _identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Some((
+                self.bytes.to_vec(),
+                self.digest(),
+                serde_json::from_slice(self.bytes).unwrap(),
+            )))
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    const FLAT_MANIFEST_JSON: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
+
+    /// Warn-tier coverage: a flat (single-platform) tag never gains a
+    /// dispatch object (A3/B2) but its root still grows with `content` set
+    /// to the leaf manifest digest itself (Default mode); Offline mode
+    /// policy-blocks an unknown flat-manifest tag before ever consulting the
+    /// source.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flat_manifest_tag_routing() {
+        let flat_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON);
+
+        // (a) + (b): Default-mode Resolve writes nothing to `o/` but grows
+        // the root with `content` = the leaf digest.
+        {
+            let cache_dir = TempDir::new().unwrap();
+            let cache = make_local_index(&cache_dir);
+            let store = index_store(&cache_dir);
+
+            let source = FlatManifestSource {
+                bytes: FLAT_MANIFEST_JSON,
+                calls: Arc::new(Mutex::new(0)),
+            };
+            let src_idx = super::super::Index::from_impl(source);
+            let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+
+            let (digest, manifest) = chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await
+                .expect("flat manifest resolve must succeed")
+                .expect("source has the tag");
+            assert_eq!(digest, flat_digest);
+            assert!(
+                matches!(manifest, Manifest::Image(_)),
+                "a flat single-platform tag must resolve to Manifest::Image"
+            );
+
+            let dispatch_path = store.dispatch_object_path(REGISTRY, REPO, &flat_digest);
+            assert!(
+                !dispatch_path.exists(),
+                "a single-platform tag must write nothing to the dispatch object CAS (A3/B2)"
+            );
+
+            let root_bytes = std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap();
+            let root: serde_json::Value = serde_json::from_slice(&root_bytes).unwrap();
+            assert_eq!(
+                root["tags"][TAG]["content"].as_str(),
+                Some(flat_digest.to_string()).as_deref(),
+                "the root's tag content must be the leaf manifest digest itself"
+            );
+        }
+
+        // (c) Offline mode policy-blocks before any source call.
+        {
+            let cache_dir = TempDir::new().unwrap();
+            let cache = make_local_index(&cache_dir);
+
+            let source = FlatManifestSource {
+                bytes: FLAT_MANIFEST_JSON,
+                calls: Arc::new(Mutex::new(0)),
+            };
+            let calls = source.calls.clone();
+            let src_idx = super::super::Index::from_impl(source);
+            let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
+
+            let err = chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await
+                .expect_err("offline resolve of an unknown flat-manifest tag must be policy-blocked");
+            assert_policy_blocked(&err, "offline");
+            assert_eq!(*calls.lock().unwrap(), 0, "Offline mode must never consult sources");
+        }
+    }
+
+    // ── blob-store leaf recovery (A3 step 2 / B2) ────────────────────────────
+    //
+    // A leaf platform manifest is never written into the local index (A3); it
+    // is CONTENT cached into `$OCX_HOME/blobs` at install (B2). These tests pin
+    // the regression: an `AbsentLeaf` (content absent from `o/`) is recovered
+    // from the machine-global blob store BEFORE any source walk, so an
+    // installed tool resolves offline with zero network — the regression that
+    // left `test_offline.py` / `test_pinned_offline.py` red.
+
+    /// A flat single-platform (leaf) image manifest and the digest its bytes
+    /// hash to. A leaf is never written to the dispatch-object CAS (A3), so a
+    /// tag or digest pointing at it reports `DispatchResolution::AbsentLeaf`;
+    /// the bytes live only in the machine-global blob store (B2).
+    fn leaf_manifest_bytes() -> (Vec<u8>, Digest) {
+        let manifest = Manifest::Image(ImageManifest::default());
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let digest = Algorithm::Sha256.hash(&bytes);
+        (bytes, digest)
+    }
+
+    /// A `BlobStore` rooted under the temp dir, seeded with `bytes` under
+    /// `(REGISTRY, digest)` — the shape `stage_and_link_chain_blobs` leaves
+    /// behind at install for a leaf platform manifest.
+    async fn seeded_blob_store(dir: &TempDir, digest: &Digest, bytes: &[u8]) -> BlobStore {
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        blobs.write_blob(REGISTRY, digest, bytes).await.unwrap();
+        blobs
+    }
+
+    /// Regression (#215-family, `test_offline.py`): a tag-addressed `AbsentLeaf`
+    /// resolves offline from the blob store with zero sources. The tag pointer
+    /// is locally known (root committed), the leaf is absent from `o/`, and its
+    /// bytes sit in `$OCX_HOME/blobs` — exactly the post-install offline-exec
+    /// state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_tag_absent_leaf_recovers_from_blob_store() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
+        // Root tag → leaf content; a single-platform tag writes nothing to `o/`
+        // (AbsentLeaf).
+        cache.commit_root_tag(&tagged_id(), &leaf_digest).await.unwrap();
+        let blobs = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
+
+        // Offline, zero sources: recovery must come from the blob store alone.
+        let chained = Index::from_chained_with_content_store(cache, vec![], ChainMode::Offline, blobs);
+        let (digest, manifest) = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("offline AbsentLeaf must recover the leaf manifest from the blob store");
+        assert_eq!(digest, leaf_digest);
+        assert!(matches!(manifest, Manifest::Image(_)), "recovered a flat leaf manifest");
+    }
+
+    /// A digest-addressed `AbsentLeaf` (a pinned pull's leaf) recovers offline
+    /// from the blob store through both `fetch_manifest` and
+    /// `fetch_manifest_digest` (`test_pinned_offline.py`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_digest_absent_leaf_recovers_from_blob_store() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
+        let blobs = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
+        let id = Identifier::new_registry(REPO, REGISTRY).clone_with_digest(leaf_digest.clone());
+        let chained = Index::from_chained_with_content_store(cache, vec![], ChainMode::Offline, blobs);
+
+        let (digest, _manifest) = chained
+            .fetch_manifest(&id, IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("digest-addressed offline leaf must recover from the blob store");
+        assert_eq!(digest, leaf_digest);
+
+        let confirmed = chained
+            .fetch_manifest_digest(&id, IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("digest-addressed offline leaf digest must be confirmed from the blob store");
+        assert_eq!(confirmed, leaf_digest);
+    }
+
+    /// The blob-store recovery is opt-in: without an attached content store
+    /// (the `from_chained` seam every unit test uses), an offline `AbsentLeaf`
+    /// stays a clean `None` — proving the fix changes nothing for the
+    /// no-content-store construction and cannot mask a genuine offline miss.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_absent_leaf_without_content_store_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
+        cache.commit_root_tag(&tagged_id(), &leaf_digest).await.unwrap();
+        // Bytes exist on disk, but no content store is wired into this chain.
+        let _ = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let result = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "no content store → offline AbsentLeaf stays a clean None"
+        );
+    }
+
+    /// The blob-store recovery must NOT mask the no-resolve policy block: an
+    /// unindexed tag (no root → a genuine `None` miss, not `AbsentLeaf`) still
+    /// exits with `PolicyResolutionBlocked` under Offline even with a blob store
+    /// attached, and never contacts a source. Pins the pre-C2 policy contract
+    /// against the new content-store seam (`test_frozen.py` /
+    /// `test_offline.py::test_exit_code_on_offline_blocks_fetch`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_unindexed_tag_blocks_even_with_content_store() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        // Blob store present but the tag was never indexed — resolve_dispatch is
+        // a genuine miss (None), so recovery cannot fire.
+        let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
+        let blobs = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained_with_content_store(cache, vec![src_idx], ChainMode::Offline, blobs);
+
+        let err = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("offline unindexed tag must policy-block even with a content store attached");
+        assert_policy_blocked(&err, "offline");
+        assert_eq!(spy.calls(), 0, "policy block must fire before any source contact");
+    }
+
+    // ── authoritative-stop on a clean miss (no silent fallthrough) ─────────
+
+    /// A fake source claiming authoritative ownership of `REGISTRY`'s
+    /// namespace (mirrors `OcxIndex::is_authoritative_for`) but reporting a
+    /// clean miss for every identifier — the case where the one configured
+    /// ocx-index for a namespace genuinely has no such package.
+    #[derive(Clone)]
+    struct AuthoritativeMissSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for AuthoritativeMissSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn is_authoritative_for(&self, identifier: &Identifier) -> bool {
+            identifier.registry() == REGISTRY
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Regression: an index-authoritative source's clean miss for a package
+    /// in its own namespace must be terminal — it must never fall through to
+    /// the registry catch-all (`adr_index_indirection.md` F5a / Decision H:
+    /// exactly one remote per namespace, no index→OCI-tags fallback chain).
+    /// Exercises the `Default`+`Resolve` chain walk (`fetch_and_persist_chain`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authoritative_clean_miss_does_not_fall_through_to_registry_resolve() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let authoritative_idx = Index::from_impl(AuthoritativeMissSource);
+        let (registry_spy, registry_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![authoritative_idx, registry_idx], ChainMode::Default);
+
+        let result = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "authoritative source's clean miss must be a terminal None"
+        );
+        assert_eq!(
+            registry_spy.calls(),
+            0,
+            "the registry source must never be queried once the authoritative source reported a clean miss"
+        );
+    }
+
+    /// Same authoritative-stop invariant on the `--remote` pure-query path
+    /// (`query_sources_manifest`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authoritative_clean_miss_does_not_fall_through_to_registry_remote_query() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let authoritative_idx = Index::from_impl(AuthoritativeMissSource);
+        let (registry_spy, registry_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![authoritative_idx, registry_idx], ChainMode::Remote);
+
+        let result = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "authoritative source's clean miss must be a terminal None under a --remote query too"
+        );
+        assert_eq!(
+            registry_spy.calls(),
+            0,
+            "the registry source must never be queried once the authoritative source reported a clean miss"
+        );
     }
 }
 
@@ -1803,9 +2970,9 @@ mod tests {
 
     use crate::{
         Result,
-        file_structure::{BlobStore, TagStore},
+        file_structure::IndexStore,
         oci::index::{Index, LocalConfig, LocalIndex, index_impl},
-        oci::{Digest, Identifier, ImageManifest, Manifest},
+        oci::{Algorithm, Digest, Identifier, Manifest},
     };
 
     // ── Test helpers ──────────────────────────────────────────────────────
@@ -1813,37 +2980,56 @@ mod tests {
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
-    // 64-char hex string required for Sha256.
-    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn tagged_id() -> Identifier {
         Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
 
     fn digest_only_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(Digest::Sha256(HEX_A.to_string()))
+        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
     }
 
+    // Two distinct single-child image INDEXES — distinct bytes so digests
+    // differ, and (A3) the bytes genuinely hash to the digest the source
+    // serves. Dispatch-shaped (never a bare leaf manifest) so a routing
+    // test's "cache hit" fixtures are genuinely locally-cacheable under the
+    // dispatch-only local index — see the identical note on the sibling copy
+    // of these fixtures in `chain_refs_tests`.
+    fn manifest_a_bytes() -> &'static [u8] {
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2,"platform":{"os":"linux","architecture":"amd64"}}]}"#
+    }
+    fn manifest_b_bytes() -> &'static [u8] {
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":3,"platform":{"os":"linux","architecture":"amd64"}}]}"#
+    }
     fn digest_a() -> Digest {
-        Digest::Sha256(HEX_A.to_string())
+        Algorithm::Sha256.hash(manifest_a_bytes())
     }
-
     fn digest_b() -> Digest {
-        Digest::Sha256(HEX_B.to_string())
+        Algorithm::Sha256.hash(manifest_b_bytes())
+    }
+    fn bytes_for(digest: &Digest) -> Vec<u8> {
+        if *digest == digest_a() {
+            manifest_a_bytes().to_vec()
+        } else if *digest == digest_b() {
+            manifest_b_bytes().to_vec()
+        } else {
+            panic!("unknown test digest {digest}")
+        }
+    }
+    fn manifest_for(digest: &Digest) -> Manifest {
+        serde_json::from_slice(&bytes_for(digest)).unwrap()
     }
 
-    fn make_image_manifest() -> Manifest {
-        Manifest::Image(ImageManifest::default())
+    fn index_store(dir: &TempDir) -> IndexStore {
+        IndexStore::new(dir.path().join("index"))
     }
 
-    /// Build a real `LocalIndex` backed by a temp directory.
+    /// Build a real `LocalIndex` backed by a temp directory's index home.
     ///
     /// The `TempDir` must outlive the index; callers keep it in scope.
     fn make_local_index(dir: &TempDir) -> LocalIndex {
         LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: BlobStore::new(dir.path().join("blobs")),
+            index_store: index_store(dir),
         })
     }
 
@@ -1917,7 +3103,7 @@ mod tests {
             let tag = identifier.tag_or_latest();
             self.calls.lock().unwrap().push(tag.to_string());
             if let Some(digest) = self.known_tags.get(tag) {
-                Ok(Some((digest.clone(), make_image_manifest())))
+                Ok(Some((digest.clone(), manifest_for(digest))))
             } else {
                 Ok(None)
             }
@@ -1941,6 +3127,21 @@ mod tests {
                 return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()).into());
             }
             Ok(None)
+        }
+
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            if let Some(msg) = &self.force_error {
+                return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()).into());
+            }
+            let tag = identifier.tag_or_latest();
+            self.calls.lock().unwrap().push(tag.to_string());
+            Ok(self
+                .known_tags
+                .get(tag)
+                .map(|digest| (bytes_for(digest), digest.clone(), manifest_for(digest))))
         }
 
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1986,16 +3187,16 @@ mod tests {
         super::super::Index::from_impl(t)
     }
 
-    /// Seed the cache with the full chain (tag pointer + manifest blob) so
-    /// subsequent cache-only reads succeed.
+    /// Seed the cache with the full dispatch chain (root tag pointer +
+    /// dispatch object) so subsequent cache-only reads succeed.
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let digest = cache
-            .persist_manifest_chain(source, identifier)
+        let (digest, _manifest) = cache
+            .persist_dispatch(source, identifier)
             .await
             .unwrap()
             .expect("source must know the seeded tag");
         if identifier.tag().is_some() {
-            cache.commit_tag(identifier, &digest).await.unwrap();
+            cache.commit_root_tag(identifier, &digest).await.unwrap();
         }
     }
 
@@ -2520,25 +3721,25 @@ mod tests {
         );
     }
 
-    // Case 13: a corrupted on-disk tag file (the documented kill-9 recovery
-    // window from `tag_guard.rs`) must not short-circuit the chain walk.
-    // `ChainedIndex::fetch_manifest` should log a warn, degrade to the source,
-    // and the re-read of the now-rewritten file must succeed.
+    // Case 13: a corrupted on-disk root document must not short-circuit the
+    // chain walk. `ChainedIndex::fetch_manifest` should log a warn, degrade
+    // to the source, and the walk must recover the manifest. An unparseable
+    // root raises `MalformedRootDocument` (a hard error per F1 — genuine
+    // corruption, not a bare root/catalog digest disagreement), but that
+    // variant is not `is_corrupt_index_object` (which matches only
+    // `DigestMismatch`), so it takes the same generic warn-and-degrade path
+    // as any other local-read error.
     #[tokio::test(flavor = "multi_thread")]
     async fn corrupted_cache_read_falls_back_to_chain() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
 
-        // Corrupt the on-disk tag file with unparseable bytes so the first
-        // `cache.fetch_manifest` call errors. The tag path follows
-        // `tags/{registry_slug}/{repo}.json` (TagStore layout).
-        let tag_file = cache_dir
-            .path()
-            .join("tags")
-            .join(REGISTRY)
-            .join(format!("{REPO}.json"));
-        std::fs::create_dir_all(tag_file.parent().unwrap()).unwrap();
-        std::fs::write(&tag_file, b"{not valid json at all").unwrap();
+        // Corrupt the on-disk root document with unparseable bytes so the
+        // first local read errors. The path is the index store's
+        // `<home>/<source>/p/<ns>/<pkg>.json`.
+        let root_file = index_store(&cache_dir).root_document_path(REGISTRY, REPO);
+        std::fs::create_dir_all(root_file.parent().unwrap()).unwrap();
+        std::fs::write(&root_file, b"{not valid json at all").unwrap();
 
         let source = make_source(TestIndex::with_tag(TAG, digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
@@ -2557,17 +3758,11 @@ mod tests {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
 
-        let tag_file = cache_dir
-            .path()
-            .join("tags")
-            .join(REGISTRY)
-            .join(format!("{REPO}.json"));
-        std::fs::create_dir_all(tag_file.parent().unwrap()).unwrap();
-        std::fs::write(&tag_file, b"").unwrap();
-        // Truncated-but-nonzero would also exercise `read_disk`'s error path;
-        // an empty file (len == 0) is treated as "no tags yet" so we need
-        // actual garbage to force a parse error.
-        std::fs::write(&tag_file, b"garbage").unwrap();
+        let root_file = index_store(&cache_dir).root_document_path(REGISTRY, REPO);
+        std::fs::create_dir_all(root_file.parent().unwrap()).unwrap();
+        // Garbage bytes force a parse error in the root read so the local
+        // read errors and `ChainedIndex` degrades to the source chain.
+        std::fs::write(&root_file, b"garbage").unwrap();
 
         let source = make_source(TestIndex::with_tag(TAG, digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);

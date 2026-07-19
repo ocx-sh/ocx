@@ -322,6 +322,67 @@ impl Client {
         Ok((index_digest, index))
     }
 
+    // ── Canonical tag (registry-side deletion safety net) ─────────────
+
+    /// Pushes a digest-named `sha256.<hex>` tag pointing directly at
+    /// `platform`'s entry in `merged_manifest`.
+    ///
+    /// `merged_manifest` is the just-returned merge result for
+    /// `(source_identifier, platform)` from `push_package` /
+    /// `push_manifest_and_merge_tags` — `platform`'s entry is expected to be
+    /// present by construction. A missing entry is a no-op rather than a
+    /// hard failure: canonical tagging is a safety net layered on top of an
+    /// already-committed push, never load-bearing for the push itself.
+    ///
+    /// Registry-side deletion safety net (`adr_index_indirection.md`
+    /// Decision E): a stray delete of a rolling/cascade tag can never orphan
+    /// a digest a lock still pins, because the canonical tag names it
+    /// directly. Uses a `.` separator — OCI tags forbid `:`. The local
+    /// snapshot and lock never read or write canonical tags; this is a pure
+    /// registry-side write.
+    pub(crate) async fn push_canonical_tag(
+        &self,
+        source_identifier: &Identifier,
+        merged_manifest: &oci::Manifest,
+        platform: &oci::Platform,
+    ) -> Result<()> {
+        let Some(manifest_digest) = super::manifest::platform_manifest_digest(merged_manifest, platform) else {
+            return Ok(());
+        };
+
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let repo_ref = source_identifier.canonical_reference();
+        self.transport
+            .ensure_auth(&repo_ref, oci::RegistryOperation::Push)
+            .await?;
+
+        // `without_tag()` matters: `push_multi_layer_manifest` pushes the
+        // platform manifest to a bare digest reference (registry/repo@digest,
+        // no tag) — `native::Reference::clone_with_digest` drops the tag by
+        // construction (`oci_spec::distribution::Reference`). Preserving
+        // `source_identifier`'s tag here would build a `tag@digest` reference
+        // that never round-trips to the same key the manifest was pushed
+        // under, so the pull below would spuriously 404.
+        let digest_ref = source_identifier
+            .without_tag()
+            .clone_with_digest(manifest_digest.clone())
+            .canonical_reference();
+        let (manifest_bytes, _digest_str) = self
+            .transport
+            .pull_manifest_raw(&digest_ref, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST])
+            .await?;
+
+        let (algorithm, hex) = manifest_digest.parts();
+        let tag_ref = source_identifier
+            .clone_with_tag(format!("{algorithm}.{hex}"))
+            .canonical_reference();
+        self.transport
+            .push_manifest_raw(&tag_ref, manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .await?;
+
+        Ok(())
+    }
+
     // ── Blob introspection ────────────────────────────────────────────
 
     /// HEAD a blob to verify its existence and retrieve its content length.
@@ -1383,11 +1444,22 @@ impl Client {
     /// Fetches the raw manifest bytes and the parsed [`oci::Manifest`] for
     /// `identifier`.
     ///
+    /// `identifier` may be tag- or digest-addressed — this is the generalized
+    /// raw-bytes fetch: any tag-resolve caller that needs verbatim bytes
+    /// alongside the parsed manifest (not just pinned-digest callers) can use
+    /// it as-is.
+    ///
     /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
     /// Unlike [`Self::fetch_manifest`], this method also returns the raw
     /// manifest bytes so callers can persist them to the CAS blob store
     /// without re-serialisation — the round-trip bytes must be byte-identical
     /// to what the registry served to ensure the stored digest is consistent.
+    ///
+    /// The returned digest is never trusted blindly: `sha256(raw_bytes)` is
+    /// recomputed and compared against the registry-claimed digest before
+    /// this method returns (see [`verify_raw_bytes_digest`]) — the trust
+    /// anchor for any snapshot store that persists these bytes verbatim
+    /// (`adr_index_indirection.md` A3).
     pub(crate) async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &Identifier,
@@ -1408,6 +1480,7 @@ impl Client {
         let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
+        verify_raw_bytes_digest(&raw_bytes, &digest)?;
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
@@ -1480,6 +1553,26 @@ impl Client {
         let manifest: oci::Manifest = serde_json::from_slice(&data).map_err(ClientError::Serialization)?;
         Ok((manifest, digest))
     }
+}
+
+/// Recomputes the digest of `raw_bytes` (using the algorithm `claimed`
+/// carries) and errors if it does not match.
+///
+/// This is the write-path trust anchor for [`Client::fetch_manifest_raw_bytes`]
+/// (ADR `adr_index_indirection.md` A3, "keep raw bytes, recompute + verify
+/// digest"): a registry-claimed digest string is untrusted input until the
+/// bytes actually received hash to it. A mismatch is a hard error, never a
+/// warning — the caller is about to persist `raw_bytes` verbatim under a
+/// filename derived from `claimed`.
+fn verify_raw_bytes_digest(raw_bytes: &[u8], claimed: &Digest) -> std::result::Result<(), ClientError> {
+    let recomputed = claimed.algorithm().hash(raw_bytes);
+    if &recomputed != claimed {
+        return Err(ClientError::DigestMismatch {
+            expected: claimed.to_string(),
+            actual: recomputed.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ── Pagination ───────────────────────────────────────────────────────
@@ -1585,6 +1678,119 @@ mod tests {
         let data = serde_json::to_vec(manifest).unwrap();
         let digest = Algorithm::Sha256.hash(&data).to_string();
         (data, digest)
+    }
+
+    // ── verify_raw_bytes_digest tests ────────────────────────────────
+    //
+    // The recompute-verify trust anchor (ADR `adr_index_indirection.md` A3):
+    // a claimed digest is never trusted without recomputing sha256(bytes)
+    // and comparing.
+
+    #[test]
+    fn verify_raw_bytes_digest_accepts_matching_bytes() {
+        let bytes = b"verbatim manifest bytes".to_vec();
+        let claimed = Algorithm::Sha256.hash(&bytes);
+        assert!(super::verify_raw_bytes_digest(&bytes, &claimed).is_ok());
+    }
+
+    #[test]
+    fn verify_raw_bytes_digest_rejects_tampered_bytes() {
+        let bytes = b"verbatim manifest bytes".to_vec();
+        let claimed = Algorithm::Sha256.hash(&bytes);
+        let tampered = b"tampered manifest bytes".to_vec();
+
+        match super::verify_raw_bytes_digest(&tampered, &claimed) {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(expected, claimed.to_string(), "expected must be the claimed digest");
+                assert_eq!(
+                    actual,
+                    Algorithm::Sha256.hash(&tampered).to_string(),
+                    "actual must be the digest recomputed from the bytes actually received"
+                );
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected ClientError::DigestMismatch, got {other:?}"),
+        }
+    }
+
+    // ── fetch_manifest_raw_bytes tests ───────────────────────────────
+    //
+    // Covers the generalized raw-bytes fetch (works for tag-addressed
+    // identifiers, not just pinned-digest ones) and the A3 recompute-verify
+    // gate wired into it.
+
+    /// A tag-resolve fetch retains the verbatim bytes alongside the parsed
+    /// manifest and digest — the precedent the future snapshot-store write
+    /// path (ADR A3) reuses.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_retains_verbatim_bytes_for_tag_identifier() {
+        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+        let id = test_identifier("1.0"); // tag-addressed, not digest-pinned
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data.clone(), digest_str.clone()));
+        let client = stub(&data);
+
+        let (raw_bytes, digest, parsed) = client
+            .fetch_manifest_raw_bytes(&id)
+            .await
+            .expect("fetch should succeed")
+            .expect("tag is present in the stub");
+
+        assert_eq!(
+            raw_bytes, manifest_data,
+            "bytes must be returned verbatim, never re-serialized"
+        );
+        assert_eq!(digest.to_string(), digest_str);
+        assert!(
+            matches!(parsed, oci::Manifest::Image(_)),
+            "parsed manifest must be the Image variant"
+        );
+    }
+
+    /// A missing tag surfaces as `Ok(None)` — not-found is a normal query
+    /// result at this layer, not an error (see `subsystem-oci.md`
+    /// "Option-based results").
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_returns_none_for_missing_tag() {
+        let id = test_identifier("missing");
+        let data = StubTransportData::new();
+        let client = stub(&data);
+
+        let result = client.fetch_manifest_raw_bytes(&id).await.expect("no transport error");
+        assert!(result.is_none());
+    }
+
+    /// A registry (or mirror) that serves bytes not matching its own claimed
+    /// digest must hard-fail, never silently hand back the tampered bytes.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_rejects_registry_claimed_digest_mismatch() {
+        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
+        let (manifest_data, _correct_digest) = serialize_manifest(&manifest);
+        // A digest that does not correspond to `manifest_data` — well-formed
+        // (64 lowercase hex chars) so it parses as a `Digest`, but wrong.
+        let wrong_digest_str = format!("sha256:{}", "f".repeat(64));
+
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, wrong_digest_str.clone()));
+        let client = stub(&data);
+
+        match client.fetch_manifest_raw_bytes(&id).await {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(
+                    expected, wrong_digest_str,
+                    "expected must be the registry-claimed digest"
+                );
+                assert_ne!(actual, expected, "actual must be the recomputed (correct) digest");
+            }
+            other => panic!("expected Err(ClientError::DigestMismatch), got {other:?}"),
+        }
     }
 
     // ── Pagination tests ─────────────────────────────────────────────
@@ -3245,6 +3451,111 @@ mod tests {
         }
     }
 
+    // ── push_canonical_tag tests ─────────────────────────────────────
+
+    mod push_canonical_tag_tests {
+        use super::*;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn platform(s: &str) -> oci::Platform {
+            s.parse().unwrap()
+        }
+
+        fn index_with_entry(digest: &str, platform: oci::Platform) -> oci::Manifest {
+            oci::Manifest::ImageIndex(oci::ImageIndex {
+                schema_version: oci::INDEX_SCHEMA_VERSION,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: None,
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: digest.to_string(),
+                    size: 42,
+                    platform: Some(platform.into()),
+                    artifact_type: None,
+                    annotations: None,
+                }],
+                annotations: None,
+            })
+        }
+
+        #[tokio::test]
+        async fn pushes_dot_separated_sha256_tag_with_the_same_bytes() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let hex = "a".repeat(64);
+            let digest = format!("sha256:{hex}");
+
+            // Seed the platform manifest at its digest-addressed reference,
+            // exactly as `push_multi_layer_manifest` leaves it after a push —
+            // bare `registry/repo@digest`, no tag (see `without_tag()` note
+            // on `push_canonical_tag`).
+            let manifest_bytes = b"platform manifest bytes".to_vec();
+            let digest_ref = id
+                .without_tag()
+                .clone_with_digest(oci::Digest::Sha256(hex.clone()))
+                .canonical_reference();
+            data.write()
+                .manifests
+                .insert(digest_ref.to_string(), (manifest_bytes.clone(), digest.clone()));
+
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&digest, platform("linux/amd64"));
+
+            client
+                .push_canonical_tag(&id, &merged, &platform("linux/amd64"))
+                .await
+                .unwrap();
+
+            let tag_ref = id.clone_with_tag(format!("sha256.{hex}")).canonical_reference();
+            let inner = data.read();
+            let (pushed_bytes, _) = inner
+                .manifests
+                .get(&tag_ref.to_string())
+                .expect("canonical tag manifest not pushed");
+            assert_eq!(
+                pushed_bytes, &manifest_bytes,
+                "canonical tag must carry the exact platform manifest bytes"
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_platform_entry_is_a_no_op() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&format!("sha256:{}", "a".repeat(64)), platform("linux/amd64"));
+
+            // Platform not present in the merged index — no-op, not an error.
+            client
+                .push_canonical_tag(&id, &merged, &platform("linux/arm64"))
+                .await
+                .unwrap();
+
+            assert!(data.read().manifests.is_empty(), "no tag should have been pushed");
+        }
+
+        #[tokio::test]
+        async fn missing_source_manifest_propagates_error() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let client = stub_with_capture(&data);
+            // Entry present in the index, but its digest was never seeded
+            // into the stub's manifest store — the pull must fail.
+            let merged = index_with_entry(&format!("sha256:{}", "b".repeat(64)), platform("linux/amd64"));
+
+            let result = client.push_canonical_tag(&id, &merged, &platform("linux/amd64")).await;
+            assert!(result.is_err(), "must propagate a missing source manifest as an error");
+        }
+    }
+
     // ── ensure_auth tests ───────────────────────────────────────────
 
     mod ensure_auth {
@@ -4174,6 +4485,429 @@ mod tests {
         }
     }
 
+    // ── T-behavioral-G1: mirror-routing matrix ────────────────────────────────
+    //
+    // The structural tests below (`canonical_reference_only_used_in_allowed_files`,
+    // `native_reference_direct_construction_restricted_to_seams`) catch a NEW
+    // read path that reaches for a disallowed symbol or construction pattern.
+    // Neither can catch a bypass that calls `identifier.canonical_reference()`
+    // from a file ALREADY on the allow-list (`oci/client.rs` itself) without
+    // adding any NEW `native::Reference::with_*` construction — exactly the
+    // read-bypass class Codex terra flagged, since text-scanning can only see
+    // symbols and call sites, never runtime behavior.
+    //
+    // This module closes that hole BEHAVIORALLY instead of lexically: every
+    // public read-path `Client` method is driven end-to-end against a recording
+    // transport with a mirror configured for the identifier's registry, and
+    // each test asserts the transport actually RECEIVED a reference whose
+    // `registry()` is the MIRROR host and whose `repository()` carries the
+    // mirror path-prefix — proving the seam was exercised, not merely that it
+    // is available. Push-path methods are out of scope by design (ADR Q5 —
+    // push stays canonical); `push_path_uses_canonical_reference_not_mirror`
+    // above already pins that half of the contract.
+    //
+    // Every new read method added to `Client` MUST add a row here — this
+    // matrix is the behavioral half of the G1 seam gate; the text-scan tests
+    // below are the structural half.
+    //
+    // Traces: mirror-invariant audit 2026-07-19, Codex terra finding —
+    // canonical_reference read-bypass class.
+    mod mirror_routing {
+        use super::*;
+        use crate::config::mirror::ParsedMirror;
+        use crate::oci::client::MirrorMap;
+        use crate::oci::client::transport::{OciTransport, ProgressFn, Result as TransportResult};
+
+        const UPSTREAM_REGISTRY: &str = "ghcr.io";
+        const MIRROR_HOST: &str = "mirror-routing.corp";
+        const MIRROR_PREFIX: &str = "ghcr-proxy";
+        const REPOSITORY: &str = "owner/tool";
+
+        /// One recorded transport call: `(method, registry, repository)`.
+        type RecordedCall = (&'static str, String, String);
+
+        /// Shared handle for [`RecordingTransport`]'s call log.
+        ///
+        /// Mirrors the [`StubTransportData`]/[`StubTransport`] split so
+        /// assertions run against a handle kept outside the boxed
+        /// `dyn OciTransport` the `Client` owns.
+        #[derive(Clone, Default)]
+        struct RecordingTransportData(std::sync::Arc<std::sync::Mutex<Vec<RecordedCall>>>);
+
+        impl RecordingTransportData {
+            fn new() -> Self {
+                Self::default()
+            }
+
+            fn record(&self, method: &'static str, image: &oci::native::Reference) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((method, image.registry().to_string(), image.repository().to_string()));
+            }
+
+            /// Returns the `(registry, repository)` the transport received for
+            /// `method`. Panics if `method` was never called — every assertion
+            /// below wants a concrete recorded pair, not a silently-passing
+            /// missing row.
+            fn call(&self, method: &str) -> (String, String) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(name, _, _)| *name == method)
+                    .map(|(_, registry, repository)| (registry.clone(), repository.clone()))
+                    .unwrap_or_else(|| panic!("transport method '{method}' was never called"))
+            }
+        }
+
+        /// A minimal [`OciTransport`] spy: every method records the
+        /// `(registry, repository)` of the reference it was handed, then
+        /// returns a trivial value so the caller's business logic can proceed
+        /// (or fail harmlessly downstream) — only the reference actually
+        /// handed to the transport matters for these tests, never the
+        /// method's return value.
+        #[derive(Clone)]
+        struct RecordingTransport {
+            data: RecordingTransportData,
+        }
+
+        #[async_trait::async_trait]
+        impl OciTransport for RecordingTransport {
+            async fn ensure_auth(
+                &self,
+                image: &oci::native::Reference,
+                _operation: oci::RegistryOperation,
+            ) -> TransportResult<()> {
+                self.data.record("ensure_auth", image);
+                Ok(())
+            }
+
+            async fn list_tags(
+                &self,
+                image: &oci::native::Reference,
+                _chunk_size: usize,
+                _last: Option<String>,
+            ) -> TransportResult<Vec<String>> {
+                self.data.record("list_tags", image);
+                Ok(vec![])
+            }
+
+            async fn catalog(
+                &self,
+                image: &oci::native::Reference,
+                _chunk_size: usize,
+                _last: Option<String>,
+            ) -> TransportResult<Vec<String>> {
+                self.data.record("catalog", image);
+                Ok(vec![])
+            }
+
+            async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> TransportResult<String> {
+                self.data.record("fetch_manifest_digest", image);
+                Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            async fn pull_manifest_raw(
+                &self,
+                image: &oci::native::Reference,
+                _accepted_media_types: &[&str],
+            ) -> TransportResult<(Vec<u8>, String)> {
+                self.data.record("pull_manifest_raw", image);
+                // Not-found is a legitimate, harmless outcome for every caller
+                // exercised below (each either propagates the error or maps
+                // it to `Ok(None)`) — only the recorded reference matters here.
+                Err(ClientError::ManifestNotFound(image.to_string()))
+            }
+
+            async fn pull_blob(
+                &self,
+                image: &oci::native::Reference,
+                _digest: &oci::Digest,
+            ) -> TransportResult<Vec<u8>> {
+                self.data.record("pull_blob", image);
+                Ok(vec![])
+            }
+
+            async fn pull_blob_to_file(
+                &self,
+                image: &oci::native::Reference,
+                _digest: &oci::Digest,
+                _path: &std::path::Path,
+            ) -> TransportResult<()> {
+                self.data.record("pull_blob_to_file", image);
+                Ok(())
+            }
+
+            async fn head_blob(&self, image: &oci::native::Reference, _digest: &oci::Digest) -> TransportResult<u64> {
+                self.data.record("head_blob", image);
+                Ok(0)
+            }
+
+            async fn pull_blob_streaming(
+                &self,
+                image: &oci::native::Reference,
+                _digest: &oci::Digest,
+            ) -> TransportResult<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>> {
+                self.data.record("pull_blob_streaming", image);
+                Ok(Box::new(tokio::io::empty()))
+            }
+
+            async fn push_manifest(
+                &self,
+                image: &oci::native::Reference,
+                _manifest: &oci::Manifest,
+            ) -> TransportResult<String> {
+                self.data.record("push_manifest", image);
+                Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            async fn push_manifest_raw(
+                &self,
+                image: &oci::native::Reference,
+                _data: Vec<u8>,
+                _media_type: &str,
+            ) -> TransportResult<String> {
+                self.data.record("push_manifest_raw", image);
+                Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            async fn push_blob(
+                &self,
+                image: &oci::native::Reference,
+                _data: Vec<u8>,
+                _digest: &oci::Digest,
+                _on_progress: ProgressFn,
+            ) -> TransportResult<String> {
+                self.data.record("push_blob", image);
+                Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            fn box_clone(&self) -> Box<dyn OciTransport> {
+                Box::new(self.clone())
+            }
+        }
+
+        /// Builds a `Client` wired to a fresh [`RecordingTransport`], with a
+        /// mirror configured for [`UPSTREAM_REGISTRY`] → [`MIRROR_HOST`] under
+        /// [`MIRROR_PREFIX`]. Returns the data handle alongside the client so
+        /// tests can inspect recorded calls after driving a method.
+        fn mirrored_client() -> (Client, RecordingTransportData) {
+            let data = RecordingTransportData::new();
+            let mut client = Client::with_transport(Box::new(RecordingTransport { data: data.clone() }));
+            client.mirrors = MirrorMap::new([(
+                UPSTREAM_REGISTRY.to_string(),
+                ParsedMirror {
+                    protocol: "https".to_string(),
+                    host: MIRROR_HOST.to_string(),
+                    path_prefix: MIRROR_PREFIX.to_string(),
+                },
+            )]);
+            (client, data)
+        }
+
+        fn identifier_with_tag(tag: &str) -> Identifier {
+            Identifier::new_registry(REPOSITORY, UPSTREAM_REGISTRY).clone_with_tag(tag)
+        }
+
+        fn digest_hex(seed: char) -> String {
+            std::iter::repeat_n(seed, 64).collect()
+        }
+
+        fn pinned_identifier(seed: char) -> oci::PinnedIdentifier {
+            let digest = oci::Digest::Sha256(digest_hex(seed));
+            let id = Identifier::new_registry(REPOSITORY, UPSTREAM_REGISTRY).clone_with_digest(digest);
+            oci::PinnedIdentifier::try_from(id).unwrap()
+        }
+
+        /// The repository every identifier-based call below must observe:
+        /// `<mirror path-prefix>/<upstream repository>`.
+        fn mirrored_repository() -> String {
+            format!("{MIRROR_PREFIX}/{REPOSITORY}")
+        }
+
+        #[tokio::test]
+        async fn list_tags_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let _ = client.list_tags(identifier_with_tag("1.0")).await;
+            let (registry, repository) = data.call("list_tags");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "list_tags must hand the transport the mirror host"
+            );
+            assert_eq!(
+                repository,
+                mirrored_repository(),
+                "list_tags must hand the transport the prefixed repository"
+            );
+        }
+
+        #[tokio::test]
+        async fn list_repositories_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let _ = client.list_repositories(UPSTREAM_REGISTRY).await;
+            let (registry, repository) = data.call("catalog");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "list_repositories must hand the transport the mirror host"
+            );
+            // Catalog calls carry no per-repository segment — the placeholder
+            // repository is the mirror's path prefix verbatim (see
+            // `transport_registry_rewrites_catalog_registry` above).
+            assert_eq!(
+                repository, MIRROR_PREFIX,
+                "list_repositories must hand the transport the bare path-prefix"
+            );
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_digest_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client.fetch_manifest_digest(&id).await;
+            let (registry, repository) = data.call("fetch_manifest_digest");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "fetch_manifest_digest must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client.fetch_manifest(&id).await;
+            // fetch_manifest delegates to the private fetch_manifest_raw
+            // helper, which calls transport.pull_manifest_raw.
+            let (registry, repository) = data.call("pull_manifest_raw");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "fetch_manifest must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn head_blob_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let digest = oci::Digest::Sha256(digest_hex('a'));
+            let _ = client.head_blob(&id, &digest).await;
+            let (registry, repository) = data.call("head_blob");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "head_blob must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn pull_manifest_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let pinned = pinned_identifier('b');
+            let _ = client.pull_manifest(&pinned).await;
+            let (registry, repository) = data.call("pull_manifest_raw");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "pull_manifest must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn pull_blob_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let blob_ref = pinned_identifier('c');
+            let _ = client.pull_blob(&blob_ref).await;
+            let (registry, repository) = data.call("pull_blob");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "pull_blob must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn pull_layer_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let pinned = pinned_identifier('d');
+            let layer = oci::Descriptor {
+                media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+                digest: format!("sha256:{}", digest_hex('e')),
+                size: 1,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            };
+            let dir = tempfile::tempdir().unwrap();
+            // Outcome is irrelevant (the recording transport yields an empty
+            // stream, so extraction fails downstream) — only the reference
+            // handed to pull_blob_streaming matters.
+            let _ = client.pull_layer(&pinned, &layer, dir.path()).await;
+            let (registry, repository) = data.call("pull_blob_streaming");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "pull_layer must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn pull_description_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let dir = tempfile::tempdir().unwrap();
+            let _ = client.pull_description(&id, dir.path()).await;
+            let (registry, repository) = data.call("pull_manifest_raw");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "pull_description must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn probe_manifest_digest_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client.probe_manifest_digest(&id).await;
+            let (registry, repository) = data.call("fetch_manifest_digest");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "probe_manifest_digest must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_raw_bytes_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client.fetch_manifest_raw_bytes(&id).await;
+            let (registry, repository) = data.call("pull_manifest_raw");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "fetch_manifest_raw_bytes must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+
+        #[tokio::test]
+        async fn fetch_layer_blob_capped_routes_through_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let digest = oci::Digest::Sha256(digest_hex('f'));
+            let _ = client.fetch_layer_blob_capped(&id, &digest, 1024).await;
+            let (registry, repository) = data.call("pull_blob_streaming");
+            assert_eq!(
+                registry, MIRROR_HOST,
+                "fetch_layer_blob_capped must hand the transport the mirror host"
+            );
+            assert_eq!(repository, mirrored_repository());
+        }
+    }
+
     // ── T-arch-A1: structural gating test ────────────────────────────────────
     //
     // `canonical_reference` is `pub(crate)` and intentionally callable in-crate,
@@ -4252,6 +4986,135 @@ mod tests {
             "T-arch-A1: `canonical_reference` found in file(s) outside the allow-list \
              (read paths must route through Client::transport_reference / transport_registry):\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    // ── T-arch-G1: native::Reference direct-construction seam gate ──────────
+    //
+    // Traces: mirror-invariant audit 2026-07-19, gap G1.
+    //
+    // The structural test above gates the `canonical_reference` symbol, but it
+    // cannot catch a NEW read path that sidesteps BOTH mirror seams by
+    // constructing a `native::Reference` directly via `native::Reference::with_tag`
+    // / `with_digest` / `with_tag_and_digest` — never touching `canonical_reference`,
+    // `transport_reference`, or `transport_registry`. This test closes that hole
+    // with the same source-scanning mechanics as the test above.
+    //
+    // Allow-list rationale (only files that ACTUALLY construct a `native::Reference`
+    // directly — same policy as the allow-list above):
+    // - `oci/client.rs`     — the two read seams this gate exists to protect
+    //                          (`transport_reference`, `transport_registry`, lines
+    //                          ~116-159).
+    // - `oci/identifier.rs` — `canonical_reference`'s own definition (the push
+    //                          seam). Callers of *that* symbol are separately
+    //                          gated by `canonical_reference_only_used_in_allowed_files`
+    //                          above, so a direct construction here is not an
+    //                          uncontrolled bypass.
+    //
+    // Deliberately scans for the qualified `native::Reference::with_` spelling,
+    // not the bare `Reference::with_`: `auth/login.rs` constructs a raw
+    // `oci_client::Reference` (imported directly, with no `native::` qualifier)
+    // for a registry-probe path (`OciClientPing::ping`) that never goes through
+    // an `Identifier` at all — including the bare spelling would false-positive
+    // there for no safety gain.
+    #[test]
+    fn native_reference_direct_construction_restricted_to_seams() {
+        use std::fs;
+        use std::path::Path;
+
+        const ALLOWED_SUFFIXES: &[&str] = &["oci/client.rs", "oci/identifier.rs"];
+        const PATTERN: &str = "native::Reference::with_";
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let src_root = Path::new(manifest_dir).join("src");
+
+        // Recursively collect all `.rs` files under the src root.
+        fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_root, &mut rs_files);
+        assert!(
+            !rs_files.is_empty(),
+            "source scanner found no .rs files under {}",
+            src_root.display()
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for file_path in &rs_files {
+            let content = fs::read_to_string(file_path).unwrap_or_default();
+            if !content.contains(PATTERN) {
+                continue;
+            }
+
+            let path_str = file_path.to_string_lossy();
+            let allowed = ALLOWED_SUFFIXES
+                .iter()
+                .any(|suffix| path_str.replace('\\', "/").ends_with(suffix));
+            if !allowed {
+                offenders.push(path_str.into_owned());
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "T-arch-G1: `{PATTERN}` found in file(s) outside the allow-list (a native::Reference \
+             must be built only via the mirror seams in client.rs, or via Identifier::canonical_reference \
+             in identifier.rs):\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// T-arch-G1b: pins the number of `native::Reference::with_*` constructions
+    /// in client.rs's PRODUCTION code (everything before the `#[cfg(test)] mod
+    /// tests` boundary) to exactly the five call sites inside
+    /// [`Client::transport_reference`] (4 — the `with_tag_and_digest` /
+    /// `with_tag` / `with_digest` / `with_tag` match arms) plus
+    /// [`Client::transport_registry`] (1 — its single `with_tag` call), lines
+    /// ~116-159 at the time this test was written.
+    ///
+    /// Update `EXPECTED_PRODUCTION_CONSTRUCTION_COUNT` ONLY when the new
+    /// construction site being added is one of the two seams themselves
+    /// (`transport_reference` / `transport_registry` growing a match arm) —
+    /// NEVER to silence a new bypass caught by
+    /// `native_reference_direct_construction_restricted_to_seams` above.
+    ///
+    /// Traces: mirror-invariant audit 2026-07-19, gap G1.
+    #[test]
+    fn client_rs_production_reference_construction_count_pinned_to_seams() {
+        use std::fs;
+        use std::path::Path;
+
+        const EXPECTED_PRODUCTION_CONSTRUCTION_COUNT: usize = 5;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let this_file = Path::new(manifest_dir).join("src/oci/client.rs");
+        let source = fs::read_to_string(&this_file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", this_file.display()));
+
+        // Everything before `mod tests {` (the `#[cfg(test)]`-gated block that
+        // spans to end of file) is production code.
+        let production_end = source
+            .find("\nmod tests {")
+            .expect("client.rs must contain a `mod tests {` boundary");
+        let production_source = &source[..production_end];
+
+        let actual = production_source.matches("native::Reference::with_").count();
+        assert_eq!(
+            actual, EXPECTED_PRODUCTION_CONSTRUCTION_COUNT,
+            "production (non-#[cfg(test)]) `native::Reference::with_*` construction count in \
+             client.rs changed from the pinned value — update EXPECTED_PRODUCTION_CONSTRUCTION_COUNT \
+             only if the new site is inside transport_reference/transport_registry themselves, never \
+             to silence a new bypass"
         );
     }
 

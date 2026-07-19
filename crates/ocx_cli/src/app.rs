@@ -142,7 +142,7 @@ impl App {
         // `Self_(SelfActivate)` is in this list because `self activate` runs on
         // every shell startup (sourced from `$OCX_HOME/env.sh`).  The full
         // `Context::try_init` cost — ConfigLoader file walk, OCI client,
-        // RemoteIndex, PackageManager construction — is paid unnecessarily on
+        // OciIndex, PackageManager construction — is paid unnecessarily on
         // every new shell session.  `SelfActivate::execute` only needs a
         // `FileStructure` (to resolve the absolute symlink bin path), which it
         // constructs cheaply via `FileStructure::new()` directly.

@@ -263,15 +263,19 @@ pub async fn publish_managed_config(
             }
         };
         let existing_versions = Publisher::parse_versions(&existing_tags);
+        // Canonical tagging (`adr_index_indirection.md` Decision E) is a
+        // `ocx package push` CLI contract; managed-config publishing has no
+        // `--[no-]canonical-tag` surface of its own, so it opts out to keep
+        // today's tag set unchanged.
         publisher
-            .push_cascade(vec![info], &layers, existing_versions, None)
+            .push_cascade(vec![info], &layers, existing_versions, None, false)
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),
             })?
     } else {
         publisher
-            .push(vec![info], &layers, None)
+            .push(vec![info], &layers, None, false)
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),

@@ -231,13 +231,17 @@ async fn setup_impl(
             // `cmake:3.28`) that land on the same leaf manifest share a
             // leader — but their resolution chains may differ (different
             // top-level image indexes). The leader linked only its chain,
-            // so top up the waiter's chain here. `link_blobs` is idempotent,
-            // so overlapping entries are no-ops; only the unique entries
-            // (e.g., the waiter's distinct image-index digest) get linked.
-            super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), resolved.blobs())
-                .await
-                .map_err(PackageErrorKind::Internal)?;
+            // so top up the waiter's chain here. Staging + linking are
+            // idempotent, so overlapping entries are no-ops; only the unique
+            // entries (e.g., the waiter's distinct image-index digest) get
+            // materialized and linked.
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
             return Ok(info);
         }
         singleflight::Acquisition::Leader(handle) => handle,
@@ -322,10 +326,13 @@ async fn setup_owned_impl(
             // Top up chain refs in case the already-installed package was
             // resolved via a different image-index path (alias tag). See
             // the waiter branch in `setup_impl` for the same invariant.
-            super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), resolved.blobs())
-                .await
-                .map_err(PackageErrorKind::Internal)?;
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
             return Ok(info);
         }
         // Status missing / partial / not-ok — crash recovery, re-pull.
@@ -356,18 +363,23 @@ async fn setup_owned_impl(
                 "Package '{}' installed by another process while waiting for lock, skipping.",
                 pinned
             );
-            super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), resolved.blobs())
-                .await
-                .map_err(PackageErrorKind::Internal)?;
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
             return Ok(info);
         }
     }
 
     // Manifest comes from the resolver — ChainedIndex already persisted it to
-    // `blobs/` via write-through during resolve, so no extra fetch is needed.
-    // When `provided_metadata` is `Some` (pull_local path), the metadata has
-    // already been validated by the caller; skip the registry round-trip.
+    // the index snapshot via write-through during resolve, so no extra fetch is
+    // needed here; `stage_and_link_chain_blobs` below copies the chain into
+    // `$OCX_HOME/blobs` for GC (B2). When `provided_metadata` is `Some`
+    // (pull_local path), the metadata has already been validated by the caller;
+    // skip the registry round-trip.
     let manifest = resolved.final_manifest.clone();
     let metadata = if let Some(meta) = provided_metadata {
         meta
@@ -400,7 +412,13 @@ async fn setup_owned_impl(
 
     // Extract layers to layers/ store and pull dependencies in parallel.
     let (layer_digests, dependencies) = tokio::join!(
-        extract_layers(mgr, pinned, &manifest, groups.layers.clone()),
+        extract_layers(
+            mgr,
+            pinned,
+            &resolved.transport_pinned,
+            &manifest,
+            groups.layers.clone()
+        ),
         setup_dependencies(mgr, &metadata, pinned, platform, groups.clone()),
     );
     let (layer_digests, dependencies) = (layer_digests?, dependencies?);
@@ -511,12 +529,11 @@ async fn setup_owned_impl(
             .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(deps_dir.clone(), e)))?;
     }
     link_dependencies_in_temp(&pkg, &dependencies)?;
-    // Forward-ref every blob the resolver touched into `refs/blobs/` so GC
-    // can reach the full resolution chain from the installed package.
-    super::common::reference_manager(fs)
-        .link_blobs(&pkg.content(), resolved.blobs())
-        .await
-        .map_err(PackageErrorKind::Internal)?;
+    // Materialize the resolver's manifest + config chain into `$OCX_HOME/blobs`
+    // (the B2 duplicate the index snapshot does not provide) and forward-ref
+    // every blob into `refs/blobs/` so GC's `add_index_retention_edges` can
+    // reach the full resolution chain from the installed package.
+    super::common::stage_and_link_chain_blobs(fs, mgr.index(), &pkg.content(), &resolved).await?;
 
     // Atomic move temp → object store.
     let install_info = move_temp_to_object_store(
@@ -709,6 +726,7 @@ async fn move_temp_to_object_store(
 async fn extract_layers(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
+    transport: &oci::PinnedIdentifier,
     manifest: &oci::ImageManifest,
     layer_group: LayerGroup,
 ) -> Result<Vec<oci::Digest>, PackageErrorKind> {
@@ -731,9 +749,10 @@ async fn extract_layers(
     for (idx, (layer, digest)) in parsed.into_iter().enumerate() {
         let mgr = mgr.clone();
         let pinned = pinned.clone();
+        let transport = transport.clone();
         let layer_group = layer_group.clone();
         tasks.spawn(crate::cli::progress::inherit_scope(async move {
-            let res = extract_layer_atomic(&mgr, &pinned, &layer, &digest, layer_group).await;
+            let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group).await;
             (idx, res)
         }));
     }
@@ -771,6 +790,7 @@ async fn extract_layers(
 async fn extract_layer_atomic(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
+    transport: &oci::PinnedIdentifier,
     layer: &oci::Descriptor,
     layer_digest: &oci::Digest,
     layer_group: LayerGroup,
@@ -808,7 +828,7 @@ async fn extract_layer_atomic(
     };
 
     // We own the handle. Either complete on Ok or fail on Err before return.
-    match extract_layer_inner(pinned, layer, layer_digest, client, fs).await {
+    match extract_layer_inner(pinned, transport, layer, layer_digest, client, fs).await {
         Ok(()) => {
             handle.complete(());
             Ok(layer_digest.clone())
@@ -823,6 +843,7 @@ async fn extract_layer_atomic(
 /// Inner extraction implementation — runs only for the leader task.
 async fn extract_layer_inner(
     pinned: &oci::PinnedIdentifier,
+    transport: &oci::PinnedIdentifier,
     layer: &oci::Descriptor,
     layer_digest: &oci::Digest,
     client: &oci::Client,
@@ -860,8 +881,12 @@ async fn extract_layer_inner(
         return Ok(());
     }
 
-    // Step 5: pull the layer blob.
-    client.pull_layer(pinned, layer, &temp.dir.dir).await?;
+    // Step 5: pull the layer blob. Content comes from the PHYSICAL location
+    // (`transport`) — for an index-sourced package that is the registry the
+    // root's `repository` pointer names, not the logical `ocx.sh` host. Storage
+    // paths above stay keyed on the logical `pinned` (Decision C2). For
+    // registry-backed packages `transport == pinned`.
+    client.pull_layer(transport, layer, &temp.dir.dir).await?;
 
     // Step 6: write digest file for CAS-path recovery.
     file_structure::write_digest_file(&temp.dir.dir.join(file_structure::DIGEST_FILENAME), layer_digest)

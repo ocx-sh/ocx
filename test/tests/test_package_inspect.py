@@ -296,19 +296,27 @@ def test_inspect_default_offline_missing_manifest_blob_exits_81(
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
-    # `index update` persisted the tag→digest pointer under tags/ and the
-    # manifest chain under blobs/. Drop the blob CAS so the digest stays
-    # pinned locally but the manifest blob is gone — default-mode offline
-    # inspect must report PolicyBlocked rather than NotFound.
-    # Note: the pin step does not persist the manifest blob under blobs/ —
-    # the digest stays pinned via tags/ while the manifest blob is absent,
-    # which is exactly the state this test needs. Remove blobs/ defensively
-    # if a future change starts persisting it.
+    # `index update` persisted the tag→digest root document (A2) and the
+    # verbatim dispatch-object CAS as siblings under the local index
+    # collection (`$OCX_HOME/index/<source>/p/<repo>.json` +
+    # `$OCX_HOME/index/<source>/p/<repo>/o/<algo>/<hex>.json`). Drop only the
+    # dispatch-object cache so the digest stays pinned locally (the root
+    # document survives) but the manifest content is gone — default-mode
+    # offline inspect must report PolicyBlocked rather than NotFound.
+    # Note: `$OCX_HOME/blobs/` (the raw OCI BlobStore) is unrelated to this
+    # scenario — it never holds index-layer manifest chain content, only
+    # actual package layer bytes fetched during install. Remove it
+    # defensively too in case a future change starts persisting there.
     blobs_root = Path(ocx.env["OCX_HOME"]) / "blobs"
     if blobs_root.exists():
         shutil.rmtree(blobs_root)
-    tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
-    assert tags_root.exists(), "tag store must remain so the digest stays pinned"
+    source_dir = Path(ocx.env["OCX_HOME"]) / "index" / registry_dir(ocx.registry)
+    repo_index_dir = source_dir / "p" / unique_repo
+    manifest_objects = repo_index_dir / "o"
+    if manifest_objects.exists():
+        shutil.rmtree(manifest_objects)
+    root_document = source_dir / "p" / f"{unique_repo}.json"
+    assert root_document.exists(), "root document must remain so the digest stays pinned"
 
     result = ocx.run(
         "--offline", "package", "inspect", pkg.short,

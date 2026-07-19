@@ -16,12 +16,10 @@ cd test
 uv run pytest -v
 ```
 
-Both the binary build (`cargo build --release`) and the registry container
-are started automatically.  To skip the build (e.g. when iterating on tests):
-
-```sh
-uv run pytest --no-build -v
-```
+The registry container is started automatically. The binary is **not** built
+by pytest — tests run the prebuilt `test/bin/ocx` (or `$OCX_COMMAND`). After
+Rust changes, refresh it via `task test` (builds with `--features
+ocx/__testing` and copies the binary into `test/bin/`).
 
 To run tests in parallel:
 
@@ -66,13 +64,14 @@ content directory, and a unique marker string for exec verification.
 
 ## Fixture Setup
 
-All fixtures are defined in `tests/conftest.py`.
+Session-scoped fixtures live in `conftest.py`, function-scoped ones in
+`tests/conftest.py`.
 
 ### Session-scoped (shared across all tests)
 
 | Fixture       | Description |
 |---------------|-------------|
-| `ocx_binary`  | Builds (unless `--no-build`) and resolves the `ocx` binary |
+| `ocx_binary`  | Resolves the `ocx` binary (`$OCX_COMMAND`, else `test/bin/ocx`) |
 | `registry`    | Registry address (default `localhost:5000`); auto-starts docker-compose |
 
 ### Function-scoped (fresh per test)
@@ -97,11 +96,8 @@ This design allows tests to run in parallel (`-n auto`) on a shared registry.
 
 ## Configuration
 
-| Environment Variable | Default             | Description |
-|---------------------|---------------------|-------------|
-| `OCX`               | `target/release/ocx` | Path to the ocx binary |
-| `REGISTRY`          | `localhost:5000`     | Registry address |
-
-| CLI Flag      | Description |
-|---------------|-------------|
-| `--no-build`  | Skip the automatic `cargo build --release` step |
+| Environment Variable | Default          | Description |
+|---------------------|------------------|-------------|
+| `OCX_COMMAND`       | `test/bin/ocx`   | Path to the ocx binary |
+| `REGISTRY`          | `localhost:5000` | Registry address |
+| `MIRROR_REGISTRY`   | `localhost:5001` | Mirror registry address |

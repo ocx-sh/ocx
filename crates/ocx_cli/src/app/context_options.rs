@@ -107,9 +107,16 @@ pub struct ContextOptions {
     #[arg(long, value_name = "N")]
     pub jobs: Option<usize>,
 
-    /// Alternative path to the local index directory (ignored if --remote is set).
+    /// Overrides the local index home directory.
     ///
-    /// Can also be set via the OCX_INDEX environment variable.
+    /// The local index is a collection of per-source subtrees, one per
+    /// configured registry or index, each holding tag roots plus their
+    /// manifest data - so resolution can work fully offline once populated.
+    /// This flag redirects the whole collection, replacing the default at
+    /// `$OCX_HOME/index`. Digest-addressed lookups still consult the local
+    /// index even under `--remote`; only tag listings and tag->manifest
+    /// lookups route to the remote registry there. Can also be set via the
+    /// `OCX_INDEX` environment variable.
     #[arg(long, value_name = "PATH")]
     pub index: Option<std::path::PathBuf>,
 

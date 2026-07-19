@@ -34,18 +34,28 @@ from src.registry import fetch_manifest_digest
 
 
 def _wipe_local_index(ocx: OcxRunner) -> None:
-    """Remove the local index (tags/) directory to simulate a fresh machine."""
-    tags_dir = Path(ocx.env["OCX_HOME"]) / "tags"
-    if tags_dir.exists():
-        shutil.rmtree(tags_dir)
+    """Remove the local index collection to simulate a fresh machine.
+
+    ``$OCX_HOME/index`` (`adr_index_indirection.md` Decision A1) holds both
+    tag pointers (root documents, A2) and the dispatch-object CAS
+    (``o/<algo>/<hex>.json``); every test that calls this helper resolves a
+    tag-addressed identifier, and tag resolution always needs the root
+    document regardless of what else is cached, so wiping the whole
+    collection is equivalent to (and simpler than) wiping just the pointer
+    file.
+    """
+    index_home = Path(ocx.env["OCX_HOME"]) / "index"
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
 
 def _tag_file_path(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """Return the path to the local tag JSON file for a package."""
+    """Return the path to the local root document (tag pointer, A2) for a package."""
     return (
         Path(ocx.env["OCX_HOME"])
-        / "tags"
+        / "index"
         / registry_dir(ocx.registry)
+        / "p"
         / f"{pkg.repo}.json"
     )
 
@@ -167,7 +177,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     tag_file = _tag_file_path(ocx, pkg_v1)
     assert tag_file.exists(), "prerequisite: tag file must exist after install"
     cached_data = json.loads(tag_file.read_text())
-    cached_digest_a = cached_data["tags"].get(pkg_v1.tag)
+    cached_digest_a = cached_data["tags"].get(pkg_v1.tag, {}).get("content")
     assert cached_digest_a is not None, "prerequisite: tag must be in cache"
 
     # Snapshot the v1 tag file so we can restore it after pushing v2 (which
@@ -199,7 +209,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
 
     # The local index must still contain digest A (not updated to B).
     refreshed_data = json.loads(tag_file.read_text())
-    stored_digest = refreshed_data["tags"].get(pkg_v1.tag)
+    stored_digest = refreshed_data["tags"].get(pkg_v1.tag, {}).get("content")
     assert stored_digest == cached_digest_a, (
         f"AC4: cache must not be refreshed automatically.\n"
         f"Expected (cached) digest: {cached_digest_a}\n"

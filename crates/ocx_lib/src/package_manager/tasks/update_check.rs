@@ -208,11 +208,10 @@ impl PackageManager {
                     crate::file_structure::StateStore::touch(state_path.clone()).await;
                     return Ok(UpdateCheckResult::Skipped(SkippedReason::Offline));
                 };
-                let remote_index =
-                    oci::index::Index::from_remote(oci::index::RemoteIndex::new(oci::index::RemoteConfig {
-                        client: client.clone(),
-                    }));
-                remote_index.list_tags(identifier).await
+                let oci_index = oci::index::Index::from_remote(oci::index::OciIndex::new(oci::index::OciIndexConfig {
+                    client: client.clone(),
+                }));
+                oci_index.list_tags(identifier).await
             }
             // ChainMode decides where this reads (local index in
             // Default/Offline/Frozen, sources under `--remote`); an empty local
@@ -531,7 +530,7 @@ mod tests {
     use std::{path::Path, time::Duration};
 
     use crate::{
-        file_structure::{BlobStore, FileStructure, TagStore},
+        file_structure::{FileStructure, IndexStore},
         oci::{
             self,
             index::{ChainMode, Index, LocalConfig, LocalIndex},
@@ -546,8 +545,7 @@ mod tests {
     fn make_offline_manager(ocx_home: &Path) -> PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(ocx_home.join("tags")),
-            blob_store: BlobStore::new(ocx_home.join("blobs")),
+            index_store: IndexStore::new(ocx_home.join("index")),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(fs, index, None, "ocx.sh")

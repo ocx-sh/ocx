@@ -62,8 +62,16 @@ def _run(
     )
 
 
-def _tags_root(ocx: OcxRunner) -> Path:
-    return Path(ocx.env["OCX_HOME"]) / "tags"
+def _index_root(ocx: OcxRunner) -> Path:
+    """The local index collection home: ``$OCX_HOME/index``.
+
+    Holds every source's copy of the index wire grammar — per-package root
+    documents (``<source>/p/<pkg>.json``) plus the dispatch-object CAS
+    (``o/sha256/<hex>``) — under one root. Wiping it simulates a fresh machine
+    with nothing locally indexed, so a tag can no longer resolve from the local
+    index.
+    """
+    return Path(ocx.env["OCX_HOME"]) / "index"
 
 
 def test_frozen_known_tag_resolves_from_local_index(
@@ -97,9 +105,9 @@ def test_frozen_unknown_tag_exits_81(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     # Drop the local index so the tag is no longer locally known.
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     result = _run(ocx, "--frozen", "package", "install", pkg.short)
     assert result.returncode == POLICY_BLOCKED, (
@@ -121,9 +129,9 @@ def test_frozen_digest_pinned_succeeds(
     digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     pinned = f"{pkg.fq}@{digest}"
 
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     result = _run(ocx, "--frozen", "package", "install", pinned)
     assert result.returncode == 0, (
@@ -157,9 +165,9 @@ def test_frozen_bare_repo_exits_81(
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     # Wipe the local index so ``latest`` is not indexed.
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     # Bare identifier: no tag component — normalises to ``:latest`` internally.
     bare = f"{ocx.registry}/{unique_repo}"
@@ -188,9 +196,9 @@ def test_frozen_lock_blocks_unindexed_tag(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     # Ensure the local index is empty so the tag pointer is absent.
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -230,9 +238,9 @@ def test_frozen_allows_direct_registry_query(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     # Wipe the local index so the tag is absent — frozen would block install.
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     # ``package info`` queries the ``__ocx.desc`` tag via remote_client(),
     # not the Index.  No description has been pushed, so it returns empty
@@ -262,9 +270,9 @@ def test_frozen_add_blocks_unindexed_tag(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     # Ensure the local index is empty so the tag pointer is absent.
-    tags = _tags_root(ocx)
-    if tags.exists():
-        shutil.rmtree(tags)
+    index_home = _index_root(ocx)
+    if index_home.exists():
+        shutil.rmtree(index_home)
 
     project = tmp_path / "proj_add"
     project.mkdir()

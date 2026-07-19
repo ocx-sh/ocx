@@ -756,8 +756,7 @@ mod tests {
         let (client, _) = crate::managed_config::test_support::stub_client_with_package(identifier, config_toml);
         let fs = FileStructure::with_root(root.to_path_buf());
         let local_index = crate::oci::index::LocalIndex::new(crate::oci::index::LocalConfig {
-            tag_store: fs.tags.clone(),
-            blob_store: fs.blobs.clone(),
+            index_store: fs.index.clone(),
         });
         let index = crate::oci::index::Index::from_chained(local_index, vec![], crate::oci::index::ChainMode::Offline);
         PackageManager::new(fs, index, None, "localhost:5000").with_managed_config_client(Some(client))

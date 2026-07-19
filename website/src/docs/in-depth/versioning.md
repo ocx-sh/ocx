@@ -38,7 +38,7 @@ If you type `+` out of habit (e.g., `cmake:3.28.1+20260216`), OCX accepts it and
 ::: warning OCI tags are not immutable
 Any tag — including build-tagged ones — can be overwritten by the publisher. Two mechanisms protect installs regardless of what the registry does later:
 
-- **[Local tag store][in-depth-indices] snapshot.** The tag → digest mapping only changes when [`ocx index update`][cmd-index-update] runs. The snapshot is yours until you decide to refresh it.
+- **[Local index][in-depth-indices] snapshot.** The tag → digest mapping only changes when [`ocx index update`][cmd-index-update] runs. The snapshot is yours until you decide to refresh it.
 - **[Content-addressed package store][in-depth-storage-packages].** Once a binary is installed, it lives at a path derived from its SHA-256 digest. The tag used to install it is irrelevant — the bytes are permanent.
 
 For absolute reproducibility without any index, reference the digest directly: `cmake@sha256:abc123…`
@@ -128,11 +128,11 @@ OCX matches all declared fields when selecting among manifest entries, through t
 
 ## Locking {#locking}
 
-The most direct lock is a digest: `cmake@sha256:abc123…` bypasses the [tag store][in-depth-indices] entirely and identifies an exact binary regardless of what any tag points to. Because all installed bytes are content-addressed, every package can be pinned this way — no lockfiles, no registry queries, just the hash.
+The most direct lock is a digest: `cmake@sha256:abc123…` bypasses the [local index][in-depth-indices] entirely and identifies an exact binary regardless of what any tag points to. Because all installed bytes are content-addressed, every package can be pinned this way — no lockfiles, no registry queries, just the hash.
 
-For most use cases, the [local tag store snapshot][in-depth-indices] already provides the lock. Tags resolve to the digest recorded at last update, and that mapping does not change until [`ocx index update`][cmd-index-update] runs. A CI runner that never updates its tag store gets the same binary on every run.
+For most use cases, the [local index snapshot][in-depth-indices] already provides the lock. Tags resolve to the digest recorded at last update, and that mapping does not change until [`ocx index update`][cmd-index-update] runs. A CI runner that never updates its local index gets the same binary on every run.
 
-For tool authors distributing OCX-powered workflows, there is a more ergonomic option. The local tag store holds only metadata — small JSON files, no binaries — so it can be shipped inside a [GitHub Action][github-actions-docs], [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features]. The result is a two-level lock: the *tool version* locks the *tag store snapshot*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lockfiles.
+For tool authors distributing OCX-powered workflows, there is a more ergonomic option. The local index holds only manifest metadata — small JSON files, no layer archives, no binaries — so it can be shipped inside a [GitHub Action][github-actions-docs], [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features]. The result is a two-level lock: the *tool version* locks the *index snapshot*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lockfiles.
 
 The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote` and `--offline` interaction, Dependabot/Renovate flow — lives in [Indices][in-depth-indices].
 
@@ -140,7 +140,7 @@ The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote`
 
 - [Versioning section in the user guide][user-versioning] — how-to: pick a tag, pin a digest, override platform
 - [Platforms][reference-platforms] — the canonical platform grammar and compatibility relation
-- [Indices][in-depth-indices] — tag-store snapshots, bundled index pattern, lock semantics
+- [Indices][in-depth-indices] — local index snapshots, `index.ocx.sh`, bundled index pattern, lock semantics
 - [Storage][in-depth-storage] — content-addressed package store, layer dedup
 - [Build Separator FAQ][faq-build-separator] — full rationale for `_` over `+`
 

@@ -306,9 +306,9 @@ Reproducibility in OCX has three levels, each stricter than the last.
 
 **Pin the digest.** The strongest lock: `cmake@sha256:abc123…` bypasses [tag resolution][in-depth-indices] entirely. The bytes are content-addressed; the digest *is* the binary. Every package can be pinned this way — no lockfiles, no registry queries, just the hash.
 
-**Pin the snapshot.** The next-strongest lock — and the one most users want — is to freeze the [local tag-to-digest snapshot][in-depth-indices-local]. Tags resolve to whatever digest was recorded at the last [`ocx index update`][cmd-index-update]; that mapping does not change until you refresh. A CI runner that never refreshes its snapshot gets the same binary on every run, even if the registry re-pushes the tag.
+**Pin the index.** The next-strongest determinism — and the one most users want — is to freeze the [local index][in-depth-indices-local]'s entry for a tag. It resolves to whatever digest was recorded at the last [`ocx index update`][cmd-index-update]; that mapping does not change until you refresh. A CI runner that never refreshes its index gets the same binary on every run, even if the registry re-pushes the tag. This is version-*choice* determinism, not `ocx.lock`: a lock already records the exact digest it pinned and never reads the index back to confirm it.
 
-**Pin a bundled snapshot.** The most ergonomic lock for tool authors. The local snapshot holds only metadata — small JSON files, no binaries — so it can be shipped *inside* a [GitHub Action][github-actions-docs], [Bazel rule][bazel-rules], or [DevContainer feature][devcontainer-features]. Pinning the action version pins the snapshot, which pins the binary:
+**Pin a bundled index.** The most ergonomic option for tool authors. A local index subtree holds only metadata — small JSON files, no binaries — so it can be shipped *inside* a [GitHub Action][github-actions-docs], [Bazel rule][bazel-rules], or [DevContainer feature][devcontainer-features]. Pinning the action version pins the bundled index, which pins the binary:
 
 ```yaml
 - uses: ocx-actions/setup-cmake@v2.1.0   # pins action → pins index → pins binary
@@ -319,8 +319,8 @@ Reproducibility in OCX has three levels, each stricter than the last.
 A version bump to the action — proposed automatically by [Dependabot][dependabot] or [Renovate][renovate] — advances the bundled index. Users get the updated binary with no config changes. The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] (one `filename → checksum` entry per `version × os × arch`) is stark.
 
 ::: tip Learn more
-[Indices In Depth → Bundled Snapshots][in-depth-indices-bundled] — full bundled-snapshot pattern, [`OCX_INDEX`][env-ocx-index] env var, Dependabot/Renovate flow.
-[Versioning In Depth → Locking][in-depth-versioning-locking] — digest pin rationale, OCI tag mutability.
+[Indices In Depth → Shipped copies][in-depth-indices-bundled] — full bundled-index pattern, [`OCX_INDEX`][env-ocx-index] env var, Dependabot/Renovate flow.
+[Versioning In Depth → Locking][in-depth-versioning-locking] — digest pin rationale, OCI tag mutability, why `ocx.lock` never consults the index.
 :::
 
 ## Keep everyday tools available everywhere {#global-toolchain}
@@ -531,7 +531,7 @@ To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$G
 :::
 
 ::: tip Learn more
-[Indices In Depth → Bundled Snapshots][in-depth-indices-bundled] — pair `ocx pull` with a bundled snapshot for end-to-end determinism.
+[Indices In Depth → Shipped copies][in-depth-indices-bundled] — pair `ocx pull` with a shipped index copy for end-to-end determinism.
 [Storage In Depth → Packages][in-depth-storage-packages] — why concurrent CI writes are safe.
 :::
 
@@ -609,61 +609,83 @@ was never logged in — CI cleanup scripts are safe to run unconditionally.
 
 ## Work offline {#offline}
 
-Once the [local snapshot][in-depth-indices-local] is populated and the [package store][in-depth-storage-packages] holds the binaries you need, OCX runs without network access. Two flags control how strictly the network is avoided:
+<span id="indices-routing"></span>Once the [local index][in-depth-indices-local] is populated and the [package store][in-depth-storage-packages] holds the binaries you need, OCX runs without network access. Two flags control how strictly the network is avoided:
+
+<span id="indices-selected"></span>
 
 | Mode | Flag | Source | Network? |
 |---|---|---|---|
-| Default | *(none)* | Local snapshot | No (unless fetching a new binary) |
+| Default | *(none)* | Local index | No (unless fetching a new binary) |
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
-| Offline | [`--offline`][arg-offline] | Local snapshot | Never |
+| Offline | [`--offline`][arg-offline] | Local index | Never |
 
-`--offline` prevents any network access for that command. If the local snapshot does not have a requested package, the command fails immediately rather than attempting a registry query — useful to verify the current snapshot and object store are self-sufficient before a build in a restricted or air-gapped environment.
+`--offline` prevents any network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query — useful to verify the current index and package store are self-sufficient before a build in a restricted or air-gapped environment.
 
-`--remote` queries the live registry directly without committing the result to the local snapshot. Use it for one-off checks of currently available tags.
+`--remote` queries the live registry directly without committing the result to the local index. Use it for one-off checks of currently available tags.
 
-[`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] only change *where* the snapshot is read from — useful when consuming a [bundled snapshot][in-depth-indices-bundled] from a GitHub Action or Bazel rule.
+[`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] only change *which collection* is read from — useful when consuming a [bundled index copy][in-depth-indices-bundled] from a GitHub Action or Bazel rule.
 
-### Refreshing the snapshot
+The index resolves *version choice* offline — which platform-manifest digest a tag currently means — not a lock: `ocx.lock` already records the exact digest it pinned and never consults the index to read it back. A multi-platform tag's local entry points at a [dispatch object][in-depth-indices-dispatch] — an image index or observation object carrying the full platform → digest map — cached alongside the tag pointer and verified by digest; a single-platform tag's entry names the platform-manifest digest directly and has no dispatch object at all. Either way, a git-committed `.ocx/index/` resolves the tag's version choice on a clean clone with no network. Fetching the actual manifest and layers still needs the registry the first time a given digest is installed (or an already-warm [package store][in-depth-storage-packages]).
 
-[`ocx index update <package>`][cmd-index-update] syncs the local snapshot for a specific package:
+### What has to travel for a home copy to work offline {#offline-portable}
 
-- **Bare identifier** (e.g., `cmake`) — downloads all tag-to-digest mappings.
-- **Tagged identifier** (e.g., `cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
+A CI cache restore, a container image layer, a devcontainer feature's shipped cache — anything that copies `$OCX_HOME` between machines needs to know which of its stores actually matter for `ocx package install`, `ocx package exec`, and a project's `ocx run` to work with zero egress on the target machine. Copy the wrong subset and a command either silently reaches back out to the network or fails outright.
 
-On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local snapshot has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
+Three stores make a copy fully offline-capable: `blobs/` (manifests), `layers/` (extracted archives), and the [local index][in-depth-indices-local] (tag → digest resolution). `packages/` does not need to be part of the copy — it holds hardlink assemblies of `layers/` content, built locally at install time. A fresh `$OCX_HOME` seeded with only `blobs/`, `layers/`, and `index/` still installs, runs, and toolchain-runs every package those three stores cover: `packages/` is reconstructed on demand from the local layer cache, no egress required.
+
+Anything the copy is missing fails closed instead of reaching the network: [`--offline`][arg-offline] refuses with exit code 81 rather than falling through to a registry a restricted or air-gapped environment may not even be able to reach.
 
 ::: tip Learn more
-[Indices In Depth][in-depth-indices] — remote query path, snapshot internals, blob write-through caching, fresh-machine fallback.
-[Versioning In Depth → Locking][in-depth-versioning-locking] — why offline snapshots are also a lock.
+[Indices In Depth][in-depth-indices] — wire layout, dispatch objects, shipped copies.
+[Storage In Depth][in-depth-storage] — the layer store and how `packages/` is assembled from it.
+:::
+
+### Refreshing the index
+
+[`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package:
+
+- **Bare identifier** (e.g., `cmake`) — downloads every tag.
+- **Tagged identifier** (e.g., `cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
+
+On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local index has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
+
+### Packages published through `index.ocx.sh` {#offline-public-index}
+
+A package identified as `ocx.sh/<namespace>/<package>` resolves through [index.ocx.sh][index-ocx-sh], a pointer index that tracks which physical registry currently hosts each package. This decouples a package's stable identity from wherever its bytes happen to live today — a maintainer can migrate the backing registry without breaking anyone who already wrote `ocx.sh/kitware/cmake:3.28`. Resolution and offline behavior work the same way as a direct registry reference; publisher signals like `deprecated` or `yanked` are surfaced as warnings rather than silently acted on.
+
+::: tip Learn more
+[Indices In Depth][in-depth-indices] — one format, many copies; remote query path; index internals; fresh-machine fallback.
+[Indices In Depth → index.ocx.sh][in-depth-indices-public] — resolution pipeline, caching, status surfacing.
+[Versioning In Depth → Locking][in-depth-versioning-locking] — how `ocx.lock` pins independent of any index.
 :::
 
 ## Route traffic through a corporate mirror {#mirrors}
 
 In many corporate and air-gapped networks, external registries — `ghcr.io`, `docker.io`, `quay.io`, `ocx.sh` — are firewall-blocked. The organization runs an artifact manager ([JFrog Artifactory][artifactory], [Sonatype Nexus][nexus], [Harbor][harbor]) with proxy/remote repositories that cache those upstreams. OCX needs to route its registry traffic to the mirror without changing the canonical package identity or the content-addressed digest.
 
-The `[mirrors."<upstream-host>"]` config table maps each upstream hostname to its mirror endpoint. OCX appends the upstream repository path after the mirror's repo-key prefix and contacts only the mirror. No origin fallback — in a firewall-controlled network, falling through to the internet is the opposite of intent.
+The `[mirrors]` config table maps each host to its mirror endpoint. OCX appends the upstream repository path after the mirror's repo-key prefix and contacts only the mirror. No origin fallback — in a firewall-controlled network, falling through to the internet is the opposite of intent.
 
 ```toml
 # ~/.ocx/config.toml  (or $XDG_CONFIG_HOME/ocx/config.toml)
-[mirrors."ghcr.io"]
-url = "https://company.jfrog.io/ghcr-remote"
-
-[mirrors."docker.io"]
-url = "https://company.jfrog.io/dockerhub-remote"
+[mirrors]
+"ghcr.io" = "https://company.jfrog.io/ghcr-remote"
+"docker.io" = "https://company.jfrog.io/dockerhub-remote"
 ```
 
 With this config, `ocx package install ghcr.io/owner/tool:1.2` fetches the manifest and blobs from `company.jfrog.io/ghcr-remote/owner/tool`. The canonical identifier — `ghcr.io/owner/tool:1.2` — is never changed.
 
+A plain string, as above, redirects every kind of traffic OCX sends that host. A host that also serves an [ocx-index][in-depth-indices-public] can be split per role instead — see [Route index traffic through a mirror][in-depth-indices-mirroring].
+
 ### Relation to the default registry {#mirrors-default-registry}
 
-[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a bare identifier (e.g. `cmake:3.28` → `ocx.sh/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure `[mirrors."ocx.sh"]`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
+[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a bare identifier (e.g. `cmake:3.28` → `ocx.sh/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure a `[mirrors]` entry for `ocx.sh`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
 
 ### Lockfile portability {#mirrors-lockfile}
 
 OCX stores the **canonical upstream host and digest** in `ocx.lock` — never the mirror host. A lock file produced behind a corporate mirror is valid on a machine with direct internet egress, and vice versa. The mirror is a transport detail; the identity of the content is unchanged.
 
 :::info Why the mirror host never appears in the lock
-OCX derives every on-disk path — blob store, package store, tag store, symlinks — from the canonical identifier. The mirror only changes which server is contacted; the local object store is keyed the same way with or without a mirror configured. This is what makes the lock portable: `sha256:abc123…` identifies the same bytes regardless of which server served them.
+OCX derives every on-disk path — blob store, package store, local index, symlinks — from the canonical identifier. The mirror only changes which server is contacted; the local object store is keyed the same way with or without a mirror configured. This is what makes the lock portable: `sha256:abc123…` identifies the same bytes regardless of which server served them.
 :::
 
 ### Unpinned tags and the trust model {#mirrors-trust}
@@ -691,11 +713,15 @@ For CI or container setups where the command line is not controlled, set mirrors
 export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}'
 ```
 
-`OCX_MIRRORS` wins over `[mirrors]` on a per-host basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
+`OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
+
+::: info Mirroring `index.ocx.sh` traffic is a role, not a separate table
+A plain `[mirrors]` string redirects both OCI registry traffic (manifests, layers) and index traffic (root/observation/catalog fetches) for that host — but the two usually live on different hosts. A project resolving packages through [index.ocx.sh][index-ocx-sh] sets the **`index` role** on that entry: `"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }`. See [Route index traffic through a mirror][in-depth-indices-mirroring] for the full split.
+:::
 
 ::: tip Learn more
-[Configuration reference → `[mirrors."<host>"]`][config-mirrors] — full schema, auth, interaction table, plain-HTTP note.
-[Environment reference → `OCX_MIRRORS`][env-mirrors] — JSON encoding, per-host precedence, subprocess forwarding.
+[Configuration reference → `[mirrors]`][config-mirrors] — full schema, the registry/index role split, auth, interaction table, plain-HTTP note.
+[Environment reference → `OCX_MIRRORS`][env-mirrors] — JSON encoding, per-host per-role precedence, subprocess forwarding.
 :::
 
 ## Configure OCX defaults {#configuration}
@@ -930,6 +956,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [gitattributes]: https://git-scm.com/docs/gitattributes
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [oras]: https://oras.land/
+[index-ocx-sh]: https://index.ocx.sh
 
 <!-- github issues -->
 [gh-trust-policy]: https://github.com/ocx-sh/ocx/issues/98
@@ -1030,7 +1057,10 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-versioning-locking]: ./in-depth/versioning.md#locking
 [in-depth-indices]: ./in-depth/indices.md
 [in-depth-indices-local]: ./in-depth/indices.md#local
+[in-depth-indices-dispatch]: ./in-depth/indices.md#local-dispatch
 [in-depth-indices-bundled]: ./in-depth/indices.md#bundled
+[in-depth-indices-public]: ./in-depth/indices.md#public-index
+[in-depth-indices-mirroring]: ./in-depth/indices.md#mirroring
 [in-depth-dependencies]: ./in-depth/dependencies.md
 [in-depth-dependencies-resolution]: ./in-depth/dependencies.md#resolution
 [in-depth-dependencies-gc]: ./in-depth/dependencies.md#gc

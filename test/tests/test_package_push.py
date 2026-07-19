@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package
+from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest, make_client
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -206,4 +207,77 @@ def test_push_report_manifest_digest_sha256_format(
     )
     assert all(c in "0123456789abcdef" for c in hex_part), (
         f"sha256 digest must be lowercase hex, got: {hex_part}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Canonical tag — adr_index_indirection.md Decision E
+#
+# `--[no-]canonical-tag`, default ON: after each platform manifest is
+# pushed, additionally push a `sha256.<hex>` tag pointing directly at it
+# (registry-side deletion safety net — a stray rolling/cascade tag delete
+# can never orphan a digest a lock still pins).
+# ---------------------------------------------------------------------------
+
+
+def test_push_default_creates_canonical_sha256_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Default `ocx package push` (no flag) pushes the `sha256.<hex>` tag."""
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    platform_digest = fetch_platform_manifest_digest(
+        ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
+    )
+    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+
+    canonical_digest = fetch_manifest_digest(ocx.registry, pkg.repo, canonical_tag)
+    assert canonical_digest == platform_digest, (
+        f"canonical tag {canonical_tag!r} must point at the platform manifest "
+        f"digest {platform_digest!r}, got {canonical_digest!r}"
+    )
+
+
+def test_push_no_canonical_tag_suppresses_the_extra_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--no-canonical-tag` must not push the `sha256.<hex>` tag."""
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        new=True,
+        cascade=False,
+        extra_push_args=["--no-canonical-tag"],
+    )
+
+    platform_digest = fetch_platform_manifest_digest(
+        ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
+    )
+    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+
+    with pytest.raises(RuntimeError):
+        fetch_manifest_digest(ocx.registry, pkg.repo, canonical_tag)
+
+
+def test_push_cascade_tags_only_the_pushed_platform_once(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--cascade` merges the platform into every rolling tag, but the
+    canonical tag is pushed exactly once — for the platform manifest this
+    invocation actually pushed, never retroactively for tags or platforms
+    already sitting in the registry.
+    """
+    pkg = make_package(ocx, unique_repo, "3.28.1", tmp_path, new=True, cascade=True)
+
+    platform_digest = fetch_platform_manifest_digest(
+        ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
+    )
+    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+
+    tags = make_client(ocx.registry).get_tags(f"{ocx.registry}/{pkg.repo}")
+    canonical_tags = [t for t in tags if t.startswith("sha256.")]
+    assert canonical_tags == [canonical_tag], (
+        f"expected exactly one canonical tag {canonical_tag!r}, got {canonical_tags}"
     )

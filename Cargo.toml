@@ -73,6 +73,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt
 
 # OCI / HTTP
 oci-client = "0.17"
+# Plain-HTTPS client for the static-file index.ocx.sh source (root / observation
+# objects / catalog fetches that never touch the OCI distribution API). Already
+# in the tree transitively via the `oci-client` fork — this direct edge adds no
+# new crate. `rustls` matches the fork's exact TLS feature so cargo feature
+# unification yields ONE rustls provider, not two (`adr_index_indirection.md` F).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Mozilla CA roots compiled into the binary so TLS works without a system
 # trust store (minimal container / CI runner without ca-certificates).
 webpki-root-certs = "1"

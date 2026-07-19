@@ -9,7 +9,7 @@ OCX takes the opposite approach. The data directory under `~/.ocx/` (configurabl
 
 ## Stores {#stores}
 
-Five stores plus a download staging area sit under `$OCX_HOME`:
+Content-addressed storage, a local index, persistent state, stable symlinks, and download staging each get their own store under `$OCX_HOME`:
 
 <Tree>
   <Node name="~/.ocx/" icon="🏠" open>
@@ -22,8 +22,11 @@ Five stores plus a download staging area sit under `$OCX_HOME`:
     <Node name="blobs/" icon="📋">
       <Description>raw OCI blobs — manifests, image indexes, referrers</Description>
     </Node>
-    <Node name="tags/" icon="🏷️">
-      <Description>local mirror of registry tag-to-digest mappings — no binaries</Description>
+    <Node name="index/" icon="🏷️">
+      <Description>local index collection — one subtree per source (see Index below)</Description>
+    </Node>
+    <Node name="state/" icon="🗄️">
+      <Description>persistent runtime state — update-check throttles, managed-config snapshot</Description>
     </Node>
     <Node name="symlinks/" icon="🔀">
       <Description>stable symlinks safe to embed in shell profiles and configs</Description>
@@ -31,10 +34,13 @@ Five stores plus a download staging area sit under `$OCX_HOME`:
     <Node name="temp/" icon="🧪">
       <Description>download staging — cleaned on successful install</Description>
     </Node>
+    <Node name="locks/" icon="🔒">
+      <Description>cross-process lock files — content-keyed, safe to delete when no ocx process is running</Description>
+    </Node>
   </Node>
 </Tree>
 
-Each store has a single responsibility. Upgrading a package updates symlinks in `symlinks/` and adds an entry to `packages/`, but never touches `tags/`. The stores can be understood — and reasoned about — one at a time.
+Each store has a single responsibility. Upgrading a package updates symlinks in `symlinks/` and adds an entry to `packages/`, but never touches `index/`. The stores can be understood — and reasoned about — one at a time.
 
 ::: details Path component encoding
 Registry names, repository names, and tags that appear as directory or file names are <Tooltip term="slugified">Characters outside `[a-zA-Z0-9._-]` are replaced with underscores. For example, `localhost:5000` becomes `localhost_5000`. This prevents the POSIX `PATH` separator (`:`) from corrupting environment variables that embed these paths.</Tooltip> before they become filesystem path components. Dots and hyphens are preserved so domain names (`ghcr.io`) and semantic versions (`3.28.1`) stay readable on disk.
@@ -151,25 +157,30 @@ Layer reuse is most valuable when many packages share a large common base — a 
 Reusing a layer by digest works only when that blob already lives in the **target repository**. OCX does not mount blobs across repositories, and an OCI registry does not share them implicitly: the same layer used by two repositories — say `ocx/cli` and `ocx/mirror` — is two separate uploads unless you push it to each, or [cross-mount it][oci-blob-mount] explicitly. Dedup is automatic *within* a repository and in the local [package store][fs-packages] — never *across* registry repositories.
 :::
 
-## Tags {#tags}
+## Index {#index}
 
-When you run `ocx install cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local tag store and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. The tag store is a local copy of that mapping — no network required.
+When you run `ocx package install cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local index and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. Unlike the other stores on this page, the index's home is not fixed to `$OCX_HOME` — [`--index` / `OCX_INDEX`][env-ocx-index] can point it at an entirely different collection, defaulting to `index/` when neither is set.
 
 <Tree>
-  <Node name="~/.ocx/tags/" icon="🏷️" open>
-    <Node name="{registry}/" icon="📁" open-icon="📂" open>
-      <Node name="{repo}.json" icon="📄">
-        <Description>{ "3.28": "sha256:abc…", "3.30": "sha256:def…" }</Description>
+  <Node name="~/.ocx/index/" icon="🏷️" open>
+    <Node name="ocx.sh/" icon="📁" open-icon="📂" open>
+      <Description>one subtree per source — the local index collection</Description>
+      <Node name="c/index.json" icon="📄">
+        <Description>catalog — <code>ns/pkg → sha256(root)</code></Description>
+      </Node>
+      <Node name="p/{ns}/{pkg}.json" icon="📄">
+        <Description>root document — repository pointer, tags, publisher status</Description>
+      </Node>
+      <Node name="p/{ns}/{pkg}/o/sha256/{hex}.json" icon="📄">
+        <Description>dispatch object — filename is the object's own digest, never a leaf manifest</Description>
       </Node>
     </Node>
   </Node>
 </Tree>
 
-The tag store is a *snapshot*: it reflects the state of the remote registry at the last time you refreshed it. The full design — when the snapshot is updated, how `--remote` and `--offline` interact with it, how snapshots travel inside GitHub Actions or Bazel rules — lives in [Indices][in-depth-indices].
+The index is a *collection*: each source's subtree reflects the state of that remote registry (or the [public index][in-depth-indices-public]) at the last time you refreshed it. It is dispatch-only — a leaf platform manifest is never copied into the index, only the tag → digest pointer and the platform → digest dispatch object it names, each verified against its own digest — so a package's *version choice* resolves offline from the index alone, with no other store or network access required. When the tag names a manifest directly (a single-platform package), OCX checks the [package store][fs-packages] before the registry: an already-installed tool's leaf manifest was cached there at install time, so re-resolving it needs no network. Only a genuinely cold digest reaches the registry. The full design — wire layout, refresh mechanics, `--remote`/`--offline` interaction, bundling a copy inside a GitHub Action or Bazel rule, and resolving packages published through `index.ocx.sh` — lives in [Indices][in-depth-indices].
 
-::: info Similar to APT's package lists
-`apt-get update` downloads package metadata from configured sources and caches it in `/var/lib/apt/lists/`. All subsequent `apt-get install` calls resolve packages from that local snapshot — the network is only involved during an explicit refresh, not on every install. `ocx index update <package>` is the per-package equivalent: you control when the snapshot changes, and the rest of the time you work from the local cache.
-:::
+The index is never walked by [`ocx clean`][cmd-clean] — see [Garbage Collection](#gc) below.
 
 ## Symlinks {#symlinks}
 
@@ -206,7 +217,7 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 
 This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on a non-Windows host, or `--select` of one) populates the object store but leaves both `candidates/{tag}` and `current` untouched, so a platformless resolver never hands you a package the host cannot run. Reference a foreign-platform install by its digest instead.
 
-**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment — from [`ocx package env`][cmd-package-env], or the global toolchain activation `eval "$(ocx --global env --shell=sh)"` — emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
+**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you refresh the local index. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment — from [`ocx package env`][cmd-package-env], or the global toolchain activation `eval "$(ocx --global env --shell=sh)"` — emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
@@ -215,7 +226,7 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 ## See Also
 
 - [Storage section in the user guide][user-storage] — how-to: install, switch versions, embed stable paths
-- [Indices][in-depth-indices] — tag-store snapshots, locking, offline behavior
+- [Indices][in-depth-indices] — the local index collection, `index.ocx.sh`, locking, offline behavior
 - [Entry Points][in-depth-entry-points] — generated launchers, synth-PATH, clean-env execution
 - [Dependencies][in-depth-dependencies] — `refs/deps/` forward-refs and reachability across the GC walk
 - [`ocx clean`][cmd-clean] — reference for the GC command
@@ -241,6 +252,7 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
+[env-ocx-index]: ../reference/environment.md#ocx-index
 
 <!-- reference -->
 [metadata-ref]: ../reference/metadata.md
@@ -251,7 +263,8 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 
 <!-- internal -->
 [fs-packages]: #packages
-[user-storage]: ../user-guide.md#storage
+[user-storage]: ../user-guide.md#stable-paths
 [in-depth-indices]: ./indices.md
+[in-depth-indices-public]: ./indices.md#public-index
 [in-depth-entry-points]: ./entry-points.md
 [in-depth-dependencies]: ./dependencies.md

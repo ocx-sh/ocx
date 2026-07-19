@@ -177,8 +177,15 @@ pub struct ChainBlob {
 #[derive(Debug, Clone)]
 pub struct ResolvedChain {
     /// The platform-selected pinned identifier — same value the old
-    /// `resolve` method returned.
+    /// `resolve` method returned. Keys every storage path (logical identity,
+    /// Decision C2).
     pub pinned: oci::PinnedIdentifier,
+    /// The **physical** transport identifier for content downloads. Equal to
+    /// [`Self::pinned`] for registry-backed packages; for an `index.ocx.sh`
+    /// source it is the registry the root's `repository` pointer names, so
+    /// layer blobs are pulled from there rather than the logical `ocx.sh` host.
+    /// Transport-only (Decision C2) — never persisted or locked.
+    pub transport_pinned: oci::PinnedIdentifier,
     /// Walk-order chain blobs the resolver touched, backed by on-disk blob
     /// files (config blob materialized later by the pull pipeline).
     pub chain: Vec<ChainBlob>,
@@ -211,6 +218,25 @@ impl ResolvedChain {
 pub struct AdmittedBinaries {
     pub binaries: Vec<(oci::PinnedIdentifier, BinaryName)>,
     pub entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
+}
+
+/// Resolves the physical transport identifier for a logical pinned reference.
+///
+/// Returns the registry the index points at (`index.ocx.sh`'s `repository`
+/// pointer, with the leaf digest carried over) when a source rewrites it, else
+/// `pinned` unchanged (registry-backed packages). Transport-only (C2).
+async fn resolve_transport_pinned(
+    index: &oci::index::Index,
+    pinned: &oci::PinnedIdentifier,
+) -> Result<oci::PinnedIdentifier, PackageErrorKind> {
+    match index
+        .physical_reference(pinned.as_identifier())
+        .await
+        .map_err(PackageErrorKind::Internal)?
+    {
+        Some(physical) => oci::PinnedIdentifier::try_from(physical).map_err(|_| PackageErrorKind::DigestMissing),
+        None => Ok(pinned.clone()),
+    }
 }
 
 impl PackageManager {
@@ -267,8 +293,10 @@ impl PackageManager {
                     media_type: img.config.media_type.clone(),
                     size: img.config.size,
                 });
+                let transport_pinned = resolve_transport_pinned(self.index(), &top_pinned).await?;
                 Ok(ResolvedChain {
                     pinned: top_pinned,
+                    transport_pinned,
                     chain,
                     final_manifest: img,
                     // A flat image manifest carries no platform metadata; it is
@@ -386,8 +414,10 @@ impl PackageManager {
                     size: final_manifest.config.size,
                 });
 
+                let transport_pinned = resolve_transport_pinned(self.index(), &pinned).await?;
                 Ok(ResolvedChain {
                     pinned,
+                    transport_pinned,
                     chain,
                     final_manifest,
                     platform: selected_platform,
@@ -577,9 +607,9 @@ impl PackageManager {
             return Ok(None);
         };
 
-        let tag_store = &self.file_structure().tags;
-        let blob_store = &self.file_structure().blobs;
-        let package_store = &self.file_structure().packages;
+        let file_structure = self.file_structure();
+        let blob_store = &file_structure.blobs;
+        let package_store = &file_structure.packages;
 
         // ── Step 1: Load global descriptor from persisted local state (offline-only). ──
         //
@@ -595,7 +625,7 @@ impl PackageManager {
         // selected by its pinned manifest digest (frozen — C8 whole-tier
         // determinism); otherwise it floats to the live tag-store record.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = file_structure.patch_descriptor_path(&global_id);
         let global_descriptor_result = load_descriptor_frozen_or_live(
             blob_store,
             // Blob CAS namespace: the descriptor id's bare-host registry — the same
@@ -692,7 +722,7 @@ impl PackageManager {
             // Frozen by manifest digest under an active snapshot, else floats to
             // the live tag store.
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
-            let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+            let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
             // Blob CAS namespace: the descriptor id's bare-host registry — the same
             // key `fetch_and_persist_descriptor` persists under (see the global leg).
             let registry = pkg_specific_id.registry().to_string();
@@ -899,7 +929,7 @@ impl PackageManager {
                     Err(error) => {
                         // C7 fail-closed: a lookup error for a required companion must not
                         // silently skip. An index I/O error, deserialization error, or
-                        // corrupt TagLock is not equivalent to "companion not installed" —
+                        // corrupt root document is not equivalent to "companion not installed" —
                         // it is an unexpected failure that could mask a missing required
                         // companion.  Only optional companions may warn-and-skip here.
                         if companion_entry.required {
@@ -1013,20 +1043,20 @@ impl PackageManager {
         // local read and routes to the registry (`ChainedIndex::fetch_manifest_digest`):
         // that would contact the network from the offline-safe overlay path and
         // ignore the locally-installed companion tag. Build a fresh `Offline`
-        // index over the same tag + blob stores so the lookup is TagLock-aware
-        // and network-free.
+        // index over the effective (--index / OCX_INDEX redirected) snapshot
+        // home so the lookup reads the SAME store the main index resolves
+        // through, and is network-free.
         let local_index = oci::index::Index::from_chained(
             oci::index::LocalIndex::new(oci::index::LocalConfig {
-                tag_store: self.file_structure().tags.clone(),
-                blob_store: self.file_structure().blobs.clone(),
+                index_store: self.effective_index_store(),
             }),
             Vec::new(),
             oci::index::ChainMode::Offline,
         );
 
-        // Step 1: resolve the tag → top-level digest via the tag store.
-        // `fetch_manifest_digest` reads only the TagLock file — no blob store access.
-        // On miss → companion not in the local tag store → not installed.
+        // Step 1: resolve the tag → top-level digest via the local index.
+        // `fetch_manifest_digest` reads only the root document — no blob store access.
+        // On miss → companion not in the local index → not installed.
         let Some(top_digest) = local_index
             .fetch_manifest_digest(companion_id, IndexOperation::Query)
             .await?
@@ -1179,16 +1209,17 @@ impl PackageManager {
             return Ok(SitePatchRoots::default());
         };
 
-        let tag_store = &self.file_structure().tags;
-        let blob_store = &self.file_structure().blobs;
-        let symlink_root = self.file_structure().symlinks.root().to_path_buf();
+        let file_structure = self.file_structure();
+        let blob_store = &file_structure.blobs;
+        let symlink_root = file_structure.symlinks.root().to_path_buf();
 
-        // Build a guaranteed-local index (same pattern as find_companion_local) so
-        // companion tag → digest resolution is network-free in every ChainMode.
+        // Build a guaranteed-local index (same pattern as find_companion_local)
+        // over the effective (--index / OCX_INDEX redirected) snapshot home so
+        // companion tag → digest resolution reads the same store the main index
+        // uses and is network-free in every ChainMode.
         let local_index = oci::index::Index::from_chained(
             oci::index::LocalIndex::new(oci::index::LocalConfig {
-                tag_store: tag_store.clone(),
-                blob_store: blob_store.clone(),
+                index_store: self.effective_index_store(),
             }),
             Vec::new(),
             oci::index::ChainMode::Offline,
@@ -1227,7 +1258,7 @@ impl PackageManager {
         // catch-all rules; iterating installed bases correctly handles both
         // catch-all ("match: *") and scoped rules.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = file_structure.patch_descriptor_path(&global_id);
 
         // Load global descriptor once (blob digests and descriptor value).
         let (global_descriptor_opt, global_manifest_digest) = collect_descriptor_digests(
@@ -1258,7 +1289,7 @@ impl PackageManager {
         // Per-base descriptors for each installed base.
         for base_id in &installed_base_ids {
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
-            let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+            let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
 
             let (pkg_descriptor_opt, pkg_manifest_digest) = collect_descriptor_digests(
                 blob_store,
@@ -1629,38 +1660,43 @@ fn merge_companions(
 
 // ── Phase 5A helpers ─────────────────────────────────────────────────────────
 
-/// Restore an installed base's real registry hostname from its tag file.
+/// Restore an installed base's real registry hostname from its root document.
 ///
 /// The symlink store names registry directories by the *slug* of the registry
 /// (`to_relaxed_slug`), which is lossy for port-containing or otherwise
-/// non-slug-safe hostnames (`localhost:5000` -> `localhost_5000`). The tag file
-/// written at install time records the canonical `registry/repository` in its
-/// `repository` field; reading it back recovers the exact hostname so descriptor
+/// non-slug-safe hostnames (`localhost:5000` -> `localhost_5000`). The local
+/// index's wire-grammar root document (`adr_index_indirection.md` A2),
+/// written at refresh/resolve time, records the canonical physical location
+/// in its `repository` field as an `oci://<registry>/<repository>` pointer;
+/// reading it back and stripping the C3 `oci://` scheme
+/// (`parse_physical_repository`) recovers the exact hostname so descriptor
 /// rule matching globs against the real identifier string.
 ///
 /// Falls back to the slug-form identifier unchanged on any read/parse miss (a
-/// missing tag file, malformed JSON, or a `repository` value that does not carry
-/// the expected `/{repository}` suffix) — the slug form still matches catch-all
-/// rules and standard dotted registries, so this only refines the port-registry
+/// missing root document, malformed JSON, or a `repository` value that fails
+/// the `oci://` scheme parse) — the slug form still matches catch-all rules
+/// and standard dotted registries, so this only refines the port-registry
 /// edge and never regresses the common path.
 ///
 /// `pub(super)` so [`super::patch_sync::enumerate_installed_bases`] can share
 /// this helper without duplicating the slug-recovery logic.
 pub(super) async fn recover_base_with_real_registry(
-    tag_store: &crate::file_structure::TagStore,
+    snapshot: &crate::file_structure::IndexStore,
     slug_base_id: &oci::Identifier,
 ) -> oci::Identifier {
-    let tags_path = tag_store.tags(slug_base_id);
-    let real_registry = match tokio::fs::read_to_string(&tags_path).await {
-        Ok(content) => serde_json::from_str::<serde_json::Value>(&content)
+    // The wire-grammar root document carries a `"repository"` field
+    // (`oci://<registry>/<repo>`, A2), so the slug-recovery parse below reads
+    // it and strips the C3 `oci://` scheme via `parse_physical_repository`.
+    let real_registry = match snapshot
+        .read_root_document_bytes(slug_base_id.registry(), slug_base_id.repository())
+        .await
+    {
+        Ok(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
             .and_then(|value| value.get("repository").and_then(|r| r.as_str()).map(str::to_owned))
-            .and_then(|repository| {
-                repository
-                    .strip_suffix(&format!("/{}", slug_base_id.repository()))
-                    .map(str::to_owned)
-            }),
-        Err(_) => None,
+            .and_then(|repository| crate::oci::index::parse_physical_repository(&repository).ok())
+            .map(|(host, _path)| host),
+        Ok(None) | Err(_) => None,
     };
     match real_registry {
         Some(registry) if registry != slug_base_id.registry() => {
@@ -1722,7 +1758,7 @@ pub(super) async fn collect_candidates_from_dir(
                 continue;
             }
             // Build an Identifier using the registry slug as the registry
-            // (the slug is used by tag_store.tags() via the same slugify
+            // (the slug is used by tag_store.patch_descriptor_path() via the same slugify
             // function, so tag lookups use the same path).
             let base_id = oci::Identifier::new_registry(&repo, registry_slug).clone_with_tag(&tag);
             out.push(base_id);
@@ -1895,108 +1931,175 @@ mod spec_tests {
 
     use super::ChainRole;
     use crate::{
-        file_structure::{BlobStore, FileStructure, TagStore},
-        oci::index::{Index, LocalConfig, LocalIndex},
-        oci::{self, Digest, Identifier},
+        file_structure::{FileStructure, IndexStore},
+        oci::index::{ChainMode, Index, IndexImpl, LocalConfig, LocalIndex},
+        oci::{self, Algorithm, Digest, Identifier},
         package_manager::PackageManager,
     };
 
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
-    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CONFIG_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    const FLAT_MANIFEST_JSON: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
 
     fn tagged_id() -> Identifier {
         Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
-    }
-    fn digest_a() -> Digest {
-        Digest::Sha256(HEX_A.to_string())
-    }
-    fn digest_b() -> Digest {
-        Digest::Sha256(HEX_B.to_string())
     }
 
     fn linux_amd64() -> oci::Platform {
         "linux/amd64".parse().unwrap()
     }
 
-    /// Build a `PackageManager` whose local index already has the tag +
-    /// blob files seeded on disk.
+    /// The snapshot store the manager's LocalIndex reads from — the default
+    /// machine-local home under the temp root (`index/`).
+    fn index_store(dir: &TempDir) -> IndexStore {
+        FileStructure::with_root(dir.path().to_path_buf()).index
+    }
+
+    /// Build an offline `PackageManager` whose local index reads from the
+    /// snapshot home under `dir`. Seed with `seed_object`/`seed_tag` (a
+    /// dispatch-shaped fixture, A3) before calling this.
     fn make_manager(dir: &TempDir) -> PackageManager {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: fs.index.clone(),
             }),
             Vec::new(),
-            crate::oci::index::ChainMode::Offline,
+            ChainMode::Offline,
         );
         PackageManager::new(fs, index, None, REGISTRY)
     }
 
-    /// Writes a `TagLock`-shaped JSON file at `tag_path` mapping `TAG → digest`.
-    /// Mirrors the on-disk format `LocalIndex` expects (see `tag_lock.rs`).
-    fn write_tag_lock(tag_path: &std::path::Path, digest: &Digest) {
-        std::fs::create_dir_all(tag_path.parent().unwrap()).unwrap();
-        let json = format!(r#"{{"version":1,"repository":"{REGISTRY}/{REPO}","tags":{{"{TAG}":"{digest}"}}}}"#);
-        std::fs::write(tag_path, json).unwrap();
+    /// A minimal fake source serving a fixed set of `(tag-or-digest) ->
+    /// bytes` entries, keyed by tag for a tag-addressed lookup or by digest
+    /// string for a digest-addressed one (the platform-selected child of an
+    /// image index). Used with `ChainMode::Default` so `PackageManager::resolve()`
+    /// can recover a LEAF platform manifest — a leaf is never locally cached
+    /// (A3), so an offline-only pre-seeded fixture cannot answer a `resolve()`
+    /// call for content that names one; this fake source drives the same
+    /// AbsentLeaf-recovery path a live registry would.
+    #[derive(Clone, Default)]
+    struct FakeManifestSource {
+        entries: std::collections::HashMap<String, (Vec<u8>, Digest, oci::Manifest)>,
     }
 
-    /// Seed a flat `ImageManifest` tag + blob pair (single-entry chain).
-    fn seed_flat_manifest(dir: &TempDir, digest: &Digest) {
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        let id = Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG);
-        write_tag_lock(&tag_store.tags(&id), digest);
+    impl FakeManifestSource {
+        fn with(mut self, key: &str, bytes: &[u8]) -> Self {
+            let digest = Algorithm::Sha256.hash(bytes);
+            let manifest = serde_json::from_slice(bytes).unwrap();
+            self.entries.insert(key.to_string(), (bytes.to_vec(), digest, manifest));
+            self
+        }
 
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-        let blob_path = blob_store.data(REGISTRY, digest);
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
-        std::fs::write(&blob_path, manifest_json).unwrap();
+        fn lookup(&self, identifier: &Identifier) -> Option<(Vec<u8>, Digest, oci::Manifest)> {
+            let key = match identifier.digest() {
+                Some(digest) => digest.to_string(),
+                None => identifier.tag_or_latest().to_string(),
+            };
+            self.entries.get(&key).cloned()
+        }
     }
 
-    /// Seed tag + top-level `ImageIndex` + child `ImageManifest` (two-entry chain).
-    fn seed_image_index(dir: &TempDir, top_digest: &Digest, child_digest: &Digest) {
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        let id = Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG);
-        write_tag_lock(&tag_store.tags(&id), top_digest);
+    #[async_trait::async_trait]
+    impl IndexImpl for FakeManifestSource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<(Digest, oci::Manifest)>> {
+            Ok(self.lookup(identifier).map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &Identifier,
+            _op: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<Digest>> {
+            Ok(self.lookup(identifier).map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> crate::Result<Option<(Vec<u8>, Digest, oci::Manifest)>> {
+            Ok(self.lookup(identifier))
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
 
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-
-        let index_blob_path = blob_store.data(REGISTRY, top_digest);
-        std::fs::create_dir_all(index_blob_path.parent().unwrap()).unwrap();
-        let index_json = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":1,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
+    /// Build a `PackageManager` chained to `source` under `ChainMode::Default`
+    /// so a resolve that needs leaf content recovers it via the fake source.
+    fn make_manager_with_source(dir: &TempDir, source: FakeManifestSource) -> PackageManager {
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: fs.index.clone(),
+            }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
         );
-        std::fs::write(&index_blob_path, index_json).unwrap();
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
 
-        let child_blob_path = blob_store.data(REGISTRY, child_digest);
-        std::fs::create_dir_all(child_blob_path.parent().unwrap()).unwrap();
-        let manifest_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
-        std::fs::write(&child_blob_path, manifest_json).unwrap();
+    /// Write `bytes` verbatim into the snapshot dispatch-object CAS under
+    /// their own digest (the A3 write invariant — bytes hash to filename)
+    /// and return it. Dispatch-shaped fixtures only (image indexes) — a leaf
+    /// manifest is never locally cached, so this helper is not valid for one.
+    async fn seed_object(store: &IndexStore, bytes: &[u8]) -> Digest {
+        let digest = Algorithm::Sha256.hash(bytes);
+        store
+            .write_dispatch_object(REGISTRY, REPO, &digest, bytes)
+            .await
+            .unwrap();
+        digest
+    }
+
+    /// Author a DERIVED root document recording `TAG → digest` (A2 — OCX-authored,
+    /// no published index involved in these tests).
+    async fn seed_tag(store: &IndexStore, digest: &Digest) {
+        let doc = serde_json::json!({
+            "repository": format!("oci://{REGISTRY}/{REPO}"),
+            "tags": { TAG: { "content": digest.to_string(), "observed": "2026-07-18T00:00:00Z" } }
+        });
+        store
+            .write_root_document(REGISTRY, REPO, &serde_json::to_vec(&doc).unwrap())
+            .await
+            .unwrap();
     }
 
     /// `resolve` against a flat `ImageManifest` yields a `ResolvedChain`
     /// with two entries — the top-level manifest digest followed by the
-    /// config-blob digest.
+    /// config-blob digest. The leaf is never locally cached (A3), so the
+    /// manager is chained to a live fake source under `ChainMode::Default`
+    /// that recovers it — mirrors a real single-platform install.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_single_image_returns_two_chain_entries() {
         let dir = TempDir::new().unwrap();
-        seed_flat_manifest(&dir, &digest_a());
-        let mgr = make_manager(&dir);
+        let manifest_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+        let source = FakeManifestSource::default().with(TAG, FLAT_MANIFEST_JSON.as_bytes());
+        let mgr = make_manager_with_source(&dir, source);
         let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
         assert_eq!(
             result.chain.len(),
             2,
             "flat ImageManifest must produce manifest + config chain entries"
         );
-        assert_eq!(result.pinned.digest(), digest_a());
+        assert_eq!(result.pinned.digest(), manifest_digest);
         assert_eq!(result.chain[0].role, ChainRole::Manifest);
         assert_eq!(
             result.chain[1].identifier.digest().to_string(),
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            CONFIG_DIGEST,
             "second entry must be the manifest's config-blob digest"
         );
         assert_eq!(result.chain[1].role, ChainRole::Config);
@@ -2008,12 +2111,21 @@ mod spec_tests {
 
     /// `resolve` against an `ImageIndex` yields a `ResolvedChain` with three
     /// entries — the top-level index, the platform-selected child manifest,
-    /// and the trailing config-blob digest.
+    /// and the trailing config-blob digest. The top-level index is a
+    /// dispatch object (locally cacheable, A3); the platform-selected child
+    /// is a leaf, recovered via the fake source exactly like the flat case.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_image_index_returns_three_chain_entries() {
         let dir = TempDir::new().unwrap();
-        seed_image_index(&dir, &digest_a(), &digest_b());
-        let mgr = make_manager(&dir);
+        let child_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+        let index_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":1,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
+        );
+        let top_digest = Algorithm::Sha256.hash(index_json.as_bytes());
+        let source = FakeManifestSource::default()
+            .with(TAG, index_json.as_bytes())
+            .with(&child_digest.to_string(), FLAT_MANIFEST_JSON.as_bytes());
+        let mgr = make_manager_with_source(&dir, source);
         let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
         assert_eq!(
             result.chain.len(),
@@ -2022,76 +2134,77 @@ mod spec_tests {
         );
         assert_eq!(
             result.chain[0].identifier.digest(),
-            digest_a(),
+            top_digest,
             "first entry must be the top-level index digest"
         );
         assert_eq!(
             result.chain[1].identifier.digest(),
-            digest_b(),
+            child_digest,
             "second entry must be the platform-selected child digest"
         );
         assert_eq!(
             result.chain[2].identifier.digest().to_string(),
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            CONFIG_DIGEST,
             "third entry must be the child manifest's config-blob digest"
         );
-        assert_eq!(result.pinned.digest(), digest_b());
+        assert_eq!(result.pinned.digest(), child_digest);
     }
 
     /// Nested image indexes (index pointing at another index) are rejected
-    /// with a clear error — unsupported OCI shape.
+    /// with a clear error — unsupported OCI shape. Both levels are
+    /// dispatch-shaped (image indexes), so this stays a pure offline,
+    /// pre-seeded fixture — no leaf content is ever reached.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_rejects_nested_image_index() {
         let dir = TempDir::new().unwrap();
+        let store = index_store(&dir);
 
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        let id = Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG);
-        write_tag_lock(&tag_store.tags(&id), &digest_a());
-
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-
-        let blob_path = blob_store.data(REGISTRY, &digest_a());
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        let index_json = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{b}","size":1}}]}}"#,
-            b = digest_b()
-        );
-        std::fs::write(&blob_path, index_json).unwrap();
-
-        let child_path = blob_store.data(REGISTRY, &digest_b());
-        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
         let child_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
-        std::fs::write(&child_path, child_json).unwrap();
+        let child_digest = seed_object(&store, child_json.as_bytes()).await;
+        let index_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{child_digest}","size":1}}]}}"#
+        );
+        let top_digest = seed_object(&store, index_json.as_bytes()).await;
+        seed_tag(&store, &top_digest).await;
 
         let mgr = make_manager(&dir);
         let result = mgr.resolve(&tagged_id(), linux_amd64()).await;
         assert!(result.is_err(), "nested ImageIndex must be rejected with an error");
     }
 
-    /// Property guarantee: every `(registry, digest)` entry in a successful
-    /// `ResolvedChain` has an on-disk `data` file at the CAS-sharded path.
+    /// Property guarantee: the top-level DISPATCH entry in a successful
+    /// `ResolvedChain` has an on-disk verbatim dispatch object in the
+    /// snapshot CAS (`adr_index_indirection.md` A3 — a leaf platform
+    /// manifest, by contrast, is never locally cached; the trailing config
+    /// blob is materialised later by the pull pipeline). Superseded scope
+    /// from the pre-C2 "every manifest entry" property: only the dispatch
+    /// (image-index) entry is a genuine local-cache guarantee now.
     #[tokio::test(flavor = "multi_thread")]
-    async fn resolve_result_every_entry_has_on_disk_blob_file() {
+    async fn resolve_result_every_entry_has_on_disk_object() {
         let dir = TempDir::new().unwrap();
-        seed_flat_manifest(&dir, &digest_a());
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-        let mgr = make_manager(&dir);
+        let child_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes());
+        let index_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":1,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
+        );
+        let source = FakeManifestSource::default()
+            .with(TAG, index_json.as_bytes())
+            .with(&child_digest.to_string(), FLAT_MANIFEST_JSON.as_bytes());
+        let store = index_store(&dir);
+        let mgr = make_manager_with_source(&dir, source);
         let result = mgr.resolve(&tagged_id(), linux_amd64()).await.unwrap();
 
-        // Manifest entries (all chain entries except the trailing config blob)
-        // must be on disk — ChainedIndex write-through guarantees that.
-        // The trailing config-blob entry is materialised later by
-        // pull::setup_owned via common::fetch_or_get_blob, not by resolve.
-        let manifest_entries = &result.chain[..result.chain.len() - 1];
-        for blob in manifest_entries {
-            let pinned = &blob.identifier;
-            let blob_path = blob_store.data(pinned.registry(), &pinned.digest());
-            assert!(
-                blob_path.exists(),
-                "property violated: manifest chain entry {pinned} has no on-disk blob at {}",
-                blob_path.display()
-            );
-        }
+        let top = &result.chain[0];
+        let dispatch_path = store.dispatch_object_path(
+            top.identifier.registry(),
+            top.identifier.repository(),
+            &top.identifier.digest(),
+        );
+        assert!(
+            dispatch_path.exists(),
+            "property violated: top-level dispatch entry {} has no dispatch object at {}",
+            top.identifier,
+            dispatch_path.display()
+        );
     }
 }
 
@@ -2114,7 +2227,7 @@ mod phase4_spec_tests {
 
     use crate::{
         config::patch::ResolvedPatchConfig,
-        file_structure::{BlobStore, FileStructure, PackageStore, TagStore},
+        file_structure::{FileStructure, IndexStore, PackageStore},
         oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
         oci::{Digest, Identifier, PinnedIdentifier},
         package::{
@@ -2161,8 +2274,7 @@ mod phase4_spec_tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Offline,
@@ -2180,32 +2292,33 @@ mod phase4_spec_tests {
         }
     }
 
-    /// Seed a companion's tag-store entry in the **correct** `TagLock` envelope
-    /// format that `LocalIndex::fetch_manifest_digest` expects.
+    /// Seed a companion's root-document tag pointer in the wire grammar
+    /// (`adr_index_indirection.md` A2 — a DERIVED, OCX-authored root: a
+    /// locally-materialized companion is never a published-index entry) that
+    /// `LocalIndex::resolve_dispatch`/`ChainedIndex::fetch_manifest_digest`
+    /// expect.
     ///
-    /// Schema: `{"version":1,"repository":"<registry>/<repo>","tags":{"<tag>":"<digest>"}}`
-    ///
-    /// Tests that previously wrote raw `BTreeMap<String, String>` (the wrong
-    /// schema) must use this helper instead so that `find_companion_local` can
-    /// resolve the tag → digest through the public `Index` wrapper without error.
-    pub(super) fn write_companion_tag_lock(
-        tag_store: &crate::file_structure::TagStore,
+    /// Tests use this helper so `find_companion_local` can resolve the
+    /// tag → digest through the public `Index` wrapper without error.
+    pub(super) fn write_companion_root_document(
+        file_structure: &FileStructure,
         companion_tag_id: &Identifier,
         digest: &Digest,
     ) {
-        let tags_path = tag_store.tags(companion_tag_id);
-        std::fs::create_dir_all(tags_path.parent().unwrap()).unwrap();
-        let tag = companion_tag_id.tag_or_latest();
         let registry = companion_tag_id.registry();
-        let repo = companion_tag_id.repository();
-        // Emit the TagLock envelope: version, repository, and tags map.
-        let json = serde_json::json!({
-            "version": 1,
-            "repository": format!("{registry}/{repo}"),
-            "tags": { tag: digest.to_string() }
-        })
-        .to_string();
-        std::fs::write(&tags_path, json).unwrap();
+        let repository = companion_tag_id.repository();
+        let root_path = file_structure.index.root_document_path(registry, repository);
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        let doc = serde_json::json!({
+            "repository": format!("oci://{registry}/{repository}"),
+            "tags": {
+                companion_tag_id.tag_or_latest(): {
+                    "content": digest.to_string(),
+                    "observed": "2026-07-18T00:00:00Z",
+                }
+            }
+        });
+        std::fs::write(&root_path, serde_json::to_vec(&doc).unwrap()).unwrap();
     }
 
     /// Write a minimal on-disk package directory (metadata.json + resolve.json).
@@ -2615,7 +2728,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // ── Companion: INTERFACE var MY_VAR=companion_value ────────────────────
         // Companion is stored with PATCH_REGISTRY so find_companion_local's
@@ -2635,10 +2748,10 @@ mod phase4_spec_tests {
             Visibility::INTERFACE,
         );
 
-        // Write companion's tag-store entry in the correct TagLock envelope so
+        // Write companion's root-document tag entry in the wire grammar so
         // find_companion_local (via Index::fetch_manifest_digest / Op::Query)
         // can resolve the tag → digest without a schema mismatch error.
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion ────────────────────────────
         let descriptor_json = serde_json::json!({
@@ -2671,7 +2784,7 @@ mod phase4_spec_tests {
 
         // Write the global tag-map entry: LookedHasDescriptor.
         let global_id = global_descriptor_id(&test_patch_config());
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .unwrap();
@@ -2770,7 +2883,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // ── Companion: INTERFACE var DEP_PATCH_VAR=present ─────────────────────
         let companion_digest = sha256('c');
@@ -2787,7 +2900,7 @@ mod phase4_spec_tests {
             "present",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule matches ONLY the private dep, not the root ──
         let descriptor_json = serde_json::json!({
@@ -2816,9 +2929,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&test_patch_config());
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // ── Root with a PRIVATE dep "privatedep" ───────────────────────────────
         let dep_id = pinned("privatedep", 'd');
@@ -3015,7 +3131,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // ── Companion: has ONLY a PRIVATE var (must never leak). ──────────────
         // Store under PATCH_REGISTRY so find_companion_local's PackageStore
@@ -3035,10 +3151,10 @@ mod phase4_spec_tests {
             Visibility::PRIVATE, // PRIVATE — must be excluded by interface projection
         );
 
-        // Write companion's tag-store entry in the correct TagLock envelope so
+        // Write companion's root-document tag entry in the wire grammar so
         // find_companion_local (via Index::fetch_manifest_digest / Op::Query)
         // resolves the tag → digest without a schema mismatch error.
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion (the private-only companion). ─
         let descriptor_json = serde_json::json!({
@@ -3069,7 +3185,7 @@ mod phase4_spec_tests {
             .unwrap();
 
         let global_id = global_descriptor_id(&test_patch_config());
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .unwrap();
@@ -3236,7 +3352,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // A companion identifier that is NOT installed locally.
         let companion_tag_id = Identifier::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
@@ -3270,7 +3386,7 @@ mod phase4_spec_tests {
             .unwrap();
 
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .unwrap();
@@ -3348,7 +3464,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // (suffix token, root digest hex, companion digest hex, root repo, companion repo).
         // Digest hex chars must be valid hexadecimal (sha256() repeats the char 64x).
@@ -3388,7 +3504,7 @@ mod phase4_spec_tests {
                 "companion",
                 Visibility::INTERFACE,
             );
-            write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+            write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
             // Package-specific descriptor for this root → its own companion.
             let descriptor_json = serde_json::json!({
@@ -3414,7 +3530,7 @@ mod phase4_spec_tests {
                 .await
                 .unwrap();
             let pkg_specific_id = patch_descriptor_id(&patch_config, root_id.as_identifier());
-            let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+            let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
             PatchTagMap::write_has_descriptor(&pkg_tags_path, &manifest_digest.to_string())
                 .await
                 .unwrap();
@@ -3517,7 +3633,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Companion: NOT installed locally so find_companion_local → Ok(None).
         let companion_tag_id = Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
@@ -3557,7 +3673,7 @@ mod phase4_spec_tests {
             .unwrap();
 
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &global_manifest_digest.to_string())
             .await
             .unwrap();
@@ -3587,7 +3703,7 @@ mod phase4_spec_tests {
             .unwrap();
 
         let pkg_specific_id = patch_descriptor_id(&patch_config, root_base_id);
-        let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+        let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
         PatchTagMap::write_has_descriptor(&pkg_tags_path, &pkg_manifest_digest.to_string())
             .await
             .unwrap();
@@ -3666,7 +3782,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // ── Global companion: CERT_FILE=global_cert ───────────────────────────
         // Use valid hex chars ('a', 'b') so Digest::try_from succeeds when
@@ -3687,7 +3803,7 @@ mod phase4_spec_tests {
             "global_cert",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &global_companion_tag_id, &global_companion_digest);
+        write_companion_root_document(&tag_store, &global_companion_tag_id, &global_companion_digest);
 
         // ── Pkg-specific companion: CERT_FILE=pkg_cert ────────────────────────
         let pkg_companion_digest = sha256('b');
@@ -3704,7 +3820,7 @@ mod phase4_spec_tests {
             "pkg_cert",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &pkg_companion_tag_id, &pkg_companion_digest);
+        write_companion_root_document(&tag_store, &pkg_companion_tag_id, &pkg_companion_digest);
 
         // ── Helper: write a descriptor blob and return manifest digest ─────────
         let write_descriptor_blob = |companion_tag: &Identifier| {
@@ -3739,7 +3855,7 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &global_manifest_digest.to_string())
             .await
             .unwrap();
@@ -3771,7 +3887,7 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let pkg_specific_id = patch_descriptor_id(&patch_config, root_id.as_identifier());
-        let pkg_tags_path = tag_store.tags(&pkg_specific_id);
+        let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
         PatchTagMap::write_has_descriptor(&pkg_tags_path, &pkg_manifest_digest.to_string())
             .await
             .unwrap();
@@ -3845,7 +3961,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // ── Companion: has PATH = "/companion/bin" (interface, Path modifier). ──
         let companion_digest = sha256('c');
@@ -3890,9 +4006,9 @@ mod phase4_spec_tests {
             .unwrap();
         }
 
-        // Tag-store entry for companion in correct TagLock envelope format.
+        // Companion's root-document tag entry in the wire grammar.
         {
-            write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+            write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
         }
 
         // ── Root: declares PATH = "/root/bin" (interface, Path modifier). ──────
@@ -3956,7 +4072,7 @@ mod phase4_spec_tests {
             .unwrap();
 
         let global_id = global_descriptor_id(&test_patch_config());
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .unwrap();
@@ -4040,7 +4156,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         let cap = super::super::patch_discovery::MAX_TOTAL_COMPANIONS;
         // Split companions: global gets `cap/2 + 1`, pkg-specific gets `cap/2 + 1`.
@@ -4080,9 +4196,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &global_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &global_manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // Root package.
         let root_id = pinned("rootpkg", 'r');
@@ -4108,9 +4227,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let pkg_specific_id = patch_descriptor_id(&patch_config, root_id.as_identifier());
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&pkg_specific_id), &pkg_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&pkg_specific_id),
+            &pkg_manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         let root_pkg_path = store.path(&root_id);
         let root = Arc::new(InstallInfo::new(
@@ -4168,7 +4290,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         let cap = super::super::patch_discovery::MAX_TOTAL_COMPANIONS;
         // Build a single descriptor with cap + 1 unique packages (all optional).
@@ -4198,9 +4320,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // Root package.
         let root_id = pinned("rootpkg", 'r');
@@ -4266,7 +4391,7 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Companion: NOT installed locally (no tag-store entry, no package dir).
         let companion_tag_id = Identifier::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
@@ -4295,9 +4420,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // dep1: a PUBLIC dep that is in the admitted set.
         let dep1_id = pinned("dep1pkg", 'd');
@@ -4354,25 +4482,26 @@ mod phase4_spec_tests {
 
     // ── Recursion / projection guard ──────────────────────────────────────────
 
-    // ── Schema regression: TagLock envelope — required companion missing ────────
+    // ── Schema regression: root-document envelope — required companion missing ─
 
     /// Regression for the schema bug: `find_companion_local` previously read the
-    /// companion tag file as a raw `BTreeMap<String, String>`, which fails on the
-    /// real on-disk `TagLock` envelope (`{"version":1,"repository":...,"tags":{...}}`).
+    /// companion's root document as a raw `BTreeMap<String, String>`, which fails
+    /// on the real on-disk root-document envelope (`{"repository":...,"tags":{...}}`,
+    /// `adr_index_indirection.md` A2).
     ///
-    /// This test seeds the companion tag file in the **correct** TagLock schema
+    /// This test seeds the companion's root document in the **correct** schema
     /// but does NOT install the companion package itself (no manifest blob, no
     /// package dir).  The expected outcome is `Err(RequiredCompanionFailed)` —
-    /// i.e. `find_companion_local` parses the TagLock correctly (no schema error),
-    /// resolves the digest, looks up the package store (miss → `Ok(None)`), and
-    /// then the required-fail-closed arm fires.
+    /// i.e. `find_companion_local` parses the root document correctly (no schema
+    /// error), resolves the digest, looks up the package store (miss →
+    /// `Ok(None)`), and then the required-fail-closed arm fires.
     ///
-    /// Before the fix, `read_tag_digest` would return `Err` on the real TagLock
-    /// file, which silently skipped the companion — a C7 violation.
+    /// Before the fix, `read_tag_digest` would return `Err` on the real
+    /// root-document file, which silently skipped the companion — a C7 violation.
     ///
-    /// Traceability: schema regression + C7 fail-closed on real TagLock path.
+    /// Traceability: schema regression + C7 fail-closed on real root-document path.
     #[tokio::test(flavor = "multi_thread")]
-    async fn schema_regression_required_companion_tag_lock_envelope_missing_package_returns_err() {
+    async fn schema_regression_required_companion_root_document_envelope_missing_package_returns_err() {
         // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
         // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
         // prevents concurrent write_blob calls from inflating the coalescing-test delta.
@@ -4392,20 +4521,20 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
-        // Companion tag ID whose tag file will be written in the REAL TagLock
+        // Companion tag ID whose root document will be written in the REAL
         // envelope format — but no package is installed (no package dir, no blob).
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("required-ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
 
-        // Write the companion tag file in the correct TagLock schema.
+        // Write the companion's root document in the correct schema.
         // Before the fix, `read_tag_digest` would fail to parse this and silently
         // skip the required companion — a C7 violation.  After the fix,
         // `fetch_manifest_digest(Op::Query)` parses it correctly, returns
         // `Ok(Some(digest))`, then `find_in_store` returns `Ok(None)` (not
         // installed), and the required-fail-closed arm fires.
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
         // NOTE: deliberately NOT seeding the package dir — companion is not installed.
 
         // Global descriptor: rule "*" → required companion.
@@ -4432,9 +4561,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // Root with no deps — still admitted (roots always in admitted set).
         let root_id = pinned("rootpkg", 'r');
@@ -4458,7 +4590,7 @@ mod phase4_spec_tests {
             .await;
         assert!(
             result.is_err(),
-            "schema regression: required companion with correct TagLock tag file but missing package must return Err; got Ok({:?})",
+            "schema regression: required companion with correct root-document tag but missing package must return Err; got Ok({:?})",
             result.ok()
         );
 
@@ -4469,12 +4601,12 @@ mod phase4_spec_tests {
         );
     }
 
-    /// Regression: a required companion that is fully installed (correct TagLock
-    /// tag file + manifest blob + package dir with interface env var) must have
-    /// its interface env appear in the overlay output.
+    /// Regression: a required companion that is fully installed (correct
+    /// root-document tag + manifest blob + package dir with interface env var)
+    /// must have its interface env appear in the overlay output.
     ///
-    /// This test proves the real resolution path (TagLock → digest → package
-    /// store → compose) works end-to-end when the companion IS installed.
+    /// This test proves the real resolution path (root document → digest →
+    /// package store → compose) works end-to-end when the companion IS installed.
     ///
     /// Traceability: schema regression — real path resolves + env surfaces.
     #[tokio::test(flavor = "multi_thread")]
@@ -4498,9 +4630,9 @@ mod phase4_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
-        // ── Companion: fully installed (TagLock tag + package dir + interface var). ──
+        // ── Companion: fully installed (root-document tag + package dir + interface var). ──
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let companion_pinned = PinnedIdentifier::try_from(
@@ -4518,9 +4650,9 @@ mod phase4_spec_tests {
             Visibility::INTERFACE,
         );
 
-        // Write the companion's tag file in the correct TagLock envelope format.
+        // Write the companion's root document in the correct envelope format.
         // This is the on-disk shape produced by a real Phase 3 install.
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion ────────────────────────────
         let descriptor_json = serde_json::json!({
@@ -4546,9 +4678,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         // ── Root with no deps ──────────────────────────────────────────────────
         let root_id = pinned("rootpkg", 'r');
@@ -4661,8 +4796,7 @@ mod phase4_spec_tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Remote,
@@ -4671,7 +4805,7 @@ mod phase4_spec_tests {
     }
 
     /// Seed a fully-installed **global** companion into `manager`'s file structure:
-    /// the companion's `TagLock` tag, optionally its package directory (carrying an
+    /// the companion's root-document tag, optionally its package directory (carrying an
     /// `INTERFACE` env var `CA_BUNDLE`), and the global `__ocx.patch` descriptor
     /// (rule `*` → companion) recorded as `LookedHasDescriptor`.
     ///
@@ -4688,7 +4822,7 @@ mod phase4_spec_tests {
 
         let store = manager.file_structure().packages.clone();
         let blob_store = manager.file_structure().blobs.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
@@ -4708,7 +4842,7 @@ mod phase4_spec_tests {
             );
         }
 
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         let descriptor_json = serde_json::json!({
             "version": 1,
@@ -4733,9 +4867,12 @@ mod phase4_spec_tests {
             .await
             .unwrap();
         let global_id = global_descriptor_id(patch_config);
-        PatchTagMap::write_has_descriptor(&tag_store.tags(&global_id), &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
 
         ("CA_BUNDLE", "/etc/ssl/certs/ca-bundle.crt")
     }
@@ -4824,8 +4961,7 @@ mod phase4_spec_tests {
 
         // Derive the offline view exactly as the CLI does, over the same stores.
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: BlobStore::new(dir.path().join("blobs")),
+            index_store: IndexStore::new(dir.path().join("index")),
         });
         let offline = manager.offline_view(local_index);
         assert!(offline.is_offline(), "offline_view must produce an offline manager");
@@ -4868,8 +5004,7 @@ mod phase4_spec_tests {
         seed_installed_global_companion(&manager, &patch_config, false).await;
 
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: BlobStore::new(dir.path().join("blobs")),
+            index_store: IndexStore::new(dir.path().join("index")),
         });
         let offline = manager.offline_view(local_index);
 
@@ -4909,7 +5044,7 @@ mod phase5a_spec_tests {
 
     use crate::{
         config::patch::ResolvedPatchConfig,
-        file_structure::{BlobStore, FileStructure, TagStore},
+        file_structure::{BlobStore, FileStructure, IndexStore},
         oci::{
             Algorithm, Digest, Identifier, PinnedIdentifier,
             index::{ChainMode, Index, LocalConfig, LocalIndex},
@@ -4920,7 +5055,7 @@ mod phase5a_spec_tests {
 
     use super::{
         super::patch_discovery::{PatchTagMap, global_descriptor_id},
-        phase4_spec_tests::{seed_package_with_constant_var, write_companion_tag_lock},
+        phase4_spec_tests::{seed_package_with_constant_var, write_companion_root_document},
     };
 
     const REGISTRY: &str = "example.com";
@@ -4945,8 +5080,7 @@ mod phase5a_spec_tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Offline,
@@ -4964,8 +5098,7 @@ mod phase5a_spec_tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Remote,
@@ -5010,7 +5143,7 @@ mod phase5a_spec_tests {
         companion_tag_id: &Identifier,
     ) -> (Digest, Digest) {
         let blob_store = BlobStore::new(dir.path().join("blobs"));
-        let tag_store = TagStore::new(dir.path().join("tags"));
+        let tag_store = FileStructure::with_root(dir.path().to_path_buf());
 
         let descriptor_json = serde_json::json!({
             "version": 1,
@@ -5041,7 +5174,7 @@ mod phase5a_spec_tests {
             .unwrap();
 
         let global_id = global_descriptor_id(patch_config);
-        let global_tags_path = tag_store.tags(&global_id);
+        let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .unwrap();
@@ -5072,7 +5205,7 @@ mod phase5a_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
 
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Seed an installed base: place a candidate symlink under the symlink store.
         let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
@@ -5094,8 +5227,8 @@ mod phase5a_spec_tests {
             Visibility::INTERFACE,
         );
 
-        // Write companion tag-store entry (TagLock format that LocalIndex understands).
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        // Write companion root-document tag entry in the wire grammar `LocalIndex` understands.
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed the global descriptor referencing the companion.
         let (manifest_digest, layer_digest) =
@@ -5158,7 +5291,7 @@ mod phase5a_spec_tests {
         let manager = make_remote_manager(&dir).with_patches(Some(patch_config.clone()));
 
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Seed installed base.
         let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
@@ -5179,7 +5312,7 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs/bundle.crt",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed global descriptor.
         seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
@@ -5268,7 +5401,7 @@ mod phase5a_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
 
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Seed an installed base.  The candidate path is:
         //   symlinks/{registry_slug}/cmake/candidates/3.28
@@ -5292,14 +5425,14 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs",
             crate::package::metadata::visibility::Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed a descriptor with a scoped rule matching `example.com/cmake:*`.
         // This rule must ONLY fire when the base identifier is correctly
         // reconstructed as `cmake` in registry `example.com`.
         {
             let blob_store = crate::file_structure::BlobStore::new(dir.path().join("blobs"));
-            let tag_store_inner = crate::file_structure::TagStore::new(dir.path().join("tags"));
+            let tag_store_inner = crate::file_structure::FileStructure::with_root(dir.path().to_path_buf());
 
             let descriptor_json = serde_json::json!({
                 "version": 1,
@@ -5333,7 +5466,7 @@ mod phase5a_spec_tests {
                 .unwrap();
 
             let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
-            let global_tags_path = tag_store_inner.tags(&global_id);
+            let global_tags_path = tag_store_inner.patch_descriptor_path(&global_id);
             super::super::patch_discovery::PatchTagMap::write_has_descriptor(
                 &global_tags_path,
                 &manifest_digest.to_string(),
@@ -5386,22 +5519,26 @@ mod phase5a_spec_tests {
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
 
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Installed base whose registry carries a PORT → symlink slug `localhost_5000`.
         let base_id = Identifier::new_registry("cmake", "localhost:5000").clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
-        // Seed the base's tag file recording the canonical `repository` so the real
-        // hostname can be recovered from the slug directory. `tag_store.tags(&base_id)`
-        // slugifies the registry, landing at `tags/localhost_5000/cmake.json`.
+        // Seed the base's root document recording the canonical `oci://` `repository`
+        // so `recover_base_with_real_registry` can restore the real hostname from
+        // the slug directory. The snapshot path slugifies the registry, landing at
+        // `.../localhost_5000/p/cmake.json`.
         {
             let base_digest = sha256('b');
-            let tags_path = tag_store.tags(&base_id);
-            std::fs::create_dir_all(tags_path.parent().unwrap()).unwrap();
-            let json =
-                format!(r#"{{"version":1,"repository":"localhost:5000/cmake","tags":{{"3.28":"{base_digest}"}}}}"#);
-            std::fs::write(&tags_path, json).unwrap();
+            let root_path = tag_store
+                .index
+                .root_document_path(base_id.registry(), base_id.repository());
+            std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+            let json = format!(
+                r#"{{"repository":"oci://localhost:5000/cmake","tags":{{"3.28":{{"content":"{base_digest}","observed":"2026-07-18T00:00:00Z"}}}}}}"#
+            );
+            std::fs::write(&root_path, json).unwrap();
         }
 
         // Companion installed locally.
@@ -5419,7 +5556,7 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs/bundle.crt",
             crate::package::metadata::visibility::Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // Global descriptor with a SCOPED port-registry rule (not catch-all).
         {
@@ -5455,7 +5592,7 @@ mod phase5a_spec_tests {
                 .unwrap();
             let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
             super::super::patch_discovery::PatchTagMap::write_has_descriptor(
-                &tag_store.tags(&global_id),
+                &tag_store.patch_descriptor_path(&global_id),
                 &manifest_digest.to_string(),
             )
             .await
@@ -5493,7 +5630,7 @@ mod phase5b_spec_tests {
     use tempfile::TempDir;
 
     use crate::{
-        file_structure::TagStore,
+        file_structure::IndexStore,
         oci::{
             Identifier, PinnedIdentifier,
             index::{LocalConfig, LocalIndex},
@@ -5503,7 +5640,7 @@ mod phase5b_spec_tests {
     };
 
     use super::{
-        phase4_spec_tests::{seed_package_with_constant_var, seed_root_arc, write_companion_tag_lock},
+        phase4_spec_tests::{seed_package_with_constant_var, seed_root_arc, write_companion_root_document},
         phase5a_spec_tests::{make_manager, seed_global_descriptor_with_companion, sha256, test_patch_config},
     };
 
@@ -5541,7 +5678,7 @@ mod phase5b_spec_tests {
 
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Digest A = live tag target.  Digest B = snapshot pin.
         let live_digest = sha256('a');
@@ -5562,7 +5699,7 @@ mod phase5b_spec_tests {
             "live_value",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_id, &live_digest);
+        write_companion_root_document(&tag_store, &companion_id, &live_digest);
 
         // Snapshot companion: package at digest B carries snapshot_value.
         let snap_pinned = PinnedIdentifier::try_from(
@@ -5641,7 +5778,7 @@ mod phase5b_spec_tests {
 
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         let live_digest = sha256('a');
         let companion_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
@@ -5658,7 +5795,7 @@ mod phase5b_spec_tests {
             "live_value",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_id, &live_digest);
+        write_companion_root_document(&tag_store, &companion_id, &live_digest);
 
         seed_global_descriptor_with_companion(&dir, &patch_config, &companion_id).await;
 
@@ -5700,7 +5837,7 @@ mod phase5b_spec_tests {
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let store = make_manager(&dir).file_structure().packages.clone();
-        let tag_store = make_manager(&dir).file_structure().tags.clone();
+        let tag_store = make_manager(&dir).file_structure().clone();
 
         // Frozen companion `ca-bundle` at digest dC1 → SNAP_VAR=frozen.
         let frozen_companion = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
@@ -5717,7 +5854,7 @@ mod phase5b_spec_tests {
             "frozen",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &frozen_companion, &frozen_digest);
+        write_companion_root_document(&tag_store, &frozen_companion, &frozen_digest);
 
         // Advanced companion `ca-bundle-v2` at digest dC2 → SNAP_VAR=advanced.
         let advanced_companion = Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_tag("latest");
@@ -5734,7 +5871,7 @@ mod phase5b_spec_tests {
             "advanced",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &advanced_companion, &advanced_digest);
+        write_companion_root_document(&tag_store, &advanced_companion, &advanced_digest);
 
         // Freeze: descriptor M1 names the frozen companion. This is the global tag
         // target captured by `ocx patch freeze`.
@@ -5835,8 +5972,7 @@ mod phase5b_spec_tests {
         );
 
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: crate::file_structure::BlobStore::new(dir.path().join("blobs")),
+            index_store: IndexStore::new(dir.path().join("index")),
         });
         let offline = manager.offline_view(local_index);
 

@@ -145,11 +145,28 @@ pub async fn load_config_metadata(
         .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
     let config_digest =
         oci::Digest::try_from(manifest.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(e.into()))?;
-    let bytes = index
-        .fetch_blob(&pinned.clone_with_digest(config_digest))
+    let config_ref = pinned.clone_with_digest(config_digest);
+    let bytes = match index
+        .fetch_blob(&config_ref)
         .await
         .map_err(PackageErrorKind::Internal)?
-        .ok_or(PackageErrorKind::Internal(crate::Error::OfflineMode))?;
+    {
+        Some(bytes) => bytes,
+        None => {
+            // The config blob is absent locally and no source could supply it
+            // (offline, or it was never cached — e.g. after a bare `ocx index
+            // update`, which persists the manifest chain into the index snapshot
+            // but not the config blob). Name the missing digest so the user knows
+            // what to re-pull, mirroring `resolve_top_manifest`'s offline
+            // manifest-missing error — never a bare, digest-less `OfflineMode`.
+            return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
+                error::OfflineManifestMissing {
+                    identifier: pinned.as_identifier().clone(),
+                    digest: config_ref.digest(),
+                },
+            )));
+        }
+    };
     let raw: metadata::Metadata = serde_json::from_slice(&bytes)
         .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
     // Reject malformed metadata at the ingress boundary — refuse to write
@@ -297,6 +314,125 @@ pub async fn resolve_top_manifest(
 /// Creates a [`ReferenceManager`] from a [`FileStructure`].
 pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager {
     ReferenceManager::new(fs.clone())
+}
+
+/// Materializes the resolver's manifest + config chain into `$OCX_HOME/blobs`
+/// and forward-refs each blob into the package's `refs/blobs/`.
+///
+/// `resolve` persists only **dispatch** objects into the local index
+/// collection (`$OCX_HOME/index`, `adr_index_indirection.md` A3) — a leaf platform
+/// manifest is never copied there. The install path keeps its own copy in
+/// `$OCX_HOME/blobs` (Decision B2): the snapshot travels with a committed
+/// `.ocx/index/`, whereas the blob store travels with the machine and is what
+/// `refs/blobs/` targets and `add_index_retention_edges` traverses for GC.
+/// Routing is role-aware, per [`ChainRole`](super::resolve::ChainRole):
+///
+/// - [`ChainRole::Config`] — genuine content-addressed blob; fetched via the
+///   OCI blobs endpoint ([`Index::fetch_blob`]).
+/// - [`ChainRole::Manifest`] — a platform-selected leaf manifest; always
+///   genuine content, fetched via the OCI manifests endpoint (digest-verified
+///   verbatim bytes, [`Index::fetch_manifest_raw_bytes`]) — the blobs endpoint
+///   does not serve manifest digests.
+/// - [`ChainRole::Index`] — the top-level dispatch entry. A derived (plain
+///   OCI-registry) source names a genuine image-index digest, fetched the
+///   same way as [`ChainRole::Manifest`] so `add_index_retention_edges` can
+///   later parse it. A published (`index.ocx.sh`) source names an
+///   observation-object digest — dispatch, never content (A3) — which no
+///   registry ever served, so it is skipped instead of staged.
+///
+/// Both the blob-store write ([`BlobStore::write_blob`]) and the ref link
+/// ([`ReferenceManager::link_blobs`]) are content-addressed and idempotent, so
+/// the fast-path branches that re-invoke this helper for an already-installed
+/// package pay only cheap existence checks. A chain blob the index cannot
+/// serve (offline and never fetched — e.g. the `pull_local` path, which never
+/// persists the config blob) is skipped; `link_blobs` tolerates the resulting
+/// dangling ref (eventual consistency, GC collects).
+///
+/// A chain blob already present in the blob store is **guaranteed-local** and is
+/// never routed through the index: the local `ocx package test` flow synthesizes
+/// its manifest and stages it straight into `fs.blobs` (never the snapshot), so
+/// an index lookup would miss and — with a client present — fall through to the
+/// registry, which 404s a blob/manifest that was never pushed. The blob-store
+/// existence probe short-circuits that registry round-trip while leaving the
+/// genuine-remote path (blob absent locally → index → source) untouched.
+pub async fn stage_and_link_chain_blobs(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    content_path: &Path,
+    resolved: &super::resolve::ResolvedChain,
+) -> Result<(), PackageErrorKind> {
+    use super::resolve::ChainRole;
+
+    for blob in &resolved.chain {
+        let identifier = &blob.identifier;
+        let digest = identifier.digest();
+        // Guaranteed-local fast path: a chain blob already in the blob store is
+        // linked without a fetch — the local `ocx package test` flow stages a
+        // synthesized manifest straight into `fs.blobs` that no registry ever
+        // served, so an index/registry lookup would 404. But existence is NOT
+        // integrity: verify the on-disk bytes hash to the digest that names them
+        // (CWE-345) before trusting the shortcut. A present-but-corrupt blob is
+        // removed so the fetch path below re-materializes it (online) — never
+        // linked as-is. `recover_absent_leaf` heals a corrupt LEAF this way
+        // during resolve; this closes the same class for the config / index
+        // chain blobs that are first materialized here (removal makes
+        // `write_blob`'s check-first fast path write fresh instead of re-accepting
+        // the corrupt file).
+        match fs
+            .blobs
+            .read_blob(identifier.registry(), &digest)
+            .await
+            .map_err(PackageErrorKind::Internal)?
+        {
+            Some(existing) if digest.algorithm().hash(&existing) == digest => continue,
+            Some(_) => {
+                log::warn!("blob-store copy of chain blob '{digest}' is corrupt; removing and re-fetching");
+                fs.blobs
+                    .remove_blob(identifier.registry(), &digest)
+                    .await
+                    .map_err(PackageErrorKind::Internal)?;
+            }
+            None => {}
+        }
+        match blob.role {
+            ChainRole::Config => {
+                if let Some(bytes) = index.fetch_blob(identifier).await.map_err(PackageErrorKind::Internal)? {
+                    fs.blobs
+                        .write_blob(identifier.registry(), &identifier.digest(), &bytes)
+                        .await
+                        .map_err(PackageErrorKind::Internal)?;
+                }
+            }
+            ChainRole::Index | ChainRole::Manifest => {
+                // A published source's `Index`-role entry names an
+                // observation-object digest — dispatch, never content (A3).
+                // No registry serves it; skip rather than stage.
+                if blob.role == ChainRole::Index
+                    && index
+                        .physical_reference(identifier.as_identifier())
+                        .await
+                        .map_err(PackageErrorKind::Internal)?
+                        .is_some()
+                {
+                    continue;
+                }
+                if let Some((bytes, _, _)) = index
+                    .fetch_manifest_raw_bytes(identifier.as_identifier())
+                    .await
+                    .map_err(PackageErrorKind::Internal)?
+                {
+                    fs.blobs
+                        .write_blob(identifier.registry(), &identifier.digest(), &bytes)
+                        .await
+                        .map_err(PackageErrorKind::Internal)?;
+                }
+            }
+        }
+    }
+    reference_manager(fs)
+        .link_blobs(content_path, resolved.blobs())
+        .await
+        .map_err(PackageErrorKind::Internal)
 }
 
 /// Acquires the per-repo selection lock for `package`.
@@ -709,6 +845,422 @@ mod tests {
             .expect("second acquire timed out after release")
             .expect("second acquire failed");
         drop(second);
+    }
+
+    /// Fake `IndexImpl` source recording which digests are requested through
+    /// each endpoint method — `fetch_manifest_raw_bytes` (manifests endpoint)
+    /// vs `fetch_blob` (blobs endpoint) — so a test can prove a manifest
+    /// digest never crosses the blobs-endpoint stream and vice versa
+    /// (`adr_index_indirection.md` B2). `published` mirrors `OcxIndex`'s
+    /// `physical_reference` override, letting a test simulate a published
+    /// (`index.ocx.sh`) source's dispatch entries without a real one.
+    #[derive(Clone, Default)]
+    struct EndpointSpySource {
+        namespace: String,
+        published: bool,
+        manifest: Option<(oci::Digest, Vec<u8>, oci::Manifest)>,
+        blob: Option<(oci::Digest, Vec<u8>)>,
+        raw_bytes_calls: std::sync::Arc<std::sync::Mutex<Vec<oci::Digest>>>,
+        blob_calls: std::sync::Arc<std::sync::Mutex<Vec<oci::Digest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::oci::index::IndexImpl for EndpointSpySource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &oci::Identifier,
+            _: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<(oci::Digest, oci::Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &oci::Identifier,
+            _: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<oci::Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            let digest = blob_ref.digest();
+            self.blob_calls.lock().unwrap().push(digest.clone());
+            Ok(self
+                .blob
+                .as_ref()
+                .filter(|(d, _)| *d == digest)
+                .map(|(_, bytes)| bytes.clone()))
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &oci::Identifier,
+        ) -> crate::Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
+            let Some(digest) = identifier.digest() else {
+                return Ok(None);
+            };
+            self.raw_bytes_calls.lock().unwrap().push(digest.clone());
+            Ok(self
+                .manifest
+                .as_ref()
+                .filter(|(d, _, _)| *d == digest)
+                .map(|(d, bytes, manifest)| (bytes.clone(), d.clone(), manifest.clone())))
+        }
+        async fn physical_reference(&self, identifier: &oci::Identifier) -> crate::Result<Option<oci::Identifier>> {
+            if self.published && identifier.registry() == self.namespace {
+                Ok(Some(identifier.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        fn box_clone(&self) -> Box<dyn crate::oci::index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// B2 (`adr_index_indirection.md`): a flat (single-platform) resolve's
+    /// chain has a `ChainRole::Manifest` entry that is a leaf platform
+    /// manifest — content the local dispatch cache never holds (A3), so it
+    /// must be staged via the manifests endpoint (`fetch_manifest_raw_bytes`),
+    /// never `fetch_blob`/the blobs endpoint (which 404s a manifest digest on
+    /// a real registry). The config entry keeps using the blobs endpoint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage_and_link_chain_blobs_stages_leaf_manifest_via_manifests_endpoint() {
+        use crate::file_structure::{FileStructure, IndexStore};
+        use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+        use crate::package_manager::tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let registry = "example.com";
+        let repository = "cmake";
+
+        let manifest_bytes = br#"{"manifest":true}"#.to_vec();
+        let manifest_digest = oci::Algorithm::Sha256.hash(&manifest_bytes);
+        let config_bytes = br#"{"config":true}"#.to_vec();
+        let config_digest = oci::Algorithm::Sha256.hash(&config_bytes);
+
+        let source = EndpointSpySource {
+            namespace: registry.to_string(),
+            published: false,
+            manifest: Some((
+                manifest_digest.clone(),
+                manifest_bytes.clone(),
+                oci::Manifest::Image(oci::ImageManifest::default()),
+            )),
+            blob: Some((config_digest.clone(), config_bytes.clone())),
+            ..Default::default()
+        };
+        let raw_bytes_calls = source.raw_bytes_calls.clone();
+        let blob_calls = source.blob_calls.clone();
+
+        let snapshot = IndexStore::new(tempdir.path().join("index"));
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig { index_store: snapshot }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+        );
+
+        let pin = |digest: &oci::Digest| {
+            oci::PinnedIdentifier::try_from(
+                oci::Identifier::new_registry(repository, registry).clone_with_digest(digest.clone()),
+            )
+            .unwrap()
+        };
+        let chain_blob = |digest: &oci::Digest, role| ChainBlob {
+            identifier: pin(digest),
+            role,
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            size: 0,
+        };
+        let resolved = ResolvedChain {
+            pinned: pin(&manifest_digest),
+            transport_pinned: pin(&manifest_digest),
+            chain: vec![
+                chain_blob(&manifest_digest, ChainRole::Manifest),
+                chain_blob(&config_digest, ChainRole::Config),
+            ],
+            final_manifest: oci::ImageManifest::default(),
+            platform: oci::Platform::any(),
+        };
+
+        let content_path = tempdir.path().join("pkg-content");
+        std::fs::create_dir_all(&content_path).unwrap();
+
+        super::stage_and_link_chain_blobs(&fs, &index, &content_path, &resolved)
+            .await
+            .expect("staging the resolved chain into the blob store must succeed");
+
+        assert_eq!(
+            fs.blobs.read_blob(registry, &manifest_digest).await.unwrap().as_deref(),
+            Some(manifest_bytes.as_slice()),
+            "leaf manifest must be materialized into the blob store"
+        );
+        assert_eq!(
+            fs.blobs.read_blob(registry, &config_digest).await.unwrap().as_deref(),
+            Some(config_bytes.as_slice()),
+            "config blob must be materialized into the blob store"
+        );
+
+        assert_eq!(
+            raw_bytes_calls.lock().unwrap().as_slice(),
+            std::slice::from_ref(&manifest_digest),
+            "the leaf manifest must be fetched via the manifests endpoint exactly once"
+        );
+        assert!(
+            !blob_calls.lock().unwrap().contains(&manifest_digest),
+            "the manifest digest must never be requested through the blobs endpoint (it 404s on a real registry)"
+        );
+        assert_eq!(
+            blob_calls.lock().unwrap().as_slice(),
+            [config_digest],
+            "the config blob must still be fetched via the blobs endpoint"
+        );
+
+        let refs_blobs = fs.packages.refs_blobs_dir_for_content(&content_path).unwrap();
+        assert_eq!(
+            std::fs::read_dir(&refs_blobs).unwrap().count(),
+            2,
+            "both chain blobs must be forward-ref linked into refs/blobs/"
+        );
+    }
+
+    /// A3 (`adr_index_indirection.md`): an index-resolved (multi-platform)
+    /// chain's `ChainRole::Index` entry is the top-level dispatch pointer. For
+    /// a published (`index.ocx.sh`) source that digest is an observation
+    /// object's own digest — a local-only construct no registry ever served —
+    /// so it must never be staged (never requested through either endpoint).
+    /// The selected leaf manifest and config still stage normally.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage_and_link_chain_blobs_never_stages_a_published_index_roles_obs_digest() {
+        use crate::file_structure::{FileStructure, IndexStore};
+        use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+        use crate::package_manager::tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let registry = "ocx.sh";
+        let repository = "ns/cmake";
+
+        let obs_digest = oci::Algorithm::Sha256.hash(b"observation object bytes never staged");
+        let manifest_bytes = br#"{"manifest":true}"#.to_vec();
+        let manifest_digest = oci::Algorithm::Sha256.hash(&manifest_bytes);
+        let config_bytes = br#"{"config":true}"#.to_vec();
+        let config_digest = oci::Algorithm::Sha256.hash(&config_bytes);
+
+        let source = EndpointSpySource {
+            namespace: registry.to_string(),
+            published: true,
+            manifest: Some((
+                manifest_digest.clone(),
+                manifest_bytes.clone(),
+                oci::Manifest::Image(oci::ImageManifest::default()),
+            )),
+            blob: Some((config_digest.clone(), config_bytes.clone())),
+            ..Default::default()
+        };
+        let raw_bytes_calls = source.raw_bytes_calls.clone();
+        let blob_calls = source.blob_calls.clone();
+
+        let snapshot = IndexStore::new(tempdir.path().join("index"));
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig { index_store: snapshot }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+        );
+
+        let pin = |digest: &oci::Digest| {
+            oci::PinnedIdentifier::try_from(
+                oci::Identifier::new_registry(repository, registry).clone_with_digest(digest.clone()),
+            )
+            .unwrap()
+        };
+        let chain_blob = |digest: &oci::Digest, role| ChainBlob {
+            identifier: pin(digest),
+            role,
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            size: 0,
+        };
+        let resolved = ResolvedChain {
+            pinned: pin(&manifest_digest),
+            transport_pinned: pin(&manifest_digest),
+            chain: vec![
+                chain_blob(&obs_digest, ChainRole::Index),
+                chain_blob(&manifest_digest, ChainRole::Manifest),
+                chain_blob(&config_digest, ChainRole::Config),
+            ],
+            final_manifest: oci::ImageManifest::default(),
+            platform: oci::Platform::any(),
+        };
+
+        let content_path = tempdir.path().join("pkg-content");
+        std::fs::create_dir_all(&content_path).unwrap();
+
+        super::stage_and_link_chain_blobs(&fs, &index, &content_path, &resolved)
+            .await
+            .expect("staging the resolved chain into the blob store must succeed");
+
+        assert!(
+            fs.blobs.read_blob(registry, &obs_digest).await.unwrap().is_none(),
+            "the observation-object digest must never be staged into the blob store"
+        );
+        assert_eq!(
+            fs.blobs.read_blob(registry, &manifest_digest).await.unwrap().as_deref(),
+            Some(manifest_bytes.as_slice()),
+            "the selected leaf manifest must still be materialized"
+        );
+        assert_eq!(
+            fs.blobs.read_blob(registry, &config_digest).await.unwrap().as_deref(),
+            Some(config_bytes.as_slice()),
+            "the config blob must still be materialized"
+        );
+
+        assert!(
+            !raw_bytes_calls.lock().unwrap().contains(&obs_digest),
+            "the obs digest must never be requested through the manifests endpoint"
+        );
+        assert!(
+            !blob_calls.lock().unwrap().contains(&obs_digest),
+            "the obs digest must never be requested through the blobs endpoint"
+        );
+        assert_eq!(
+            raw_bytes_calls.lock().unwrap().as_slice(),
+            [manifest_digest],
+            "only the selected leaf manifest crosses the manifests endpoint"
+        );
+    }
+
+    /// Regression (`ocx package test` local flow, rc=69): a chain blob already
+    /// staged in the blob store — as the local package-test flow does with its
+    /// synthesized manifest — must resolve **guaranteed-local**, never routed
+    /// through the index/registry. Nothing is seeded index-side (see the inline
+    /// note below): the blob-store existence guard must short-circuit before
+    /// any index consultation. Without the guard, `stage_and_link_chain_blobs`
+    /// fetches through the index and fails (offline miss here; in production,
+    /// a registry 404 for the never-pushed blob).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage_and_link_chain_blobs_never_indexes_a_blob_already_in_the_store() {
+        use crate::file_structure::{FileStructure, IndexStore};
+        use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+        use crate::package_manager::tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let snapshot = IndexStore::new(tempdir.path().join("index"));
+        let registry = "example.com";
+        let repository = "cmake";
+
+        let manifest_bytes = br#"{"local":"manifest"}"#.to_vec();
+        let manifest_digest = oci::Algorithm::Sha256.hash(&manifest_bytes);
+
+        // The package-test flow stages its synthesized manifest straight into the
+        // blob store — never the snapshot.
+        fs.blobs
+            .write_blob(registry, &manifest_digest, &manifest_bytes)
+            .await
+            .unwrap();
+
+        // No corresponding snapshot/index object is seeded at all: the
+        // `fs.blobs.data()` guaranteed-local guard in `stage_and_link_chain_blobs`
+        // fires before the `ChainRole::Manifest` arm ever reaches the index, so
+        // a tampered snapshot object at this digest is unreachable from this
+        // test — it was proven dead even before the index-home flat blob CAS
+        // was retired (`stage_and_link_chain_blobs` never routes a
+        // `ChainRole::Manifest` entry through `Index::fetch_blob` in the first
+        // place; that role always uses `fetch_manifest_raw_bytes`).
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig { index_store: snapshot }),
+            vec![],
+            ChainMode::Offline,
+        );
+
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry(repository, registry).clone_with_digest(manifest_digest.clone()),
+        )
+        .unwrap();
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: pinned.clone(),
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                size: i64::try_from(manifest_bytes.len()).unwrap(),
+            }],
+            final_manifest: oci::ImageManifest::default(),
+            platform: oci::Platform::any(),
+        };
+
+        let content_path = tempdir.path().join("pkg-content");
+        std::fs::create_dir_all(&content_path).unwrap();
+
+        super::stage_and_link_chain_blobs(&fs, &index, &content_path, &resolved)
+            .await
+            .expect("a blob already in the blob store must resolve without touching the index");
+
+        // The forward-ref still lands so GC can reach the locally-staged blob.
+        let refs_blobs = fs.packages.refs_blobs_dir_for_content(&content_path).unwrap();
+        assert_eq!(std::fs::read_dir(&refs_blobs).unwrap().count(), 1);
+    }
+
+    /// AC10 regression: an offline install whose config blob was never cached
+    /// (e.g. after a bare `ocx index update`, which now persists the manifest
+    /// chain into the index snapshot but not the config blob) must fail with a
+    /// clean error **naming the missing digest** — not a bare, digest-less
+    /// `OfflineMode`. `OfflineManifestMissing` classifies to `PolicyBlocked`
+    /// (81) and its message carries the `sha256:` digest + "cache".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_config_metadata_offline_missing_config_names_the_digest() {
+        use crate::file_structure::IndexStore;
+        use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+        use crate::package_manager::error::PackageErrorKind;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        // Offline index over an empty snapshot → `fetch_blob` always yields None.
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(tempdir.path().join("index")),
+            }),
+            vec![],
+            ChainMode::Offline,
+        );
+
+        let config_digest = oci::Algorithm::Sha256.hash(b"config-bytes");
+        let manifest_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{}","digest":"{}","size":12}},"layers":[]}}"#,
+            crate::MEDIA_TYPE_PACKAGE_METADATA_V1,
+            config_digest,
+        );
+        let oci::Manifest::Image(image_manifest) = serde_json::from_str(&manifest_json).unwrap() else {
+            panic!("fixture must parse as an image manifest");
+        };
+
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry("cmake", "example.com")
+                .clone_with_tag("3.28")
+                .clone_with_digest(oci::Algorithm::Sha256.hash(b"manifest-bytes")),
+        )
+        .unwrap();
+
+        let err = super::load_config_metadata(&index, &pinned, &image_manifest)
+            .await
+            .expect_err("offline install with a missing config blob must fail");
+
+        match err {
+            PackageErrorKind::OfflineManifestMissing(missing) => {
+                assert_eq!(
+                    missing.digest, config_digest,
+                    "error must name the missing config digest"
+                );
+                let text = PackageErrorKind::OfflineManifestMissing(missing).to_string();
+                assert!(text.contains("sha256:"), "message must carry the digest: {text}");
+                assert!(text.contains("cache"), "message must mention the local cache: {text}");
+            }
+            other => panic!("expected OfflineManifestMissing naming the digest, got {other:?}"),
+        }
     }
 
     /// Distinct packages must not contend on the same lock — each repo gets

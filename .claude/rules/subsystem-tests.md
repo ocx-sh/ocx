@@ -96,8 +96,8 @@ task test              # Build + registry + all tests
 task test:quick        # Skip rebuild
 task test:parallel     # pytest-xdist (-n auto)
 
-# Single test:
-cd test && uv run pytest tests/test_install.py::test_name -v --no-build
+# Single test (runs prebuilt test/bin/ocx — rebuild via `task test` after Rust changes):
+cd test && uv run pytest tests/test_install.py::test_name -v
 ```
 
 ## Adding a New Test
@@ -106,7 +106,7 @@ cd test && uv run pytest tests/test_install.py::test_name -v --no-build
 2. Use `ocx: OcxRunner` and `published_package: PackageInfo` fixtures
 3. Call `ocx.json("command", pkg.short)` and assert results
 4. Custom packages: use `make_package()` with `unique_repo` and `tmp_path`
-5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
+5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v`
 
 For shell-friendly assertions (exec output, file existence, exit-code branches), prefer `test/scenarios/` — see Platform Split below.
 
@@ -174,4 +174,4 @@ The acceptance harness already builds with the feature: `test/taskfile.yml` and 
 
 ## Quality Gate
 
-During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.
+During review-fix loops, run `task test:parallel` — not full `task verify`. Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).

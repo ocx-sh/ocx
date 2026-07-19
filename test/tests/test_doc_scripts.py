@@ -51,13 +51,23 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     shared slot `tests/test_patches.py` serializes itself against via the
     ``patch_global_slot`` xdist group. Join that group here too so this case
     never races a concurrent global-descriptor publish from that module.
+
+    ``user-guide__managed-config-{rollout,publish}.sh`` both push to the
+    fixed, non-``unique_repo`` identifier ``corp/ocx-config`` (the on-screen
+    example in the docs) — join a shared group so the two never run
+    concurrently on different xdist workers and race the same registry repo.
     """
+    _SHARED_SLOT_GROUPS = {
+        "patches__consumer.sh": "patch_global_slot",
+        "user-guide__managed-config-rollout.sh": "managed_config_corp_slot",
+        "user-guide__managed-config-publish.sh": "managed_config_corp_slot",
+    }
     if "script" in metafunc.fixturenames:
         scripts = discover_doc_scripts(DOC_SCRIPTS_DIR)
         ids = [str(p.relative_to(DOC_SCRIPTS_DIR)) for p in scripts]
         params = [
-            pytest.param(script, marks=pytest.mark.xdist_group("patch_global_slot"))
-            if script.name == "patches__consumer.sh"
+            pytest.param(script, marks=pytest.mark.xdist_group(_SHARED_SLOT_GROUPS[script.name]))
+            if script.name in _SHARED_SLOT_GROUPS
             else script
             for script in scripts
         ]

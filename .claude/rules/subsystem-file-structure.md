@@ -18,6 +18,15 @@ Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, as
 
 Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
+**`TagStore` deleted; `FileStructure` gains a seventh store, `index: IndexStore`.** The
+tag-only local index is replaced by the wire-grammar index collection (dispatch-object-only CAS —
+see `subsystem-oci.md` "LocalIndex — wire-grammar collection, dispatch-only"). `IndexStore` is
+`FileStructure`'s default machine-local index home (`root.join("index")`) — never one of the
+GC-walked stores below. `LocalIndex` (the `oci::index` consumer) reads through it *by default*;
+`--index` PATH / `OCX_INDEX` construct a separate `IndexStore` pointed elsewhere instead
+(`context.rs`), bypassing `FileStructure` for that one override — home resolution stays
+`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index`. ADR: `adr_index_indirection.md` Decision A, B1, H.
+
 ## Module Map
 
 | File | Purpose | Key Types |
@@ -26,10 +35,10 @@ Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`
 | `blob_store.rs` | Raw OCI blob storage; stateless `write_blob` / `read_blob` (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore`, `BlobDir` |
 | `layer_store.rs` | Extracted layer storage | `LayerStore`, `LayerDir` |
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
-| `tag_store.rs` | Local tag→digest index | `TagStore` |
 | `symlink_store.rs` | Install symlinks (candidate/current) | `SymlinkStore`, `SymlinkKind` |
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
+| `index_store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
 | `reference_manager.rs` | Forward symlinks + back-references for GC | `ReferenceManager` |
 
 ### Cross-cutting link primitives
@@ -49,24 +58,31 @@ pub struct FileStructure {
     pub blobs: BlobStore,
     pub layers: LayerStore,
     pub packages: PackageStore,
-    pub tags: TagStore,
+    pub index: IndexStore,
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
+    pub locks: PathBuf,
 }
 ```
 
-One instance per session. Sub-stores public fields. `root()` return OCX home path.
+One instance per session. Sub-stores public fields. `root()` return OCX home path. `locks` is a
+non-store field — the machine-global cross-process lock directory (`$OCX_HOME/locks`), never in
+the GC graph. Locking policy (when to lock the data file in place vs. `lock_scoped` into `locks/`):
+`arch-principles.md` "Locking Policy".
 
 ### Never Re-Construct a Store (Block-tier)
 
-Never `<Store>::new(root.join("tags"))` / `.join("blobs")` / etc. to reach a store — that
+Never `<Store>::new(root.join("blobs"))` / etc. to reach a store — that
 re-constructs a store `FileStructure` already owns, via a literal path join instead of the
 canonical accessor. Always reach a store through the already-constructed `FileStructure`
-(`FileStructure::with_root(root)` builds all seven stores in one place): `fs.tags`, `fs.blobs`,
-`fs.layers`, `fs.packages`, `fs.symlinks`, `fs.state`, `fs.temp`. A literal `.join(...)` is fine
-when it is a genuine SUB-PATH under an already-correct store root (e.g. a scratch subdir under
-`fs.temp.root()`) — the rule is against RE-CONSTRUCTING the store, not against every join.
+(`FileStructure::with_root(root)` builds all seven stores in one place): `fs.blobs`,
+`fs.layers`, `fs.packages`, `fs.index`, `fs.symlinks`, `fs.state`, `fs.temp`. A literal `.join(...)`
+is fine when it is a genuine SUB-PATH under an already-correct store root (e.g. a scratch subdir
+under `fs.temp.root()`) — the rule is against RE-CONSTRUCTING the store, not against every join.
+The one sanctioned exception is the `--index`/`OCX_INDEX` override seam in `context.rs`, which
+builds a second `IndexStore` pointed elsewhere instead of using `fs.index` — see "TagStore
+deleted" above.
 
 **Root-level state files under `$OCX_HOME`:**
 
@@ -114,11 +130,25 @@ Key store methods: `path(pinned_id)`, `content(pinned_id)`, `metadata(pinned_id)
 
 `*_for_content()` methods canonicalize path (follow install symlinks), navigate to sibling file/dir.
 
-### TagStore — Local tag index
+### IndexStore — Local index collection
 
-Layout: `{root}/tags/{registry_slug}/{repo_path}.json`
+Layout: `{root}/index/<source_slug>/{config.json, c/index.json(+.etag), p/<ns>/<pkg>.json,
+p/<ns>/<pkg>/o/<algo>/<hex>.json}` — the `index.ocx.sh`-hosted wire grammar verbatim, one subtree
+per source (A2). `FileStructure.index` is the machine-local default; `--index`/`OCX_INDEX`
+construct a second instance elsewhere instead (never through `FileStructure`).
 
-Key methods: `tags(identifier) → PathBuf`, `list_repositories(registry) → Vec<String>`.
+`IndexStore` is pure wire grammar — root documents, catalog, dispatch objects
+(`write_root`/`read_root`/`read_root_uncatalogued`, `write_dispatch_object`/`read_dispatch_object`,
+`begin_catalog_transaction` → `CatalogTransaction`) — the actual local index `oci::index::LocalIndex`
+reads and writes. There is no flat blob CAS in this store: config blobs and managed-config
+payloads route exclusively through the machine-global `BlobStore` (`$OCX_HOME/blobs`) via
+`ChainedIndex`'s attached content store — the same seam `recover_absent_leaf` uses.
+`ChainedIndex` recompute-verifies both directions (cache-read and post-source-fetch, CWE-345); a
+present-but-corrupt entry is removed (`BlobStore::remove_blob`) before the source walk so the
+write-through that follows a successful fetch heals it.
+
+Outside the GC reachability graph — no `CasTier` variant, never walked by `ocx clean`. ADR:
+`adr_index_indirection.md` Decision A2–A4, B1.
 
 ### SymlinkStore — Install symlinks
 
@@ -205,7 +235,7 @@ Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blo
 
 `BlobStore::write_blob` / `read_blob` (stateless) are the only blob-IO entry points. Writes use `tempfile::NamedTempFile::new_in(parent)` + `sync_data` + atomic rename to the CAS path; content-addressed invariant (same digest ⟹ same bytes) means concurrent writers produce byte-equivalent output and the rename is idempotent. On Windows, `persist_with_windows_retry` wraps the rename with exponential backoff (3 retries: 100/400/800 ms ±25 % jitter) on `ERROR_SHARING_VIOLATION` (32) and `ERROR_ACCESS_DENIED` (5) — Windows Defender real-time scanning on `windows-latest` GitHub Actions runners is the dominant source of these transients (rattler `rename_with_retry` precedent). After retry exhaustion the function re-checks existence and returns Ok if the path now exists (idempotent recovery).
 
-Same-process dedup for concurrent same-digest fan-out lives in `package_manager::tasks::pull_local::PullCoordinator`, which owns a `singleflight::Group<oci::Digest, ()>` scoped per pull operation. The OCI manifest layer-download path is the only caller with concurrent same-digest writes; index-layer callers (`write_manifest_blob`, `local_index::stage_blob_bytes`) call `BlobStore::write_blob` directly without dedup — they are sequential and the content-addressed invariant covers any rare cross-process race.
+Same-process dedup for concurrent same-digest fan-out lives in `package_manager::tasks::pull_local::PullCoordinator`, which owns a `singleflight::Group<oci::Digest, ()>` scoped per pull operation. The OCI manifest layer-download path is the only caller with concurrent same-digest writes; index-layer callers (`write_manifest_blob`, `ChainedIndex::fetch_blob` write-through) call `BlobStore::write_blob` directly without dedup — they are sequential and the content-addressed invariant covers any rare cross-process race.
 
 There is no `LockFileEx` on blob `data` files. The F1 class (cross-process raw reader of a locked range → `ERROR_LOCK_VIOLATION`) is structurally impossible — see ADR `adr_file_lock_unification.md` §Decision 2.
 

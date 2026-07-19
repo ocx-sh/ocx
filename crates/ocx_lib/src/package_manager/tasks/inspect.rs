@@ -216,9 +216,9 @@ mod spec_tests {
 
     use crate::{
         MEDIA_TYPE_PACKAGE_METADATA_V1,
-        file_structure::{BlobStore, FileStructure, TagStore},
-        oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
-        oci::{self, Digest, Identifier},
+        file_structure::FileStructure,
+        oci::index::{ChainMode, Index, IndexImpl, IndexOperation, LocalConfig, LocalIndex},
+        oci::{self, Algorithm, Digest, Identifier},
         package_manager::{PackageManager, error::PackageErrorKind},
     };
 
@@ -227,9 +227,10 @@ mod spec_tests {
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
-    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // A fixed child digest used only as a *reference* inside an image index (the
+    // child manifest is not read in default mode), and a fixed layer digest
+    // referenced by a manifest descriptor — neither is a stored, verified object.
     const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const HEX_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const HEX_D: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     const METADATA_JSON: &str = r#"{"type":"bundle","version":1,"env":[{"key":"PATH","type":"path","value":"${installPath}/bin","visibility":"public"}],"dependencies":[],"entrypoints":{}}"#;
@@ -244,30 +245,110 @@ mod spec_tests {
         "linux/amd64".parse().unwrap()
     }
 
-    fn make_manager(dir: &TempDir) -> PackageManager {
+    /// A minimal fake source serving a fixed set of `(tag-or-digest) -> bytes`
+    /// manifest entries, keyed by tag for a tag-addressed lookup or by digest
+    /// string for a digest-addressed one (a platform-selected child), plus a
+    /// separate `digest -> bytes` map for opaque config blobs (`fetch_blob`,
+    /// a distinct seam from manifest resolution). Used with
+    /// `ChainMode::Default` so `PackageManager::inspect` can recover content
+    /// through the same AbsentLeaf-recovery path a live registry would — a
+    /// leaf platform manifest is never locally cached (A3), so an
+    /// offline-only pre-seeded fixture cannot answer a lookup for one.
+    #[derive(Clone, Default)]
+    struct FakeManifestSource {
+        entries: std::collections::HashMap<String, (Vec<u8>, Digest, oci::Manifest)>,
+        blobs: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl FakeManifestSource {
+        fn with(mut self, key: &str, bytes: &[u8]) -> Self {
+            let digest = Algorithm::Sha256.hash(bytes);
+            let manifest = serde_json::from_slice(bytes).unwrap();
+            self.entries.insert(key.to_string(), (bytes.to_vec(), digest, manifest));
+            self
+        }
+
+        /// Register an opaque blob (e.g. a package-metadata config blob,
+        /// which does not parse as an OCI [`oci::Manifest`]) served by
+        /// `fetch_blob`, keyed by its own digest string.
+        fn with_blob(mut self, digest: &str, bytes: &[u8]) -> Self {
+            self.blobs.insert(digest.to_string(), bytes.to_vec());
+            self
+        }
+
+        fn lookup(&self, identifier: &Identifier) -> Option<(Vec<u8>, Digest, oci::Manifest)> {
+            let key = match identifier.digest() {
+                Some(digest) => digest.to_string(),
+                None => identifier.tag_or_latest().to_string(),
+            };
+            self.entries.get(&key).cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IndexImpl for FakeManifestSource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, oci::Manifest)>> {
+            Ok(self.lookup(identifier).map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<Digest>> {
+            Ok(self.lookup(identifier).map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            // Config blobs are fetched by digest via `Index::fetch_blob`
+            // (`load_config_metadata`), a separate seam from
+            // `fetch_manifest_raw_bytes`.
+            Ok(self.blobs.get(&blob_ref.digest().to_string()).cloned())
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> crate::Result<Option<(Vec<u8>, Digest, oci::Manifest)>> {
+            Ok(self.lookup(identifier))
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Build a `PackageManager` chained to `source` under `ChainMode::Default`.
+    fn make_manager(dir: &TempDir, source: FakeManifestSource) -> PackageManager {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: fs.index.clone(),
+            }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+        );
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// An offline `PackageManager` with no sources and an empty local index
+    /// — for tests asserting a genuine local miss / policy block.
+    fn make_offline_manager(dir: &TempDir) -> PackageManager {
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: fs.index.clone(),
             }),
             Vec::new(),
             ChainMode::Offline,
         );
         PackageManager::new(fs, index, None, REGISTRY)
-    }
-
-    fn write_tag_lock(tag_path: &std::path::Path, d: &Digest) {
-        std::fs::create_dir_all(tag_path.parent().unwrap()).unwrap();
-        let json = format!(r#"{{"version":1,"repository":"{REGISTRY}/{REPO}","tags":{{"{TAG}":"{d}"}}}}"#);
-        std::fs::write(tag_path, json).unwrap();
-    }
-
-    fn write_blob(dir: &TempDir, d: &Digest, bytes: &str) {
-        let blob_store = BlobStore::new(dir.path().join("blobs"));
-        let path = blob_store.data(REGISTRY, d);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, bytes).unwrap();
     }
 
     fn image_manifest_json(config_digest: &Digest) -> String {
@@ -279,16 +360,21 @@ mod spec_tests {
     }
 
     /// Default mode against a flat image manifest returns metadata plus the
-    /// manifest's layer descriptors — no `--resolve` needed.
+    /// manifest's layer descriptors — no `--resolve` needed. A leaf platform
+    /// manifest is never locally cached (A3); the manager is chained to a
+    /// live fake source under `ChainMode::Default` (default-inspect uses
+    /// `IndexOperation::Resolve`, so the walk reaches it) that recovers it.
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_flat_manifest_returns_metadata_and_layers() {
         let dir = TempDir::new().unwrap();
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
-        write_blob(&dir, &digest(HEX_A), &image_manifest_json(&digest(HEX_C)));
-        write_blob(&dir, &digest(HEX_C), METADATA_JSON);
+        let config_digest = Algorithm::Sha256.hash(METADATA_JSON.as_bytes());
+        let manifest_json = image_manifest_json(&config_digest);
+        let manifest_digest = Algorithm::Sha256.hash(manifest_json.as_bytes());
+        let source = FakeManifestSource::default()
+            .with(TAG, manifest_json.as_bytes())
+            .with_blob(&config_digest.to_string(), METADATA_JSON.as_bytes());
 
-        let mgr = make_manager(&dir);
+        let mgr = make_manager(&dir, source);
         let result = mgr.inspect(&tagged_id(), linux_amd64(), false).await.unwrap();
 
         match result {
@@ -297,7 +383,7 @@ mod spec_tests {
                 metadata,
                 layers,
             } => {
-                assert_eq!(pinned.digest(), digest(HEX_A));
+                assert_eq!(pinned.digest(), manifest_digest);
                 assert_eq!(metadata.env().expect("env").into_iter().count(), 1);
                 assert_eq!(layers.len(), 1, "manifest layer surfaced in default mode");
                 assert_eq!(layers[0].digest, format!("sha256:{HEX_D}"));
@@ -308,24 +394,25 @@ mod spec_tests {
     }
 
     /// Default mode against an image index returns the platform candidates,
-    /// no metadata loaded.
+    /// no metadata loaded. The top-level index is dispatch-shaped (locally
+    /// cacheable, A3); the child is only a reference here (not read in
+    /// default mode), so a fixed digest is fine and no fake source is needed.
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_image_index_returns_candidates() {
         let dir = TempDir::new().unwrap();
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
         let index_json = format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child}","size":7,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
             child = digest(HEX_B),
         );
-        write_blob(&dir, &digest(HEX_A), &index_json);
+        let index_digest = Algorithm::Sha256.hash(index_json.as_bytes());
+        let source = FakeManifestSource::default().with(TAG, index_json.as_bytes());
 
-        let mgr = make_manager(&dir);
+        let mgr = make_manager(&dir, source);
         let result = mgr.inspect(&tagged_id(), oci::Platform::any(), false).await.unwrap();
 
         match result {
             InspectResult::Candidates { pinned, candidates } => {
-                assert_eq!(pinned.digest(), digest(HEX_A), "pinned = index digest");
+                assert_eq!(pinned.digest(), index_digest, "pinned = index digest");
                 assert_eq!(candidates.len(), 1);
                 assert_eq!(candidates[0].identifier.digest(), digest(HEX_B));
                 assert_eq!(candidates[0].platform, linux_amd64());
@@ -336,26 +423,29 @@ mod spec_tests {
     }
 
     /// `--resolve` against an image index platform-selects the child and
-    /// returns metadata plus a 3-entry chain.
+    /// returns metadata plus a 3-entry chain. The top-level index is
+    /// dispatch-shaped (locally cacheable); the platform-selected child is a
+    /// leaf, recovered via the fake source.
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_resolve_image_index_returns_chain() {
         let dir = TempDir::new().unwrap();
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
+        let config_digest = Algorithm::Sha256.hash(METADATA_JSON.as_bytes());
+        let child_json = image_manifest_json(&config_digest);
+        let child_digest = Algorithm::Sha256.hash(child_json.as_bytes());
         let index_json = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child}","size":1,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
-            child = digest(HEX_B),
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":1,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
         );
-        write_blob(&dir, &digest(HEX_A), &index_json);
-        write_blob(&dir, &digest(HEX_B), &image_manifest_json(&digest(HEX_C)));
-        write_blob(&dir, &digest(HEX_C), METADATA_JSON);
+        let source = FakeManifestSource::default()
+            .with(TAG, index_json.as_bytes())
+            .with(&child_digest.to_string(), child_json.as_bytes())
+            .with_blob(&config_digest.to_string(), METADATA_JSON.as_bytes());
 
-        let mgr = make_manager(&dir);
+        let mgr = make_manager(&dir, source);
         let result = mgr.inspect(&tagged_id(), linux_amd64(), true).await.unwrap();
 
         match result {
             InspectResult::Resolved { pinned, chain, .. } => {
-                assert_eq!(pinned.digest(), digest(HEX_B));
+                assert_eq!(pinned.digest(), child_digest);
                 assert_eq!(chain.chain.len(), 3, "index + child + config");
             }
             other => panic!("expected Resolved, got {other:?}"),
@@ -371,7 +461,7 @@ mod spec_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_unknown_tag_is_policy_blocked_offline() {
         let dir = TempDir::new().unwrap();
-        let mgr = make_manager(&dir);
+        let mgr = make_offline_manager(&dir);
         let err = mgr
             .inspect(&tagged_id(), oci::Platform::any(), false)
             .await
@@ -406,20 +496,19 @@ mod spec_tests {
         const BAD_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"constant","value":"${deps.missing.installPath}/x","visibility":"public"}],"entrypoints":{}}"#;
 
         let dir = TempDir::new().unwrap();
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
+        let config_digest = Algorithm::Sha256.hash(BAD_METADATA_JSON.as_bytes());
         // The image manifest's config descriptor advertises the structurally
         // invalid metadata blob's length so the media-type/size gate passes
         // and validation is the failing step.
         let manifest_json = format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config}","size":{size}}},"layers":[]}}"#,
-            config = digest(HEX_C),
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
             size = BAD_METADATA_JSON.len(),
         );
-        write_blob(&dir, &digest(HEX_A), &manifest_json);
-        write_blob(&dir, &digest(HEX_C), BAD_METADATA_JSON);
+        let source = FakeManifestSource::default()
+            .with(TAG, manifest_json.as_bytes())
+            .with_blob(&config_digest.to_string(), BAD_METADATA_JSON.as_bytes());
 
-        let mgr = make_manager(&dir);
+        let mgr = make_manager(&dir, source);
         let err = mgr
             .inspect(&tagged_id(), oci::Platform::any(), false)
             .await
@@ -440,13 +529,11 @@ mod spec_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_bad_child_digest_is_internal_digest_error() {
         let dir = TempDir::new().unwrap();
-        let tag_store = TagStore::new(dir.path().join("tags"));
-        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
         // Child descriptor `digest` is not a valid `algorithm:hex` string.
         let index_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"not-a-valid-digest","size":7,"platform":{"os":"linux","architecture":"amd64"}}]}"#;
-        write_blob(&dir, &digest(HEX_A), index_json);
+        let source = FakeManifestSource::default().with(TAG, index_json.as_bytes());
 
-        let mgr = make_manager(&dir);
+        let mgr = make_manager(&dir, source);
         let err = mgr
             .inspect(&tagged_id(), oci::Platform::any(), false)
             .await

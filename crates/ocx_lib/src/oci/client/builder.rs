@@ -189,12 +189,13 @@ impl ClientBuilder {
 ///
 /// [`Config`]: crate::config::Config
 fn mirrors_from_env() -> Result<MirrorMap, MirrorConfigError> {
-    let (entries, _pairs) = crate::config::mirror::resolve_mirror_map(
+    let resolved = crate::config::mirror::resolve_mirror_map(
         &crate::config::Config::default(),
         crate::env::mirrors()?,
         &crate::env::insecure_registries(),
     )?;
-    Ok(MirrorMap::new(entries))
+    // Registry role only — an index-only mirror must never rewrite OCI traffic.
+    Ok(MirrorMap::new(resolved.registry))
 }
 
 #[cfg(test)]
@@ -339,6 +340,62 @@ mod tests {
         assert!(
             client.mirrors.get("ghcr.io").is_some(),
             "ghcr.io mirror entry must be present on the built client"
+        );
+    }
+
+    // ── T-arch-G2: index-only OCX_MIRRORS entry excluded from Client.mirrors ──
+    //
+    // Traces: mirror-invariant audit 2026-07-19, gap G2.
+    //
+    // `mirrors_from_env` takes only `resolved.registry` — the F5b union value
+    // lets a host declare an `index`-role-only endpoint
+    // (`{"index": "..."}`), which must never reach `Client.mirrors` (that map
+    // feeds the OCI-distribution read path only). The sibling test above
+    // (`from_env_with_progress_reads_ocx_mirrors_env`) only exercises the
+    // bare-string (both-roles) form; these two close the index-only and mixed
+    // gaps using the same env-injection + inspector mechanics.
+
+    /// An `OCX_MIRRORS` entry that declares ONLY the `index` role must leave
+    /// the built client's `mirrors` map empty — the registry (OCI
+    /// distribution) read path must never be rewritten by an index-only
+    /// mirror declaration.
+    #[test]
+    fn from_env_with_progress_index_only_entry_yields_empty_client_mirrors() {
+        let env = crate::test::env::lock();
+        env.set(
+            crate::env::keys::OCX_MIRRORS,
+            r#"{"ghcr.io":{"index":"https://mirror.corp/idx"}}"#,
+        );
+
+        let client = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
+            .expect("an index-role-only OCX_MIRRORS entry must still build a client");
+
+        assert!(
+            client.mirrors.is_empty(),
+            "an index-only mirror entry must never populate Client.mirrors — the registry role is empty"
+        );
+    }
+
+    /// One index-only entry alongside one registry-bearing entry: the built
+    /// client's `mirrors` map must contain ONLY the registry-bearing host.
+    #[test]
+    fn from_env_with_progress_mixed_entries_keep_only_registry_bearing_host() {
+        let env = crate::test::env::lock();
+        env.set(
+            crate::env::keys::OCX_MIRRORS,
+            r#"{"ghcr.io":{"index":"https://mirror.corp/idx"},"quay.io":"https://mirror.corp/quay-remote"}"#,
+        );
+
+        let client = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
+            .expect("a mix of index-only and registry-bearing OCX_MIRRORS entries must still build a client");
+
+        assert!(
+            client.mirrors.get("ghcr.io").is_none(),
+            "the index-only ghcr.io entry must not appear in Client.mirrors"
+        );
+        assert!(
+            client.mirrors.get("quay.io").is_some(),
+            "the registry-bearing quay.io entry must appear in Client.mirrors"
         );
     }
 }

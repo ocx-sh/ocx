@@ -10,6 +10,7 @@ mod locked_file;
 pub mod path;
 mod same_dir;
 mod same_filesystem;
+mod scoped_lock;
 mod symlink_walk;
 
 pub use assemble::{
@@ -29,6 +30,7 @@ pub use file_lock::FileLock;
 pub use locked_file::{LockedFile, LockedJsonFile, LockedTomlFile};
 pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
+pub use scoped_lock::lock_scoped;
 pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};
 
 /// Returns whether `path` exists, swallowing any I/O error as `false`.

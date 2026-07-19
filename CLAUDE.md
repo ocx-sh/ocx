@@ -41,7 +41,7 @@ Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` be
 
 Single acceptance test:
 ```sh
-cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
+cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v
 ```
 
 Lint tooling setup (one-off): `task ocx:index-update` populates `.ocx/index/` for every tool in `ocx.toml`; first `direnv allow` (or `task` invocation) materializes the symlinks under `~/.ocx/`.

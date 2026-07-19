@@ -2,13 +2,14 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for client-declared OCI registry mirror support.
 
-These tests run against the CURRENT STUBS (Phase 3, contract-first TDD).  All
-six scenarios are expected to FAIL against the stubs — the contracts they
-encode are the Phase 4 implementation targets.
+Regression tests pinning the implemented registry-role mirror behaviour: the
+mirror endpoint appears only at the network seam
+(``Client::transport_reference``/``transport_registry``); storage paths,
+``ocx.lock`` entries, GC reachability, and report identity all key on the
+canonical logical registry (mirror-invariant audit 2026-07-19, gaps G3-G5).
 
 Design record:
     .claude/artifacts/adr_oci_registry_mirror.md  (behaviour authority)
-    .claude/state/plans/plan_oci_registry_mirror.md  (scenarios 1–6, Step 3.2b)
 
 Dual-registry harness:
     The ``mirror_registry`` fixture (test/conftest.py) provides a second
@@ -32,8 +33,6 @@ import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-import pytest
 
 from src.helpers import make_package
 from src.runner import OcxRunner
@@ -146,13 +145,13 @@ def test_mirror_install_routes_to_configured_mirror(
     success is only possible if routing worked.
 
     Traces: plan scenario 1 — "push tool to mirror only; configure
-    ``[mirrors."<upstream>"] url=<mirror>``; ``ocx package install <upstream>``
+    ``[mirrors] "<upstream>" = "<mirror>"``; ``ocx package install <upstream>``
     → served by mirror"; ADR R2 (replace semantics).
     """
     # Create a runner that targets the mirror registry for pushing.
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
 
-    mirror_pkg = make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
+    make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
 
     # Precondition: absent from the upstream registry.
     assert head_manifest(registry, unique_repo, "1.0.0") == 404, (
@@ -162,7 +161,7 @@ def test_mirror_install_routes_to_configured_mirror(
     # Configure the mirror: upstream registry → mirror registry.
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     # Install using the upstream identifier — OCX must route to the mirror.
@@ -235,7 +234,7 @@ def test_mirror_push_targets_canonical_registry_not_mirror(
     # tag-listing read can reach it; the push itself stays canonical (ADR Q5).
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
@@ -320,7 +319,7 @@ def test_mirror_ocx_lock_records_canonical_host_and_digest(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
     # Plain-HTTP mirror host must be in OCX_INSECURE_REGISTRIES (ADR F2) so the
     # lock resolution read can reach it.
@@ -396,7 +395,7 @@ def test_mirror_library_prefix_repo_routes_verbatim(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     # Install with the library/ prefix in the identifier. The plain-HTTP mirror
@@ -450,7 +449,7 @@ def test_plain_http_mirror_with_insecure_flag_succeeds(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     fq = f"{registry}/{unique_repo}:1.0.0"
@@ -508,7 +507,7 @@ def test_plain_http_mirror_without_insecure_flag_gives_actionable_error(
 
     write_home_config(
         ocx,
-        f'[mirrors."{registry}"]\nurl = "http://{mirror_registry}"\n',
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
 
     fq = f"{registry}/{unique_repo}:1.0.0"
@@ -539,3 +538,218 @@ def test_plain_http_mirror_without_insecure_flag_gives_actionable_error(
         "error message must name the offending mirror host, got:\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# G3 — CAS paths keyed by canonical slug after a mirrored install
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_install_cas_paths_keyed_by_canonical_slug(
+    ocx: OcxRunner,
+    registry: str,
+    mirror_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``blobs/``, ``layers/``, ``packages/`` after a mirror-routed install are
+    keyed by the CANONICAL (upstream) registry slug — never the mirror's.
+    The mirror endpoint is transport-only; everything off the network seam
+    keys on the original logical identity.
+
+    Paired positive/negative: the positive proves the layout landed under
+    the canonical slug with real content, the negative proves no
+    mirror-slug subtree leaked in alongside it (analog of the cross-platform
+    positive+negative pairing convention in quality-rust.md).
+
+    Traces: mirror-invariant audit 2026-07-19, gap G3.
+    """
+    from src.assertions import assert_dir_exists, assert_not_exists  # noqa: PLC0415
+
+    # Push to the mirror only — the package exists ONLY there.
+    mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
+    make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
+
+    assert head_manifest(registry, unique_repo, "1.0.0") == 404, (
+        "package must be absent from upstream before the mirror-routed install"
+    )
+
+    write_home_config(
+        ocx,
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
+    )
+    fq = f"{registry}/{unique_repo}:1.0.0"
+    run_with_env(
+        ocx,
+        "package",
+        "install",
+        fq,
+        extra_env={"OCX_INSECURE_REGISTRIES": f"{registry},{mirror_registry}"},
+    )
+
+    home = Path(ocx.env["OCX_HOME"])
+    canonical_slug = _registry_slug(registry)
+    mirror_slug = _registry_slug(mirror_registry)
+
+    for sub in ("blobs", "layers", "packages"):
+        canonical_dir = home / sub / canonical_slug
+        mirror_dir = home / sub / mirror_slug
+        assert_dir_exists(
+            canonical_dir,
+            f"expected {sub}/{canonical_slug}/ to exist after a mirror-routed install",
+        )
+        assert any(canonical_dir.rglob("*")), (
+            f"{canonical_dir} must contain content after install"
+        )
+        assert_not_exists(
+            mirror_dir,
+            f"{sub}/{mirror_slug}/ must NOT exist — the mirror is transport-only, "
+            "CAS paths key on the canonical identity, not the transport it "
+            "travelled over",
+        )
+
+    packages_root = home / "packages" / canonical_slug
+    manifest_paths = list(packages_root.rglob("manifest.json"))
+    assert manifest_paths, f"expected at least one manifest.json under {packages_root}"
+
+
+# ---------------------------------------------------------------------------
+# G4 — offline resolution survives mirror-config removal
+# ---------------------------------------------------------------------------
+
+
+def test_offline_exec_survives_mirror_config_removal(
+    ocx: OcxRunner,
+    registry: str,
+    mirror_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """Local state has zero dependence on the mirror endpoint staying
+    configured or reachable: install a package that exists ONLY on the
+    mirror, then strip BOTH the ``[mirrors]`` config section AND the mirror
+    host from ``OCX_INSECURE_REGISTRIES`` — ``--offline package exec`` must
+    still succeed, running the binary straight from the local CAS.
+
+    Traces: mirror-invariant audit 2026-07-19, gap G4.
+    """
+    mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
+    mirror_pkg = make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
+
+    assert head_manifest(registry, unique_repo, "1.0.0") == 404, (
+        "package must be absent from upstream before the mirror-routed install"
+    )
+
+    write_home_config(
+        ocx,
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
+    )
+    fq = f"{registry}/{unique_repo}:1.0.0"
+    run_with_env(
+        ocx,
+        "package",
+        "install",
+        fq,
+        extra_env={"OCX_INSECURE_REGISTRIES": f"{registry},{mirror_registry}"},
+    )
+
+    # Overwrite config.toml WITHOUT a [mirrors] section — the mirror
+    # configuration no longer exists on disk at all.
+    write_home_config(ocx, "")
+
+    # Offline exec, with the mirror host also dropped from
+    # OCX_INSECURE_REGISTRIES — local resolution must not depend on the
+    # mirror endpoint staying configured or reachable. `make_package`'s
+    # default binary (`hello`) echoes a unique marker (src/helpers.py).
+    result = run_with_env(
+        ocx,
+        "--offline",
+        "package",
+        "exec",
+        f"{unique_repo}:1.0.0",
+        "--",
+        "hello",
+        extra_env={"OCX_INSECURE_REGISTRIES": registry},
+    )
+
+    assert result.returncode == 0, (
+        f"offline exec must succeed with no mirror config and no mirror host "
+        f"in OCX_INSECURE_REGISTRIES (rc={result.returncode})\nstderr: {result.stderr}"
+    )
+    assert result.stdout.strip() == mirror_pkg.marker, (
+        "offline exec must run the binary installed from the mirror-routed "
+        "pull, entirely from local state"
+    )
+
+
+# ---------------------------------------------------------------------------
+# G5 — GC after a mirrored install: reachability is mirror-agnostic
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_install_clean_reachability_is_mirror_agnostic(
+    ocx: OcxRunner,
+    registry: str,
+    mirror_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """GC reachability after a mirror-routed install is mirror-agnostic —
+    mirror of ``test_clean.py::test_clean_preserves_referenced_objects`` /
+    ``test_clean_removes_unreferenced_objects`` but through the mirror
+    fixture: (a) installed (referenced) content survives ``ocx clean``; (b)
+    once uninstalled (unreferenced), ``ocx clean`` collects it. No
+    mirror-keyed subtree should ever appear under blobs/layers/packages,
+    before or after clean.
+
+    Traces: mirror-invariant audit 2026-07-19, gap G5.
+    """
+    from src.assertions import assert_dir_exists, assert_not_exists  # noqa: PLC0415
+
+    mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
+    make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
+
+    assert head_manifest(registry, unique_repo, "1.0.0") == 404, (
+        "package must be absent from upstream before the mirror-routed install"
+    )
+
+    write_home_config(
+        ocx,
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
+    )
+    # `Context::try_init` resolves the mirror map (and validates its plain-HTTP
+    # host against OCX_INSECURE_REGISTRIES) at command startup, before any
+    # network work — so every subsequent command in this test, even purely
+    # local ones like `clean`, needs the mirror host listed here as long as
+    # the [mirrors] config stays on disk (ADR F2 fail-loud gate).
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
+
+    fq = f"{registry}/{unique_repo}:1.0.0"
+    result = ocx.json("package", "install", fq)
+    content = Path(result[fq]["path"]).resolve()
+    assert_dir_exists(content)
+
+    home = Path(ocx.env["OCX_HOME"])
+    mirror_slug = _registry_slug(mirror_registry)
+
+    def assert_no_mirror_slug_leak() -> None:
+        for sub in ("blobs", "layers", "packages"):
+            assert_not_exists(
+                home / sub / mirror_slug,
+                f"{sub}/{mirror_slug}/ must NOT exist — CAS paths key on the "
+                "canonical identity, never the transport-only mirror host",
+            )
+
+    assert_no_mirror_slug_leak()
+
+    # (a) Referenced (still installed): clean preserves the content.
+    ocx.plain("clean")
+    assert_dir_exists(content)
+    assert_no_mirror_slug_leak()
+
+    # (b) Unreferenced (uninstalled): clean collects the content.
+    ocx.plain("package", "uninstall", fq)
+    assert_dir_exists(content)  # still on disk until clean actually runs
+    ocx.plain("clean")
+    assert_not_exists(content)
+    assert_no_mirror_slug_leak()

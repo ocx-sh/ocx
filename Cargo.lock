@@ -3056,6 +3056,7 @@ dependencies = [
  "lzma-rust2",
  "oci-client",
  "regex",
+ "reqwest",
  "rpassword",
  "schemars",
  "secrecy",

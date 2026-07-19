@@ -20,9 +20,9 @@ use super::resolve::{ChainBlob, ChainRole, ResolvedChain};
 /// concurrent same-digest fan-out from the resolver `JoinSet`. Created per
 /// [`PackageManager::pull_local`] call so entries are freed when the pull completes.
 ///
-/// Index-layer callers (`write_manifest_blob`, `local_index::stage_blob_bytes`) call
-/// `BlobStore::write_blob` directly without a coordinator — they are sequential callers
-/// and content-addressed safety covers them.
+/// Index-layer callers (`write_manifest_blob`, `ChainedIndex::fetch_blob` write-through)
+/// call `BlobStore::write_blob` directly without a coordinator — they are sequential
+/// callers and content-addressed safety covers them.
 pub(crate) struct PullCoordinator {
     write_group: utility::singleflight::Group<oci::Digest, ()>,
 }
@@ -175,6 +175,9 @@ impl PackageManager {
             .unwrap_or_else(|| oci::OCI_IMAGE_MEDIA_TYPE.to_string());
         let chain = ResolvedChain {
             pinned: pinned.clone(),
+            // Local materialization from already-present layers — no registry
+            // download, so the physical ref is the logical pinned itself.
+            transport_pinned: pinned.clone(),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,
@@ -527,7 +530,7 @@ async fn stage_blob_bytes(
 #[cfg(test)]
 mod tests {
     use crate::{
-        file_structure::{BlobStore, FileStructure, TagStore},
+        file_structure::{FileStructure, IndexStore},
         oci::{
             self,
             index::{ChainMode, Index, LocalConfig, LocalIndex},
@@ -563,8 +566,7 @@ mod tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Offline,
@@ -840,8 +842,7 @@ mod tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             ChainMode::Offline,
@@ -1011,8 +1012,7 @@ mod tests {
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_chained(
             LocalIndex::new(LocalConfig {
-                tag_store: TagStore::new(dir.path().join("tags")),
-                blob_store: BlobStore::new(dir.path().join("blobs")),
+                index_store: IndexStore::new(dir.path().join("index")),
             }),
             Vec::new(),
             crate::oci::index::ChainMode::Offline,

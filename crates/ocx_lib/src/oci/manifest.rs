@@ -7,7 +7,7 @@
 //! bytes from a `package::info::Info` + layer descriptors, with no I/O),
 //! see [`crate::oci::manifest_builder`].
 
-use super::{Manifest, Platform};
+use super::{Digest, Manifest, Platform};
 
 /// Returns `true` if the manifest contains an entry for the given platform.
 ///
@@ -27,6 +27,24 @@ pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
     let native = super::native::Platform::from(platform);
     let target = Some(native);
     index.manifests.iter().any(|e| e.platform == target)
+}
+
+/// Returns the digest of the manifest entry for the given platform, if present.
+///
+/// Complements [`has_platform`] (existence only) by extracting the pinned
+/// digest, so a caller (e.g. the canonical-tag push,
+/// `adr_index_indirection.md` Decision E) can address that exact platform
+/// manifest without re-deriving it from the layers/metadata that produced it.
+pub fn platform_manifest_digest(manifest: &Manifest, platform: &Platform) -> Option<Digest> {
+    let Manifest::ImageIndex(index) = manifest else {
+        return None;
+    };
+    let target = Some(super::native::Platform::from(platform));
+    index
+        .manifests
+        .iter()
+        .find(|entry| entry.platform == target)
+        .and_then(|entry| Digest::try_from(&entry.digest).ok())
 }
 
 #[cfg(test)]
@@ -85,5 +103,42 @@ mod tests {
         let manifest = Manifest::Image(oci::ImageManifest::default());
         let platform: Platform = "linux/amd64".parse().unwrap();
         assert!(!has_platform(&manifest, &platform));
+    }
+
+    #[test]
+    fn platform_manifest_digest_returns_matching_entry() {
+        let hex_amd64 = "a".repeat(64);
+        let hex_arm64 = "b".repeat(64);
+        let manifest = make_index(vec![
+            ("linux/amd64", &format!("sha256:{hex_amd64}"), 100),
+            ("linux/arm64", &format!("sha256:{hex_arm64}"), 200),
+        ]);
+        let platform: Platform = "linux/arm64".parse().unwrap();
+        let digest = platform_manifest_digest(&manifest, &platform).expect("entry present");
+        assert_eq!(digest.to_string(), format!("sha256:{hex_arm64}"));
+    }
+
+    #[test]
+    fn platform_manifest_digest_missing_platform_returns_none() {
+        let manifest = make_index(vec![("linux/amd64", &format!("sha256:{}", "a".repeat(64)), 100)]);
+        let platform: Platform = "linux/arm64".parse().unwrap();
+        assert!(platform_manifest_digest(&manifest, &platform).is_none());
+    }
+
+    #[test]
+    fn platform_manifest_digest_image_manifest_returns_none() {
+        let manifest = Manifest::Image(oci::ImageManifest::default());
+        let platform: Platform = "linux/amd64".parse().unwrap();
+        assert!(platform_manifest_digest(&manifest, &platform).is_none());
+    }
+
+    #[test]
+    fn platform_manifest_digest_malformed_digest_returns_none() {
+        // The digest string isn't validated at index-merge time — a bare
+        // string like a mirror-generated placeholder can slip in. The
+        // lookup must not panic; it treats an unparseable digest as absent.
+        let manifest = make_index(vec![("linux/amd64", "sha256:not-valid-hex", 100)]);
+        let platform: Platform = "linux/amd64".parse().unwrap();
+        assert!(platform_manifest_digest(&manifest, &platform).is_none());
     }
 }

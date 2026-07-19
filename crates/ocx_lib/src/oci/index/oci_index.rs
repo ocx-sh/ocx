@@ -9,16 +9,18 @@ use crate::{Result, oci, package::tag::Tag};
 mod cache;
 mod config;
 
-pub use config::Config;
+pub use config::OciIndexConfig;
 
+/// Remote client that **derives** an index from a plain OCI registry's tags
+/// API (`adr_index_indirection.md` Decision H).
 #[derive(Clone)]
-pub struct Index {
+pub struct OciIndex {
     client: oci::Client,
     cache: cache::SharedCache,
 }
 
-impl Index {
-    pub fn new(config: Config) -> Self {
+impl OciIndex {
+    pub fn new(config: OciIndexConfig) -> Self {
         Self {
             client: config.client,
             cache: Default::default(),
@@ -27,7 +29,7 @@ impl Index {
 }
 
 #[async_trait]
-impl index_impl::IndexImpl for Index {
+impl index_impl::IndexImpl for OciIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         if let Some(cached) = self.cache.get_repositories(registry).await {
             return Ok(cached);
@@ -82,6 +84,16 @@ impl index_impl::IndexImpl for Index {
     async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
         let bytes = self.client.pull_blob(blob_ref).await?;
         Ok(Some(bytes))
+    }
+
+    /// Returns the verbatim manifest bytes the registry served, digest
+    /// recompute-verified by the client — the trust anchor an index store
+    /// persists without re-serialisation (`adr_index_indirection.md` A3).
+    async fn fetch_manifest_raw_bytes(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
+        Ok(self.client.fetch_manifest_raw_bytes(identifier).await?)
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

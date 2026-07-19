@@ -33,7 +33,7 @@ Patched dep: `oci-client` at `external/rust-oci-client` (local git submodule).
 |-----------|-------|-----|
 | **Facade** | `PackageManager`, `Index`, `Client` | Single coordination point hide subsystem complexity |
 | **Strategy / trait dispatch** | `IndexImpl` (local/remote), `OciTransport` (native/test), archive backends (tar/zip) | Testability, swappable impls |
-| **Composite root** | `FileStructure` wraps `BlobStore` + `LayerStore` + `PackageStore` + `TagStore` + `SymlinkStore` + `TempStore` | Three-tier CAS: raw blobs → extracted layers → assembled packages; tags + symlinks = mutable namespace on top |
+| **Composite root** | `FileStructure` wraps `BlobStore` + `LayerStore` + `PackageStore` + `IndexStore` (`index/` — the local index collection) + `SymlinkStore` + `StateStore` + `TempStore`; `--index`/`OCX_INDEX` construct a second `IndexStore` outside `FileStructure` instead of using its `index` field | Three-tier CAS: raw blobs → extracted layers → assembled packages; symlinks = mutable namespace on top |
 | **Three-layer errors** | `Error` → `PackageError` → `PackageErrorKind` | Per-package diagnosis in batch ops |
 | **Command pattern** | CLI: args → identifiers → manager task → report data → API output | Uniform flow input → output |
 | **Ref separation for GC** | `refs/symlinks/` (install back-refs, GC roots), `refs/deps/`, `refs/layers/`, `refs/blobs/` (forward-refs) | Single BFS pass across all three CAS tiers for reachability; lock-free |
@@ -63,7 +63,7 @@ CLI command (clap parse)
 | **Blob** | Raw OCI blob (manifests, image indexes, referrers) stored at `blobs/{registry}/{algorithm}/{2hex}/{remaining_hex}/` |
 | **Layer** | Extracted OCI tar layer at `layers/{registry}/{algorithm}/{2hex}/{remaining_hex}/content/` |
 | **Package** | Assembled package at `packages/{registry}/{algorithm}/{2hex}/{remaining_hex}/`; `content/` files hardlinked from `layers/` |
-| **Index** | Local JSON snapshot of registry metadata (tags, manifests) for offline/reproducibility |
+| **Index** | One wire format (hosted `index.ocx.sh` grammar), differing only by location (hosted/mirrored/shipped/local), provenance (published copy vs OCX-derived), and completeness (partial vs full-mirror). Local home is a **collection** at `index/{source}/` — dispatch objects only (`o/<algo>/<hex>.json`), never a leaf manifest. Resolves *version choice* offline; plays no part in `ocx.lock` resolution (locks are index-free). |
 | **Candidate** | Symlink at `symlinks/{registry}/{repo}/candidates/{tag}` — pinned at install time |
 | **Current** | Floating symlink at `symlinks/{registry}/{repo}/current` — set by `ocx select` |
 | **Project ledger** | Flat symlink store at `$OCX_HOME/projects/` — one symlink per registered project, name = 16-hex SHA-256 of canonical project dir, target = project dir. GC roots for multi-project clean. Self-link for the global toolchain is prohibited (global file's project dir is `$OCX_HOME`); instead `clean::collect_project_roots` adds an **implicit `$OCX_HOME/ocx.lock` root** so global lock-pinned packages are GC roots without a ledger entry (ADR `adr_global_toolchain_tier.md` D5 amended 2026-05-19). ADR: `adr_project_gc_symlink_ledger.md`. |
@@ -105,6 +105,7 @@ CLI command (clap parse)
 | `adr_ci_env_export_flag.md` | Realize handshake §6 CI export as `--ci[=provider]` flag on `ocx env`/`ocx package env` (not a command); GitHub autodetected two-file sink (rejects `--export-file`); GitLab JSON-lines, stdout default / `--export-file`; `--ci` ⟂ `--shell`; GitLab flavor added. |
 | `adr_self_setup.md` | `ocx self setup` — bare-binary install complement to the install script: bootstrap + env shim write + managed RC-block (`# >>> ocx v1 <hash> >>>`) in user shell profiles; `ExitCode::DirtyRcBlock` (82) for user-edited blocks; `ocx self update` refreshes shims post-swap (4C). |
 | `adr_cli_plugin_pattern.md` | Git-style `ocx <name>` → `ocx-<name>` PATH dispatch; plugins inherit parent env (trust boundary); built-ins always shadow |
+| `adr_index_indirection.md` | One index format, many copies — differing only by location/provenance/completeness; `LocalIndex` owns the local **collection** (home `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index`, one subtree per source, outside GC graph); object store holds dispatch objects only (`o/<algo>/<hex>.json`), leaf manifests never copied, absence ⇒ manifest with decode-verified self-heal; crash-safe per-package updates with derivable catalog entries; index resolves *version choice* only — `ocx.lock` is index-free; logical-identity keying with transport-only physical refs (mirror-seam precedent); canonical `sha256.<hex>` tags default-on at push; index.ocx.sh two-hop client (root→obs, frozen ● shapes, yank/deprecation surfacing, `c/index.json` digest-diff sync) + `[registries."<ns>"] index` protocol selector + `[mirrors]` registry/index role split (F5); components `LocalIndex`/`OcxIndex`/`OciIndex`/`IndexSync`/`ChainedIndex`; `TagLock`/`TagStore`/`TagGuard` deleted, no migration |
 | `adr_managed_config_tier.md` | Corporate managed configuration tier (`[managed]`) — scope: One-Way-Door Medium. Seed pointer in `config.toml` resolves to an operator-published `config.toml` package (v2: config-as-package, superseding the v1 custom-artifact wire shape), identity-gated snapshot merged as a synthetic 5th precedence tier, `ocx config push`/`ocx config update` reuse ordinary package machinery (versioning, cascade, rollback). |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
@@ -167,6 +168,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Sorted / dedup `Vec` fluently | `VecExt::sorted` / `unique_clone` | prelude |
 | Ignore `Result` deliberately | `ResultExt::ignore` | prelude |
 | Cross-process advisory file lock with RAII + in-place I/O via the lock-owning handle | `utility::fs::LockedFile` (+ `LockedJsonFile<T>` / `LockedTomlFile<T>` codec wrappers) | `crates/ocx_lib/src/utility/fs/locked_file.rs` |
+| Cross-process advisory lock keyed by a guarded directory's file identity, homed in a central sharded `locks/` root (never a sidecar next to the guarded data) | `utility::fs::lock_scoped(locks_root, scope, guarded_dir, discriminator, timeout)` | `crates/ocx_lib/src/utility/fs/scoped_lock.rs` |
 | Stateless content-addressed blob write/read (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore::write_blob` / `read_blob` | `crates/ocx_lib/src/file_structure/blob_store.rs` |
 | Per-pull-operation singleflight dedup of concurrent same-digest blob writes | `package_manager::tasks::pull_local::PullCoordinator` (wraps `singleflight::Group<oci::Digest, ()>`) | `crates/ocx_lib/src/package_manager/tasks/pull_local.rs` |
 | RAII "delete path on drop" guard | `utility::fs::DropFile` | `utility/fs/drop_file.rs` |
@@ -187,5 +189,12 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `utility::child_process::propagate_exit_code` | `utility/child_process.rs` |
 | Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `utility::path::move_to_front` | `utility/path.rs` |
 | File error with path context | `error::file_error(path, io_err)` | `crates/ocx_lib/src/error.rs` |
+
+## Locking Policy
+
+| Data shape | Mechanism |
+|---|---|
+| Stable inode, edited in place | `LockedFile` — lock the data file itself |
+| Atomic-rename-replaced data (inode rotates) | `lock_scoped` into `$OCX_HOME/locks` — never a persistent sidecar; sidecars outside `$OCX_HOME/locks` are a review Block-tier finding |
 
 **Check std first, then this catalog, then invent.** Most "small helper" needs already covered by `std::path`, `tokio::fs`, or existing entry above. If add new entry here, keep row to one line and put impl details in target module's doc comment, not this table.

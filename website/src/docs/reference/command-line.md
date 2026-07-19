@@ -43,10 +43,12 @@ miss. To recover, either run `ocx index update` online first, or switch to a
 digest-pinned identifier.
 
 ::: warning
-Running `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` (without a prior
-online install) fails with an `OfflineManifestMissing` error that names the missing digest.
-`ocx index update` writes only tag→digest pointers; it does not download manifest or layer blobs.
-Run `ocx install <pkg>` online first to populate the blob cache, then offline installs will work.
+`ocx index update <pkg>` writes the tag's dispatch object and root document into the local index,
+so a subsequent `ocx --offline package install <pkg>` can resolve the tool's per-platform digest
+with no network. The install itself still needs the actual manifest and layer archives, which the
+index does not carry — those are fetched into the [package store][fs-objects] only by an online
+`ocx package install` or `ocx package pull`. Run one of those online first if you need the binary
+itself available offline.
 :::
 
 ### `--remote` {#arg-remote}
@@ -55,7 +57,7 @@ Routes mutable lookups (tag list, catalog, tag→manifest resolution) to the
 remote registry instead of the local index. Pure-query commands
 ([`ocx index list`](#index-list), [`ocx index catalog`](#index-catalog),
 [`ocx package info`](#package-info)) do **not** persist the result to the
-local index — to refresh the persistent snapshot, run
+local index — to refresh it, run
 [`ocx index update`](#index-update) explicitly. Implies network access.
 
 Digest-addressed reads (manifests and layers already identified by a content
@@ -119,19 +121,25 @@ unpinned tags (adding `--frozen` is accepted but has no further effect).
 
 ### `--index` {#arg-index}
 
-Override the path to the [local index][fs-index] directory for this invocation.
-By default, ocx reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+Override the path to the [local index][fs-index] collection directory for this invocation.
+By default, ocx reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`) — a
+directory holding one subtree per source (`ocx.sh/`, `ghcr.io/`, …).
 
 ```shell
 ocx --index /path/to/bundled/index install cmake:3.28
 ```
 
-This flag is intended for environments where the [local index][fs-index] is bundled alongside a
-tool rather than living inside `OCX_HOME` — for example inside a [GitHub Action][github-actions-docs],
+This flag swaps the *whole* collection for a shipped one — never a partial overlay of the two. It
+is intended for environments where an index copy is bundled alongside a tool rather than living
+inside `OCX_HOME` — for example inside a [GitHub Action][github-actions-docs],
 [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features] that ships a frozen
-index snapshot as part of its release.
+index copy as part of its release.
 
-The flag has no effect when [`--remote`](#arg-remote) is set.
+Under [`--remote`](#arg-remote), tag- and catalog-addressed lookups bypass the local index entirely
+and query the registry directly, so `--index` has no effect on those. Digest-addressed lookups —
+including the digest a resolved tag carries once pinned — still consult the redirected collection
+first in every mode, `--remote` included, so `--index` keeps mattering for anything already pinned
+by digest.
 
 The same override can be set persistently via the [`OCX_INDEX`][env-ocx-index] environment
 variable. The `--index` flag takes precedence when both are set.
@@ -825,7 +833,7 @@ ocx direnv export [OPTIONS]
 ocx index catalog [OPTIONS] [REGISTRY...]
 ```
 
-Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local snapshot. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local index. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
 
 **Arguments**
 
@@ -847,7 +855,9 @@ Identifiers carrying a digest (`@sha256:...`) are rejected with a usage
 error — `index list` enumerates tags, and a digest narrows nothing. Use
 [`ocx package info <pkg>@<digest>`](#package-info) for a single artifact, or
 drop the `@digest` suffix. Tag-only identifiers (`<pkg>:<tag>`) still work
-as a tag filter on the returned list.
+as a tag filter on the returned list. With `--platforms`, a digest-bearing
+identifier (`<pkg>@<digest>`) is accepted and resolves directly to that
+artifact's platform set, offline when already cached locally.
 
 **Arguments**
 
@@ -861,7 +871,7 @@ as a tag filter on the returned list.
 
 ::: tip
 `index list` is a pure-query command — under [`--remote`](#arg-remote) it
-contacts the registry without writing the local tag store. To refresh the
+contacts the registry without writing the local index. To refresh the
 persistent snapshot, run [`ocx index update`](#index-update) explicitly.
 :::
 
@@ -871,24 +881,29 @@ persistent snapshot, run [`ocx index update`](#index-update) explicitly.
 ocx index update <PACKAGE>...
 ```
 
-Explicitly refresh the local index from the remote registry. **The only
-command that writes tag pointers to `$OCX_HOME/tags/` outside of
-`ocx install` / `ocx package pull`** (the install/pull path commits via
-`LocalIndex::commit_tag`, gated to skip pinned-id pulls). No manifest or
-layer blobs are written to `$OCX_HOME/blobs/` by `index update`.
+Explicitly refresh the local index for one or more packages from the remote source. Per tag, it
+writes the tag's dispatch object plus its root document into the [local index collection][in-depth-indices-layout]
+— never a leaf platform manifest — in a fixed, crash-safe order, then upserts the package's
+catalog entry. This is what keeps a committed `.ocx/index/` self-contained for **version
+choice**: resolving a locked tool's platform-manifest digest from the index afterward needs no
+other store or network access. The manifest bytes and layers themselves are content, still fetched
+on demand from the registry when actually installed.
 
-When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest pointer is
+When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag is
 recorded — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where
-the local tag store should contain only explicitly requested tags. When a bare identifier is used
-(e.g., `cmake`), digest pointers for all tags are recorded.
+the local index should contain only explicitly requested tags. When a bare identifier is used
+(e.g., `cmake`), every tag is recorded.
 
-After running `ocx index update <pkg>`, an `ocx --offline install <pkg>` will fail with
-`OfflineManifestMissing` until the blob cache is populated by a prior online `ocx install <pkg>`.
+`ocx index update` never writes to `$OCX_HOME/blobs/` or `$OCX_HOME/layers/` — those are populated
+only by an online `ocx package install` or `ocx package pull` that actually materializes a package.
+After running `ocx index update <pkg>`, an `ocx --offline package install <pkg>` resolves the
+tool's per-platform digest from the index but still fails to install, since the manifest and layer
+archives themselves are not part of the index.
 
 A tag-refresh failure for any requested package fails the whole invocation; the
 [exit code][exit-codes] corresponds to the first failure in request order
-(deterministic across repeated runs). Packages refreshed earlier in the batch
-keep their updated tags.
+(deterministic across repeated runs). Packages that refresh successfully keep
+their updated tags.
 
 **Arguments**
 
@@ -1188,7 +1203,7 @@ Concurrent invocations of `ocx lock` and `ocx update` are serialised via an in-p
 
 ### `update` {#update}
 
-Re-resolves advisory tags in `ocx.toml` against the live registry and rewrites `ocx.lock`. Unlike [`ocx lock`](#lock) or [`ocx add`](#add), which resolve through the local index by default, `ocx update` talks to the registry every time — the same default [`ocx self update`](#self-update) uses, since the whole point is to see where a moving tag (`:latest`, `:3`) points *today*. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved, even when the lock is already current. An unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written. Resolution only ever writes `ocx.lock`; it never rewrites the local tag pointers under `~/.ocx/tags/`.
+Re-resolves advisory tags in `ocx.toml` against the live registry and rewrites `ocx.lock`. Unlike [`ocx lock`](#lock) or [`ocx add`](#add), which resolve through the local index by default, `ocx update` talks to the registry every time — the same default [`ocx self update`](#self-update) uses, since the whole point is to see where a moving tag (`:latest`, `:3`) points *today*. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved, even when the lock is already current. An unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written. Resolution only ever writes `ocx.lock`; it never rewrites the local index at `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`.
 
 Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped update advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an update.
 
@@ -1197,7 +1212,7 @@ Whole-file `ocx update` always re-resolves every tag against the registry; scope
 :::
 
 ::: tip The update family
-Three verbs share the name; each refreshes exactly one record. [`ocx index update`](#index-update) refreshes the local index snapshot under `~/.ocx/tags/`. [`ocx self update`](#self-update) refreshes the managed ocx install. `ocx update` refreshes `ocx.lock`. Under [`--frozen`](#arg-frozen), `ocx update` caps discovery at that local index snapshot — a declared tag it doesn't already know exits [`81`](#exit-codes). Under [`--offline`](#arg-offline), no network call is made at all, which also exits `81` when resolution is required.
+Three verbs share the name; each refreshes exactly one record. [`ocx index update`](#index-update) refreshes the local index at `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`. [`ocx self update`](#self-update) refreshes the managed ocx install. `ocx update` refreshes `ocx.lock`. Under [`--frozen`](#arg-frozen), `ocx update` caps discovery at that local index — a declared tag it doesn't already know exits [`81`](#exit-codes). Under [`--offline`](#arg-offline), no network call is made at all, which also exits `81` when resolution is required.
 :::
 
 **Usage**
@@ -2170,6 +2185,7 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
+- `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -3177,6 +3193,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-project-running]: ../in-depth/project.md#running
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [in-depth-ci]: ../in-depth/ci.md
+[in-depth-indices-layout]: ../in-depth/indices.md#local-layout
+[in-depth-indices-public]: ../in-depth/indices.md#public-index
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

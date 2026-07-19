@@ -143,6 +143,7 @@ def make_package(
     binaries: list[str] | _Unset = _UNSET,
     bin_exec: dict[str, bool] | None = None,
     no_bin_scan: bool = False,
+    extra_push_args: list[str] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -203,6 +204,10 @@ def make_package(
         Auto-mode scan never fills a ``binaries`` claim even when ``bin/``
         holds an interface-visible executable.  Use this to build a
         genuinely claim-less (pre-ADR / legacy-shaped) fixture package.
+    extra_push_args:
+        Extra flags appended to the ``ocx package push`` invocation (e.g.
+        ``["--no-canonical-tag"]``), after ``-n``/``--cascade`` and before
+        ``-i``.
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -342,6 +347,8 @@ def make_package(
         push_args.append("-n")
     if cascade:
         push_args.append("--cascade")
+    if extra_push_args:
+        push_args += extra_push_args
     push_args += ["-i", fq] + [str(b) for b in all_bundles]
     ocx.plain(*push_args)
 

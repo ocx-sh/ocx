@@ -9,12 +9,12 @@ cd "$SCENARIO_TMP"
 # Prologue (outside the region): the operator has published two versions and
 # this host already tracks the floating `:user` tag.
 cat >config-old.toml <<'TOML'
-[mirrors."ghcr.io"]
-url = "https://ghcr-old.corp.example.com"
+[mirrors]
+"ghcr.io" = "https://ghcr-old.corp.example.com"
 TOML
 cat >config-new.toml <<'TOML'
-[mirrors."ghcr.io"]
-url = "https://ghcr-new.corp.example.com"
+[mirrors]
+"ghcr.io" = "https://ghcr-new.corp.example.com"
 TOML
 ocx config push -i corp/ocx-config:user-1.4.1 ./config-old.toml --cascade --new
 ocx config push -i corp/ocx-config:user-1.4.2 ./config-new.toml --cascade

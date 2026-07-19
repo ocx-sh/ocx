@@ -3,6 +3,7 @@
 
 use crate::oci::Client;
 
-pub struct Config {
+/// Construction inputs for [`super::OciIndex`].
+pub struct OciIndexConfig {
     pub client: Client,
 }

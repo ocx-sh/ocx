@@ -140,7 +140,7 @@ impl PackageManager {
         // unchanged `build_site_patch_set` reads this tag + the CAS blob to
         // reconstruct the descriptor — no compose-time descriptor override.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
-        let global_tags_path = self.file_structure().tags.tags(&global_id);
+        let global_tags_path = self.file_structure().patch_descriptor_path(&global_id);
         super::patch_discovery::PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
             .await
             .map_err(PackageErrorKind::Internal)?;
@@ -204,7 +204,7 @@ impl PackageManager {
         let companion_tag_id = info.identifier.clone();
         let installed = self.pull_local(info, layers, None).await?;
         let digest = installed.identifier().digest();
-        register_local_companion_tag(&self.file_structure().tags, &companion_tag_id, &digest)
+        register_local_companion_tag(&self.file_structure().index, &companion_tag_id, &digest)
             .await
             .map_err(PackageErrorKind::Internal)?;
         Ok(format!(
@@ -215,35 +215,45 @@ impl PackageManager {
     }
 }
 
-/// Write a companion's tag-store entry in the `TagLock` envelope that
-/// `LocalIndex::fetch_manifest_digest` (and thus companion resolution) reads.
+/// Write a companion's tag pointer into a DERIVED (OCX-authored) root
+/// document (`adr_index_indirection.md` A2) so
+/// `LocalIndex::resolve_dispatch`/`fetch_manifest_digest` (and thus
+/// companion resolution) resolves it offline.
 ///
-/// Production sibling of the `#[cfg(test)]` `write_companion_tag_lock` helper:
-/// used by [`PackageManager::materialize_test_companion`] so a locally
+/// Used by [`PackageManager::materialize_test_companion`] so a locally
 /// materialized companion archive is resolvable in the scratch store without a
-/// registry round-trip. The envelope maps the advisory tag to the materialized
+/// registry round-trip. The pointer maps the advisory tag to the materialized
 /// platform-manifest digest; `find_companion_local`'s manifest-absent fallback
 /// then locates the package at that digest.
 async fn register_local_companion_tag(
-    tag_store: &crate::file_structure::TagStore,
+    snapshot: &crate::file_structure::IndexStore,
     companion_tag_id: &Identifier,
     digest: &oci::Digest,
 ) -> crate::Result<()> {
-    let tags_path = tag_store.tags(companion_tag_id);
-    if let Some(parent) = tags_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| crate::error::file_error(parent, error))?;
-    }
-    let json = serde_json::json!({
-        "version": 1,
-        "repository": format!("{}/{}", companion_tag_id.registry(), companion_tag_id.repository()),
-        "tags": { companion_tag_id.tag_or_latest(): digest.to_string() },
-    })
-    .to_string();
-    tokio::fs::write(&tags_path, json)
+    let source = companion_tag_id.registry();
+    let repository = companion_tag_id.repository();
+    let expected_repository = format!("oci://{source}/{repository}");
+    // Read-merge-write so a second `--companion-archive` for a different tag of
+    // the same repo does not clobber the first pointer. The scratch store is
+    // written by a single sequential materialize loop, so no cross-process lock
+    // is needed here.
+    let mut tags: std::collections::BTreeMap<String, serde_json::Value> =
+        match snapshot.read_root_document_bytes(source, repository).await? {
+            Some(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?
+                .get("tags")
+                .and_then(|tags| tags.as_object())
+                .map(|tags| tags.iter().map(|(tag, entry)| (tag.clone(), entry.clone())).collect())
+                .unwrap_or_default(),
+            None => std::collections::BTreeMap::new(),
+        };
+    tags.insert(
+        companion_tag_id.tag_or_latest().to_string(),
+        serde_json::json!({ "content": digest.to_string(), "observed": chrono::Utc::now().to_rfc3339() }),
+    );
+    let doc = serde_json::json!({ "repository": expected_repository, "tags": tags });
+    snapshot
+        .write_root_document(source, repository, &serde_json::to_vec(&doc)?)
         .await
-        .map_err(|error| crate::error::file_error(&tags_path, error))
 }
 
 // ── Free helpers ───────────────────────────────────────────────────────────────
@@ -310,7 +320,7 @@ mod tests {
 
     use crate::{
         config::patch::ResolvedPatchConfig,
-        file_structure::{FileStructure, PackageDir, PackageStore, TagStore},
+        file_structure::{FileStructure, PackageDir, PackageStore},
         oci::{
             Digest, Identifier, PinnedIdentifier,
             index::{ChainMode, Index, LocalConfig, LocalIndex},
@@ -326,6 +336,39 @@ mod tests {
 
     const PATCH_REGISTRY: &str = "patches.corp.com";
 
+    /// Two `--companion-archive` materializations for different tags of the same
+    /// repo in one invocation must BOTH resolve: the second registration merges
+    /// into the derived root document rather than clobbering the first pointer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_local_companion_tag_merges_tags_of_same_repo() {
+        let dir = TempDir::new().unwrap();
+        let snapshot = FileStructure::with_root(dir.path().to_path_buf()).index;
+        let id_a = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("1.0");
+        let id_b = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("2.0");
+        let digest_a = Digest::Sha256("a".repeat(64));
+        let digest_b = Digest::Sha256("b".repeat(64));
+
+        register_local_companion_tag(&snapshot, &id_a, &digest_a).await.unwrap();
+        register_local_companion_tag(&snapshot, &id_b, &digest_b).await.unwrap();
+
+        let bytes = snapshot
+            .read_root_document_bytes(PATCH_REGISTRY, "ca-bundle")
+            .await
+            .unwrap()
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            doc["tags"]["1.0"]["content"].as_str(),
+            Some(digest_a.to_string()).as_deref(),
+            "the first archive's tag must survive the second registration"
+        );
+        assert_eq!(
+            doc["tags"]["2.0"]["content"].as_str(),
+            Some(digest_b.to_string()).as_deref(),
+            "the second archive's tag must be present"
+        );
+    }
+
     // ── Seed helpers (DAMP — self-contained per quality-core test guidance) ───────
 
     /// Build an offline scratch `PackageManager` with the `[patches]` tier set.
@@ -336,8 +379,7 @@ mod tests {
     fn make_scratch_manager(root: &Path, patches: ResolvedPatchConfig) -> PackageManager {
         let file_structure = FileStructure::with_root(root.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
-            tag_store: file_structure.tags.clone(),
-            blob_store: file_structure.blobs.clone(),
+            index_store: file_structure.index.clone(),
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(file_structure, index, None, PATCH_REGISTRY).with_patches(Some(patches))
@@ -398,18 +440,24 @@ mod tests {
         .unwrap();
     }
 
-    /// Write a companion's tag-store entry in the `TagLock` envelope that
-    /// `LocalIndex::fetch_manifest_digest` (and thus companion resolution) reads.
-    fn write_companion_tag_lock(tag_store: &TagStore, companion_tag_id: &Identifier, digest: &Digest) {
-        let tags_path = tag_store.tags(companion_tag_id);
-        std::fs::create_dir_all(tags_path.parent().unwrap()).unwrap();
-        let json = serde_json::json!({
-            "version": 1,
-            "repository": format!("{}/{}", companion_tag_id.registry(), companion_tag_id.repository()),
-            "tags": { companion_tag_id.tag_or_latest(): digest.to_string() }
-        })
-        .to_string();
-        std::fs::write(&tags_path, json).unwrap();
+    /// Seed a companion's tag pointer into a DERIVED root document so
+    /// `LocalIndex::resolve_dispatch`/`fetch_manifest_digest` (and thus
+    /// companion resolution) reads it.
+    fn write_companion_root_document(file_structure: &FileStructure, companion_tag_id: &Identifier, digest: &Digest) {
+        let registry = companion_tag_id.registry();
+        let repository = companion_tag_id.repository();
+        let root_path = file_structure.index.root_document_path(registry, repository);
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        let doc = serde_json::json!({
+            "repository": format!("oci://{registry}/{repository}"),
+            "tags": {
+                companion_tag_id.tag_or_latest(): {
+                    "content": digest.to_string(),
+                    "observed": "2026-07-18T00:00:00Z",
+                }
+            }
+        });
+        std::fs::write(&root_path, serde_json::to_vec(&doc).unwrap()).unwrap();
     }
 
     /// Build a base `InstallInfo` (no deps, no env) backed by an on-disk content dir.
@@ -467,7 +515,7 @@ mod tests {
         let patches = patch_config(true);
         let manager = make_scratch_manager(dir.path(), patches.clone());
         let store = manager.file_structure().packages.clone();
-        let tag_store = manager.file_structure().tags.clone();
+        let tag_store = manager.file_structure().clone();
 
         // Companion: fully installed with an INTERFACE var.
         let companion_digest = sha256('c');
@@ -483,7 +531,7 @@ mod tests {
             "/etc/ssl/certs/ca-bundle.crt",
             Visibility::INTERFACE,
         );
-        write_companion_tag_lock(&tag_store, &companion_tag_id, &companion_digest);
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
 
         // Base: no deps, no env of its own.
         let base = make_base(dir.path(), &store, "cmake", 'r');

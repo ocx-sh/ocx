@@ -42,8 +42,15 @@ impl Cache {
     }
 }
 
-/// Shared handle to the in-memory remote index cache.
+/// Shared handle to the in-memory [`OciIndex`](super::OciIndex) cache.
 ///
-/// Inner fields are independently locked — see
-/// [`super::super::local_index::cache::SharedCache`] for the rationale.
+/// The inner fields of [`Cache`] are each independently guarded by a
+/// `tokio::sync::RwLock`, so the outer handle is a plain `Arc<Cache>` — no
+/// outer lock. Wrapping the whole struct in an outer lock would force a
+/// writer to hold that outer write-guard across an inner `.await` (`set_tags`
+/// / `set_tag_digest` / `set_repositories`); `tokio::sync::RwLock` allows
+/// this in principle, but it blocks every other reader for the entire
+/// suspension window. `Arc<Cache>` avoids the contention at the type level —
+/// readers and writers only contend on the specific sub-map they touch, and
+/// no guard is ever held across an `.await` on a foreign lock.
 pub type SharedCache = std::sync::Arc<Cache>;

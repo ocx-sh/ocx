@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 mod bin_scan;
+mod canonical_tag;
 mod completion;
 mod compression_level;
 mod content_path;
@@ -12,6 +13,7 @@ mod pull;
 mod verify;
 
 pub use bin_scan::{BinScan, BinScanMode};
+pub use canonical_tag::CanonicalTag;
 pub use completion::Completion;
 pub use compression_level::CompressionLevel;
 pub use content_path::ContentPath;

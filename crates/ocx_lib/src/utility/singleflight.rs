@@ -68,8 +68,14 @@ impl std::error::Error for SharedError {
 #[non_exhaustive]
 pub enum Error {
     /// The leader task failed and broadcast its error.
-    #[error("singleflight leader failed: {0}")]
-    Failed(#[source] SharedError),
+    ///
+    /// Display is transparent — the wrapped leader error is surfaced verbatim,
+    /// with no "singleflight leader failed" plumbing prefix, so a dedup that
+    /// happens to run behind a singleflight leader reports the same message a
+    /// direct call would. The variant is still distinct for `Debug` and
+    /// exit-code classification (which inspects the wrapped error's chain).
+    #[error(transparent)]
+    Failed(SharedError),
     /// The task responsible for producing the value was dropped without
     /// calling [`Handle::complete`] or [`Handle::fail`].
     #[error("singleflight leader abandoned")]
@@ -263,6 +269,19 @@ mod tests {
     }
 
     impl std::error::Error for TestError {}
+
+    #[test]
+    fn failed_display_is_transparent_no_plumbing_prefix() {
+        let failed = Error::Failed(SharedError::for_test(TestError(
+            "manifest sha256:abc not in the local cache",
+        )));
+        // Transparent: the wrapped leader error is surfaced verbatim — no
+        // "singleflight leader failed" prefix leaking into user-facing output.
+        assert_eq!(failed.to_string(), "manifest sha256:abc not in the local cache");
+        // The wrapped typed error stays reachable via the source chain for
+        // exit-code classification.
+        assert!(std::error::Error::source(&failed).is_some());
+    }
 
     fn group(max: usize) -> Group<String, String> {
         Group::new(max, Duration::from_secs(300))

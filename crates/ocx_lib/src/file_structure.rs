@@ -4,22 +4,22 @@
 mod blob_store;
 mod cas_path;
 pub mod error;
+mod index_store;
 mod layer_store;
 mod package_store;
 mod state_store;
 mod symlink_store;
-mod tag_store;
 mod temp_store;
 
 pub use blob_store::{BlobDir, BlobStore};
 #[cfg(test)]
 pub(crate) use blob_store::{WRITE_BLOB_CALL_COUNT, WRITE_BLOB_TEST_LOCK};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file};
+pub use index_store::{CatalogEntryStatus, CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
 pub use state_store::StateStore;
 pub use symlink_store::{SymlinkKind, SymlinkStore};
-pub use tag_store::TagStore;
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
 
 /// Root layout of the local OCX data directory.
@@ -30,10 +30,22 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 /// - **`blobs`**    — content-addressed raw blob store
 /// - **`layers`**   — content-addressed extracted layer store
 /// - **`packages`** — content-addressed package store (content, metadata, refs)
-/// - **`tags`**     — tag-to-digest mapping store (local index)
+/// - **`index`**    — self-contained index collection at the default machine-local
+///   home (`index/`): a first-class store sibling to `blobs/`/`layers/`/`packages/`,
+///   one index per source — `<source>/{config.json,c/,p/}` holding the hosted
+///   wire grammar (root documents + dispatch-object CAS, A2) plus a flat
+///   opaque-blob CAS for content that is not a package manifest (config
+///   blobs, managed-config payloads). Redirected wholesale by `--index` /
+///   `OCX_INDEX` at the CLI seam (`adr_index_indirection.md` A1)
 /// - **`symlinks`** — install symlinks (candidate / current)
 /// - **`state`**    — persistent runtime state (update-check timestamps, etc.)
 /// - **`temp`**     — temporary staging directories for in-progress downloads
+///
+/// plus one non-store path:
+///
+/// - **`locks`**    — machine-global cross-process lock directory
+///   (`$OCX_HOME/locks`); sharded, content-keyed advisory lock files, outside
+///   the GC graph, kept out of the (possibly redirected/read-only) index home
 ///
 /// Default root: `~/.ocx` (resolved via [`default_ocx_root`]).
 #[derive(Debug, Clone)]
@@ -42,10 +54,16 @@ pub struct FileStructure {
     pub blobs: BlobStore,
     pub layers: LayerStore,
     pub packages: PackageStore,
-    pub tags: TagStore,
+    pub index: IndexStore,
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
+    /// Machine-global cross-process lock directory (`$OCX_HOME/locks`). Not a
+    /// CAS store and never in the GC graph — sharded, content-keyed advisory
+    /// lock files written by [`crate::utility::fs::lock_scoped`]. Kept out of
+    /// the index home so a redirected (`--index`) or read-only shipped index
+    /// copy never accumulates lock litter.
+    pub locks: std::path::PathBuf,
 }
 
 impl Default for FileStructure {
@@ -63,14 +81,21 @@ impl FileStructure {
 
     /// Creates a `FileStructure` rooted at `root`.
     pub fn with_root(root: std::path::PathBuf) -> Self {
+        let locks = root.join("locks");
         Self {
             blobs: BlobStore::new(root.join("blobs")),
             layers: LayerStore::new(root.join("layers")),
             packages: PackageStore::new(root.join("packages")),
-            tags: TagStore::new(root.join("tags")),
+            // Default machine-local index home — a first-class store
+            // sibling to `blobs/`/`layers/`/`packages/`, not runtime state
+            // buried under `state/` (`adr_index_indirection.md` A1). `--index`
+            // / `OCX_INDEX` redirect the whole collection at the CLI seam, but
+            // its locks always stay machine-global under `$OCX_HOME/locks`.
+            index: IndexStore::new(root.join("index")).with_locks_root(locks.clone()),
             symlinks: SymlinkStore::new(root.join("symlinks")),
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
+            locks,
             root,
         }
     }
@@ -78,6 +103,24 @@ impl FileStructure {
     /// Returns the root directory of this file structure (e.g., `~/.ocx`).
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Machine-local path holding the patch-descriptor discovery state
+    /// (the `__ocx.patch` three-state record — a `BTreeMap<String, String>`
+    /// tag→digest map) for `identifier`.
+    ///
+    /// Layout: `{root}/state/patch-descriptors/{registry_slug}/{repo}.json`.
+    /// This is a per-machine cache of "did we look for a patch descriptor at
+    /// this (registry, repo) pair", NOT the committed reproducibility index
+    /// snapshot — so it lives under `state/`, never in the redirectable index
+    /// home, and never carries `--index` / `OCX_INDEX` redirection.
+    pub fn patch_descriptor_path(&self, identifier: &crate::oci::Identifier) -> PathBuf {
+        self.root
+            .join("state")
+            .join("patch-descriptors")
+            .join(slugify(identifier.registry()))
+            .join(repository_path(identifier.repository()))
+            .with_added_extension("json")
     }
 }
 
