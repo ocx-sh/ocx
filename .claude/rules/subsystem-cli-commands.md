@@ -85,7 +85,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package create PATH` | Bundle directory into archive; `--bin-scan`/`--no-bin-scan` fill or verify the `binaries` claim | `-o`, `-m`, `-l`, `-j`, `--force`, `--bin-scan`/`--no-bin-scan` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp`, `--canonical-tag/--no-canonical-tag` (default on — pushes `sha256.<hex>` per platform manifest, registry-side deletion safety net; `index.ocx.sh` ignores it) |
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
-| `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
+| `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); `--deps` adds a metadata-only dependency closure (`closure` array) + interface-surface aggregate (`interface_surface` — binaries/entrypoints that would land on PATH) without installing; keyed object for multiple | `--resolve`, `--deps`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |

@@ -125,6 +125,14 @@ pub async fn load_object_data(
     Ok((metadata, resolved_result?))
 }
 
+/// Upper bound on a metadata config blob's size (declared descriptor size AND
+/// fetched byte length), enforced by [`load_config_metadata`].
+///
+/// Config metadata is KB-scale in practice — a 4 MiB ceiling is orders of
+/// magnitude above any real package and therefore never bites a legitimate
+/// publisher. See `adr_inspect_metadata_closure.md` D5.
+pub(super) const MAX_METADATA_BLOB_BYTES: usize = 4 * 1024 * 1024;
+
 /// Fetches the OCX metadata config blob referenced by `manifest`, validates
 /// its media type, deserializes it, and runs publish-time validation.
 ///
@@ -143,6 +151,17 @@ pub async fn load_config_metadata(
     // wrong-media-type blob into the local CAS.
     media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
         .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
+
+    // D5 step 1 (pre-fetch): the manifest's declared config size is known
+    // before any blob request — reject an over-cap declared size without
+    // touching the network or the cache.
+    if manifest.config.size < 0 || manifest.config.size as u64 > MAX_METADATA_BLOB_BYTES as u64 {
+        return Err(PackageErrorKind::Internal(crate::Error::MetadataBlobTooLarge {
+            size: manifest.config.size,
+            max: MAX_METADATA_BLOB_BYTES,
+        }));
+    }
+
     let config_digest =
         oci::Digest::try_from(manifest.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(e.into()))?;
     let config_ref = pinned.clone_with_digest(config_digest);
@@ -167,6 +186,16 @@ pub async fn load_config_metadata(
             )));
         }
     };
+
+    // D5 step 2 (post-fetch): re-check the actual fetched length — defends
+    // against a registry that declares a small size but serves a larger body.
+    if bytes.len() > MAX_METADATA_BLOB_BYTES {
+        return Err(PackageErrorKind::Internal(crate::Error::MetadataBlobTooLarge {
+            size: bytes.len() as i64,
+            max: MAX_METADATA_BLOB_BYTES,
+        }));
+    }
+
     let raw: metadata::Metadata = serde_json::from_slice(&bytes)
         .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
     // Reject malformed metadata at the ingress boundary — refuse to write
@@ -355,44 +384,94 @@ pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager
 /// registry, which 404s a blob/manifest that was never pushed. The blob-store
 /// existence probe short-circuits that registry round-trip while leaving the
 /// genuine-remote path (blob absent locally → index → source) untouched.
-pub async fn stage_and_link_chain_blobs(
+/// Checks whether `identifier`'s content is already present and valid in
+/// `fs.blobs`, healing (removing) a present-but-corrupt copy first (CWE-345
+/// — the on-disk bytes are re-hashed against the digest that names them, the
+/// same check [`crate::oci::index::chained_index`]'s `recover_absent_leaf`
+/// applies to a leaf recovered from the same store). Returns `true` when the
+/// caller still needs to fetch and write the bytes.
+///
+/// The guaranteed-local fast-path check factored out of
+/// [`stage_and_link_chain_blobs`] so a caller with no installed package to
+/// ref-link into — `inspect`'s closure walker (`tasks/inspect.rs`), which
+/// stages a fetched dep's leaf manifest into this same content-addressed
+/// cache — can reuse it without pulling in ref-linking. A blob staged this
+/// way with no ref is an unreferenced cache entry; `ocx clean` may reclaim
+/// it, same as any other cache-warming write.
+pub async fn blob_needs_fetch(
+    fs: &file_structure::FileStructure,
+    identifier: &oci::PinnedIdentifier,
+) -> Result<bool, PackageErrorKind> {
+    let digest = identifier.digest();
+    match fs
+        .blobs
+        .read_blob(identifier.registry(), &digest)
+        .await
+        .map_err(PackageErrorKind::Internal)?
+    {
+        Some(existing) if digest.algorithm().hash(&existing) == digest => Ok(false),
+        Some(_) => {
+            log::warn!("blob-store copy of chain blob '{digest}' is corrupt; removing and re-fetching");
+            fs.blobs
+                .remove_blob(identifier.registry(), &digest)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
+            Ok(true)
+        }
+        None => Ok(true),
+    }
+}
+
+/// Verifies `bytes` — fetched from an index source under `identifier`'s own
+/// claimed digest — actually hash to that digest before a caller persists
+/// them into content-addressed storage (CWE-345 trust-boundary check).
+///
+/// [`Index::fetch_manifest_raw_bytes`] is a distinct seam from
+/// [`Index::fetch_blob`]: `fetch_blob` (config blobs) digest-verifies inside
+/// `ChainedIndex` itself before returning or writing through
+/// (`chained_index.rs`'s `digest_matches`), but `fetch_manifest_raw_bytes`
+/// only checks a source's returned bytes are self-consistent with the digest
+/// the *source* computed from them — never against the digest the *caller*
+/// requested. A source that returns wrong bytes under a self-consistent but
+/// unrequested digest would otherwise be written straight into the CAS at
+/// the caller's requested digest path unverified. Every caller that persists
+/// a `fetch_manifest_raw_bytes` result under `identifier`'s digest
+/// (`stage_leaf_manifest`, [`stage_chain_blobs`]'s `Index`/`Manifest` roles)
+/// must call this first.
+pub(super) fn verify_requested_digest(
+    identifier: &oci::PinnedIdentifier,
+    bytes: &[u8],
+) -> Result<(), PackageErrorKind> {
+    let claimed = identifier.digest();
+    let computed = claimed.algorithm().hash(bytes);
+    if computed != claimed {
+        return Err(PackageErrorKind::Internal(
+            crate::file_structure::error::Error::DigestMismatch { claimed, computed }.into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Stages every blob in `resolved.chain` into `fs.blobs` — role-aware fetch
+/// (config via [`Index::fetch_blob`], index/manifest via
+/// [`Index::fetch_manifest_raw_bytes`]), `blob_needs_fetch`-gated, no
+/// ref-linking. The per-blob staging step of [`stage_and_link_chain_blobs`],
+/// factored out so a caller with no installed package to ref-link into
+/// (`inspect --deps`, which stages the root's own resolution chain the same
+/// way it stages each dep node — `tasks/inspect.rs`) can warm the content
+/// cache without pulling in ref-linking. See [`blob_needs_fetch`]'s doc for
+/// the unreferenced-cache-entry contract this leaves behind.
+pub async fn stage_chain_blobs(
     fs: &file_structure::FileStructure,
     index: &oci::index::Index,
-    content_path: &Path,
     resolved: &super::resolve::ResolvedChain,
 ) -> Result<(), PackageErrorKind> {
     use super::resolve::ChainRole;
 
     for blob in &resolved.chain {
         let identifier = &blob.identifier;
-        let digest = identifier.digest();
-        // Guaranteed-local fast path: a chain blob already in the blob store is
-        // linked without a fetch — the local `ocx package test` flow stages a
-        // synthesized manifest straight into `fs.blobs` that no registry ever
-        // served, so an index/registry lookup would 404. But existence is NOT
-        // integrity: verify the on-disk bytes hash to the digest that names them
-        // (CWE-345) before trusting the shortcut. A present-but-corrupt blob is
-        // removed so the fetch path below re-materializes it (online) — never
-        // linked as-is. `recover_absent_leaf` heals a corrupt LEAF this way
-        // during resolve; this closes the same class for the config / index
-        // chain blobs that are first materialized here (removal makes
-        // `write_blob`'s check-first fast path write fresh instead of re-accepting
-        // the corrupt file).
-        match fs
-            .blobs
-            .read_blob(identifier.registry(), &digest)
-            .await
-            .map_err(PackageErrorKind::Internal)?
-        {
-            Some(existing) if digest.algorithm().hash(&existing) == digest => continue,
-            Some(_) => {
-                log::warn!("blob-store copy of chain blob '{digest}' is corrupt; removing and re-fetching");
-                fs.blobs
-                    .remove_blob(identifier.registry(), &digest)
-                    .await
-                    .map_err(PackageErrorKind::Internal)?;
-            }
-            None => {}
+        if !blob_needs_fetch(fs, identifier).await? {
+            continue;
         }
         match blob.role {
             ChainRole::Config => {
@@ -421,6 +500,7 @@ pub async fn stage_and_link_chain_blobs(
                     .await
                     .map_err(PackageErrorKind::Internal)?
                 {
+                    verify_requested_digest(identifier, &bytes)?;
                     fs.blobs
                         .write_blob(identifier.registry(), &identifier.digest(), &bytes)
                         .await
@@ -429,6 +509,16 @@ pub async fn stage_and_link_chain_blobs(
             }
         }
     }
+    Ok(())
+}
+
+pub async fn stage_and_link_chain_blobs(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    content_path: &Path,
+    resolved: &super::resolve::ResolvedChain,
+) -> Result<(), PackageErrorKind> {
+    stage_chain_blobs(fs, index, resolved).await?;
     reference_manager(fs)
         .link_blobs(content_path, resolved.blobs())
         .await
