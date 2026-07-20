@@ -277,7 +277,10 @@ pub use error::DependencyError;
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
-pub use tasks::inspect::InspectResult;
+pub use tasks::inspect::{
+    ClosureConflicts, ClosureEdge, ClosureNode, EntrypointConflict, InspectClosure, InspectOptions, InspectResult,
+    RepositoryConflict,
+};
 pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;

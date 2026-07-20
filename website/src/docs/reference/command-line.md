@@ -2329,8 +2329,11 @@ Inspects what sits at a package reference — nothing is installed and no symlin
 - **Default, image-index reference** (the usual multi-platform tag): lists the platform **candidates** — for each child manifest the platform, child digest, media type, and size. No metadata is loaded and no platform is selected.
 - **Default, single-manifest reference** (a flat tag or an `@digest` pointing directly at an image manifest): emits the declared **metadata** (bundle version, `strip_components`, env vars, dependencies, entrypoints) plus the manifest's **layers** (digest, media type, size). No resolution chain.
 - **`--resolve`**: platform-selects through the index, then emits metadata and layers plus the OCI **resolution** chain (the walk-order `index` → `manifest` → `config` blobs).
+- **`--deps`**: walks the declared [dependencies][reference-dependencies] to compute the full **closure** — every package reachable from the reference, read from cached or fetched metadata alone, without installing anything — plus the **interface surface**: the binaries and entrypoints that would land on `PATH` if the reference were installed. On an image-index reference, `--deps` platform-selects first (honoring `-p`/`--platform`, the host platform otherwise) exactly like `--resolve` does, because the walk needs a concrete manifest to read declared dependencies from — `--deps` alone therefore never returns the metadata-less candidates listing.
 
 Unlike [`package test`][cmd-package-test], the identifier accepts an explicit `@digest` (a tag or digest both resolve).
+
+`--deps` fails closed: if any dependency's manifest or metadata can't be loaded, the whole request fails rather than rendering a partial closure (see **Exit codes** below). A script deciding whether `--deps` ran should check for the `closure` key in JSON output, not for `resolution` — `resolution` reflects the shape of the reference (whether it needed platform selection), not whether `--deps` was requested.
 
 **Usage**
 
@@ -2346,8 +2349,9 @@ With more than one identifier, JSON output is an object keyed by the requested i
 
 **Options**
 
-- `-p`, `--platform <PLATFORM>`: Platform to select. Applies **only** with `--resolve`; ignored in default mode (the candidate list always shows every platform).
+- `-p`, `--platform <PLATFORM>`: Platform to select. Applies with `--resolve` and `--deps`; ignored in default mode (the candidate list always shows every platform).
 - `--resolve`: Platform-select through the index and emit the resolution chain — the pinned identifier and the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size) — alongside the metadata and layers (the layers are shown for the selected manifest in both default and `--resolve` mode).
+- `--deps`: Compute the metadata-only dependency closure and interface surface without installing. Adds a `closure` array and an `interface_surface` object to JSON output, and a matching section to the plain-text tree. Combining `--deps` with `--resolve` on an image-index reference is redundant but harmless — the platform selection `--deps` already performs is the same one `--resolve` performs.
 - `-h`, `--help`: Print help information.
 
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
@@ -2399,6 +2403,53 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 }
 ```
 
+`--deps` — adds `closure` and `interface_surface` on top of whichever body the reference already produces (the **metadata** body shown here for a single manifest, or the **resolution** body above when the reference needed platform selection):
+
+```json
+{
+  "identifier": "registry/cmake:3.28",
+  "pinned_digest": "sha256:cccc…",
+  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
+  "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }],
+  "closure": [
+    {
+      "identifier": "registry/zlib@sha256:bbbb…",
+      "digest": "sha256:bbbb…",
+      "effective_visibility": "public",
+      "entrypoints": ["zfmt"],
+      "dependencies": []
+    },
+    {
+      "identifier": "registry/cmake@sha256:cccc…",
+      "digest": "sha256:cccc…",
+      "entrypoints": ["cc"],
+      "dependencies": [
+        { "identifier": "registry/zlib@sha256:bbbb…", "visibility": "public", "name": "zlib" }
+      ],
+      "root": true
+    }
+  ],
+  "interface_surface": {
+    "binaries": [],
+    "entrypoints": [
+      { "name": "cc", "package": "registry/cmake@sha256:cccc…" },
+      { "name": "zfmt", "package": "registry/zlib@sha256:bbbb…" }
+    ],
+    "binaries_complete": true,
+    "conflicts": { "entrypoints": [], "repositories": [] }
+  }
+}
+```
+
+`closure` is a flat array, one entry per package reachable from the reference's declared [dependencies][reference-dependencies] — dependencies before dependents, with the inspected reference itself last and marked `"root": true`. Each entry carries:
+
+- `effective_visibility` — the entry's [visibility][reference-visibility] as composed from the root, down every path that reaches it. Omitted only for the root entry, since "composed from the root" has no meaning for the root itself.
+- `binaries` — the same tri-state as [Executables][reference-binaries]: the key is absent when the publisher never declared the field, `[]` when the publisher declared zero, and a populated array when names are declared.
+- `entrypoints` — the entry's own declared entrypoint names.
+- `dependencies` — the entry's own declared edges, each carrying its authored (not composed) `visibility` and the dependency `name`.
+
+`interface_surface` is the aggregate answer to "what lands on `PATH`": the reference itself, unconditionally, plus every closure entry whose `effective_visibility` reaches the interface. `binaries_complete` is `false` when any interface entry has undeclared `binaries` — an unknown claim never silently counts as zero. `conflicts` is always present; a non-empty `entrypoints` or `repositories` list names a condition (two entries claiming the same entrypoint name, or one repository resolving to two digests) that installing this closure would reject. `inspect` only reports the condition — it stays exit `0` either way.
+
 **Examples**
 
 ```shell
@@ -2413,6 +2464,9 @@ ocx package inspect mytool@sha256:abc…
 
 # Platform-select and include the OCI resolution chain.
 ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.["mytool:1.0.0"].resolution'
+
+# What would land on PATH without installing it?
+ocx --format json package inspect --deps mytool:1.0.0 | jq '.["mytool:1.0.0"].interface_surface'
 ```
 
 **Plain output**
@@ -2453,11 +2507,39 @@ registry/repo:tag@sha256:…
       └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
 ```
 
+With `--deps`, a `closure` branch and an `interface surface` branch are added. The closure tree is rooted at the inspected reference and follows declared dependency edges; a dependency reached a second time (a diamond) is not re-expanded — it renders as a `(*)`-marked leaf instead, keyed by content digest, so the same digest reached under two different tags or dependency names still collapses to one expansion:
+
+```text
+registry/cmake:3.28@sha256:cccc…
+├─ metadata
+│  └─ …
+├─ layers
+│  └─ …
+├─ closure
+│  └─ registry/cmake:3.28@sha256:cccc…
+│     ├─ entrypoints
+│     │  └─ cc
+│     ├─ gcc · sha256:dddd… · public
+│     │  ├─ entrypoints
+│     │  │  └─ gcc
+│     │  └─ zlib · sha256:bbbb… · public
+│     │     └─ entrypoints
+│     │        └─ zfmt
+│     └─ zlib · (*) · sha256:bbbb… · public
+└─ interface surface
+   └─ entrypoints
+      ├─ cc · registry/cmake:3.28@sha256:cccc…
+      ├─ gcc · registry/gcc@sha256:dddd…
+      └─ zfmt · registry/zlib@sha256:bbbb…
+```
+
+Here `cmake` depends on both `gcc` and `zlib`, and `gcc` itself depends on `zlib` — a diamond. The first visit to `zlib` (under `gcc`) expands its own entrypoints in full; the second visit (directly under `cmake`) renders as a leaf annotated `(*) · sha256:bbbb… · public` — the dedup marker alongside the same digest and effective visibility every node carries — without repeating its entrypoints. When `interface_surface.binaries_complete` is `false`, the `interface surface` branch adds a leaf noting that at least one admitted dependency declares no binaries; an entrypoint or repository conflict (see above) each render as their own leaf naming the colliding entrypoint or repository.
+
 **Exit codes**
 
-- `79` (`NotFound`) — the tag or digest does not resolve.
-- `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index.
-- `65` (`DataError`) — the resolved metadata is malformed or fails validation; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)).
+- `79` (`NotFound`) — the tag or digest does not resolve; with `--deps`, also a dependency in the closure that is genuinely absent from the registry (a source was consulted and it said no).
+- `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index. With `--deps`, the same code covers a dependency's manifest or metadata blob missing from the local cache under `--offline` — run the same `--deps` inspection online once (or `ocx package pull` the dependency) to warm the cache, then retry offline.
+- `65` (`DataError`) — the resolved metadata is malformed, fails validation, or exceeds the metadata size cap; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)). With `--deps`, the same checks apply to every dependency in the closure — one bad dependency fails the whole request rather than a smaller closure.
 
 #### `describe` {#package-describe}
 
@@ -3285,6 +3367,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [reference-binaries-none-vs-empty]: ./metadata.md#executables-none-vs-empty
 [reference-env-path]: ./metadata.md#env-path
 [reference-env-visibility]: ./metadata.md#env-entry-visibility
+[reference-visibility]: ./metadata.md#dependencies-visibility
 [reference-dependencies-authoring]: ./metadata.md#dependencies-authoring-vs-published
 
 <!-- global flag -->

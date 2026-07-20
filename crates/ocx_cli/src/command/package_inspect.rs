@@ -27,8 +27,20 @@ use crate::{conventions, options};
 ///   `-p/--platform`), then emit metadata and layers plus the **resolution**
 ///   chain — the pinned identifier and the walk-order chain blob digests
 ///   (index, manifest, config).
+/// - `--deps`: compute the metadata-only dependency closure and the set of
+///   binaries and entrypoints that would land on PATH if the package were
+///   installed, without installing it. Adds a `closure` array and an
+///   `interface_surface` object to JSON output; plain output adds a closure
+///   tree and an interface-surface summary. On a multi-platform reference,
+///   `--deps` first platform-selects (honoring `-p/--platform`) to read the
+///   declared dependencies, so the output is the same platform-selected body
+///   `--resolve` produces, with the closure attached.
 ///
-/// `-p/--platform` applies only with `--resolve`. Honors the global
+/// A script deciding whether `--deps` ran should check for the `closure` key
+/// in JSON output, not for `resolution` (which reflects the shape of the
+/// reference, not whether `--deps` was requested).
+///
+/// `-p/--platform` applies with `--resolve` and `--deps`. Honors the global
 /// `--offline` / `--remote` / `--format` flags. JSON is the primary consumer
 /// surface (OCX is a backend tool).
 #[derive(Parser)]
@@ -38,10 +50,25 @@ pub struct PackageInspect {
 
     /// Platform-select through the index and emit the OCI resolution chain
     /// (pinned identifier and walk-order chain digests: index, manifest,
-    /// config) alongside the metadata and layers. Without this, an image-index
-    /// reference lists its platform candidates instead.
+    /// config) alongside the metadata and layers. Without `--resolve` or
+    /// `--deps`, an image-index reference lists its platform candidates
+    /// instead.
     #[clap(long)]
     resolve: bool,
+
+    /// Show dependencies and interface binaries without installing.
+    ///
+    /// Computes the metadata-only dependency closure and the binaries and
+    /// entrypoints that would land on PATH if this package were installed.
+    /// Adds a `closure` array and an `interface_surface` object to JSON
+    /// output; plain output adds a closure tree and an interface-surface
+    /// summary.
+    ///
+    /// For a multi-platform reference, `--deps` first selects a platform
+    /// (honoring `-p/--platform`, the host platform by default) to read the
+    /// declared dependencies - the same selection `--resolve` performs.
+    #[clap(long)]
+    deps: bool,
 
     /// Package identifiers to inspect (each a tag or `@digest`).
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -50,17 +77,24 @@ pub struct PackageInspect {
 
 impl PackageInspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        use ocx_lib::package_manager::InspectOptions;
+
         use crate::api::data::package_inspect::{PackageInspect, PackageInspects};
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
 
+        let inspect_options = InspectOptions {
+            resolve: self.resolve,
+            deps: self.deps,
+        };
+
         // `inspect_all` preserves input order, so zipping the results back with
         // `self.packages` (the raw request strings) is sound.
         let results = context
             .manager()
-            .inspect_all(identifiers.clone(), platform.clone(), self.resolve)
+            .inspect_all(identifiers.clone(), platform.clone(), inspect_options)
             .await?;
 
         let entries: Vec<(String, PackageInspect)> = self
