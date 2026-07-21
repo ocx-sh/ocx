@@ -216,14 +216,22 @@ class TestSkillsLayout:
             f"— they break slash command discovery. Found: {violating}"
         )
 
+    # Owner-unlocked action skills (2026-07-21): deliberately model-invocable
+    # despite an action-verb name/hint, so an agent runs the documented
+    # workflow instead of improvising the same side effects ad hoc. `/commit`
+    # qualifies because its own workflow is the safety rail (stage by name,
+    # never push, never `--no-verify`). Reversible by flipping frontmatter back.
+    MODEL_INVOCABLE_ACTION_SKILLS = {"commit"}
+
     def test_action_skills_disable_model_invocation(self) -> None:
         """Skills with side-effectful argument hints must opt out of auto-invocation.
 
         Any skill whose `argument-hint` contains action verbs
         (deploy|release|sync|create|update|commit|push) must set
-        `disable-model-invocation: true` in its frontmatter. This prevents
-        Claude from triggering destructive or network-touching workflows
-        without explicit user intent.
+        `disable-model-invocation: true` in its frontmatter, unless it is
+        listed in `MODEL_INVOCABLE_ACTION_SKILLS`. This prevents Claude from
+        triggering destructive or network-touching workflows without explicit
+        user intent.
         """
         action_verbs = re.compile(
             r"\b(deploy|release|sync|create|update|commit|push|mirror)\b",
@@ -245,6 +253,8 @@ class TestSkillsLayout:
             if not arg_hint:
                 continue
             if not action_verbs.search(arg_hint) and not action_verbs.search(name):
+                continue
+            if name in self.MODEL_INVOCABLE_ACTION_SKILLS:
                 continue
             if frontmatter.get("disable-model-invocation", "").lower() != "true":
                 violations.append((name, arg_hint))
@@ -1164,8 +1174,12 @@ class TestAiConfigOverhaulPhase2:
     # flips (action skill losing the flag, or pure-advisory skill gaining it).
     _EXPECTED_DISABLE_MODEL_INVOCATION = {
         # Action skills with side effects — must disable auto-invocation
-        "commit": True,
         "finalize": True,
+        # Owner-unlocked (2026-07-21): `/commit` is model-invocable so an agent
+        # follows the documented workflow (stage by name, never push, never
+        # `--no-verify`) instead of improvising equivalent git calls. Mirrored
+        # in `MODEL_INVOCABLE_ACTION_SKILLS` above.
+        "commit": False,
         "meta-maintain-config": True,
         "ocx-sync-roadmap": True,
         # Owner-unlocked for autonomous multi-agent workflows (2026-05-16):

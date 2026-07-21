@@ -2,7 +2,7 @@
 name: commit
 description: Use when the user says "commit", "/commit", "save progress", or asks to land working changes on a feature or worktree branch. OCX working-phase posture — minimises commit count, can amend rolling Checkpoints, offers a one-time PR prompt. For pre-merge cleanup, use `/finalize`.
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 argument-hint: "[optional context or --pr | --no-pr | --amend]"
 triggers:
   - "commit"
