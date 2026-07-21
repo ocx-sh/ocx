@@ -53,29 +53,22 @@ id() { echo "${NAMESPACE}/${1}:${TAG}"; }
 # `identifier` fields. ocx rejects short identifiers there with
 # "identifier must include an explicit registry".
 fq() { echo "${REGISTRY}/${NAMESPACE}/${1}:${TAG}"; }
-manifest_digest() {
-    # Echo the manifest digest of `${REGISTRY}/${repo}:${TAG}` over plain HTTP
-    # (rig is localhost-only — the entry guard rejects everything else).
-    local repo="$1"
-    local accept digest
-    for accept in \
-        "application/vnd.oci.image.index.v1+json" \
-        "application/vnd.oci.image.manifest.v1+json"; do
-        digest=$(curl -fsSI -H "Accept: ${accept}" \
-            "http://${REGISTRY}/v2/${NAMESPACE}/${repo}/manifests/${TAG}" \
-            2>/dev/null | tr -d '\r' | awk -F': ' '/^Docker-Content-Digest/ {print $2}')
-        if [[ -n "$digest" ]]; then
-            echo "$digest"
-            return 0
-        fi
-    done
-    echo "error: could not fetch manifest digest for ${NAMESPACE}/${repo}:${TAG}" >&2
-    return 1
-}
+
+# Extra `ocx package create` flags for the NEXT push_simple call only —
+# reset to empty after each one. Used to opt a package out of the
+# interface-binaries auto-scan (`--no-bin-scan`) so the rig also carries an
+# `undeclared` node for `ocx package inspect --closure` (tri-state `binaries`).
+CREATE_FLAGS=()
 
 # Push a single-source-tree package. Args: repo, source-subdir (relative
 # to the package root, e.g. "build"). Trailing args are KEY=value template
 # substitutions for `metadata.in.json` (`@@KEY@@` → value).
+#
+# `create` writes a RESOLVED sidecar next to the bundle
+# (`out/<repo>-<tag>-metadata.json`) carrying the auto-scanned `binaries`
+# claim; `push` is deliberately called WITHOUT `-m` so it discovers that
+# sidecar instead of the hand-authored `metadata.json`. Passing `-m
+# metadata.json` here would publish metadata with no `binaries` field.
 push_simple() {
     local repo="$1" src="$2"
     shift 2
@@ -86,9 +79,18 @@ push_simple() {
     (
         ocx_cd "${PKG_ROOT}/${repo}"
         mkdir -p out
-        ocx package create --force -m metadata.json -o "$bundle" "$src"
-        ocx package push -n -c -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "$bundle"
+        ocx package create --force "${CREATE_FLAGS[@]}" -p "$PLATFORM" -m metadata.json -o "$bundle" "$src"
+        ocx package push -n -c -p "$PLATFORM" -i "$(id "$repo")" "$bundle"
     )
+    CREATE_FLAGS=()
+    index_update "$repo"
+}
+
+# Refresh the local index entry for a just-pushed package. Required before a
+# DEPENDENT package is created: `ocx package create -p` resolves unpinned
+# dependencies through the index. Also what makes `ocx package which` work.
+index_update() {
+    ocx index update "${NAMESPACE}/${1}" >/dev/null
 }
 
 # Push a multi-layer package. Args: repo, layer-source-subdirs... (relative
@@ -104,14 +106,20 @@ push_multi_layer() {
     (
         ocx_cd "${PKG_ROOT}/${repo}"
         mkdir -p out
+        local sidecar=""
         for layer_src in "$@"; do
             local b="out/${repo}-${TAG}-layer${idx}.tar.gz"
-            ocx package create --force -m metadata.json -o "$b" "$layer_src"
+            ocx package create --force -p "$PLATFORM" -m metadata.json -o "$b" "$layer_src"
             bundles+=("$b")
+            sidecar="out/${repo}-${TAG}-layer${idx}-metadata.json"
             idx=$((idx + 1))
         done
-        ocx package push -n -c -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "${bundles[@]}"
+        # Each `create` writes its own sidecar, so push cannot infer one —
+        # name the LAST layer's explicitly. That layer ships `bin/`, so its
+        # auto-scanned `binaries` claim is the meaningful one.
+        ocx package push -n -c -p "$PLATFORM" -m "$sidecar" -i "$(id "$repo")" "${bundles[@]}"
     )
+    index_update "$repo"
 }
 
 # Render `metadata.in.json` → `metadata.json` for a package by substituting
@@ -140,45 +148,45 @@ scaffold_payloads "$PKG_ROOT"
 push_simple single-layer-hello build
 push_simple multi-entry-toolkit build
 push_simple deps-leaf-a build
+# leaf-b publishes NO `binaries` claim (scan skipped, field undeclared) so
+# `inspect --closure` has a closure entry where the `binaries` key is absent —
+# "not determined", distinct from an asserted-empty `[]`.
+CREATE_FLAGS=(--no-bin-scan)
 push_simple deps-leaf-b build
 
 # ── 2. Multi-layer (no deps) ──────────────────────────────────────────────
 push_multi_layer multi-layer-app layer-base layer-libs layer-app
 
 # ── 3. Two-tier dep chain ─────────────────────────────────────────────────
-LEAF_A_DIGEST="$(manifest_digest deps-leaf-a)"
+# Deps are templated as plain `<registry>/<ns>/<repo>:<tag>` references;
+# `ocx package create -p` resolves each one to a PLATFORM MANIFEST digest and
+# writes the pins into the sidecar. Never hand-pin a tag's index digest — it
+# is rewritten on every platform push and garbage-collected.
 push_simple deps-mid build \
-    "LEAF_A_FQ_DIGEST=$(fq deps-leaf-a)@${LEAF_A_DIGEST}"
+    "LEAF_A_FQ=$(fq deps-leaf-a)"
 
 # ── 4. App with mixed-visibility deps ─────────────────────────────────────
-LEAF_B_DIGEST="$(manifest_digest deps-leaf-b)"
-MID_DIGEST="$(manifest_digest deps-mid)"
+# deps-app → leaf-a is a DIAMOND: also reachable through mid. The direct
+# edge is `private`, the path through mid is `interface`, so leaf-a's
+# effective visibility is the merge of both — and the closure renders it
+# once, with `(*)` marking the repeat visit.
 push_simple deps-app build \
-    "MID_FQ_DIGEST=$(fq deps-mid)@${MID_DIGEST}" \
-    "LEAF_B_FQ_DIGEST=$(fq deps-leaf-b)@${LEAF_B_DIGEST}"
+    "MID_FQ=$(fq deps-mid)" \
+    "LEAF_B_FQ=$(fq deps-leaf-b)" \
+    "LEAF_A_FQ=$(fq deps-leaf-a)"
 
 # ── 5. Entrypoint that targets a dep's binary via ${deps.NAME.installPath} ─
 push_simple cross-layer-entrypoint build \
-    "LEAF_A_FQ_DIGEST=$(fq deps-leaf-a)@${LEAF_A_DIGEST}"
+    "LEAF_A_FQ=$(fq deps-leaf-a)"
 
 # ── 6. Baked args + ${installPath} interpolation demo ─────────────────────
 # No @@...@@ substitutions; metadata.in.json used verbatim.
 # content/ (committed) ships scripts/hello.sh; the entrypoint bakes its path.
 push_simple baked-args-demo content
 
-# Refresh local index so `ocx package which` works.
-ocx index update "${NAMESPACE}/single-layer-hello" >/dev/null
-ocx index update "${NAMESPACE}/multi-entry-toolkit" >/dev/null
-ocx index update "${NAMESPACE}/multi-layer-app" >/dev/null
-ocx index update "${NAMESPACE}/deps-leaf-a" >/dev/null
-ocx index update "${NAMESPACE}/deps-leaf-b" >/dev/null
-ocx index update "${NAMESPACE}/deps-mid" >/dev/null
-ocx index update "${NAMESPACE}/deps-app" >/dev/null
-ocx index update "${NAMESPACE}/cross-layer-entrypoint" >/dev/null
-ocx index update "${NAMESPACE}/baked-args-demo" >/dev/null
-
 echo
 ocx_done "bootstrap done. Try:"
 echo "  ocx package exec ${NAMESPACE}/single-layer-hello:${TAG} -- hello"
 echo "  ocx package exec ${NAMESPACE}/multi-entry-toolkit:${TAG} -- tool-a"
 echo "  ocx package exec ${NAMESPACE}/deps-app:${TAG} -- app"
+echo "  ocx package inspect --closure ${NAMESPACE}/deps-app:${TAG}    # closure, no install"

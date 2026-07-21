@@ -18,11 +18,15 @@
   ],
   "dependencies": [
     {
-      "identifier": "@@MID_FQ_DIGEST@@",
+      "identifier": "@@MID_FQ@@",
       "visibility": "interface"
     },
     {
-      "identifier": "@@LEAF_B_FQ_DIGEST@@",
+      "identifier": "@@LEAF_B_FQ@@",
+      "visibility": "private"
+    },
+    {
+      "identifier": "@@LEAF_A_FQ@@",
       "visibility": "private"
     }
   ],

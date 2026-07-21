@@ -442,6 +442,26 @@ impl LocalIndex {
         Ok(Some((digest, manifest)))
     }
 
+    /// Like [`Self::persist_dispatch`], but fetches and decodes the dispatch
+    /// object WITHOUT staging an image index into `o/` — the read-only
+    /// counterpart used by a [`super::chained_index`] `ReadOnly` resolve
+    /// (`ocx package inspect`). Returns the same `(digest, manifest)` so the
+    /// caller can display / recurse, while the permanent index stays untouched.
+    /// A leaf platform manifest already writes nothing to `o/`, so for that
+    /// shape this is identical to `persist_dispatch`; the divergence is only
+    /// for an image index, which `persist_dispatch` would stage and this does
+    /// not.
+    pub async fn fetch_dispatch_only(
+        &self,
+        source: &super::Index,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+        Ok(source
+            .fetch_manifest_raw_bytes(identifier)
+            .await?
+            .map(|(_, digest, manifest)| (digest, manifest)))
+    }
+
     /// Commit a single tag → `content` pointer for `identifier` into a DERIVED
     /// (OCX-authored) root document (`adr_index_indirection.md` A2/F1),
     /// read-modify-written under an exclusive lock on the root document's own

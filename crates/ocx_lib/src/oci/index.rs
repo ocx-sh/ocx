@@ -221,6 +221,17 @@ impl Index {
         }
     }
 
+    /// A view of this index that resolves identically but writes nothing into
+    /// the local index (no dispatch object, no tag pointer) — see
+    /// [`index_impl::IndexImpl::read_only_view`]. Content-addressed blob writes
+    /// still happen. Used by `ocx package inspect` so a read-only look never
+    /// grows the permanent index.
+    pub fn read_only_view(&self) -> Self {
+        Self {
+            inner: self.inner.read_only_view(),
+        }
+    }
+
     /// List all repositories available in the given registry.
     pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         log::debug!("Listing repositories for registry '{}'.", registry);

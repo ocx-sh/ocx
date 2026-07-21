@@ -7,6 +7,7 @@ use std::collections::btree_map::Entry;
 use serde::{Deserialize, Serialize};
 
 use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
+use super::visibility::Visibility;
 
 /// A validated entrypoint name.
 ///
@@ -171,6 +172,19 @@ pub struct Entrypoints {
 }
 
 impl Entrypoints {
+    /// The visibility entry points carry as a surface carrier.
+    ///
+    /// Entry points have no publisher-declared visibility field; they are
+    /// launchers a *consumer* invokes the package through, while the
+    /// package's own runtime bypasses them and calls `bin/` directly. That
+    /// is exactly [`Visibility::INTERFACE`]: consumer axis yes, self axis
+    /// no. The composer's surface algebra
+    /// (`package_manager::composer::carrier_crosses`) derives everything
+    /// else from this one constant — a root's launchers appear on its
+    /// interface surface only, and a dependency's launchers cross the edge
+    /// like any interface-side carrier (they are how the parent invokes it).
+    pub const IMPLICIT_VISIBILITY: Visibility = Visibility::INTERFACE;
+
     /// Constructs an `Entrypoints` from a name-keyed map.
     ///
     /// Uniqueness is given by `BTreeMap` key semantics; this constructor is

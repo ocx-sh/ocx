@@ -49,6 +49,15 @@ pub enum Error {
     #[error("unsupported media type '{media_type}', expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
     UnsupportedMediaType(String, &'static [&'static str]),
 
+    /// A metadata config blob exceeded the size cap enforced by
+    /// `package_manager::tasks::common::load_config_metadata`, either by its
+    /// declared descriptor size (checked before any blob fetch) or its
+    /// actual fetched byte length (checked after fetch, defending against a
+    /// registry that declares a small size but serves a larger body). See
+    /// `adr_inspect_metadata_closure.md` D5.
+    #[error("metadata blob size {size} bytes exceeds the {max}-byte cap")]
+    MetadataBlobTooLarge { size: i64, max: usize },
+
     /// An authentication operation failed.
     #[error(transparent)]
     Auth(#[from] crate::auth::error::AuthError),
@@ -217,7 +226,9 @@ impl ClassifyExitCode for Error {
             // I/O → 74), not the flat `IoError` (74) `InternalFile` returns.
             Self::SymlinkWalk(e) => e.classify(),
             Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
-            Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),
+            Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) | Self::MetadataBlobTooLarge { .. } => {
+                Some(ExitCode::DataError)
+            }
             // Transparent wrappers delegate to the inner error's classification.
             Self::Auth(e) => e.classify(),
             Self::Platform(e) => e.classify(),

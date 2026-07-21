@@ -12,7 +12,7 @@
   ],
   "dependencies": [
     {
-      "identifier": "@@LEAF_A_FQ_DIGEST@@",
+      "identifier": "@@LEAF_A_FQ@@",
       "visibility": "interface",
       "name": "leaf-a"
     }

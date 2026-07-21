@@ -31,9 +31,9 @@ use crate::{
         install_info::InstallInfo,
         metadata::{
             self,
-            binary::BinaryName,
+            binary::{Binaries, BinaryName},
             dependency::DependencyName,
-            entrypoint::EntrypointName,
+            entrypoint::{EntrypointName, Entrypoints},
             env::{dep_context::DependencyContext, entry::Entry, modifier::ModifierKind, resolver::EnvResolver},
         },
         resolved_package::ResolvedPackage,
@@ -91,6 +91,83 @@ pub struct ComposeOutput {
     /// `Metadata::entrypoints()`. Consumed by `ocx env` / `ocx package
     /// env`'s `entrypoints` JSON array.
     pub admitted_entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
+}
+
+// ── Surface algebra: the single source of truth ─────────────────────────────
+//
+// A surface is defined recursively over the two-axis `Visibility` algebra
+// (`metadata::visibility`) — never by structural special cases:
+//
+//     surface(P, axis) = { carrier c of P       : vis(c).has(axis) }
+//                      ∪ ⋃ { interface_surface(D) : edge P→D has(axis) }
+//
+// Carriers are a package's own contributions, each with a visibility:
+// declared env vars carry their publisher-declared one; entry points carry
+// `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE — launchers are
+// consumer-facing, the package's own runtime bypasses them); binaries claims
+// carry `Binaries::IMPLICIT_VISIBILITY` (PUBLIC — raw executables serve
+// consumers and the package's own shims alike). Below the root the recursion
+// always takes the dep's INTERFACE surface — "only the interface side of a
+// dep crosses edges" (ADR Algorithm v3 step 5) — with edge composition
+// precomputed by the `through_edge`/`merge` effective-visibility fold
+// (`ResolvedPackage::with_dependencies`).
+//
+// `compose` runs this recursion flattened over the precomputed TC:
+// `dep_admitted` is the edge-union term; `carrier_crosses` is the carrier
+// term, where `is_root` marks recursion depth 0 — the only level where the
+// requested axis, not INTERFACE, gates the package's own carriers.
+// `self_view` selects WHICH of the root's two surfaces is emitted; it never
+// decides membership on its own.
+//
+// These predicates are the ONE implementation shared by `compose` (the
+// runtime env behind `ocx env` / `ocx env --self`) and
+// `package_manager::tasks::inspect::project_surface` (the static summary
+// behind `ocx package inspect --closure`). Inspect MUST route every
+// admission / crossing decision through them — never re-derive — so the two
+// views can never disagree about a surface.
+
+/// Whether a transitive-dependency entry is admitted to a surface.
+///
+/// A dep enters the interface (consumer) surface iff its effective visibility
+/// `has_interface()`, and the private (self) surface iff `has_private()`.
+/// Root packages have no edge visibility and are ALWAYS admitted — that is the
+/// caller's structural rule, applied around this predicate, not part of it.
+pub(crate) fn dep_admitted(effective: metadata::visibility::Visibility, self_view: bool) -> bool {
+    if self_view {
+        effective.has_private()
+    } else {
+        effective.has_interface()
+    }
+}
+
+/// Whether one carrier crosses onto a surface, given its visibility.
+///
+/// The flattened carrier term of the surface algebra (module comment above).
+/// At the ROOT (recursion depth 0) a carrier crosses on the surface's own
+/// axis — `has_interface()` on the interface surface, `has_private()` on the
+/// private (self) surface. On a DEPENDENCY only the carrier's interface side
+/// crosses, on EITHER surface: the recursion below the root always takes a
+/// dep's *interface* surface (ADR Algorithm v3 step 5), so a dep's
+/// private-only carrier never crosses the edge into the parent — even on the
+/// parent's self surface. This asymmetry is exactly why a single
+/// `crosses(vis)` predicate is wrong; the caller must state whether the
+/// owning node is the root.
+///
+/// Applies uniformly to every carrier kind: declared env vars pass their
+/// declared visibility, entry points pass `Entrypoints::IMPLICIT_VISIBILITY`
+/// (both the `admitted_entrypoints` claim and the synth-`entrypoints/` PATH
+/// push route through here, so a claim can never contradict PATH), binaries
+/// claims pass `Binaries::IMPLICIT_VISIBILITY`.
+pub(crate) fn carrier_crosses(carrier: metadata::visibility::Visibility, is_root: bool, self_view: bool) -> bool {
+    if is_root {
+        if self_view {
+            carrier.has_private()
+        } else {
+            carrier.has_interface()
+        }
+    } else {
+        carrier.has_interface()
+    }
 }
 
 /// Compose the runtime env from one or more root packages.
@@ -186,12 +263,7 @@ pub(crate) async fn compose(
                 continue;
             }
 
-            let want = if self_view {
-                tc_entry.visibility.has_private()
-            } else {
-                tc_entry.visibility.has_interface()
-            };
-            if !want {
+            if !dep_admitted(tc_entry.visibility, self_view) {
                 continue;
             }
 
@@ -249,14 +321,19 @@ pub(crate) async fn compose(
             let dep_pkg = store.package_dir(&dep_id);
             let dep_content = dep_pkg.content();
 
-            // Same admission rule as `admitted` above — this dep already
-            // passed the surface gate to reach `visible_entries`. `None`
-            // binaries means undeclared (contributes nothing); entrypoints
-            // are always the declared map's keys.
-            if let Some(binaries) = meta.binaries() {
+            // This dep already passed the surface gate (`dep_admitted`) to
+            // reach `visible_entries`; each carrier kind additionally crosses
+            // under its implicit visibility. Both are interface-side on a dep,
+            // so both cross wherever the node is admitted. `None` binaries
+            // means undeclared (contributes nothing).
+            if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, false, self_view)
+                && let Some(binaries) = meta.binaries()
+            {
                 admitted_binaries.extend(binaries.iter().map(|name| (dep_id.clone(), name.clone())));
             }
-            if let Some(entrypoints) = meta.entrypoints() {
+            if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, false, self_view)
+                && let Some(entrypoints) = meta.entrypoints()
+            {
                 admitted_entrypoints.extend(entrypoints.names().map(|name| (dep_id.clone(), name.clone())));
             }
 
@@ -266,7 +343,14 @@ pub(crate) async fn compose(
             // own dep paths independently.
             let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store);
 
-            emit_dep_path_block(&meta, &dep_pkg, &dep_content, &dep_dep_contexts, &mut entries)?;
+            emit_dep_path_block(
+                &meta,
+                &dep_pkg,
+                &dep_content,
+                &dep_dep_contexts,
+                self_view,
+                &mut entries,
+            )?;
         }
 
         // Root's own contributions, partitioned by `self_view`. Emit AFTER
@@ -284,12 +368,18 @@ pub(crate) async fn compose(
             // the patch overlay can match tag-anchored descriptor rules.
             admitted.push(root.identifier().clone());
 
-            // Root claims unconditionally, mirroring the `admitted` push
-            // above — no surface gate for the root's own contributions.
-            if let Some(binaries) = root.metadata().binaries() {
+            // The root's own carriers cross on the surface's axis under their
+            // implicit visibilities: binaries (PUBLIC) on both surfaces — the
+            // root's own executables serve its own shims too — while entry
+            // points (INTERFACE) reach the interface surface only.
+            if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, true, self_view)
+                && let Some(binaries) = root.metadata().binaries()
+            {
                 admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
             }
-            if let Some(entrypoints) = root.metadata().entrypoints() {
+            if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view)
+                && let Some(entrypoints) = root.metadata().entrypoints()
+            {
                 admitted_entrypoints.extend(
                     entrypoints
                         .names()
@@ -446,6 +536,7 @@ fn emit_interface_vars(
     dep_metadata: &metadata::Metadata,
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
+    self_view: bool,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
     let Some(env) = dep_metadata.env() else {
@@ -453,7 +544,11 @@ fn emit_interface_vars(
     };
     let resolver = EnvResolver::new(dep_content, dep_dep_contexts);
     for var in env {
-        if !var.visibility.has_interface() {
+        // A dependency crosses only its interface side onto either surface —
+        // `carrier_crosses(_, is_root=false, _)` is `has_interface()` regardless
+        // of `self_view`; routed through the shared predicate so inspect and the
+        // env command cannot diverge.
+        if !carrier_crosses(var.visibility, false, self_view) {
             continue;
         }
         if let Some(entry) = resolver.resolve(var)? {
@@ -479,13 +574,9 @@ fn emit_root_vars(
     };
     let resolver = EnvResolver::new(root_content, root_dep_contexts);
     for var in env {
-        let entry_vis = var.visibility;
-        let want = if self_view {
-            entry_vis.has_private()
-        } else {
-            entry_vis.has_interface()
-        };
-        if !want {
+        // The root's own vars cross on the surface's own axis. Routed through
+        // the shared predicate — the single source of truth inspect also uses.
+        if !carrier_crosses(var.visibility, true, self_view) {
             continue;
         }
         if let Some(entry) = resolver.resolve(var)? {
@@ -523,16 +614,19 @@ fn emit_dep_path_block(
     dep_pkg: &PackageDir,
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
+    self_view: bool,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
     // Step 1: interface-tagged env vars (includes declared bin/ PATH entry).
     // Only the interface side of a dep crosses edges into the consumer's
     // surface (ADR Algorithm v3 step 5).
-    emit_interface_vars(dep_metadata, dep_content, dep_dep_contexts, entries)?;
+    emit_interface_vars(dep_metadata, dep_content, dep_dep_contexts, self_view, entries)?;
 
     // Step 2: synth-PATH last so entrypoints/ ends up at the front of PATH
-    // and shadows bin/ from step 1.
-    if let Some(eps) = dep_metadata.entrypoints()
+    // and shadows bin/ from step 1. Same carrier gate as the claim list —
+    // interface-side on a dep, so it crosses on either surface.
+    if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, false, self_view)
+        && let Some(eps) = dep_metadata.entrypoints()
         && !eps.is_empty()
     {
         entries.push(synth_entrypoints_path_for(dep_pkg));
@@ -550,10 +644,10 @@ fn emit_dep_path_block(
 /// the declared env vars so that the synthetic `entrypoints/` entry (pushed
 /// last) ends up earlier in the resolved PATH and shadows declared `bin/`.
 ///
-/// The synth-PATH push is additionally gated by `!self_view` because under
-/// `--self` the root must not see its own launchers (ADR Algorithm v3
-/// §"Root's own contributions") — the package's private runtime view bypasses
-/// the launcher and uses `bin/` directly.
+/// The synth-PATH push crosses under `Entrypoints::IMPLICIT_VISIBILITY`
+/// (INTERFACE) on the root's own axis: absent under `--self`, because the
+/// package's private runtime view bypasses its launchers and uses `bin/`
+/// directly (ADR Algorithm v3 §"Root's own contributions").
 ///
 /// Regression test:
 /// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_after_declared_bin`
@@ -568,8 +662,9 @@ fn emit_root_path_block(
     // Step 1: env vars (includes declared bin/ PATH entry when present).
     emit_root_vars(root_metadata, root_content, root_dep_contexts, self_view, entries)?;
 
-    // Step 2: synth-PATH last (guarded by !self_view — no launchers on --self surface).
-    if !self_view
+    // Step 2: synth-PATH last (no launchers on the --self surface). Same
+    // carrier gate as the root's `admitted_entrypoints` claim in `compose`.
+    if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view)
         && let Some(eps) = root_metadata.entrypoints()
         && !eps.is_empty()
     {
@@ -977,6 +1072,57 @@ mod tests {
         assert!(
             out.entries.is_empty(),
             "SEALED dep must contribute nothing under --self"
+        );
+    }
+
+    /// The root's own entry points are interface-only —
+    /// `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE) under `carrier_crosses`
+    /// on the root's own axis.
+    ///
+    /// Couples `admitted_entrypoints` to `emit_root_path_block`'s synth-PATH
+    /// push — both route through the same carrier gate: `--self` deliberately
+    /// keeps the root's `entrypoints/` off PATH, so it must not claim those
+    /// launchers either. The divergence this locks out surfaced through
+    /// `ocx package inspect --closure`, which listed the root's `app` launcher
+    /// on the private surface.
+    #[tokio::test]
+    async fn compose_root_entrypoints_are_interface_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let root = Arc::new(make_install_info_with_ep(
+            dir.path(),
+            "root",
+            'r',
+            ResolvedPackage::new(),
+            "app",
+        ));
+
+        let synth_path_emitted = |out: &super::ComposeOutput| {
+            out.entries
+                .iter()
+                .any(|e| e.key == "PATH" && e.value.contains("entrypoints"))
+        };
+
+        let consumer = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+        assert_eq!(
+            consumer.admitted_entrypoints.len(),
+            1,
+            "root launcher must be claimed on the interface surface"
+        );
+        assert!(
+            synth_path_emitted(&consumer),
+            "interface surface must put the root's entrypoints/ on PATH"
+        );
+
+        let self_view = compose(&[root], &store, true).await.unwrap();
+        assert!(
+            self_view.admitted_entrypoints.is_empty(),
+            "root launcher must not be claimed under --self: {:?}",
+            self_view.admitted_entrypoints
+        );
+        assert!(
+            !synth_path_emitted(&self_view),
+            "--self must not put the root's entrypoints/ on PATH"
         );
     }
 
@@ -2849,8 +2995,15 @@ mod tests {
         let dep_dep_contexts = std::collections::HashMap::new();
 
         let mut entries = Vec::new();
-        emit_dep_path_block(&dep_metadata, &dep_pkg, &dep_content, &dep_dep_contexts, &mut entries)
-            .expect("emit_dep_path_block must succeed");
+        emit_dep_path_block(
+            &dep_metadata,
+            &dep_pkg,
+            &dep_content,
+            &dep_dep_contexts,
+            false,
+            &mut entries,
+        )
+        .expect("emit_dep_path_block must succeed");
 
         // Must have at least 2 entries: synth-PATH + declared bin/ PATH.
         let entry_summary: Vec<_> = entries.iter().map(|e| (&e.key, &e.value)).collect();
@@ -2920,8 +3073,15 @@ mod tests {
         let dep_dep_contexts = std::collections::HashMap::new();
 
         let mut entries = Vec::new();
-        emit_dep_path_block(&dep_metadata, &dep_pkg, &dep_content, &dep_dep_contexts, &mut entries)
-            .expect("emit_dep_path_block must succeed");
+        emit_dep_path_block(
+            &dep_metadata,
+            &dep_pkg,
+            &dep_content,
+            &dep_dep_contexts,
+            false,
+            &mut entries,
+        )
+        .expect("emit_dep_path_block must succeed");
 
         // Swap the two PATH entries to simulate reversed push order.
         let synth_idx = entries

@@ -76,6 +76,29 @@ fn digest_matches(bytes: &[u8], digest: &oci::Digest) -> bool {
 /// mode because immutable content cannot be wrong. The query/resolve
 /// split is encoded by the [`super::IndexOperation`] argument:
 /// `Query` callers never trigger a chain walk, `Resolve` callers do.
+/// How much a resolve is allowed to write into the **local index** (never the
+/// blob store — content-addressed blob writes are unaffected by this policy).
+///
+/// The three levels form a strict descending ladder of index mutation:
+///
+/// - [`Full`](LocalWritePolicy::Full) — a normal resolve: persist the dispatch
+///   object AND grow the root-document tag pointer. `ocx package install` and
+///   the default resolve path.
+/// - [`NoTag`](LocalWritePolicy::NoTag) — persist the dispatch object but never
+///   commit a tag pointer; the caller's own record (e.g. `ocx.lock`) is
+///   canonical. The update-verb family (`ocx update`), see
+///   `adr_toolchain_update_family.md`.
+/// - [`ReadOnly`](LocalWritePolicy::ReadOnly) — write nothing at all: no
+///   dispatch object, no tag pointer, no AbsentLeaf self-heal. A read-only
+///   view (`ocx package inspect`) resolves content-addressed (index -> blobs ->
+///   source) and warms the blob cache, but never grows the permanent index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalWritePolicy {
+    Full,
+    NoTag,
+    ReadOnly,
+}
+
 pub struct ChainedIndex {
     /// The curated, persisted local index. Not a transparent cache — see
     /// the struct doc for the lifecycle. Renamed from `cache` to make
@@ -92,12 +115,12 @@ pub struct ChainedIndex {
     /// a post-walk local read-back cannot recover it; the walk's own fetch is
     /// the only place the manifest bytes ever exist locally.
     singleflight: singleflight::Group<String, Option<(oci::Digest, oci::Manifest)>>,
-    /// When set, `fetch_and_persist_chain` never commits a tag pointer into
-    /// the local index — resolution lands only in the caller's own record
-    /// (e.g. `ocx.lock`). Content-addressed blob writes still happen. Set by
-    /// [`Self::new_lock_scoped`] for the update-verb family; see
-    /// `adr_toolchain_update_family.md`.
-    suppress_tag_commit: bool,
+    /// How much this index may write into the local index on a resolve — see
+    /// [`LocalWritePolicy`]. `Full` for a normal resolve, `NoTag` for the
+    /// update-verb family ([`Self::new_lock_scoped`]), `ReadOnly` for a
+    /// read-only view ([`Self::read_only`]). Content-addressed blob writes are
+    /// never gated by this.
+    write_policy: LocalWritePolicy,
     /// The machine-global blob store (`$OCX_HOME/blobs`) that holds installed
     /// **content** — leaf platform manifests and their layers — distinct from
     /// the local index, which holds resolution **dispatch** only
@@ -135,7 +158,7 @@ impl ChainedIndex {
             sources,
             mode,
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
-            suppress_tag_commit: false,
+            write_policy: LocalWritePolicy::Full,
             content_store: None,
         }
     }
@@ -146,8 +169,32 @@ impl ChainedIndex {
     /// live without mutating the shared tag store.
     pub fn new_lock_scoped(local_index: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
-            suppress_tag_commit: true,
+            write_policy: LocalWritePolicy::NoTag,
             ..Self::new(local_index, sources, mode)
+        }
+    }
+
+    /// A read-only clone of `self` that writes nothing into the local index
+    /// (no dispatch object, no tag pointer, no AbsentLeaf self-heal) — the
+    /// [`LocalWritePolicy::ReadOnly`] policy. Shares the same sources and
+    /// content store; only the write policy differs.
+    ///
+    /// A **fresh** singleflight group (not the parent's) is deliberate: the
+    /// singleflight key encodes `(mode, identifier)` but NOT the write policy,
+    /// so sharing the parent's group could coalesce a read-only resolve onto a
+    /// persisting leader (or vice versa) and apply the wrong write behaviour.
+    /// A distinct group keeps read-only resolves coalescing only among
+    /// themselves — `box_clone` then shares THIS group across the view's own
+    /// clones. Backs [`index_impl::IndexImpl::read_only_view`] for
+    /// `ocx package inspect`.
+    fn read_only(&self) -> Self {
+        Self {
+            local_index: self.local_index.clone(),
+            sources: self.sources.clone(),
+            mode: self.mode,
+            singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
+            write_policy: LocalWritePolicy::ReadOnly,
+            content_store: self.content_store.clone(),
         }
     }
 
@@ -286,8 +333,12 @@ impl ChainedIndex {
         // Self-heal an incomplete snapshot: an image index present in the blob
         // store but missing from `o/` is staged back so the next dispatch reads
         // it locally (A3 step 2 fallback). Best-effort — a heal failure must not
-        // fail the resolve, whose manifest is already in hand.
-        if matches!(manifest, oci::Manifest::ImageIndex(_))
+        // fail the resolve, whose manifest is already in hand. A `ReadOnly`
+        // policy suppresses the heal write entirely: a read-only view never
+        // grows the local index (the next resolve simply re-recovers from the
+        // blob store).
+        if self.write_policy != LocalWritePolicy::ReadOnly
+            && matches!(manifest, oci::Manifest::ImageIndex(_))
             && let Err(error) = self.local_index.stage_dispatch_bytes(identifier, content, &bytes).await
         {
             log::warn!("failed to self-heal dispatch object '{content}' into the local index: {error}");
@@ -449,7 +500,16 @@ impl ChainedIndex {
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
-            match self.local_index.persist_dispatch(source, identifier).await {
+            // `ReadOnly` fetches + decodes the dispatch object WITHOUT staging
+            // it into `o/` — a read-only view never grows the local index. Every
+            // other policy persists the dispatch object as usual (an image index
+            // is written to `o/`; a leaf manifest writes nothing there anyway).
+            let fetched = if self.write_policy == LocalWritePolicy::ReadOnly {
+                self.local_index.fetch_dispatch_only(source, identifier).await
+            } else {
+                self.local_index.persist_dispatch(source, identifier).await
+            };
+            match fetched {
                 Ok(Some((digest, manifest))) => {
                     // Root growth gated on identifier shape (same contract as
                     // the legacy tag-pointer commit):
@@ -463,14 +523,15 @@ impl ChainedIndex {
                     // caller already has the digest pinned in `ocx.lock`, so a
                     // root write here is redundant and silently shadows the lock.
                     // See `adr_index_routing_semantics.md`.
-                    // `suppress_tag_commit` extends the same principle to
-                    // tag-only resolution performed on behalf of a lock
-                    // (`ocx update`); see `adr_toolchain_update_family.md`.
+                    // Only a `Full` write policy grows the root: `NoTag` resolves
+                    // on behalf of a lock (`ocx update`,
+                    // `adr_toolchain_update_family.md`) and `ReadOnly` views
+                    // (`ocx package inspect`) both leave the tag pointer untouched.
                     // `grow_root` further gates on the miss shape the caller
                     // observed locally — an AbsentLeaf recovery of an
                     // already-known root must never re-copy it (Invariant 1).
                     if grow_root
-                        && !self.suppress_tag_commit
+                        && self.write_policy == LocalWritePolicy::Full
                         && identifier.tag().is_some()
                         && identifier.digest().is_none()
                     {
@@ -975,9 +1036,13 @@ impl index_impl::IndexImpl for ChainedIndex {
             mode: self.mode,
             // Singleflight group is shared across clones so waiters coalesce.
             singleflight: self.singleflight.clone(),
-            suppress_tag_commit: self.suppress_tag_commit,
+            write_policy: self.write_policy,
             content_store: self.content_store.clone(),
         })
+    }
+
+    fn read_only_view(&self) -> Box<dyn index_impl::IndexImpl> {
+        Box::new(self.read_only())
     }
 }
 
@@ -1348,7 +1413,49 @@ mod chain_refs_tests {
             .unwrap();
         assert!(
             tag_pointer.is_none(),
-            "suppress_tag_commit must be carried through box_clone; got a manifest for the tag"
+            "the no-tag write policy must be carried through box_clone; got a manifest for the tag"
+        );
+    }
+
+    // ── read-only view: inspect resolves without growing the local index ─────
+
+    /// A `ReadOnly` view (`ocx package inspect`) resolves through the source
+    /// but writes NOTHING into the local index — no dispatch object, no tag
+    /// pointer. A read-only look never grows the permanent index; content warms
+    /// only the GC-able blob cache (unexercised here — this fake source has no
+    /// blob store attached).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_view_resolves_but_writes_no_dispatch_object_or_tag_pointer() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let store = index_store(&cache_dir);
+
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let read_only = Index::from_chained(cache, vec![src_idx], ChainMode::Remote).read_only_view();
+        let result = read_only
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "read-only resolve must still reach the source");
+        assert!(spy.calls() > 0, "read-only resolve must consult the source");
+
+        // No dispatch object staged — a read-only view never writes into `o/`,
+        // unlike the lock-scoped (`NoTag`) resolve which still persists it.
+        let dispatch = store.dispatch_object_path(REGISTRY, REPO, &digest_a());
+        assert!(
+            !dispatch.exists(),
+            "read-only resolve must not persist a dispatch object into the local index"
+        );
+
+        // No tag pointer committed — an offline probe cannot resolve the tag.
+        let probe = Index::from_chained(make_local_index(&cache_dir), Vec::new(), ChainMode::Offline);
+        let tag_pointer = probe
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            tag_pointer.is_none(),
+            "read-only resolve must never commit a tag pointer; got a manifest for the tag"
         );
     }
 

@@ -277,7 +277,10 @@ pub use error::DependencyError;
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
-pub use tasks::inspect::InspectResult;
+pub use tasks::inspect::{
+    ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, EntrypointConflict, InspectClosure, InspectOptions,
+    InspectResult, RepositoryConflict, Surface,
+};
 pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
@@ -443,6 +446,16 @@ impl PackageManager {
 
     pub fn index(&self) -> &oci::index::Index {
         &self.index
+    }
+
+    /// A read-only view of the default index that resolves identically but
+    /// writes nothing into the permanent local index (no dispatch object, no
+    /// tag pointer) — content-addressed blob writes still happen. Used by
+    /// read-only commands (`ocx package inspect`) so merely looking at a
+    /// package never grows the committed index. See
+    /// [`oci::index::Index::read_only_view`].
+    pub fn read_only_index(&self) -> oci::index::Index {
+        self.index.read_only_view()
     }
 
     /// Returns the OCI client as an `Option`. `None` indicates offline mode.
@@ -616,6 +629,20 @@ impl PackageManager {
             // Carry the effective index-store redirect so an offline view's
             // guaranteed-local lookups read the same home as the parent.
             index_store: self.index_store.clone(),
+        }
+    }
+
+    /// A view of this manager whose resolution writes nothing into the
+    /// permanent local index — every index lookup routes through
+    /// [`oci::index::Index::read_only_view`]. Content still warms the GC-able
+    /// blob cache; the committed index is never grown. Used by
+    /// `ocx package inspect` so a read-only look at a package leaves the index
+    /// untouched. Everything else (client, blob store, patches) is shared with
+    /// the parent unchanged.
+    pub fn read_only_view(&self) -> Self {
+        Self {
+            index: self.index.read_only_view(),
+            ..self.clone()
         }
     }
 }

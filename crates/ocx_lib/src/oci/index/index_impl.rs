@@ -135,4 +135,21 @@ pub trait IndexImpl: Send + Sync {
     }
 
     fn box_clone(&self) -> Box<dyn IndexImpl>;
+
+    /// A view that resolves identically but writes **nothing** into the local
+    /// index — no dispatch object, no root-document tag pointer, no
+    /// AbsentLeaf self-heal. Content-addressed blob writes (leaf manifests,
+    /// config blobs) still happen: the blob store is the GC-able content
+    /// cache, distinct from the permanent local index. Used by read-only
+    /// views (`ocx package inspect`) so merely looking at a package never
+    /// grows the committed index (`adr_index_indirection.md` — the index is
+    /// deployment-managed, outside GC; only `ocx index update` / pins may
+    /// populate it).
+    ///
+    /// Default: [`Self::box_clone`] — a source with no local index of its own
+    /// (a bare remote) has nothing to suppress. Only [`super::chained_index::ChainedIndex`]
+    /// overrides it, returning a clone whose write policy is read-only.
+    fn read_only_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
 }

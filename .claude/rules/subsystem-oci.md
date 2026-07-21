@@ -78,6 +78,16 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 **Design note — write paths.** Local index mutation is owned by exactly three entry points: `LocalIndex::refresh_tags` (called from `ocx index update`; grows a package's root + dispatch objects, A2/A3), `LocalIndex::persist_dispatch` (single dispatch-object write per chain fetch — never walks child manifests, A3), and `LocalIndex::commit_root_tag` (`pub(super)`, the only root-document tag writer outside `refresh_tags`; called only from `ChainedIndex::fetch_and_persist_chain`). Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_root_tag` step because `ocx.lock` is canonical.
 
+**`LocalWritePolicy` — how much a `Resolve` may write.** `ChainedIndex` carries a `LocalWritePolicy` (replaces the former `suppress_tag_commit` bool), a descending ladder of local-index mutation independent of `ChainMode`:
+
+| Policy | Constructor | Dispatch object (`o/`) | Root-doc tag pointer | AbsentLeaf self-heal |
+|--------|-------------|------------------------|----------------------|----------------------|
+| `Full` | `new` / `from_chained*` | write | grow | write |
+| `NoTag` | `new_lock_scoped` (update family) | write | skip | write |
+| `ReadOnly` | `read_only_view` (inspect) | **skip** (`fetch_dispatch_only`, no stage) | skip | skip |
+
+`ReadOnly` is the only policy that persists **nothing** into the permanent index — a read-only `ocx package inspect` resolves content-addressed (index → blobs → source) and warms the GC-able blob cache (`stage_leaf_manifest`, `stage_chain_blobs`, config-blob `fetch_blob` all still write `$OCX_HOME/blobs`), but never grows the committed index. Threaded as `IndexImpl::read_only_view` (default = `box_clone`; `ChainedIndex` flips the policy) → `Index::read_only_view` → `PackageManager::read_only_index` / `read_only_view`. The write policy survives `box_clone`. Acceptance: `test/tests/test_inspect_no_index_growth.py`; unit: `chain_refs_tests::read_only_view_resolves_but_writes_no_dispatch_object_or_tag_pointer`. Rationale: the index is deployment-managed and outside GC (`adr_index_indirection.md` B1), so an inspect-time write would be permanent pollution; the blob cache self-cleans on `ocx clean`.
+
 ### Identifier
 
 Parsed OCI reference: `registry/repository[:tag][@digest]`.

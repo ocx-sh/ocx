@@ -2329,8 +2329,11 @@ Inspects what sits at a package reference — nothing is installed and no symlin
 - **Default, image-index reference** (the usual multi-platform tag): lists the platform **candidates** — for each child manifest the platform, child digest, media type, and size. No metadata is loaded and no platform is selected.
 - **Default, single-manifest reference** (a flat tag or an `@digest` pointing directly at an image manifest): emits the declared **metadata** (bundle version, `strip_components`, env vars, dependencies, entrypoints) plus the manifest's **layers** (digest, media type, size). No resolution chain.
 - **`--resolve`**: platform-selects through the index, then emits metadata and layers plus the OCI **resolution** chain (the walk-order `index` → `manifest` → `config` blobs).
+- **`--closure`**: walks the declared [dependencies][reference-dependencies] to compute the metadata-only dependency **closure** — every package reachable from the reference, read from cached or fetched metadata alone, without installing anything — plus two **surface** projections: `interface` (what would land on `PATH` for a consumer installing the reference) and `private` (what the reference's own runtime sees). On an image-index reference, `--closure` platform-selects first (honoring `-p`/`--platform`, the host platform otherwise) exactly like `--resolve` does, because the walk needs a concrete manifest to read declared dependencies from — `--closure` alone therefore never returns the metadata-less candidates listing.
 
 Unlike [`package test`][cmd-package-test], the identifier accepts an explicit `@digest` (a tag or digest both resolve).
+
+`--closure` fails closed: if any dependency's manifest or metadata can't be loaded, the whole request fails rather than rendering a partial closure (see **Exit codes** below). A script deciding whether `--closure` ran should check for the `closure` key in JSON output, not for `resolution` — `resolution` reflects the shape of the reference (whether it needed platform selection), not whether `--closure` was requested.
 
 **Usage**
 
@@ -2346,8 +2349,9 @@ With more than one identifier, JSON output is an object keyed by the requested i
 
 **Options**
 
-- `-p`, `--platform <PLATFORM>`: Platform to select. Applies **only** with `--resolve`; ignored in default mode (the candidate list always shows every platform).
+- `-p`, `--platform <PLATFORM>`: Platform to select. Applies with `--resolve` and `--closure`; ignored in default mode (the candidate list always shows every platform).
 - `--resolve`: Platform-select through the index and emit the resolution chain — the pinned identifier and the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size) — alongside the metadata and layers (the layers are shown for the selected manifest in both default and `--resolve` mode).
+- `--closure`: Compute the metadata-only dependency closure without installing. Adds one `closure` object to JSON output — `deps` (the transitive dependencies, in transitive-closure order) and `surface` (the `interface` and `private` projections) — and a matching `closure` branch to the plain-text tree. Combining `--closure` with `--resolve` on an image-index reference is redundant but harmless — the platform selection `--closure` already performs is the same one `--resolve` performs.
 - `-h`, `--help`: Print help information.
 
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
@@ -2399,6 +2403,99 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 }
 ```
 
+`--closure` — adds one `closure` object on top of whichever body the reference already produces (the **metadata** body shown here for a single manifest, or the **resolution** body above when the reference needed platform selection):
+
+```json
+{
+  "identifier": "registry/cmake:3.28",
+  "pinned_digest": "sha256:cccc…",
+  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
+  "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }],
+  "closure": {
+    "deps": [
+      {
+        "name": "zlib",
+        "identifier": "registry/zlib@sha256:bbbb…",
+        "digest": "sha256:bbbb…",
+        "effective_visibility": "public",
+        "entrypoints": ["zfmt"],
+        "dependencies": []
+      },
+      {
+        "name": "gcc",
+        "identifier": "registry/gcc@sha256:dddd…",
+        "digest": "sha256:dddd…",
+        "effective_visibility": "private",
+        "binaries": ["gcc", "g++"],
+        "entrypoints": [],
+        "dependencies": [
+          { "identifier": "registry/zlib@sha256:bbbb…", "visibility": "public", "name": "zlib" }
+        ]
+      }
+    ],
+    "surface": {
+      "interface": {
+        "binaries": [],
+        "entrypoints": [
+          { "name": "cc", "package": "registry/cmake:3.28@sha256:cccc…" },
+          { "name": "zfmt", "package": "registry/zlib@sha256:bbbb…" }
+        ],
+        "env": [
+          { "key": "PATH", "type": "path", "package": "registry/cmake:3.28@sha256:cccc…" },
+          { "key": "ZLIB_ROOT", "type": "constant", "package": "registry/zlib@sha256:bbbb…" }
+        ],
+        "binaries_complete": false
+      },
+      "private": {
+        "binaries": [
+          { "name": "gcc", "package": "registry/gcc@sha256:dddd…" },
+          { "name": "g++", "package": "registry/gcc@sha256:dddd…" }
+        ],
+        "entrypoints": [
+          { "name": "zfmt", "package": "registry/zlib@sha256:bbbb…" }
+        ],
+        "env": [
+          { "key": "PATH", "type": "path", "package": "registry/cmake:3.28@sha256:cccc…" },
+          { "key": "GCC_HOME", "type": "constant", "package": "registry/gcc@sha256:dddd…" },
+          { "key": "ZLIB_ROOT", "type": "constant", "package": "registry/zlib@sha256:bbbb…" }
+        ],
+        "binaries_complete": false
+      }
+    },
+    "conflicts": { "entrypoints": [], "repositories": [] }
+  }
+}
+```
+
+`closure.deps` lists every package transitively reachable from the reference's declared [dependencies][reference-dependencies], in transitive-closure order — dependencies before the packages that depend on them. The inspected reference itself is never listed here; it is named by the top-level `identifier` and contributes to both surface projections below. A dependency reached through two different paths (a diamond) still appears once, carrying the merge of every path that reaches it. Each entry carries:
+
+- `name` — the dependency repository's short display name (its final path segment).
+- `identifier` / `digest` — the dependency's resolved, digest-pinned identity.
+- `effective_visibility` — the entry's [visibility][reference-visibility] as composed from the root, down every path that reaches it.
+- `binaries` — the same tri-state as [Executables][reference-binaries]: the key is absent when the publisher never declared the field, `[]` when the publisher declared zero, and a populated array when names are declared.
+- `entrypoints` — the entry's own declared [entry-point][guide-entry-points] launcher names. Independent of `binaries`: a package may declare either, both, or neither. A binary is a raw executable the package puts on `PATH`; an entry point is a named launcher that runs one with a fixed argument prefix — the two are separate axes, not a 1:1 pairing. Above, `zlib` declares an entry point but no binaries; `gcc` declares binaries but no entry point.
+- `dependencies` — the entry's own declared edges (as authored, not composed), each carrying its `visibility` and dependency `name` — enough to reconstruct the DAG from the flat list.
+
+`closure.surface` projects the same node set two ways — the two environments the package participates in, each equal to what the runtime composer emits:
+
+- `interface` is the **consumer view**: what a package depending on this reference inherits. It admits the reference itself plus every dependency whose `effective_visibility` reaches the interface axis. This is the surface [`ocx env`][cmd-package-env] composes for a downstream consumer.
+- `private` is the **self-execution view**: what the reference runs with when it runs itself — its own `bin/` plus every dependency reaching the private axis. This is the surface [`ocx env --self`][cmd-package-env] composes.
+
+The two surfaces overlap by design, and the overlap is deliberate, not redundant:
+
+- A `public` dependency reaches both axes and appears in both surfaces (`zlib` above). A dependency reached only through a `private` edge appears in `private` only (`gcc` above); an `interface`-only dependency, in `interface` only.
+- Entry points carry an implicit `interface` visibility: a launcher exists so a *consumer* can invoke the package, while the package's own runtime bypasses its launchers and calls `bin/` directly. The reference's own entry points therefore appear under `interface` only (`cc` above) — `ocx env --self` never puts its `entrypoints/` on `PATH` — while a **dependency's** entry points cross the edge like any interface-side carrier and appear on whichever surfaces admit the dependency (`zfmt` above): they are how this package invokes that dependency.
+- Binaries carry an implicit `public` visibility — raw executables serve consumers and the package's own shims alike — so the reference's own binaries, like its `public` env vars, appear in both surfaces.
+- Env crossing is asymmetric, matching the composer. The reference's own vars cross on the surface's axis (its `interface`/`public` vars on `interface`, its `private`/`public` vars on `private`). A **dependency**, however, contributes only its *interface-side* vars on either surface — a dependency's own `private` var is that dependency's internal detail and never crosses the edge into this package, so it appears on neither surface.
+
+Each surface carries three attributed arrays plus a completeness flag:
+
+- `binaries` / `entrypoints` — what lands on `PATH` on that axis, each entry `{ name, package }` naming the declaring package.
+- `env` — the environment keys exposed on that axis, each entry `{ key, type, package }`. `type` is `path` or `constant`; the value is omitted because it is `${installPath}`-templated and only concrete once the package is installed — the summary answers *which* keys would be set, not *to what*.
+- `binaries_complete` — `false` iff some admitted node on that axis left `binaries` **undeclared** (the key absent from its metadata). A declared-empty claim (`"binaries": []`) is the opposite of a gap — the publisher asserts *zero* binaries — and keeps the aggregate complete; an unknown claim never silently counts as zero. Above, both surfaces admit `zlib` (undeclared) so both read `false` even though `gcc` declared its own claim.
+
+`closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable. `inspect` only reports the condition — it stays exit `0` either way.
+
 **Examples**
 
 ```shell
@@ -2413,6 +2510,9 @@ ocx package inspect mytool@sha256:abc…
 
 # Platform-select and include the OCI resolution chain.
 ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.["mytool:1.0.0"].resolution'
+
+# What would land on PATH without installing it?
+ocx --format json package inspect --closure mytool:1.0.0 | jq '.["mytool:1.0.0"].closure.surface.interface'
 ```
 
 **Plain output**
@@ -2453,11 +2553,47 @@ registry/repo:tag@sha256:…
       └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
 ```
 
+With `--closure`, a `closure` branch is added alongside `metadata` and `layers` (and `resolution`, on a multi-platform reference — `--closure` platform-selects the same way `--resolve` does). The branch holds a flat `deps` list — one leaf per transitive dependency, in transitive-closure order, labeled by its short name with the whole identifier annotated as a digest-inked span and its composed visibility tagged after — and a `surface` branch with `interface` and `private` sub-branches, each rendering its admitted binaries/entrypoints/env the same way the JSON `surface` object does. A dependency reached through two different paths already merges into one entry before rendering (see [Visibility][reference-visibility]), so `deps` needs no repeat-visit marker:
+
+```text
+registry/cmake:3.28@sha256:cccc…
+├─ metadata
+│  └─ …
+├─ layers
+│  └─ …
+└─ closure
+   ├─ deps
+   │  ├─ zlib · registry/zlib@sha256:bbbb… · public
+   │  └─ gcc · registry/gcc@sha256:dddd… · private
+   └─ surface
+      ├─ interface
+      │  ├─ entrypoints
+      │  │  ├─ cc · registry/cmake:3.28@sha256:cccc…
+      │  │  └─ zfmt · registry/zlib@sha256:bbbb…
+      │  ├─ env
+      │  │  ├─ PATH · path · registry/cmake:3.28@sha256:cccc…
+      │  │  └─ ZLIB_ROOT · constant · registry/zlib@sha256:bbbb…
+      │  └─ binaries incomplete: at least one admitted package leaves binaries undeclared
+      └─ private
+         ├─ binaries
+         │  ├─ gcc · registry/gcc@sha256:dddd…
+         │  └─ g++ · registry/gcc@sha256:dddd…
+         ├─ entrypoints
+         │  └─ zfmt · registry/zlib@sha256:bbbb…
+         ├─ env
+         │  ├─ PATH · path · registry/cmake:3.28@sha256:cccc…
+         │  ├─ GCC_HOME · constant · registry/gcc@sha256:dddd…
+         │  └─ ZLIB_ROOT · constant · registry/zlib@sha256:bbbb…
+         └─ binaries incomplete: at least one admitted package leaves binaries undeclared
+```
+
+Here `gcc`'s direct edge is `private` — it never reaches the interface surface, so `cc` (the reference's own entrypoint) and `zfmt` (`zlib`, reachable by a separate `public` edge) are the only entries under `interface`, while `private` drops `cc` (the reference does not go through its own launcher) and gains `gcc`'s two binaries. Both surfaces flag `binaries incomplete`: the reference itself and `zlib` never declare a `binaries` claim on either axis they're admitted to, and completeness requires every admitted node to have declared — `gcc`'s own `["gcc"]` claim does not offset it. An entrypoint or repository conflict, when present, renders as its own leaf directly under `closure`, naming the colliding entrypoint or repository.
+
 **Exit codes**
 
-- `79` (`NotFound`) — the tag or digest does not resolve.
-- `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index.
-- `65` (`DataError`) — the resolved metadata is malformed or fails validation; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)).
+- `79` (`NotFound`) — the tag or digest does not resolve; with `--closure`, also a dependency in the closure that is genuinely absent from the registry (a source was consulted and it said no).
+- `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index. With `--closure`, the same code covers a dependency's manifest or metadata blob missing from the local cache under `--offline` — run the same `--closure` inspection online once (or `ocx package pull` the dependency) to warm the cache, then retry offline.
+- `65` (`DataError`) — the resolved metadata is malformed, fails validation, or exceeds the metadata size cap; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)). With `--closure`, the same checks apply to every dependency in the closure — one bad dependency fails the whole request rather than a smaller closure.
 
 #### `describe` {#package-describe}
 
@@ -3285,6 +3421,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [reference-binaries-none-vs-empty]: ./metadata.md#executables-none-vs-empty
 [reference-env-path]: ./metadata.md#env-path
 [reference-env-visibility]: ./metadata.md#env-entry-visibility
+[reference-visibility]: ./metadata.md#dependencies-visibility
 [reference-dependencies-authoring]: ./metadata.md#dependencies-authoring-vs-published
 
 <!-- global flag -->

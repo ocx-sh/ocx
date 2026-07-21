@@ -56,9 +56,21 @@ test/manual/scripts/bootstrap.sh
 The script publishes the packages below into the namespace
 `dojo/<name>:1.0.0`, walking the dep graph in order. Every package ships a
 committed `metadata.in.json` (the source of truth); bootstrap renders it
-into a gitignored `metadata.json` — substituting `@@KEY@@` tokens with
-upstream `<fq>@<digest>` for templated packages, or copying verbatim for
+into a gitignored `metadata.json` — substituting `@@KEY@@` tokens with an
+upstream `<fq>` reference for templated packages, or copying verbatim for
 plain ones.
+
+Two mechanics worth knowing before reading the table:
+
+- **Deps are templated unpinned** (`localhost:5000/dojo/deps-mid:1.0.0`, no
+  `@digest`). `ocx package create -p <platform>` resolves each one to a
+  **platform manifest** digest and writes the pins into the sidecar it emits
+  next to the bundle. Never hand-pin a tag's *index* digest — it is rewritten
+  on every platform push and garbage-collected, and create/push reject it.
+- **`push` is called without `-m`** so it picks up that create-emitted
+  sidecar (`out/<name>-1.0.0-metadata.json`), which also carries the
+  auto-scanned `binaries` claim. Passing `-m metadata.json` would publish the
+  hand-authored metadata instead, with no pins and no `binaries`.
 
 | Package | Layers | Entrypoints | Deps | Exercise |
 |---|---|---|---|---|
@@ -66,9 +78,9 @@ plain ones.
 | `dojo/multi-layer-app` | 3 | `myapp` | — | multi-layer assembly, layer-reuse via digest refs |
 | `dojo/multi-entry-toolkit` | 1 | `tool-a` … `tool-d` | — | entrypoint dedup; collision detection |
 | `dojo/deps-leaf-a` | 1 | `leaf-a` | — | leaf for chains |
-| `dojo/deps-leaf-b` | 1 | `leaf-b` | — | second leaf |
+| `dojo/deps-leaf-b` | 1 | `leaf-b` | — | second leaf; pushed with `--no-bin-scan`, so its `binaries` claim is **undeclared** (`null`, not `[]`) |
 | `dojo/deps-mid` | 1 | `mid` | leaf-a (interface) | transitive surface gating |
-| `dojo/deps-app` | 1 | `app` | mid (interface) + leaf-b (private) | surface visibility (`--self`) |
+| `dojo/deps-app` | 1 | `app` | mid (interface) + leaf-b (private) + leaf-a (private) | surface visibility (`--self`); the leaf-a edge makes the closure a **diamond** (also reachable through mid) |
 | `dojo/cross-layer-entrypoint` | 1 | `wrap-leaf-a` | leaf-a (interface) | `${deps.NAME.installPath}` template |
 | `dojo/baked-args-demo` | 1 | `hello-script` | — | baked `args` with `${installPath}` interpolation; ships `content/scripts/hello.sh` (committed), no dep required |
 
@@ -208,6 +220,101 @@ rm -rf $OCX_HOME/packages $OCX_HOME/blobs $OCX_HOME/layers
 ocx --offline package exec dojo/multi-layer-app:1.0.0 -- myapp   # exits non-zero
 ```
 
+### `ocx package inspect --closure` — dependency closure + surfaces, no install
+
+Answers "what lands on `PATH` if I install this?" from metadata alone — no
+package is downloaded, assembled, or installed. Nothing above needs to have
+run; a bare `bootstrap.sh` is enough.
+
+```sh
+ocx package inspect --closure dojo/deps-app:1.0.0
+```
+
+Reading the tree against the bootstrapped graph:
+
+```
+└── closure
+    ├── deps
+    │   ├── deps-leaf-a · …@sha256:4f24… · public
+    │   ├── deps-leaf-b · …@sha256:4713… · private
+    │   └── deps-mid · …@sha256:171a… · interface
+    └── surface
+        ├── interface
+        │   ├── binaries        leaf-a, mid, app
+        │   ├── entrypoints     leaf-a, mid, app
+        │   └── env             PATH (path), LEAF_A_HOME/MID_HOME/APP_HOME (constant)
+        └── private
+            ├── binaries        leaf-a, mid, app
+            ├── entrypoints     leaf-a, leaf-b, mid, app
+            └── env             adds LEAF_B_HOME (constant)
+```
+
+- **`deps` is flat** — each entry is a leaf (name, whole identifier, composed
+  visibility), never a branch; there is nothing nested under it. One entry
+  per transitive dependency, in transitive-closure order, appearing exactly
+  once even though leaf-a is reached two ways (directly from deps-app, and
+  through deps-mid) — no repeat-visit marker to read past. Per-dep binaries
+  and entrypoints show up only in the `surface` projections below, attributed
+  to their declaring package, not nested under `deps`.
+- **`public`** on leaf-a is the *merged effective* visibility: `private`
+  (direct edge from deps-app) OR `interface` (through mid). Each entry
+  carries the composition of every path that reaches it, not a single edge's
+  declaration.
+- **leaf-b carries no `binaries` field** — it was published with
+  `--no-bin-scan`, so the claim is undeclared: the key is absent from its
+  closure entry entirely, not `[]` ("asserted zero binaries").
+- **`surface.interface` omits leaf-b entirely**: private deps never reach
+  the consumer's `PATH`. **`surface.private`** additionally admits leaf-b
+  (visible on the package's own private axis). Each surface's **env** branch
+  summarizes every env key the admitted packages on that axis expose, each
+  attributed to its package with its modifier kind. Values are omitted —
+  they are `${installPath}`-templated and only concrete after install; the
+  summary answers *which* keys, not *to what*.
+
+The JSON form is the machine contract — one `closure` object holding a flat,
+already-deduped `deps` array plus the two `surface` projections:
+
+```sh
+ocx --format json package inspect --closure dojo/deps-app:1.0.0 \
+    | jq '.[] | .closure | {deps: [.deps[] | {id: .identifier, vis: .effective_visibility, bins: .binaries}], surface}'
+```
+
+Expect `bins` absent (not printed by `jq` — the key was never serialized) on
+leaf-b, `surface.interface.binaries_complete: true` (every interface-admitted
+package — deps-app, deps-mid, deps-leaf-a — declared a claim), and
+`surface.private.binaries_complete: false` (the private axis additionally
+admits leaf-b, whose claim is undeclared) — the flag flips per axis based on
+what that axis actually admits, so a consumer can tell "no binaries" apart
+from "could not determine". `surface.<axis>.env` is the sibling of
+`binaries`/`entrypoints`: one `{ key, type, package }` entry per exposed env
+key.
+
+Branch on `closure` presence, never on `resolution` presence: `--closure`
+and `--resolve` are independent flags.
+
+#### Local-first / offline
+
+`--closure` reads manifests and config blobs through the local blob store
+first and persists what it fetched, so a warmed closure answers with the
+network gone:
+
+```sh
+ocx package inspect --closure dojo/deps-app:1.0.0        # warms the blob cache
+ocx --offline package inspect --closure dojo/deps-app:1.0.0   # same output, no network
+```
+
+Un-warmed and offline exits 81 (`PolicyBlocked`) naming the manifest it
+could not read — the walk is fail-closed and never renders a partial
+closure:
+
+```sh
+ocx clean                                              # drop unreferenced cache entries
+ocx --offline package inspect --closure dojo/deps-app:1.0.0   # exit 81
+```
+
+Nothing is written without `--closure` — a plain `ocx package inspect` stays
+a pure read.
+
 ### `ocx package deps` — inspect the dep graph
 
 ```sh
@@ -216,7 +323,7 @@ ocx package install --select dojo/deps-app:1.0.0
 ocx package deps dojo/deps-app:1.0.0                  # tree, interface surface only
 ocx package deps --self dojo/deps-app:1.0.0           # tree incl. private (leaf-b)
 ocx package deps --flat dojo/deps-app:1.0.0           # resolved evaluation order
-ocx package deps --depth 1 dojo/deps-app:1.0.0        # one level (mid only)
+ocx package deps --depth 1 dojo/deps-app:1.0.0        # one level (mid, leaf-b, leaf-a)
 
 # "Why is leaf-a in the closure?" → because mid pulls it in.
 ocx package deps --why dojo/deps-leaf-a dojo/deps-app:1.0.0

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::slug::SLUG_MAX_LEN;
+use super::visibility::Visibility;
 
 /// A validated executable-name claim.
 ///
@@ -142,6 +143,17 @@ impl<'de> Deserialize<'de> for BinaryName {
 pub struct Binaries(BTreeSet<BinaryName>);
 
 impl Binaries {
+    /// The visibility a binaries claim carries as a surface carrier.
+    ///
+    /// Binaries have no publisher-declared visibility field; they name raw
+    /// executables in `bin/`, invocable by consumers *and* by the package's
+    /// own shims and entry-point launchers (a launcher's target IS one of
+    /// these). That is [`Visibility::PUBLIC`]: both axes — so under the
+    /// composer's surface algebra a claim crosses wherever its owning node
+    /// is admitted, which is the admission rule
+    /// `adr_declared_binaries_metadata.md` §4 records.
+    pub const IMPLICIT_VISIBILITY: Visibility = Visibility::PUBLIC;
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

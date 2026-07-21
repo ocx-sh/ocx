@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::{conventions, options};
 
-/// Inspect what sits at one or more package references. Read-only — nothing
+/// Inspect what sits at one or more package references. Read-only - nothing
 /// is installed and no symlinks are created. Accepts a tag or an `@digest`.
 ///
 /// With multiple packages, JSON output is an object keyed by the requested
@@ -25,10 +25,25 @@ use crate::{conventions, options};
 ///   resolution chain.
 /// - `--resolve`: platform-select through the index (honoring
 ///   `-p/--platform`), then emit metadata and layers plus the **resolution**
-///   chain — the pinned identifier and the walk-order chain blob digests
+///   chain - the pinned identifier and the walk-order chain blob digests
 ///   (index, manifest, config).
+/// - `--closure`: compute the metadata-only dependency closure without
+///   installing. Adds one `closure` object to JSON output holding `deps` (the
+///   transitive dependencies in transitive-closure order, each with its
+///   effective visibility) and `surface` (the `interface` and `private`
+///   projections - the binaries, entrypoints and env keys that would land on
+///   PATH for a consumer versus internally). Plain output adds a `closure`
+///   branch with a flat dependency list and the two surface summaries. On a
+///   multi-platform reference, `--closure` first platform-selects (honoring
+///   `-p/--platform`) to read the declared dependencies, so the output is the
+///   same platform-selected body `--resolve` produces, with the closure
+///   attached.
 ///
-/// `-p/--platform` applies only with `--resolve`. Honors the global
+/// A script deciding whether `--closure` ran should check for the `closure`
+/// key in JSON output, not for `resolution` (which reflects the shape of the
+/// reference, not whether `--closure` was requested).
+///
+/// `-p/--platform` applies with `--resolve` and `--closure`. Honors the global
 /// `--offline` / `--remote` / `--format` flags. JSON is the primary consumer
 /// surface (OCX is a backend tool).
 #[derive(Parser)]
@@ -38,10 +53,26 @@ pub struct PackageInspect {
 
     /// Platform-select through the index and emit the OCI resolution chain
     /// (pinned identifier and walk-order chain digests: index, manifest,
-    /// config) alongside the metadata and layers. Without this, an image-index
-    /// reference lists its platform candidates instead.
+    /// config) alongside the metadata and layers. Without `--resolve` or
+    /// `--closure`, an image-index reference lists its platform candidates
+    /// instead.
     #[clap(long)]
     resolve: bool,
+
+    /// Compute the metadata-only dependency closure without installing.
+    ///
+    /// Adds one `closure` object to the output holding `deps` (the transitive
+    /// dependencies in transitive-closure order, each with its effective
+    /// visibility) and `surface` (the `interface` and `private` projections -
+    /// the binaries, entrypoints and env keys that would land on PATH for a
+    /// consumer versus internally). Plain output adds a `closure` branch with a
+    /// flat dependency list and the two surface summaries.
+    ///
+    /// For a multi-platform reference, `--closure` first selects a platform
+    /// (honoring `-p/--platform`, the host platform by default) to read the
+    /// declared dependencies - the same selection `--resolve` performs.
+    #[clap(long)]
+    closure: bool,
 
     /// Package identifiers to inspect (each a tag or `@digest`).
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -50,17 +81,24 @@ pub struct PackageInspect {
 
 impl PackageInspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        use ocx_lib::package_manager::InspectOptions;
+
         use crate::api::data::package_inspect::{PackageInspect, PackageInspects};
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
 
+        let inspect_options = InspectOptions {
+            resolve: self.resolve,
+            closure: self.closure,
+        };
+
         // `inspect_all` preserves input order, so zipping the results back with
         // `self.packages` (the raw request strings) is sound.
         let results = context
             .manager()
-            .inspect_all(identifiers.clone(), platform.clone(), self.resolve)
+            .inspect_all(identifiers.clone(), platform.clone(), inspect_options)
             .await?;
 
         let entries: Vec<(String, PackageInspect)> = self
