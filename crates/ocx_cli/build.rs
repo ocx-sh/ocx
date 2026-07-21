@@ -54,7 +54,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match GixBuilder::default()
         .sha(false) // long SHA — short variant derived in build_info.rs
         .describe(true, true, None) // dirty marker + tags
-        .dirty(true)
+        // `false` = do NOT count untracked files as dirty. The release job
+        // runs `dist build … > dist-manifest.json`, and the shell creates
+        // that redirect target at the repo root *before* cargo runs — an
+        // untracked file every published binary would otherwise self-report
+        // as a dirty build. Tracked-file modification is the predicate that
+        // `describe`'s `-dirty` suffix already uses; keeping both on the
+        // same predicate stops the two fields from contradicting each other.
+        .dirty(false)
         .commit_timestamp(true)
         .build()
     {
