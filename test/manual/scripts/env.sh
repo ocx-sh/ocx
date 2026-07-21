@@ -27,6 +27,12 @@ export OCX_HOME
 unset _ocx_src
 mkdir -p "${OCX_HOME}"
 
+# Keep manual experiments out of the repo's committed index copy. The root
+# taskfile pins `OCX_INDEX` to `.ocx/index`, but go-task lets an inherited
+# environment variable win — so exporting it here redirects every `task run --
+# ...` in this shell to the disposable home instead of dirtying git.
+export OCX_INDEX="${OCX_HOME}/index"
+
 cat >&2 <<EOF
 Configured environment for manual testing with local registry:
 

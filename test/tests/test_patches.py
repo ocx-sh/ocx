@@ -34,7 +34,7 @@ import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
-from src.runner import OcxRunner, PackageInfo
+from src.runner import OcxRunner, PackageInfo, registry_dir
 
 # The global descriptor lives at a FIXED, registry-wide repository
 # (`<patch-registry>/global:__ocx.patch`). Several tests here publish to it,
@@ -44,6 +44,34 @@ from src.runner import OcxRunner, PackageInfo
 # xdist worker so these tests run sequentially (deterministic order); other
 # test modules still parallelize, and none of them touch the `[patches]` tier.
 pytestmark = pytest.mark.xdist_group("patch_global_slot")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _empty_global_descriptor_slot_afterwards(
+    ocx_binary: Path, registry: str, tmp_path_factory: pytest.TempPathFactory
+):
+    """Leave the registry-wide global descriptor slot empty when this module ends.
+
+    The slot outlives the test session — nothing here is UUID-scoped, and no
+    other fixture cleans it. A `match: "*"` rule left behind means every LATER
+    ocx run against this registry with a `[patches]` tier (a dogfooding shell,
+    a manual rig, another suite) installs this suite's throwaway companions and
+    writes their tag pointers into whatever `OCX_INDEX` is active. Publishing a
+    zero-rule descriptor is the cheapest neutraliser: no registry delete API,
+    no per-test cost, one push per session.
+    """
+    yield
+    home = tmp_path_factory.mktemp("global_slot_reset")
+    descriptor = home / "empty_descriptor.json"
+    _write_descriptor(descriptor, rules=[])
+    OcxRunner(ocx_binary, home, registry).run(
+        "patch", "publish",
+        "--descriptor", str(descriptor),
+        "--global",
+        "--registry", registry,
+        format=None,
+        check=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2215,4 +2243,68 @@ def test_patch_test_script_asserts_composed_env(
     assert result.returncode == 0, (
         "`ocx patch test --script` with a passing expect.eq on the composed env must exit 0; "
         f"got {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provenance: why a companion repository shows up in the local index after an
+# `ocx index update` that never named it
+# ---------------------------------------------------------------------------
+
+
+def test_index_update_writes_global_companion_into_the_local_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx index update <base>` also indexes GLOBAL companions of that base.
+
+    Provenance regression test — this is the chain that puts a repository the
+    user never typed into the local index:
+
+      1. `index update` piggybacks `sync_patches` whenever a `[patches]` tier
+         is configured and the manager is online (`command/index_update.rs`).
+      2. `sync_patches` re-fetches the reserved, registry-wide
+         `<patch-registry>/global:__ocx.patch` descriptor for every installed
+         base and installs newly-referenced companions.
+      3. Installing a package refreshes its tag pointers into the index.
+
+    Consequence worth knowing: a `match: "*"` global descriptor left behind in
+    a SHARED registry (this suite publishes several) leaks its companion into
+    every later `ocx index update` run against that registry — including a
+    dogfooding shell pointed at a git-tracked `OCX_INDEX`.
+    """
+    companion_repo = _unique_repo("index_update_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "INDEX_UPDATE_PROBE", "on")
+
+    _write_config(ocx, registry)
+
+    descriptor_path = tmp_path / "index_update_global_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    published = ocx.run(
+        "patch", "publish",
+        "--descriptor", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert published.returncode == 0, (
+        f"global patch publish must succeed; got {published.returncode}\nstderr: {published.stderr}"
+    )
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    ocx.plain("package", "install", base_pkg.short)
+
+    # Drop the companion's index entry so the assertion below can only pass if
+    # THIS `index update` rewrote it (the companion is already installed at
+    # this point — the piggyback re-checks and refreshes regardless).
+    index_home = ocx.ocx_home / "index" / registry_dir(registry) / "p"
+    companion_root = index_home / f"{companion_repo}.json"
+    companion_root.unlink(missing_ok=True)
+
+    ocx.plain("index", "update", base_pkg.short)
+
+    assert companion_root.exists(), (
+        f"expected {companion_root.name} — `ocx index update {base_pkg.short}` grows the index "
+        "with the global companion via the patch-sync piggyback; if this now fails, the piggyback "
+        "changed and the surprising cross-repository index writes are gone"
     )

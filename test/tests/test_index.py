@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -5,7 +6,11 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner, PackageInfo, static_index
+from src.registry import fetch_platform_manifest_digest
 from src.runner import registry_dir
+
+IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 
 
 @pytest.fixture()
@@ -23,6 +28,65 @@ def test_index_update_succeeds(
     pkg = published_package
     result = ocx.plain("index", "update", pkg.short)
     assert result.returncode == 0
+
+
+def test_index_update_never_stores_an_image_manifest(
+    ocx: OcxRunner, published_package: PackageInfo, registry: str
+):
+    """No file anywhere in the local index is a leaf platform manifest.
+
+    `adr_index_indirection.md` A3: the local index stores dispatch objects
+    only. A tag whose target is a single-platform image manifest records its
+    pointer in the root document and writes NOTHING to `o/` — the absence of
+    an object IS the "this is a leaf manifest" encoding, self-healed on read.
+
+    Such a tag is not hypothetical: `ocx package push` publishes a canonical
+    `sha256.<hex>` tag per platform manifest by default, so a bare
+    `ocx index update <repo>` always walks one. The test pins that tag as the
+    non-vacuity anchor, then sweeps EVERY json file under the index home so a
+    manifest leaking in through any other path fails here too.
+    """
+    pkg = published_package
+    manifest_digest = fetch_platform_manifest_digest(registry, pkg.repo, pkg.tag)
+    canonical_tag = manifest_digest.replace(":", ".")
+
+    ocx.plain("index", "update", pkg.repo)
+
+    index_home = ocx.ocx_home / "index"
+    documents = sorted(index_home.rglob("*.json"))
+    assert documents, f"index update wrote nothing under {index_home}"
+
+    objects = sorted(index_home.rglob("o/*/*.json"))
+    assert objects, "index update wrote no dispatch object — the sweep below would be vacuous"
+
+    for path in documents:
+        media_type = json.loads(path.read_text()).get("mediaType")
+        assert media_type != IMAGE_MANIFEST_MEDIA_TYPE, (
+            f"{path.relative_to(index_home)} is a leaf platform image manifest; "
+            "the local index must only ever hold dispatch objects"
+        )
+    for path in objects:
+        media_type = json.loads(path.read_text()).get("mediaType")
+        assert media_type == IMAGE_INDEX_MEDIA_TYPE, (
+            f"{path.relative_to(index_home)} has mediaType {media_type!r}, "
+            f"expected {IMAGE_INDEX_MEDIA_TYPE}"
+        )
+
+    # Anchor: the manifest-pointing tag WAS walked (so the sweep above is
+    # meaningful), it is recorded as a pointer, and it stored no object.
+    root_document = index_home / registry_dir(registry) / "p" / f"{pkg.repo}.json"
+    tags = json.loads(root_document.read_text())["tags"]
+    assert canonical_tag in tags, (
+        f"canonical tag {canonical_tag} missing from {root_document.name}; "
+        f"got {sorted(tags)} — this test proves nothing without a manifest-pointing tag"
+    )
+    assert tags[canonical_tag]["content"] == manifest_digest
+    algorithm, hex_digest = manifest_digest.split(":", 1)
+    manifest_object = root_document.with_suffix("") / "o" / algorithm / f"{hex_digest}.json"
+    assert not manifest_object.exists(), (
+        f"{manifest_object.relative_to(index_home)} exists; a tag pointing at a platform "
+        "image manifest must store no dispatch object"
+    )
 
 
 def test_index_update_partial_failure_exits_nonzero_and_stable(
