@@ -222,6 +222,12 @@ jobs:
               install -m 0755 "$SRC" "$WORK/repackage/bin/${bin_stem}${ext}"
 
               ARCHIVE="$WORK/${bin_stem}-${target}.tar.xz"
+              # No --metadata below: `push` derives the sidecar path from its
+              # layer via the SAME conventions::infer_metadata_file that
+              # `create` uses to write it, so the two cannot drift. Handing
+              # `push` the source `$METADATA` instead fails with "metadata
+              # sidecar has no recorded platform" (exit 65) — only the
+              # generated sidecar carries the recorded platform.
               ocx package create "$WORK/repackage" \
                 -m "$METADATA" \
                 -o "$ARCHIVE" \
@@ -234,7 +240,6 @@ jobs:
                 --platform "${platform}" \
                 --cascade \
                 --new \
-                --metadata "${METADATA}" \
                 "$ARCHIVE"
 
               rm -rf "$WORK"
