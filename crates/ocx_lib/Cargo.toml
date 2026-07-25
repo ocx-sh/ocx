@@ -38,7 +38,16 @@ reqwest.workspace = true
 # empty-store platform verifier panics (`No CA certificates were loaded`).
 webpki-root-certs.workspace = true
 lzma-rust2.workspace = true
-serde_json.workspace = true
+# `preserve_order`: the canonical index-root serializer (oci/index/wire_writer.rs,
+# CONTRACTS §14) round-trips a package root through `serde_json::Value` and must
+# emit fields in insertion order (never alphabetized). The feature swaps the
+# backing map to `indexmap` (already a workspace dep) so parse→emit preserves the
+# on-disk field order byte-for-byte. Blast radius is WORKSPACE-WIDE via Cargo
+# feature unification: every serde_json Value/Map consumer (oci-client, patch
+# descriptors, docker_credential) flips to insertion order too — verified safe by
+# the full `cargo test -p ocx_lib` pass. Adding ordering-sensitive code elsewhere
+# must account for this.
+serde_json = { workspace = true, features = ["preserve_order"] }
 serde_json_canonicalizer.workspace = true
 serde.workspace = true
 sha2.workspace = true

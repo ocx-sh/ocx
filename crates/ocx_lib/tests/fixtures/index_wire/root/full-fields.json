@@ -1,0 +1,49 @@
+{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/ocx-contrib/widget",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    },
+    {
+      "github": "bob",
+      "github_id": 2
+    }
+  ],
+  "status": "deprecated",
+  "deprecated_message": "Superseded by acme/widget2; no further releases planned.",
+  "created": "2026-01-15",
+  "desc": {
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "title": "Caf\u00e9 Widget",
+    "description": "A caffeinated widget, mirrored from upstream.",
+    "keywords": [
+      "cli",
+      "build",
+      "widget"
+    ],
+    "readme": "sha256:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+    "logo": "sha256:llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"
+  },
+  "upstream": {
+    "org": "Acme Org",
+    "repository_url": "https://github.com/acme/widget",
+    "disclaimer": "Community-maintained mirror, not officially endorsed by Acme Org."
+  },
+  "superseded_by": "acme/widget2",
+  "tags": {
+    "2.0.0": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-24T00:00:00Z"
+    },
+    "1.0.0": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-01-15T00:00:00Z",
+      "yanked": {
+        "reason": "critical security issue",
+        "at": "2026-02-01T00:00:00Z"
+      }
+    }
+  }
+}

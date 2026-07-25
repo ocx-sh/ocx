@@ -920,12 +920,12 @@ mod tests {
         let low = write_config(
             &dir,
             "low.toml",
-            "[registries.shared]\nurl = \"old.example\"\n\n[registries.only_low]\nurl = \"low.example\"",
+            "[registries.shared]\nindex = \"https://old.example\"\n\n[registries.only_low]\nindex = \"https://low.example\"",
         );
         let high = write_config(
             &dir,
             "high.toml",
-            "[registries.shared]\nurl = \"new.example\"\n\n[registries.only_high]\nurl = \"high.example\"",
+            "[registries.shared]\nindex = \"https://new.example\"\n\n[registries.only_high]\nindex = \"https://high.example\"",
         );
         let config = ConfigLoader::load_and_merge(&[low, high])
             .await
@@ -933,12 +933,12 @@ mod tests {
         let registries = config.registries.expect("registries should be present");
         assert_eq!(registries.len(), 3);
         assert_eq!(
-            registries["shared"].url.as_deref(),
-            Some("new.example"),
+            registries["shared"].index.as_deref(),
+            Some("https://new.example"),
             "higher tier should win on conflicting key"
         );
-        assert_eq!(registries["only_low"].url.as_deref(), Some("low.example"));
-        assert_eq!(registries["only_high"].url.as_deref(), Some("high.example"));
+        assert_eq!(registries["only_low"].index.as_deref(), Some("https://low.example"));
+        assert_eq!(registries["only_high"].index.as_deref(), Some("https://high.example"));
     }
 
     // ── load() orchestration tests ───────────────────────────────────────────
@@ -2411,10 +2411,6 @@ mod tests {
         );
     }
 
-    /// Same contract as `managed_snapshot_cannot_override_system_locked_registry`,
-    /// but through the `[registries.<name>].url` indirection:
-    /// `Config::resolved_default_registry` resolves `[registry] default`
-    /// through the NAMED `[registries.<name>]` entry's `url`, so a lock on
     /// Regression (review round 2): the `[managed]` lock call was missing
     /// from the system-scope wiring — `ManagedConfig::lock_as_system` existed
     /// but was never invoked, so criterion 13 was unenforced dead code. Pins
@@ -2425,7 +2421,7 @@ mod tests {
         let mut config: crate::config::Config = toml::from_str(concat!(
             "[patches]\nregistry = \"patches.corp.example\"\nrequired = true\n",
             "[registry]\ndefault = \"corp\"\n",
-            "[registries.corp]\nurl = \"registry.corp.example\"\n",
+            "[registries.corp]\nindex = \"https://registry.corp.example\"\n",
             "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
         ))
@@ -2456,10 +2452,12 @@ mod tests {
         );
     }
 
-    /// `RegistryDefaults` alone leaves that indirection open — a managed
-    /// payload could redirect the entry instead of the default name. This
-    /// pins that the entry-level lock (`RegistryConfig::system_locked`)
-    /// closes it too.
+    /// Same contract as `managed_snapshot_cannot_override_system_locked_registry`,
+    /// but for the `[registries.<name>]` entry lock directly. Since §6 removed
+    /// `resolved_default_registry`'s indirection through this table entirely,
+    /// the entry's own `system_locked` flag is now the only thing protecting
+    /// its fields — this pins that a managed payload still cannot override a
+    /// system-locked entry's `index` value.
     #[tokio::test]
     async fn managed_snapshot_cannot_override_system_locked_registries_entry() {
         let env = crate::test::env::lock();
@@ -2472,28 +2470,20 @@ mod tests {
         write_managed_snapshot(
             dir.path(),
             "registry.test/managed-config:v1",
-            "[registries.corp]\nurl = \"malicious-registry.example\"\n",
+            "[registries.corp]\nindex = \"https://malicious-index.example\"\n",
         );
 
         // Simulate an accumulator that already folded a locked SYSTEM tier:
-        // both `[registry] default = "corp"` and `[registries.corp].url` are
-        // system-locked (in production via `/etc/ocx/config.toml`'s
-        // `lock_as_system` branch).
-        let mut registry = crate::config::RegistryDefaults {
-            default: Some("corp".to_string()),
-            system_locked: false,
-        };
-        registry.lock_as_system();
+        // the `[registries.corp]` entry is system-locked (in production via
+        // `/etc/ocx/config.toml`'s `lock_as_system` branch).
         let mut corp_entry = crate::config::RegistryConfig {
-            url: Some("system-locked-registry.example".to_string()),
-            index: None,
-            system_locked: false,
+            index: Some("https://system-locked-index.example".to_string()),
+            ..Default::default()
         };
         corp_entry.lock_as_system();
         let mut registries = std::collections::HashMap::new();
         registries.insert("corp".to_string(), corp_entry);
         let accumulator = crate::config::Config {
-            registry: Some(registry),
             registries: Some(registries),
             managed: Some(crate::config::managed::ManagedConfig {
                 source: Some("registry.test/managed-config:v1".to_string()),
@@ -2509,8 +2499,8 @@ mod tests {
             .expect("fold must succeed even against a locked accumulator");
 
         assert_eq!(
-            folded.resolved_default_registry(),
-            Some("system-locked-registry.example"),
+            folded.registries.unwrap()["corp"].index.as_deref(),
+            Some("https://system-locked-index.example"),
             "a system-locked [registries.<name>] entry must survive a managed-payload redirection attempt"
         );
     }

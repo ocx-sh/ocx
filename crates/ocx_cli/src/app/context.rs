@@ -185,7 +185,7 @@ impl Context {
             // scheme-driven opt-out (ADR F2).
             let client = oci::ClientBuilder::new()
                 .plain_http_registries(env::insecure_registries())
-                .mirrors(mirror_map)
+                .mirrors(mirror_map.clone())
                 .progress(progress.clone())
                 .build();
             (
@@ -231,10 +231,12 @@ impl Context {
             index::ChainMode::Default
         };
         let index_sources = Self::build_index_sources(
-            remote_client.as_ref(),
+            remote_client.is_some(),
             &config,
             &resolved_mirrors.index,
+            &mirror_map,
             &env::insecure_registries(),
+            &progress,
         )?;
         let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
         // Attach the machine-global blob store so an installed tool's leaf
@@ -595,13 +597,18 @@ impl Context {
     /// refused unless its host is in `insecure_hosts`
     /// (`OCX_INSECURE_REGISTRIES`), the same gate the registry role applies.
     fn build_index_sources(
-        remote_client: Option<&oci::Client>,
+        online: bool,
         config: &ocx_lib::Config,
         mirrors_index: &std::collections::BTreeMap<String, ocx_lib::ParsedMirror>,
+        registry_mirrors: &oci::MirrorMap,
         insecure_hosts: &[String],
+        progress: &ocx_lib::cli::progress::ProgressManager,
     ) -> ocx_lib::Result<Vec<index::OcxIndex>> {
-        // Offline (no remote client) or no `[registries]` table ⇒ no sources.
-        let (Some(client), Some(registries)) = (remote_client, config.registries.as_ref()) else {
+        // Offline or no `[registries]` table ⇒ no sources.
+        if !online {
+            return Ok(Vec::new());
+        }
+        let Some(registries) = config.registries.as_ref() else {
             return Ok(Vec::new());
         };
 
@@ -617,12 +624,31 @@ impl Context {
         let allow_yanked = env::flag(env::keys::OCX_ALLOW_YANKED, false);
         let mut sources = Vec::with_capacity(namespaces.len());
         for namespace in namespaces {
+            // Per-namespace physical-fetch client: same mirror + plain-HTTP +
+            // progress config as the shared remote client, PLUS an SSRF
+            // `GuardedResolver` seeded with THIS namespace's `trusted_hosts`
+            // (X1-X3, ocx#218). The resolver pins the connect address to the one
+            // `physical_identifier` validated, so a root `repository` host cannot
+            // rebind to a forbidden range between validate and connect. The trust
+            // set is per-namespace (never a union) so one namespace's exemption
+            // can never widen another's.
+            let trusted_hosts = registries
+                .get(namespace)
+                .and_then(|entry| entry.trusted_hosts.clone())
+                .unwrap_or_default();
+            let client = oci::ClientBuilder::new()
+                .plain_http_registries(insecure_hosts.to_vec())
+                .mirrors(registry_mirrors.clone())
+                .progress(progress.clone())
+                .ssrf_guard(trusted_hosts.clone())
+                .build();
             sources.push(index::OcxIndex::new(index::OcxIndexConfig {
                 transport: Box::new(index::ReqwestIndexTransport::new()),
                 base_url: index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts)?,
                 namespace: namespace.clone(),
-                client: client.clone(),
+                client,
                 allow_yanked,
+                trusted_hosts,
             }));
         }
         Ok(sources)
@@ -859,17 +885,16 @@ mod tests {
     // registry alone for it, so an outage on an unconfigured index endpoint
     // can never hard-block a plain-OCI namespace.
 
-    /// Builds a `Config` with the given `(namespace, url, index)` registry
+    /// Builds a `Config` with the given `(namespace, index)` registry
     /// entries.
-    fn config_with_registries(entries: &[(&str, Option<&str>, Option<&str>)]) -> ocx_lib::Config {
+    fn config_with_registries(entries: &[(&str, Option<&str>)]) -> ocx_lib::Config {
         let mut registries = std::collections::HashMap::new();
-        for (namespace, url, index) in entries {
+        for (namespace, index) in entries {
             registries.insert(
                 namespace.to_string(),
                 ocx_lib::RegistryConfig {
-                    url: url.map(str::to_string),
                     index: index.map(str::to_string),
-                    system_locked: false,
+                    ..Default::default()
                 },
             );
         }
@@ -883,19 +908,37 @@ mod tests {
         sources.iter().map(|source| source.namespace().to_string()).collect()
     }
 
+    /// Calls [`Context::build_index_sources`] with the physical-client inputs the
+    /// wiring tests don't vary (an empty registry mirror map, no plain-HTTP hosts,
+    /// disabled progress). `online` and the two config maps are what these tests
+    /// exercise.
+    fn build_test_sources(
+        online: bool,
+        config: &ocx_lib::Config,
+        mirrors_index: &std::collections::BTreeMap<String, ocx_lib::ParsedMirror>,
+    ) -> ocx_lib::Result<Vec<index::OcxIndex>> {
+        Context::build_index_sources(
+            online,
+            config,
+            mirrors_index,
+            &oci::MirrorMap::default(),
+            &[],
+            &ocx_lib::cli::progress::ProgressManager::disabled(),
+        )
+    }
+
     #[test]
     fn build_index_sources_is_empty_without_an_index_bearing_registry() {
-        // No `[registries]` table, and an entry carrying only `url` (a plain
-        // hostname alias, no `index`), both yield no index sources — presence
-        // of `index` specifically is the sole selector (ADR F5a).
-        let client = oci::ClientBuilder::new().build();
+        // No `[registries]` table, and an entry with no `index` field at all,
+        // both yield no index sources — presence of `index` specifically is
+        // the sole selector (ADR F5a).
         let mirrors = std::collections::BTreeMap::new();
 
-        let empty = Context::build_index_sources(Some(&client), &ocx_lib::Config::default(), &mirrors, &[]).unwrap();
+        let empty = build_test_sources(true, &ocx_lib::Config::default(), &mirrors).unwrap();
         assert!(empty.is_empty(), "no [registries] table must build no index sources");
 
-        let url_only = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("ghcr.io"), None)]);
-        let built = Context::build_index_sources(Some(&client), &url_only, &mirrors, &[]).unwrap();
+        let index_absent = config_with_registries(&[(oci::OCX_SH_REGISTRY, None)]);
+        let built = build_test_sources(true, &index_absent, &mirrors).unwrap();
         assert!(
             built.is_empty(),
             "a registries entry lacking `index` must not build an index source"
@@ -906,8 +949,8 @@ mod tests {
     fn build_index_sources_is_empty_when_offline() {
         // Offline is modelled as no remote client; without a physical fetch
         // client there is nothing to build an index source's leaf fetches on.
-        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh"))]);
-        let built = Context::build_index_sources(None, &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh"))]);
+        let built = build_test_sources(false, &config, &std::collections::BTreeMap::new()).unwrap();
         assert!(
             built.is_empty(),
             "offline (no remote client) must build no index sources"
@@ -920,20 +963,87 @@ mod tests {
         // plus one plain-OCI namespace ⇒ exactly two sources, keyed by their
         // own namespaces, in deterministic (sorted) order. This is the fix: a
         // `[registries."<other-ns>"] index` entry is no longer silently ignored.
-        let client = oci::ClientBuilder::new().build();
         let config = config_with_registries(&[
-            (oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh")),
-            ("corp.example", None, Some("https://index.corp.example")),
-            ("plain.example", Some("ghcr.io"), None),
+            (oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh")),
+            ("corp.example", Some("https://index.corp.example")),
+            ("plain.example", None),
         ]);
 
-        let sources =
-            Context::build_index_sources(Some(&client), &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+        let sources = build_test_sources(true, &config, &std::collections::BTreeMap::new()).unwrap();
 
         assert_eq!(
             source_namespaces(&sources),
             vec!["corp.example".to_string(), oci::OCX_SH_REGISTRY.to_string()],
             "one index source per index-bearing namespace, sorted, and never for a plain-OCI entry"
+        );
+    }
+
+    #[test]
+    fn build_index_sources_never_leaks_trusted_hosts_across_namespaces() {
+        // Two index-bearing namespaces, each with its OWN, DIFFERENT
+        // `trusted_hosts` set (X2, the SSRF escape hatch). Pins that a built
+        // `OcxIndex` carries exactly its own namespace's set — never the
+        // other namespace's, and never the union — so a future "share one
+        // client across namespaces" refactor cannot silently widen one
+        // namespace's trust exemption into another's.
+        let mut registries = std::collections::HashMap::new();
+        registries.insert(
+            "ns-a".to_string(),
+            ocx_lib::RegistryConfig {
+                index: Some("https://index.a.example".to_string()),
+                trusted_hosts: Some(vec!["10.0.0.0/8".to_string()]),
+                ..Default::default()
+            },
+        );
+        registries.insert(
+            "ns-b".to_string(),
+            ocx_lib::RegistryConfig {
+                index: Some("https://index.b.example".to_string()),
+                trusted_hosts: Some(vec!["192.168.0.0/16".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = ocx_lib::Config {
+            registries: Some(registries),
+            ..Default::default()
+        };
+
+        let sources = build_test_sources(true, &config, &std::collections::BTreeMap::new()).unwrap();
+
+        assert_eq!(
+            source_namespaces(&sources),
+            vec!["ns-a".to_string(), "ns-b".to_string()],
+            "one index source per index-bearing namespace, sorted"
+        );
+
+        let ns_a = sources
+            .iter()
+            .find(|source| source.namespace() == "ns-a")
+            .expect("ns-a source must be built");
+        let ns_b = sources
+            .iter()
+            .find(|source| source.namespace() == "ns-b")
+            .expect("ns-b source must be built");
+
+        assert_eq!(
+            ns_a.trusted_hosts(),
+            ["10.0.0.0/8".to_string()],
+            "ns-a must carry only its own trusted_hosts entry"
+        );
+        assert_eq!(
+            ns_b.trusted_hosts(),
+            ["192.168.0.0/16".to_string()],
+            "ns-b must carry only its own trusted_hosts entry"
+        );
+        assert_ne!(
+            ns_a.trusted_hosts(),
+            ["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()].as_slice(),
+            "ns-a's trusted_hosts must never be the union with ns-b's"
+        );
+        assert_ne!(
+            ns_b.trusted_hosts(),
+            ["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()].as_slice(),
+            "ns-b's trusted_hosts must never be the union with ns-a's"
         );
     }
 
@@ -959,8 +1069,7 @@ mod tests {
         // instead it must fail, and the gate error must name the OVERRIDE's
         // host — proving the built source's resolution used the mirror, not
         // the original `[registries] index` value.
-        let client = oci::ClientBuilder::new().build();
-        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let config = config_with_registries(&[("ns", Some("https://index.example"))]);
         let mut mirrors_index = std::collections::BTreeMap::new();
         mirrors_index.insert(
             "index.example".to_string(),
@@ -969,7 +1078,7 @@ mod tests {
 
         // `OcxIndex` carries no `Debug` impl (only `Clone`), so `expect_err`
         // is unavailable here — match explicitly instead.
-        let error = match Context::build_index_sources(Some(&client), &config, &mirrors_index, &[]) {
+        let error = match build_test_sources(true, &config, &mirrors_index) {
             Err(error) => error,
             Ok(_) => panic!(
                 "a mirrors_index override to a non-allowlisted http host must gate, proving the override reached resolution"
@@ -992,15 +1101,14 @@ mod tests {
         // namespace's resolution, the plain-http gate below would fire since
         // its target is also http and unlisted; instead `build_index_sources`
         // must succeed, keeping the original https base untouched.
-        let client = oci::ClientBuilder::new().build();
-        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let config = config_with_registries(&[("ns", Some("https://index.example"))]);
         let mut mirrors_index = std::collections::BTreeMap::new();
         mirrors_index.insert(
             "unrelated.example".to_string(),
             ocx_lib::parse_url("http://unrelated.example").unwrap(),
         );
 
-        let sources = Context::build_index_sources(Some(&client), &config, &mirrors_index, &[])
+        let sources = build_test_sources(true, &config, &mirrors_index)
             .expect("a mirrors_index entry keyed by an unrelated host must not affect this namespace's resolution");
 
         assert_eq!(
@@ -1017,8 +1125,7 @@ mod tests {
         // directly — replicated here through `build_index_sources` to prove
         // the gate error propagates all the way out of the wiring call, not
         // only inside the unit-tested function in isolation.
-        let client = oci::ClientBuilder::new().build();
-        let config = config_with_registries(&[("ns", None, Some("https://index.example"))]);
+        let config = config_with_registries(&[("ns", Some("https://index.example"))]);
         let mut mirrors_index = std::collections::BTreeMap::new();
         mirrors_index.insert(
             "index.example".to_string(),
@@ -1031,7 +1138,7 @@ mod tests {
 
         // `OcxIndex` carries no `Debug` impl (only `Clone`), so `expect_err`
         // is unavailable here — match explicitly instead.
-        let wired = match Context::build_index_sources(Some(&client), &config, &mirrors_index, &[]) {
+        let wired = match build_test_sources(true, &config, &mirrors_index) {
             Err(error) => error,
             Ok(_) => panic!("build_index_sources must propagate the same gate error, not silently succeed"),
         };
@@ -1050,13 +1157,11 @@ mod tests {
         // logical reference in its namespace resolves through the verified
         // two-hop path, and `is_authoritative_for` stops fall-through so
         // exactly one remote resolves each namespace (Decision H).
-        let client = oci::ClientBuilder::new().build();
         let config = config_with_registries(&[
-            (oci::OCX_SH_REGISTRY, None, Some("https://index.ocx.sh")),
-            ("corp.example", None, Some("https://index.corp.example")),
+            (oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh")),
+            ("corp.example", Some("https://index.corp.example")),
         ]);
-        let index_sources =
-            Context::build_index_sources(Some(&client), &config, &std::collections::BTreeMap::new(), &[]).unwrap();
+        let index_sources = build_test_sources(true, &config, &std::collections::BTreeMap::new()).unwrap();
         let oci_index = index::OciIndex::new(index::OciIndexConfig {
             client: oci::ClientBuilder::new().build(),
         });

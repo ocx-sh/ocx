@@ -2021,6 +2021,75 @@ The `version` key is the only field the [self update](#self-update) parser reads
 
 ### `package` {#package}
 
+#### `announce` {#package-announce}
+
+Observes an owner-curated set of registry tags for one package and publishes the rebuilt entry into the index: either written to a local directory (`--out`) or opened as a pull request against a fork of the index repository (`--fork`).
+
+A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced against the same fork updates the existing pull request in place rather than opening a second one.
+
+An unchanged run normally opens no pull request either. The one exception is a `--fork` run whose announce branch still carries commits the index repository does not have: an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded.
+
+`--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
+
+Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
+
+**Usage**
+
+```shell
+ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <PATH> | --refresh) (--out <DIRECTORY> | --fork <OWNER>/<REPO>) [OPTIONS]
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--package <NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required). | — |
+| `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-file`/`--refresh`; exactly one is required. | — |
+| `--tags-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
+| `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
+| `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`; exactly one is required. | — |
+| `--fork <OWNER>/<REPO>` | Open (or update) a pull request against this fork. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
+| `--index-repo <OWNER>/<REPO>` | Index repository the pull request targets. | `ocx-sh/index` |
+| `--yank <TAG>` | Mark a tag as yanked — a publisher signal that content should no longer be installed, not a delete. Repeatable. Requires `--yank-reason`; only applies to a tag already in the curated set. | — |
+| `--unyank <TAG>` | Clear the yanked marker from a tag. Repeatable. | — |
+| `--yank-reason <TEXT>` | Reason recorded on every tag named by `--yank` in this run. | — |
+| `-h`, `--help` | Print help information. | — |
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| A curated tag's physical host resolves to a private, loopback, link-local, or metadata address — add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow | 78 |
+| `--fork` given without [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] set, or the token was rejected (401/403) | 80 |
+| The physical registry could not be resolved (DNS failure), or the forge is unreachable or returned a 5xx | 69 |
+| A curated tag does not resolve on the physical registry — check for a typo | 79 |
+| The namespace is unclaimed — no committed root exists for the package yet. Claiming one is a human-lane action, never something announce performs | 79 |
+| The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
+
+**JSON report**
+
+```json
+{
+  "package": "acme/widget",
+  "status": "updated",
+  "pull_request_url": "https://github.com/ocx-sh/index/pull/42",
+  "pull_request_number": 42,
+  "fork": "forkuser/index",
+  "written_paths": []
+}
+```
+
+`status` is `unchanged` or `updated`. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode.
+
+::: tip
+[`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-file` reads, so a publish pipeline can feed one straight into the other:
+
+```shell
+ocx package push -i acme/widget:1.2.3 -c --announce-file tags.txt widget.tar.xz
+ocx package announce --package acme/widget --tags-file tags.txt --fork myuser/index
+```
+:::
+
 #### `create` {#package-create}
 
 Bundles a local directory into a compressed package archive ready for publishing. If the package
@@ -2186,6 +2255,7 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
+- `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -3445,3 +3515,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 
 <!-- faq -->
 [faq-gcompat]: ../faq.md#linux-gcompat
+
+<!-- commands (package announce) -->
+[cmd-package-announce]: #package-announce
+[env-ocx-announce-token]: ./environment.md#ocx-announce-token
+[config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts

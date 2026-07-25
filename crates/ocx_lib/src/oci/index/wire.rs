@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::oci;
 
@@ -65,8 +65,29 @@ pub struct RootTag {
     /// 2026-07-19).
     pub content: oci::Digest,
     /// Per-tag yank marker (human-governed, survives index regeneration).
+    /// Wire shape is an object (`{"reason": "...", "at": "..."}`), never a
+    /// bare boolean — absence means not yanked.
     #[serde(default)]
-    pub yanked: Option<bool>,
+    pub yanked: Option<YankMarker>,
+}
+
+/// Per-tag yank marker wire object (●) — a publisher's reason + timestamp for
+/// pulling a tag out of default resolution. A yank is a signal, never a
+/// delete (`ocx_index::surface_root_status`); presence alone (`.is_some()`)
+/// is what callers act on, the fields are for surfacing to the user.
+///
+/// Both fields are `#[serde(default)]`: an index root is read by many ocx
+/// versions at once, so a root serving only one of them must not fail the
+/// WHOLE [`IndexRoot`] parse and render the package unresolvable
+/// (`arch-principles.md`, fleet forward-compat on fleet-read config). Since
+/// callers act on `.is_some()`, an empty string degrades the surfaced text and
+/// nothing else.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct YankMarker {
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub at: String,
 }
 
 /// `o/sha256/<hex>.json` observation object (● — immutable CAS).
@@ -74,14 +95,21 @@ pub struct RootTag {
 /// `platforms[].platform` is a verbatim OCI platform object (may carry
 /// `os.version` / CPU `features`); `platforms[].digest` is the **platform
 /// manifest** digest, never an image-index digest.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` is present only so the canonical writer
+/// ([`super::wire_writer::serialize_observation`], CONTRACTS §14) can bridge a
+/// constructed observation through `serde_json::to_value` to reuse serde's exact
+/// field-name mapping (notably the `os.features` wire key on
+/// [`crate::oci::native::Platform`]). It does not participate in the read path —
+/// the tolerant `Deserialize` above is the sole reader contract.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Observation {
     #[serde(default)]
     pub platforms: Vec<ObservationPlatform>,
 }
 
 /// One `(platform, manifest-digest)` leaf inside an [`Observation`] (●).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ObservationPlatform {
     /// Verbatim OCI platform object; converted to native [`oci::Platform`] with
     /// the warn-drop policy (`adr_platform_model_unification.md` D2) at select
@@ -159,7 +187,7 @@ mod tests {
             r#"{{
             "repository": "oci://ghcr.io/kitware/cmake",
             "tags": {{
-                "3.27": {{ "content": "{}", "observed": "2026-01-01T00:00:00Z", "yanked": true }}
+                "3.27": {{ "content": "{}", "observed": "2026-01-01T00:00:00Z", "yanked": {{ "reason": "critical security issue", "at": "2026-02-01T00:00:00Z" }} }}
             }},
             "status": "deprecated",
             "deprecated_message": "use 3.28 instead",
@@ -171,7 +199,9 @@ mod tests {
         assert_eq!(root.status.as_deref(), Some("deprecated"));
         assert_eq!(root.deprecated_message.as_deref(), Some("use 3.28 instead"));
         assert_eq!(root.superseded_by.as_deref(), Some("kitware/cmake:3.28"));
-        assert_eq!(root.tags.get("3.27").unwrap().yanked, Some(true));
+        let yanked = root.tags.get("3.27").unwrap().yanked.as_ref().unwrap();
+        assert_eq!(yanked.reason, "critical security issue");
+        assert_eq!(yanked.at, "2026-02-01T00:00:00Z");
     }
 
     #[test]
@@ -225,6 +255,36 @@ mod tests {
             result.is_ok(),
             "unknown fields must not fail parsing: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn yank_marker_missing_a_field_still_yanks_the_tag() {
+        // Fleet forward-compat: a root serving a partial yank marker must not
+        // fail the WHOLE `IndexRoot` parse and make the package unresolvable.
+        // Callers act on `.is_some()`, so the marker survives; only the
+        // surfaced text degrades.
+        let json = format!(
+            r#"{{
+            "repository": "oci://ghcr.io/kitware/cmake",
+            "tags": {{
+                "3.27": {{ "content": "{}", "yanked": {{ "reason": "critical security issue" }} }}
+            }}
+        }}"#,
+            test_digest('c')
+        );
+        let root: IndexRoot = serde_json::from_str(&json).expect("a partial yank marker must not fail the root parse");
+        let yanked = root
+            .tags
+            .get("3.27")
+            .unwrap()
+            .yanked
+            .as_ref()
+            .expect("the tag stays yanked");
+        assert_eq!(yanked.reason, "critical security issue");
+        assert_eq!(
+            yanked.at, "",
+            "an absent timestamp degrades to empty, never to a parse failure"
         );
     }
 

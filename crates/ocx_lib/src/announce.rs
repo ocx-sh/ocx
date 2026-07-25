@@ -1,0 +1,369 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! `ocx package announce` orchestration (ocx-sh/ocx#216).
+//!
+//! A self-contained, forge-neutral routine (reused by `ocx-mirror`) that a
+//! publisher runs to update **one** package's entry in the `ocx-sh/index`
+//! repository. It observes an owner-curated set of registry tags, rebuilds the
+//! package's index root plus its content-addressed observation objects
+//! byte-exactly (CONTRACTS §14, via [`crate::oci::index::serialize_root`] /
+//! [`serialize_observation`](crate::oci::index::serialize_observation)), and
+//! either writes the result locally (`--out`) or opens/updates a fork pull
+//! request against the index (`--fork`). Server-side privileged verification
+//! (ownership, claim re-derivation) happens in the index CI, never here.
+//!
+//! The pipeline behaviourally matches the Python reference tool
+//! (`ocx-sh/index` `bot/cli/announce.py`, design register FP-9), with the
+//! owner-ratified C-cell decisions layered on: branch-head base (C4),
+//! replace/union/refresh curation (C3/C5), the unchanged short-circuit (C6),
+//! owner-only yank markers (C7), fork auto-create at the upstream base SHA (C8),
+//! and one atomic multi-file commit (C15). The SSRF guard runs before the first
+//! registry request (X3); the announce credential never leaves the ambient
+//! `OCX_ANNOUNCE_TOKEN` (X6), carried only by the passed-in
+//! [`GitHubForge`](crate::forge::GitHubForge).
+//!
+//! ADR: `adr_announce_publisher_surface.md` (D5 — orchestration in `ocx_lib`,
+//! the CLI a thin wrapper).
+
+pub mod error;
+mod pipeline;
+pub mod request;
+
+pub use error::AnnounceError;
+pub use request::{AnnounceOutcome, AnnounceRequest, AnnounceStatus, AnnounceTarget, TagSelection};
+
+use std::collections::BTreeMap;
+
+use serde_json::Value;
+
+use crate::forge::{ForkIdentity, GitHubForge, RepoCoordinate};
+use crate::oci::index::serialize_root;
+use crate::publisher::Publisher;
+
+/// The main branch of the index repository (design register C10).
+const INDEX_BASE_REF: &str = "main";
+
+/// Announce one package (design register C11/C12 — one package per call).
+///
+/// `forge` is `Some` for every mode that reaches a remote: it reads the
+/// committed root (C10) and, for [`AnnounceTarget::Fork`], commits and opens the
+/// pull request. A `None` forge cannot read the committed root, so announce
+/// returns [`AnnounceError::ForgeRequired`].
+///
+/// # Errors
+///
+/// Returns an [`AnnounceError`] for a missing forge, an unclaimed namespace, an
+/// SSRF-forbidden physical host, a curated tag that does not resolve, a
+/// yank/unyank input error, or any forge / filesystem failure. See
+/// [`AnnounceError`] for the full taxonomy.
+pub async fn announce(
+    publisher: &Publisher,
+    forge: Option<&GitHubForge>,
+    request: AnnounceRequest,
+) -> Result<AnnounceOutcome, AnnounceError> {
+    let forge = forge.ok_or(AnnounceError::ForgeRequired)?;
+    let package = request.package.repository().to_string();
+    let root_path = format!("p/{package}.json");
+    let branch = format!("indexbot-announce-{}", package.replace('/', "-"));
+
+    // 0. Resolve the fork's REAL identity first, so every later endpoint is
+    //    built from it — the announce branch lives on the fork, and `--fork
+    //    <owner>/<repo>` may name one renamed away from the upstream's
+    //    repository name. Deliberately read-only (`find_fork`, never
+    //    `ensure_fork`): an unchanged run must not provoke a fork create (C6).
+    let existing_fork = match &request.target {
+        AnnounceTarget::Fork(target) => forge.find_fork(&request.index_repo, target).await?,
+        AnnounceTarget::Out(_) => None,
+    };
+    let fork_coordinate = existing_fork.as_ref().map(ForkIdentity::coordinate);
+
+    // 1. Read the committed root (C10), from the fork branch head when it exists
+    //    (C4) so sequential announces accumulate, else from the index main.
+    let root_read = read_committed_root(
+        forge,
+        &request.index_repo,
+        fork_coordinate.as_ref(),
+        &root_path,
+        &branch,
+    )
+    .await?;
+    let committed_bytes = pipeline::require_root(&package, &root_path, &root_read.base_ref, root_read.bytes)?;
+    let committed_root: Value =
+        serde_json::from_slice(&committed_bytes).map_err(|source| AnnounceError::RootParse {
+            path: root_path.clone(),
+            source,
+        })?;
+    if !committed_root.is_object() {
+        return Err(AnnounceError::RootNotObject { path: root_path });
+    }
+
+    // 2/3/4. Resolve the curated tag set (C3/C5), observe it (X3), regenerate
+    //        the tags (C6-preserving), apply yank markers (C7), and assemble
+    //        the atomic file set (C15) — one timestamp shared by all of them so
+    //        the run is self-consistent.
+    let now = pipeline::current_timestamp();
+    let Rebuilt {
+        root_bytes: new_root_bytes,
+        files,
+        observed,
+    } = observe_and_rebuild(publisher, &committed_root, &request, &now, &root_path, &package).await?;
+
+    // C6: byte-identical root AND no new CAS object ⇒ nothing moved.
+    let unchanged = new_root_bytes == committed_bytes && pipeline::new_cas_count(&committed_root, &observed) == 0;
+    let mut status = if unchanged {
+        AnnounceStatus::Unchanged
+    } else {
+        AnnounceStatus::Updated
+    };
+    let message = format!("announce: curate {package}");
+    let pull_request_body = format!("Publisher-curated tag update for `{package}`.");
+
+    // 7. Dispatch: write locally (`--out`) or open/update a fork PR (`--fork`).
+    match &request.target {
+        AnnounceTarget::Out(directory) => {
+            // `--out` writes on EVERY run, unchanged included. C6 is scoped to
+            // "no commit, no pull request" (design register), and a local write
+            // is neither: a pipeline shaped `announce --out dir && publish dir`
+            // must not silently publish an empty directory just because nothing
+            // moved. The byte contract makes the repeated write idempotent, and
+            // `status` still reports `unchanged` so callers can tell.
+            let written_paths = pipeline::write_out(directory, &files).await?;
+            Ok(AnnounceOutcome {
+                package,
+                status,
+                pull_request: None,
+                fork: None,
+                written_paths,
+            })
+        }
+        AnnounceTarget::Fork(target) => {
+            if unchanged {
+                // C6: a pure no-op — unless a prior fork announce left commits
+                // on the branch that the index base does not have. Such a run
+                // may have committed content whose pull request then failed to
+                // open, stranding the update; ensure an open PR exists so it is
+                // never lost (design register C6 amendment). The predicate is
+                // genuine ancestry, not mere branch existence: a branch sitting
+                // at (or already merged into) the base carries nothing
+                // unmerged, and ensuring a PR for it would open a spurious
+                // empty one on every unchanged run.
+                if let Some(fork) = &existing_fork
+                    && root_read.branch_sha.is_some()
+                    && forge
+                        .branch_is_ahead(&request.index_repo, INDEX_BASE_REF, &fork.owner, &branch)
+                        .await?
+                {
+                    let pull_request = forge
+                        .open_or_update_pull_request(
+                            &request.index_repo,
+                            &fork.owner,
+                            &branch,
+                            INDEX_BASE_REF,
+                            &message,
+                            &pull_request_body,
+                        )
+                        .await?;
+                    return Ok(AnnounceOutcome {
+                        package,
+                        status,
+                        pull_request: Some(pull_request),
+                        fork: Some(fork.clone()),
+                        written_paths: Vec::new(),
+                    });
+                }
+                return Ok(AnnounceOutcome {
+                    package,
+                    status,
+                    pull_request: None,
+                    fork: None,
+                    written_paths: Vec::new(),
+                });
+            }
+            // C8: reuse the already-resolved fork, else create one under the
+            // requested owner (S12 shared fork), then commit onto the
+            // accumulating branch head (C4) or the upstream base SHA (C8, first
+            // announce) — one atomic multi-file commit (C15).
+            let fork = match existing_fork {
+                Some(fork) => fork,
+                None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
+            };
+            let base_sha = match root_read.branch_sha {
+                Some(sha) => sha,
+                None => forge
+                    .get_ref_sha(&request.index_repo, &format!("heads/{INDEX_BASE_REF}"))
+                    .await?
+                    .ok_or_else(|| AnnounceError::MissingBaseRef {
+                        repo: request.index_repo.full_name(),
+                    })?,
+            };
+            // F2/C4: the ref update is fast-forward-only (CAS). If a concurrent
+            // announce advanced the branch between our read and our commit,
+            // re-read the new head, re-run the WHOLE regeneration against it,
+            // and retry exactly once so the concurrent change is preserved,
+            // never overwritten.
+            match forge
+                .commit_files(&fork.coordinate(), &branch, &base_sha, &message, &files)
+                .await
+            {
+                Ok(_) => {}
+                Err(crate::forge::ForgeError::NonFastForward { .. }) => {
+                    let head_sha = forge
+                        .get_ref_sha(&fork.coordinate(), &format!("heads/{branch}"))
+                        .await?
+                        .ok_or_else(|| AnnounceError::MissingBaseRef {
+                            repo: fork.full_name.clone(),
+                        })?;
+                    let head_bytes = forge
+                        .get_file_contents(&fork.coordinate(), &root_path, &head_sha)
+                        .await?
+                        .ok_or_else(|| AnnounceError::MissingHeadRoot {
+                            repo: fork.full_name.clone(),
+                            path: root_path.clone(),
+                            sha: head_sha.clone(),
+                        })?;
+                    let head_root: Value =
+                        serde_json::from_slice(&head_bytes).map_err(|source| AnnounceError::RootParse {
+                            path: root_path.clone(),
+                            source,
+                        })?;
+                    let merged =
+                        observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
+                    // Re-apply C6 against the head that WON the race: two
+                    // identical racing announces both regenerate the same
+                    // bytes, so committing again would push a commit whose tree
+                    // equals its base — an empty diff, a governance threat class
+                    // the index bot tests for (X7). Skip the commit and fall
+                    // through to the ensure-PR call below, which still runs, so
+                    // nothing is stranded.
+                    if merged.root_bytes == head_bytes && pipeline::new_cas_count(&head_root, &merged.observed) == 0 {
+                        status = AnnounceStatus::Unchanged;
+                    } else {
+                        forge
+                            .commit_files(&fork.coordinate(), &branch, &head_sha, &message, &merged.files)
+                            .await?;
+                    }
+                }
+                Err(other) => return Err(other.into()),
+            }
+            // Re-announce reuses the open PR without patching title/body — the
+            // C4 branch-head commits carry the update.
+            let pull_request = forge
+                .open_or_update_pull_request(
+                    &request.index_repo,
+                    &fork.owner,
+                    &branch,
+                    INDEX_BASE_REF,
+                    &message,
+                    &pull_request_body,
+                )
+                .await?;
+            Ok(AnnounceOutcome {
+                package,
+                status,
+                pull_request: Some(pull_request),
+                fork: Some(fork),
+                written_paths: Vec::new(),
+            })
+        }
+    }
+}
+
+/// One regenerated announce payload.
+struct Rebuilt {
+    /// The canonical root bytes (CONTRACTS §14) — what the C6 byte comparison
+    /// reads.
+    root_bytes: Vec<u8>,
+    /// The atomic file set a commit would carry: the root plus every CAS object
+    /// (C15).
+    files: BTreeMap<String, Vec<u8>>,
+    /// Every curated tag's fresh observation — the C6 "no new CAS object" input.
+    observed: Vec<pipeline::Observed>,
+}
+
+/// One full regeneration pass over `base_root`: resolve the curated tag universe
+/// (C3/C5), observe every curated tag behind the SSRF pre-flight (X3), rebuild
+/// the tags (C6), apply the yank markers (C7), serialize the root, and assemble
+/// the atomic file set (C15).
+///
+/// Shared verbatim by the initial commit and the C4 non-fast-forward retry, so
+/// the retry re-derives the *whole* sequence from the winning head instead of
+/// replaying a tag universe resolved against the pre-race root. Re-resolving is
+/// what preserves a concurrent announce's additions: `--tags-file` and
+/// `--refresh` take the base root's tags as their starting set, so unioning
+/// against the new head keeps a tag the winner added — replaying a stale set
+/// would delete it, since [`pipeline::regenerate`] replaces `tags` wholesale.
+/// `--tags` stays a deliberate replace (C3): its universe is the flag, not the
+/// base root, so a tag it omits is still dropped on the retry — the publisher
+/// asked for exactly that set.
+///
+/// # Errors
+///
+/// Propagates the curated-resolution (C3/C5), observe/SSRF (X3) and yank/unyank
+/// (C7) failures of the steps it composes.
+async fn observe_and_rebuild(
+    publisher: &Publisher,
+    base_root: &Value,
+    request: &AnnounceRequest,
+    now: &str,
+    root_path: &str,
+    package: &str,
+) -> Result<Rebuilt, AnnounceError> {
+    let base_tags = pipeline::committed_tag_names(base_root);
+    let curated = pipeline::resolve_curated_tags(&request.curated, &base_tags)?;
+    let observed = pipeline::observe_curated(publisher, base_root, &curated, &request.trusted_hosts).await?;
+    let mut root = pipeline::regenerate(base_root, &observed, now);
+    pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
+    let root_bytes = serialize_root(&root);
+    let files = pipeline::build_files(root_path, &root_bytes, package, &observed);
+    Ok(Rebuilt {
+        root_bytes,
+        files,
+        observed,
+    })
+}
+
+/// The outcome of reading the committed root: its bytes (`None` when the path is
+/// absent), the fork branch head SHA when the announce branch already exists
+/// (C4, reused as the commit base), and the ref it was read from.
+struct RootRead {
+    bytes: Option<Vec<u8>>,
+    branch_sha: Option<String>,
+    base_ref: String,
+}
+
+/// Read the committed root per C4/C10: the fork's own announce branch head when
+/// it exists (accumulate), else the index repository's `main`.
+///
+/// `fork` is the **verified** fork coordinate — `None` for `--out` and for a
+/// fork target with no fork yet, both of which can only read the index base.
+/// Reading the branch through the verified coordinate rather than the raw
+/// `--fork` value is what makes C4 accumulation work for a fork renamed away
+/// from the upstream's repository name.
+async fn read_committed_root(
+    forge: &GitHubForge,
+    index_repo: &RepoCoordinate,
+    fork: Option<&RepoCoordinate>,
+    root_path: &str,
+    branch: &str,
+) -> Result<RootRead, AnnounceError> {
+    // The announce branch only ever exists on the fork; an absent branch reads
+    // back as `None`, falling through to `main`.
+    if let Some(fork) = fork {
+        let branch_sha = forge.get_ref_sha(fork, &format!("heads/{branch}")).await?;
+        if branch_sha.is_some() {
+            let bytes = forge.get_file_contents(fork, root_path, branch).await?;
+            return Ok(RootRead {
+                bytes,
+                branch_sha,
+                base_ref: branch.to_string(),
+            });
+        }
+    }
+    let bytes = forge.get_file_contents(index_repo, root_path, INDEX_BASE_REF).await?;
+    Ok(RootRead {
+        bytes,
+        branch_sha: None,
+        base_ref: INDEX_BASE_REF.to_string(),
+    })
+}

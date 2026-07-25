@@ -16,7 +16,8 @@ pub use ocx_index::{
     CatalogSyncOutcome, DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig,
     ReqwestIndexTransport, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
 };
-pub use wire::{CatalogIndex, IndexRoot, Observation, ObservationPlatform, RootTag};
+pub use wire::{CatalogIndex, IndexRoot, Observation, ObservationPlatform, RootTag, YankMarker};
+pub use wire_writer::{serialize_observation, serialize_root};
 
 mod chained_index;
 mod index_impl;
@@ -25,6 +26,7 @@ mod local_index;
 mod oci_index;
 mod ocx_index;
 mod wire;
+pub mod wire_writer;
 
 /// Re-export the private `IndexImpl` trait for sibling-module tests.
 ///

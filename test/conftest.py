@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import os
 import stat
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -128,6 +130,40 @@ def ocx_home(tmp_path: Path) -> Path:
 @pytest.fixture()
 def ocx(ocx_binary: Path, ocx_home: Path, registry: str) -> OcxRunner:
     return OcxRunner(ocx_binary, ocx_home, registry)
+
+
+def _load_fake_forge_module():
+    """Loads `test/tests/fake_forge.py` by path.
+
+    `tests/` carries no `__init__.py` (pytest's rootless test-directory
+    convention — see every sibling `test_*.py`), so it is not a regular
+    importable package from this session-root conftest. Loading by file path
+    sidesteps that and any import-mode/collection-order ambiguity.
+    """
+    module_path = Path(__file__).parent / "tests" / "fake_forge.py"
+    spec = importlib.util.spec_from_file_location("fake_forge", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def fake_forge():
+    """A per-test fake GitHub REST forge (`test/tests/fake_forge.py`).
+
+    Bound to an ephemeral loopback port, zero real network. Point
+    `GitHubForge` at it via the `__OCX_TESTING_FORGE_BASE_URL` env override
+    (e.g. ``ocx.run(..., env_overrides={"__OCX_TESTING_FORGE_BASE_URL": fake_forge.base_url})``).
+    """
+    server = _load_fake_forge_module().FakeForge()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------

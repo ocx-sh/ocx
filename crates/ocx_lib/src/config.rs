@@ -35,10 +35,11 @@ pub struct Config {
     /// The plural name is deliberate: it matches Cargo's convention and avoids
     /// a TOML collision with the singular `[registry]` global-settings section.
     ///
-    /// In v1 each entry only has a `url` field, giving `[registry] default`
-    /// a lookup target. Future extensions (per-registry insecure flag,
-    /// location rewrite, timeout, auth) drop into the same entry struct
-    /// without breaking existing configs.
+    /// Every key is an identifier prefix, always — `[registry] default`
+    /// never dereferences through this table (§6 ratified simplification).
+    /// Future extensions (per-registry insecure flag, location rewrite,
+    /// timeout, auth) drop into the same entry struct without breaking
+    /// existing configs.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 
     /// Per-traffic-host mirrors (`[mirrors."<host>"]`).
@@ -97,9 +98,9 @@ pub struct RegistryDefaults {
     /// `<default>/cmake:3.28`). Overridden by the `OCX_DEFAULT_REGISTRY`
     /// environment variable.
     ///
-    /// May be a literal hostname (`"ghcr.io"`) or the name of a
-    /// `[registries.<name>]` entry — the latter is resolved to its `url`
-    /// field at runtime.
+    /// Always a literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never
+    /// resolved through the `[registries.<name>]` table (§6 ratified
+    /// simplification).
     pub default: Option<String>,
 
     /// Runtime provenance marker: this tier was declared at the SYSTEM config
@@ -154,33 +155,15 @@ impl Config {
         }
     }
 
-    /// Resolve [`RegistryDefaults::default`] through the `[registries.<name>]`
-    /// lookup table.
+    /// Return [`RegistryDefaults::default`] as a literal prefix.
     ///
-    /// If `[registry] default = "name"` and `[registries.name] url = "host"`,
-    /// returns `Some("host")`. If the name has no matching entry, returns
-    /// the name as-is (treating it as a literal hostname — the v1 behavior).
-    /// Returns `None` only when no default is configured at all.
-    ///
-    /// **System-lock indirection guard (CWE-15).** When `[registry]` is
-    /// system-locked but the `[registries.<name>]` entry it points through is
-    /// NOT, the dereference is refused and the name is treated as a literal
-    /// host. Otherwise a managed-config payload could inject a fresh, unlocked
-    /// `[registries."name"]` entry to hijack the locked default registry — the
-    /// `[registry]` lock protects the `default` pointer, not the table it
-    /// resolves through, so the two locks must be checked together here.
+    /// `[registry] default` is always a literal identifier prefix (e.g.
+    /// `"ghcr.io"`, `"ocx.sh"`) — it never dereferences through the
+    /// `[registries.<name>]` table (§6 ratified simplification). Returns
+    /// `None` only when no default is configured at all.
     #[must_use]
     pub fn resolved_default_registry(&self) -> Option<&str> {
-        let registry = self.registry.as_ref()?;
-        let name = registry.default.as_deref()?;
-        if let Some(entries) = self.registries.as_ref()
-            && let Some(entry) = entries.get(name)
-            && let Some(url) = entry.url.as_deref()
-            && (!registry.system_locked || entry.system_locked)
-        {
-            return Some(url);
-        }
-        Some(name)
+        self.registry.as_ref()?.default.as_deref()
     }
 }
 
@@ -247,13 +230,16 @@ mod tests {
         // [registries.<name>] is a live v1 feature — parses into the
         // `registries` HashMap on Config, one RegistryEntry per key.
         let config: Config = toml::from_str(
-            "[registries.ghcr]\nurl = \"ghcr.io\"\n\n[registries.company]\nurl = \"registry.company.com\"",
+            "[registries.ghcr]\nindex = \"https://ghcr.example\"\n\n[registries.company]\nindex = \"https://index.company.com\"",
         )
         .unwrap();
         let registries = config.registries.expect("registries table should be present");
         assert_eq!(registries.len(), 2);
-        assert_eq!(registries["ghcr"].url.as_deref(), Some("ghcr.io"));
-        assert_eq!(registries["company"].url.as_deref(), Some("registry.company.com"));
+        assert_eq!(registries["ghcr"].index.as_deref(), Some("https://ghcr.example"));
+        assert_eq!(
+            registries["company"].index.as_deref(),
+            Some("https://index.company.com")
+        );
     }
 
     #[test]
@@ -459,34 +445,38 @@ mod tests {
     fn merge_registries_adds_new_entries_and_updates_existing() {
         // Keys unique to `lower` survive; keys unique to `higher` appear;
         // keys in both are field-merged with `higher` winning on conflicts.
-        let mut lower: Config =
-            toml::from_str("[registries.ghcr]\nurl = \"ghcr.io\"\n\n[registries.company]\nurl = \"old.company.com\"")
-                .unwrap();
+        let mut lower: Config = toml::from_str(
+            "[registries.ghcr]\nindex = \"https://ghcr.example\"\n\n[registries.company]\nindex = \"https://old.company.com\"",
+        )
+        .unwrap();
         let higher: Config = toml::from_str(
-            "[registries.company]\nurl = \"new.company.com\"\n\n[registries.private]\nurl = \"priv.co\"",
+            "[registries.company]\nindex = \"https://new.company.com\"\n\n[registries.private]\nindex = \"https://priv.co\"",
         )
         .unwrap();
         lower.merge(higher);
         let registries = lower.registries.unwrap();
         assert_eq!(registries.len(), 3);
-        assert_eq!(registries["ghcr"].url.as_deref(), Some("ghcr.io"));
-        assert_eq!(registries["company"].url.as_deref(), Some("new.company.com"));
-        assert_eq!(registries["private"].url.as_deref(), Some("priv.co"));
+        assert_eq!(registries["ghcr"].index.as_deref(), Some("https://ghcr.example"));
+        assert_eq!(registries["company"].index.as_deref(), Some("https://new.company.com"));
+        assert_eq!(registries["private"].index.as_deref(), Some("https://priv.co"));
+    }
+
+    /// §6 ratified simplification: `[registry] default` is always a literal
+    /// prefix — a matching `[registries.<name>]` entry never changes the
+    /// resolved value (no more `url`-alias dereference).
+    #[test]
+    fn resolved_default_registry_returns_literal_name_even_with_matching_entry() {
+        let config: Config = toml::from_str(
+            "[registry]\ndefault = \"ghcr\"\n\n[registries.ghcr]\nindex = \"https://index.ghcr.example\"",
+        )
+        .unwrap();
+        assert_eq!(config.resolved_default_registry(), Some("ghcr"));
     }
 
     #[test]
-    fn resolved_default_registry_returns_url_from_named_entry() {
-        // [registry] default = "ghcr" + [registries.ghcr] url = "ghcr.io"
-        // → resolves to "ghcr.io".
-        let config: Config =
-            toml::from_str("[registry]\ndefault = \"ghcr\"\n\n[registries.ghcr]\nurl = \"ghcr.io\"").unwrap();
-        assert_eq!(config.resolved_default_registry(), Some("ghcr.io"));
-    }
-
-    #[test]
-    fn resolved_default_registry_falls_back_to_literal_when_no_entry() {
+    fn resolved_default_registry_returns_literal_name_when_no_entry() {
         // [registry] default = "ocx.sh" with no matching [registries.ocx.sh]
-        // → returns the literal name (backwards-compat with bare hostnames).
+        // → returns the literal name (the only supported behavior — §6).
         let config: Config = toml::from_str("[registry]\ndefault = \"ocx.sh\"").unwrap();
         assert_eq!(config.resolved_default_registry(), Some("ocx.sh"));
     }
@@ -497,22 +487,15 @@ mod tests {
         assert_eq!(config.resolved_default_registry(), None);
     }
 
+    /// §6 ratified simplification killed the CWE-15 indirection class
+    /// entirely: `resolved_default_registry` never reads the `[registries]`
+    /// table, so a locked `[registry] default` cannot be hijacked by an
+    /// injected `[registries.<name>]` entry — there is no dereference left to
+    /// exploit. Regression coverage for the removal, not the old guard.
     #[test]
-    fn resolved_default_registry_falls_back_when_entry_has_no_url() {
-        // [registries.ghcr] exists but has no `url` field → fall back to the name.
-        let config: Config = toml::from_str("[registry]\ndefault = \"ghcr\"\n\n[registries.ghcr]").unwrap();
-        assert_eq!(config.resolved_default_registry(), Some("ghcr"));
-    }
-
-    /// Finding #2 regression: a system-locked `[registry] default = "corp"`
-    /// must NOT resolve through a `[registries.corp]` entry injected by a
-    /// lower (unlocked) tier — e.g. a managed-config payload. The `[registry]`
-    /// lock covers the `default` pointer; the indirection guard closes the
-    /// gap so an unlocked entry cannot hijack the resolved host (CWE-15).
-    #[test]
-    fn resolved_default_registry_locked_registry_ignores_unlocked_injected_entry() {
+    fn resolved_default_registry_locked_registry_ignores_injected_entry() {
         // System tier: [registry] default = "corp", locked. No [registries.corp]
-        // in the system file (the vulnerable shape the fix targets).
+        // in the system file.
         let mut system = Config {
             registry: Some(RegistryDefaults {
                 default: Some("corp".to_string()),
@@ -522,17 +505,16 @@ mod tests {
         };
         system.registry.as_mut().unwrap().lock_as_system();
 
-        // Managed-config payload injects a FRESH, unlocked [registries.corp]
-        // entry pointing at an attacker host.
+        // A lower tier injects a FRESH [registries.corp] entry — it must have
+        // zero effect on the resolved default, locked or not.
         let injected: Config =
-            toml::from_str("[registries.corp]\nurl = \"evil.attacker.example\"").expect("payload must parse");
+            toml::from_str("[registries.corp]\nindex = \"https://evil.attacker.example\"").expect("payload must parse");
         system.merge(injected);
 
         assert_eq!(
             system.resolved_default_registry(),
             Some("corp"),
-            "a locked [registry] must not dereference through an unlocked injected [registries.<name>] entry; \
-             it must fall back to the literal name"
+            "the [registries.<name>] table must never affect the resolved literal default"
         );
     }
 
@@ -592,17 +574,15 @@ mod tests {
             }),
             ("[registries.<name>]", || {
                 let mut system = RegistryConfig {
-                    url: Some("system-registry.corp".to_string()),
-                    index: None,
-                    system_locked: false,
+                    index: Some("https://system-index.corp".to_string()),
+                    ..Default::default()
                 };
                 system.lock_as_system();
                 system.merge(RegistryConfig {
-                    url: Some("lower.evil".to_string()),
-                    index: None,
-                    system_locked: false,
+                    index: Some("https://lower.evil".to_string()),
+                    ..Default::default()
                 });
-                system.system_locked && system.url.as_deref() == Some("system-registry.corp")
+                system.system_locked && system.index.as_deref() == Some("https://system-index.corp")
             }),
             ("[mirrors.\"<host>\"]", || {
                 let mut system = MirrorConfig {
@@ -630,41 +610,5 @@ mod tests {
                  OR dropped the lock flag"
             );
         }
-    }
-
-    /// The indirection guard only tightens the LOCKED case: a system-locked
-    /// `[registry]` still resolves through a `[registries.<name>]` entry that
-    /// is ALSO system-locked (the legitimate corporate shape).
-    #[test]
-    fn resolved_default_registry_locked_registry_honors_locked_entry() {
-        let mut system = Config {
-            registry: Some(RegistryDefaults {
-                default: Some("corp".to_string()),
-                system_locked: false,
-            }),
-            registries: Some({
-                let mut map = HashMap::new();
-                map.insert(
-                    "corp".to_string(),
-                    RegistryConfig {
-                        url: Some("registry.corp.example".to_string()),
-                        index: None,
-                        system_locked: false,
-                    },
-                );
-                map
-            }),
-            ..Config::default()
-        };
-        system.registry.as_mut().unwrap().lock_as_system();
-        for entry in system.registries.as_mut().unwrap().values_mut() {
-            entry.lock_as_system();
-        }
-
-        assert_eq!(
-            system.resolved_default_registry(),
-            Some("registry.corp.example"),
-            "a locked [registry] must still resolve through a locked [registries.<name>] entry"
-        );
     }
 }

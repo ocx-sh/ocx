@@ -410,18 +410,16 @@ def test_no_config_with_explicit_flag_loads_only_explicit(ocx: OcxRunner, tmp_pa
     )
 
 
-def test_named_registry_table_resolves_default(ocx: OcxRunner) -> None:
-    """[registry] default = "name" + [registries.name] url = "host" resolves to host.
+def test_registry_default_is_a_literal_prefix(ocx: OcxRunner) -> None:
+    """[registry] default is always a literal identifier prefix.
 
-    Plan: registries table — named entries provide a lookup target for
-    `[registry] default`. When both are set, the default name is resolved
-    through the registries map and the entry's `url` becomes the effective
-    default registry.
+    The `default` value is used verbatim as the effective default registry —
+    it is never dereferenced through a matching [registries.<name>] entry.
     """
     write_home_config(
         ocx,
-        '[registry]\ndefault = "company"\n\n'
-        '[registries.company]\nurl = "registry-host.company.example"\n',
+        '[registry]\ndefault = "literal-default.example"\n\n'
+        '[registries."literal-default.example"]\n',
     )
     # Remove OCX_DEFAULT_REGISTRY so the resolved value is observable.
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
@@ -433,38 +431,8 @@ def test_named_registry_table_resolves_default(ocx: OcxRunner) -> None:
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
-    assert "registry-host.company.example" in combined, (
-        f"expected 'registry-host.company.example' (resolved via [registries.company]), "
-        f"got stdout={result.stdout!r} stderr={result.stderr!r}"
-    )
-
-
-def test_named_registry_with_no_url_falls_back_to_literal_name(ocx: OcxRunner) -> None:
-    """[registry] default = "name" + [registries.name] without url → literal "name".
-
-    Plan: resolved_default_registry fallback path — when the named entry
-    exists but has no `url` field, the resolver falls back to treating the
-    `default` value as a literal hostname. Backwards-compatible with bare
-    hostnames when a future per-registry setting (e.g. `insecure`) is
-    declared without a `url`.
-    """
-    write_home_config(
-        ocx,
-        '[registry]\ndefault = "literal-fallback.example"\n\n'
-        '[registries."literal-fallback.example"]\n',
-    )
-    # Remove OCX_DEFAULT_REGISTRY so the resolved value is observable.
-    env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
-    result = subprocess.run(
-        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert result.returncode != 0, "install of nonexistent package should fail"
-    combined = result.stdout + result.stderr
-    assert "literal-fallback.example" in combined, (
-        f"expected the literal name when [registries.<name>] has no url field, "
+    assert "literal-default.example" in combined, (
+        f"expected the literal default prefix in the error, "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
@@ -649,12 +617,12 @@ def test_layered_merge_home_tier_and_explicit_config(ocx: OcxRunner, tmp_path: P
     # Lower tier: $OCX_HOME/config.toml adds [registries.shared]
     write_home_config(
         ocx,
-        "[registries.shared]\nurl = \"shared.example\"\n",
+        "[registries.shared]\nindex = \"https://shared.example\"\n",
     )
 
     # Higher tier: explicit --config adds [registries.other]
     extra_config = tmp_path / "extra.toml"
-    extra_config.write_text("[registries.other]\nurl = \"other.example\"\n")
+    extra_config.write_text("[registries.other]\nindex = \"https://other.example\"\n")
 
     # Use index catalog (works even with empty index) to trigger config load
     result = subprocess.run(

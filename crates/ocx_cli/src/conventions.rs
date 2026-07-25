@@ -170,6 +170,33 @@ pub fn resolve_ci_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiF
     }
 }
 
+/// Splits tag-list bytes on commas and newlines into trimmed, non-empty tag
+/// names, preserving order.
+///
+/// Shared wire format for `ocx package announce --tags-file` (read) and
+/// `ocx package push --announce-file` (write) — parses whatever either side
+/// writes, and is byte-compatible with `indexbot --tags-file`.
+pub fn parse_tags_file(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .split(['\n', '\r', ','])
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Appends `tags` onto `existing`, deduping (first occurrence wins) while
+/// preserving order, and returns the comma-joined content to write back.
+pub fn merge_tags_file(existing: &[String], tags: &[String]) -> String {
+    let mut merged = existing.to_vec();
+    for tag in tags {
+        if !merged.contains(tag) {
+            merged.push(tag.clone());
+        }
+    }
+    merged.join(",")
+}
+
 /// Export resolved env entries into a CI system's persistence channel.
 ///
 /// Shared by `ocx env` and `ocx package env`. Rejects `--export-file` for
@@ -189,7 +216,7 @@ pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, en
 
 #[cfg(test)]
 mod tests {
-    use super::{export_ci, resolve_ci_arg, resolve_shell_arg};
+    use super::{export_ci, merge_tags_file, parse_tags_file, resolve_ci_arg, resolve_shell_arg};
     use ocx_lib::ci::CiFlavor;
     use ocx_lib::cli::UsageError;
     use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
@@ -254,5 +281,40 @@ mod tests {
 
         let content = std::fs::read_to_string(&export).expect("read export");
         assert_eq!(content, "{\"name\":\"JAVA_HOME\",\"value\":\"/pkg/java\"}\n");
+    }
+
+    // ── announce tag-file wire format (design register C2) ──────────────────
+
+    #[test]
+    fn parse_tags_file_splits_on_commas_and_newlines_and_trims() {
+        let tags = parse_tags_file(b"3.28.1,3.28,3\nlatest\r\n , 1.0.0 ,");
+        assert_eq!(
+            tags,
+            vec![
+                "3.28.1".to_string(),
+                "3.28".to_string(),
+                "3".to_string(),
+                "latest".to_string(),
+                "1.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_tags_file_is_empty_for_empty_input() {
+        assert!(parse_tags_file(b"").is_empty());
+    }
+
+    #[test]
+    fn merge_tags_file_pushes_the_pushed_tag_and_cascade() {
+        let merged = merge_tags_file(&[], &["3.28.1".to_string(), "3.28".to_string(), "3".to_string()]);
+        assert_eq!(merged, "3.28.1,3.28,3");
+    }
+
+    #[test]
+    fn merge_tags_file_dedupes_overlapping_appends_preserving_order() {
+        let existing = parse_tags_file(b"3.28.1,3.28,3,latest");
+        let merged = merge_tags_file(&existing, &["3.28.2".to_string(), "latest".to_string()]);
+        assert_eq!(merged, "3.28.1,3.28,3,latest,3.28.2");
     }
 }

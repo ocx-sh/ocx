@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod about;
+pub mod announce;
 pub mod catalog;
 // ci_export deleted (C4 — handshake §6: ocx ci removed)
 pub mod clean;

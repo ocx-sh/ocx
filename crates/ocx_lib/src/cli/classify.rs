@@ -74,6 +74,7 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
 /// gains a `ClassifyExitCode` impl. Each downcast is O(1) (`TypeId` check), so
 /// the ladder is cheap even when it grows.
 fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
+    use crate::announce::AnnounceError;
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
     use crate::ci::error::Error as CiError;
@@ -82,6 +83,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::config::error::Error as ConfigError;
     use crate::config::managed::ManagedConfigError;
     use crate::file_structure::error::Error as FileStructureError;
+    use crate::forge::ForgeError;
     use crate::managed_config::{
         ManagedConfigFetchError, ManagedConfigPersistError, ManagedConfigPublishError, ManagedConfigUpdateError,
     };
@@ -92,6 +94,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::layer_layout::LayerLayoutError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
+    use crate::oci::ssrf::SsrfError;
     use crate::package::bin_scan::BinScanError;
     use crate::package::dependency_pinning::DependencyPinningError;
     use crate::package::error::Error as PackageError;
@@ -128,6 +131,9 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(IdentifierError);
     try_downcast!(PlatformError);
     try_downcast!(PinnedIdentifierError);
+    try_downcast!(SsrfError);
+    try_downcast!(ForgeError);
+    try_downcast!(AnnounceError);
     try_downcast!(PackageManagerError);
     try_downcast!(PackageErrorKind);
     try_downcast!(DependencyError);
@@ -813,5 +819,98 @@ mod tests {
             ExitCode::PolicyBlocked,
             "BinScanError::Scan must delegate classification to its inner crate::Error cause"
         );
+    }
+
+    // ── announce error classification (design register C13) ─────────────────
+
+    /// `AnnounceError::Ssrf` is `#[error(transparent)]`, which makes
+    /// `Error::source()` skip past the wrapped `SsrfError` — so this only
+    /// classifies correctly because `AnnounceError` is registered in the
+    /// ladder AND its own `classify()` delegates explicitly (see
+    /// `announce/error.rs`), not via a source-chain walk.
+    #[test]
+    fn announce_ssrf_forbidden_target_maps_to_config_error() {
+        use crate::announce::AnnounceError;
+        use crate::oci::ssrf::SsrfError;
+
+        let err = AnnounceError::Ssrf(SsrfError::ForbiddenTarget {
+            host: "169.254.169.254".to_string(),
+            ip: "169.254.169.254".parse().unwrap(),
+        });
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn announce_ssrf_resolution_failure_maps_to_unavailable() {
+        use crate::announce::AnnounceError;
+        use crate::oci::ssrf::SsrfError;
+
+        let err = AnnounceError::Ssrf(SsrfError::Resolution {
+            host: "registry.invalid".to_string(),
+            source: std::io::Error::other("dns lookup failed"),
+        });
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    /// `AnnounceError::Observe`'s `#[source]` field is `Box<ClientError>` (a
+    /// concrete boxed type), so thiserror's `AsDynError` blanket forwarding
+    /// erases it as `Box<ClientError>`, not `ClientError` — a generic
+    /// `downcast_ref::<ClientError>()` in the chain walker would silently
+    /// miss it. `AnnounceError::classify()` delegates explicitly instead
+    /// (`source.classify()`, autoderef through `Box`), which is what this
+    /// locks in.
+    #[test]
+    fn announce_observe_delegates_to_inner_client_error() {
+        use crate::announce::AnnounceError;
+
+        let client_err = ClientError::Registry(Box::new(std::io::Error::other("503")));
+        let err = AnnounceError::Observe {
+            tag: "1.0.0".to_string(),
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            source: Box::new(client_err),
+        };
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn announce_unresolved_tag_maps_to_not_found() {
+        use crate::announce::AnnounceError;
+
+        let err = AnnounceError::UnresolvedTag {
+            tag: "9.9.9".to_string(),
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    /// `AnnounceError::Forge` is `#[error(transparent)]` — same erasure trap
+    /// as `Ssrf` (see the module doc there). Only correct because
+    /// `AnnounceError::classify()` delegates explicitly to `ForgeError`.
+    #[test]
+    fn announce_forge_status_401_maps_to_auth_error() {
+        use crate::announce::AnnounceError;
+        use crate::forge::ForgeError;
+
+        let err = AnnounceError::Forge(ForgeError::Status {
+            url: "https://api.github.com/user".to_string(),
+            status: 401,
+        });
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn announce_forge_transport_failure_maps_to_unavailable() {
+        use crate::announce::AnnounceError;
+        use crate::forge::ForgeError;
+
+        let source = reqwest::Client::new()
+            .get("not a valid url")
+            .build()
+            .expect_err("a malformed URL must fail to build without any network access");
+        let err = AnnounceError::Forge(ForgeError::Transport {
+            url: "https://api.github.com/user".to_string(),
+            source,
+        });
+        assert_eq!(classify(err), ExitCode::Unavailable);
     }
 }

@@ -75,7 +75,7 @@ Global settings for the registry subsystem.
 
 The default registry used for bare package identifiers — those without an explicit registry prefix. When you write `cmake:3.28`, OCX expands it to `<default>/cmake:3.28`.
 
-The value may be either a literal hostname (`"ghcr.io"`) or the name of a [`[registries.<name>]`](#keys-registries) entry. When it matches a named entry, OCX resolves it to that entry's `url`.
+`default` is always a literal identifier prefix — the same string used as a [`[registries.<name>]`](#keys-registries) table key. OCX never dereferences it through any other field; every `[registries.<name>]` key is an identifier prefix, always.
 
 ```toml
 [registry]
@@ -92,25 +92,8 @@ Per-registry settings, keyed by a friendly name. Each entry configures one regis
 
 The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo's convention][cargo-registries] and avoids a TOML collision with the singular [`[registry]`](#keys-registry) global-settings section.
 
-#### `url` {#keys-registries-url}
-
-**Type**: string
-
-The actual registry hostname this entry resolves to. When `[registry] default` names this entry, OCX uses `url` as the effective default registry hostname.
-
-```toml
-[registry]
-default = "company"
-
-[registries.company]
-url = "registry.company.example"
-
-[registries.ghcr]
-url = "ghcr.io"
-```
-
 ::: info v1 scope
-`url` and `index` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are rejected (typo protection); unknown top-level sections are silently ignored (forward compatibility).
+`index` and `trusted_hosts` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are rejected (typo protection); unknown top-level sections are silently ignored (forward compatibility).
 :::
 
 #### `index` {#keys-registries-index}
@@ -124,15 +107,31 @@ Selects the resolution protocol for this namespace. An entry that sets `index` r
 index = "https://index.ocx.sh"
 ```
 
-`index` needs no `<dialect>+` URL-scheme prefix, because OCX has exactly one index wire dialect — the field's presence is the kind marker, the same convention [Cargo][cargo-registries] uses for its own `[registries.NAME] index = "…"`. `index` is a second, independent field on the same entry as [`url`](#keys-registries-url): a `[registries.<name>]` entry may declare a hostname alias, an index URL, or both.
+`index` needs no `<dialect>+` URL-scheme prefix, because OCX has exactly one index wire dialect — the field's presence is the kind marker, the same convention [Cargo][cargo-registries] uses for its own `[registries.NAME] index = "…"`. An entry with no `index` field still resolves as plain OCI — it can still declare [`trusted_hosts`](#keys-registries-trusted-hosts) for its physical registry, `index` and `trusted_hosts` are independent fields.
 
 ::: info Why the resolved physical pointer uses `oci://`, never `http(s)`
 A [derived index's][in-depth-indices-dispatch] local root document — the file `ocx index update` writes under `$OCX_HOME/index/<source>/p/<ns>/<pkg>.json` — records the package's resolved physical location as `oci://<host>/<repository>`, not `http://` or `https://`. That scheme marks the reference *kind* — "an OCI registry repository" — not a transport to dial. Transport is a host-side decision: it comes from a [`[mirrors]`](#keys-mirrors) entry's own scheme for that host, or the plain-HTTP allowance in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the pointer itself carried `http://` or `https://` instead, a publisher able to write that shared identity data could force every consumer resolving it down to plaintext — a scheme belongs to the operator who configures the host, never to data that travels with a package's identity.
 :::
 
+#### `trusted_hosts` {#keys-registries-trusted-hosts}
+
+**Type**: array of strings (hostnames or CIDR blocks)
+
+The SSRF escape hatch for this namespace's physical hosts. Before OCX dereferences an index root's `oci://<host>/<repository>` pointer into a physical registry fetch, it refuses any host that resolves to a private, loopback, link-local, or cloud-metadata address — that pointer is remote-controlled data, and a compromised or mirrored index could otherwise aim it at an internal service. A private registry legitimately lives on such an address, so listing its host or network here restores access for exactly this namespace without weakening the guard anywhere else.
+
+Each entry is either an exact hostname or a CIDR block; a listed target skips the address check.
+
+```toml
+[registries."corp"]
+index = "https://index.corp.example"
+trusted_hosts = ["10.0.0.0/8", "registry.corp"]
+```
+
+The guard is default-on and needs no configuration for public registries. There is no command-line flag to widen the trust set — the exemption lives only on the config entry, so a [system-locked](#keys-registries-system-lock) entry's `trusted_hosts` cannot be broadened by a lower tier or a CLI override. A refused host exits with a configuration error that names the host and points back to `trusted_hosts`.
+
 #### System-locked {#keys-registries-system-lock}
 
-Each `[registries.<name>]` entry declared at the system scope is locked the same way as [`[registry]`](#keys-registry-system-lock) — unconditionally, per entry, covering both `url` and `index`. This closes an indirection a bare `[registry]` lock would leave open: without it, a lower tier could leave a locked `[registry] default = "company"` alone and instead redirect `[registries.company] url` to a different host, changing where the locked default actually resolves. Locking the named entry itself closes that path.
+Each `[registries.<name>]` entry declared at the system scope is locked the same way as [`[registry]`](#keys-registry-system-lock) — unconditionally, per entry, covering both `index` and `trusted_hosts`. A lower tier cannot flip a locked entry's resolution protocol or widen its SSRF trust set.
 
 ### `[mirrors]` {#keys-mirrors}
 
@@ -500,14 +499,14 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 
 These sections are documented here so the format design is stable before they land. They do not exist in the current release.
 
-### Per-registry fields beyond `url` {#future-registries-fields}
+### Per-registry fields beyond `index` and `trusted_hosts` {#future-registries-fields}
 
-The [`[registries.<name>]`](#keys-registries) table is live in v1, but only `url` is defined. Future per-registry fields will slot in without breaking existing configs:
+The [`[registries.<name>]`](#keys-registries) table is live in v1 with [`index`](#keys-registries-index) and [`trusted_hosts`](#keys-registries-trusted-hosts). Future per-registry fields will slot in without breaking existing configs:
 
 ```toml
-# Future shape (not in v1 — only `url` is implemented today):
+# Future shape (not in v1 — only index and trusted_hosts are implemented today):
 [registries.private]
-url = "registry.company.example"
+index = "https://index.company.example"
 insecure = false                 # per-registry TLS opt-out
 location = "mirror.company.example"  # URL rewrite / mirror
 ```

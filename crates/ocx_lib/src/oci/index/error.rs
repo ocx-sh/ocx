@@ -75,6 +75,15 @@ pub enum Error {
     #[error("malformed physical repository reference '{value}' in index root")]
     MalformedPhysicalRef { value: String },
 
+    /// A root's `repository` host was refused by the default-on SSRF guard
+    /// (ocx#218): it resolved to a private / loopback / link-local / metadata
+    /// address and was not listed in the namespace's `trusted_hosts`. The host
+    /// arrives in remote-controlled index data, so it is validated before the
+    /// first physical registry request. The fix path is configuration
+    /// (`[registries."<ns>"].trusted_hosts`), hence `ConfigError`.
+    #[error(transparent)]
+    Ssrf(#[from] crate::oci::ssrf::SsrfError),
+
     /// An existing OCX-authored derived root document names a different physical
     /// `repository` than the identifier being committed implies. Overwriting it
     /// would corrupt the authored root, so a cross-check failure is a hard
@@ -171,6 +180,24 @@ impl ClassifyExitCode for Error {
             Self::IndexHttpFailed { .. } => ExitCode::Unavailable,
             // A misconfigured index-role traffic target — a configuration fault.
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
+            // An SSRF-refused physical host — the fix is `trusted_hosts` config.
+            Self::Ssrf(_) => ExitCode::ConfigError,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An SSRF refusal classifies to `ConfigError` (78): the fix path is adding
+    /// the host to `[registries."<ns>"].trusted_hosts`.
+    #[test]
+    fn ssrf_refusal_classifies_as_config_error() {
+        let error = Error::Ssrf(crate::oci::ssrf::SsrfError::ForbiddenTarget {
+            host: "127.0.0.1".to_string(),
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        });
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
     }
 }

@@ -29,6 +29,7 @@ pub(crate) mod test;
 
 pub(crate) use media_type::*;
 
+pub mod announce;
 pub mod archive;
 pub mod auth;
 pub mod ci;
@@ -38,6 +39,7 @@ pub mod compression;
 pub mod env;
 pub mod error;
 pub mod file_structure;
+pub mod forge;
 pub mod hardlink;
 pub mod log;
 pub mod managed_config;

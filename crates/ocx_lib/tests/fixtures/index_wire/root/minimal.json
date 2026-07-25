@@ -1,0 +1,20 @@
+{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/ocx-contrib/widget",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-07-24",
+  "desc": null,
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-24T00:00:00Z"
+    }
+  }
+}

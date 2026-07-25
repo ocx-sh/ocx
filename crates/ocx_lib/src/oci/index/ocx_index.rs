@@ -165,10 +165,10 @@ pub struct ReqwestIndexTransport {
 /// `No CA certificates were loaded` crash. Seeding any roots flips reqwest onto
 /// the `Verifier::new_with_extra_roots` branch that never touches the system
 /// store (reqwest client.rs:751). This mirrors the OCI half, which gets the
-/// same set from the `oci-client` fork's `ClientConfig::default()`; the shared
-/// single source is the `webpki_root_certs::TLS_SERVER_ROOT_CERTS` const (the
-/// two client types — `oci_client` config vs bare `reqwest` — cannot share a
-/// literal builder).
+/// same set from the `oci-client` fork's `ClientConfig::default()` (a
+/// different client type, so it cannot share a builder with this one); the
+/// root-seeding loop itself is shared with `forge::github`'s bare-`reqwest`
+/// client via [`crate::utility::tls::seed_embedded_roots`].
 fn build_index_http_client() -> reqwest::Client {
     // Transport hardening applied to both the primary and the (unreachable)
     // fallback build so the degraded path never silently drops the gates:
@@ -182,12 +182,7 @@ fn build_index_http_client() -> reqwest::Client {
             .timeout(INDEX_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
     };
-    let mut builder = harden(reqwest::Client::builder());
-    for root in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-        if let Ok(certificate) = reqwest::Certificate::from_der(root.as_ref()) {
-            builder = builder.add_root_certificate(certificate);
-        }
-    }
+    let builder = crate::utility::tls::seed_embedded_roots(harden(reqwest::Client::builder()));
     builder.build().unwrap_or_else(|error| {
         // The bundled-roots build cannot hit the empty-store panic (roots are
         // non-empty). A different init failure is not expected; fall back so
@@ -320,8 +315,10 @@ pub fn parse_physical_repository(value: &str) -> Result<(String, String)> {
     // split `host`/`path` — with no tag and no digest — rejects a smuggled tag
     // (`repo:x`), digest (`repo@sha256:…`), whitespace, control character,
     // uppercase segment, or stray colon that the bare prefix + first-slash split
-    // above would otherwise wave through. Host allowlisting / private-IP
-    // rejection is deliberately out of scope (a separate, deferred decision).
+    // above would otherwise wave through. Host *allowlisting* (which hosts may
+    // appear in roots at all) stays index-side governance (X4); the private-IP /
+    // SSRF floor is enforced at deref time by [`OcxIndex::physical_identifier`]
+    // via [`oci::ssrf::resolve_and_validate`] (ocx#218).
     let parsed = oci::Identifier::parse_with_default_registry(rest, host).map_err(|_| malformed())?;
     if parsed.registry() != host || parsed.repository() != path || parsed.tag().is_some() || parsed.digest().is_some() {
         return Err(malformed().into());
@@ -430,9 +427,16 @@ pub struct OcxIndex {
     /// identifier whose `registry()` differs is not this source's concern.
     namespace: String,
     /// OCI client for the physical manifest/layer fetches (applies `[mirrors]`).
+    /// Built with an SSRF [`GuardedResolver`](oci::ssrf::GuardedResolver) so the
+    /// connect pins the address `physical_identifier` validated (resolve ->
+    /// validate -> pin).
     client: oci::Client,
     /// When false, a tag resolving to a yanked entry is refused (F3).
     allow_yanked: bool,
+    /// SSRF escape hatch for this namespace: hosts / CIDRs whose resolved
+    /// addresses skip the default-on private/loopback/link-local/metadata
+    /// refusal (`[registries."<ns>"].trusted_hosts`, X2).
+    trusted_hosts: Vec<String>,
     cache: Arc<RwLock<SourceCacheInner>>,
 }
 
@@ -443,6 +447,9 @@ pub struct OcxIndexConfig {
     pub namespace: String,
     pub client: oci::Client,
     pub allow_yanked: bool,
+    /// SSRF escape hatch for the physical hosts this source dereferences
+    /// (`[registries."<ns>"].trusted_hosts`, X2). Empty = guard every host.
+    pub trusted_hosts: Vec<String>,
 }
 
 impl OcxIndex {
@@ -453,6 +460,7 @@ impl OcxIndex {
             namespace: config.namespace,
             client: config.client,
             allow_yanked: config.allow_yanked,
+            trusted_hosts: config.trusted_hosts,
             cache: Arc::new(RwLock::new(SourceCacheInner::default())),
         }
     }
@@ -460,6 +468,14 @@ impl OcxIndex {
     /// The logical registry this source serves (e.g. `"ocx.sh"`).
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// This source's own SSRF escape hatch (`[registries."<ns>"].trusted_hosts`,
+    /// X2) — read-only accessor over already-public construction input
+    /// ([`OcxIndexConfig::trusted_hosts`]), so callers can confirm a built
+    /// source carries exactly its own namespace's set and never another's.
+    pub fn trusted_hosts(&self) -> &[String] {
+        &self.trusted_hosts
     }
 
     /// Resolves the static-file base URL for `namespace`: the
@@ -678,6 +694,18 @@ impl OcxIndex {
             return Ok(None);
         };
         let (registry, repository) = parse_physical_repository(&root.repository)?;
+        // SSRF floor (X1-X3, ocx#218): `registry` is a host from remote-controlled
+        // index data, so resolve + validate it against the private/loopback/
+        // link-local/metadata ranges BEFORE the first physical registry request
+        // (`self.client.*` in every caller). `trusted_hosts` is the explicit
+        // per-namespace escape hatch. `self.client` additionally pins the
+        // validated address at connect time via its `GuardedResolver`, closing
+        // the resolve -> connect rebinding window. The resolved addresses are
+        // discarded here — the pin, not this pre-flight, drives the connection.
+        let (host, port) = oci::ssrf::split_host_port(&registry);
+        oci::ssrf::resolve_and_validate(host, port, &self.trusted_hosts)
+            .await
+            .map_err(super::error::Error::from)?;
         let mut physical = oci::Identifier::new_registry(repository, registry);
         if let Some(digest) = identifier.digest() {
             physical = physical.clone_with_digest(digest);
@@ -789,7 +817,7 @@ pub(super) fn surface_root_status(
     tag: &RootTag,
     allow_yanked: bool,
 ) -> Result<()> {
-    let yanked = tag.yanked.unwrap_or(false) || root.status.as_deref() == Some("yanked");
+    let yanked = tag.yanked.is_some() || root.status.as_deref() == Some("yanked");
     if yanked {
         log::warn!("'{identifier}' resolves to a yanked entry — a yank is a publisher signal, not a delete");
         if !allow_yanked {
@@ -999,6 +1027,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::super::index_impl::IndexImpl;
+    use super::super::wire::YankMarker;
     use super::*;
     use crate::oci::Algorithm;
     use crate::oci::client::test_transport::{StubTransport, StubTransportData};
@@ -1109,12 +1138,24 @@ mod tests {
     }
 
     fn make_source(transport: StubIndexTransport, allow_yanked: bool) -> OcxIndex {
+        make_source_with(transport, allow_yanked, stub_client(), Vec::new())
+    }
+
+    /// Like [`make_source`] but with an explicit physical-fetch client and
+    /// `trusted_hosts` — used by the SSRF read-path tests.
+    fn make_source_with(
+        transport: StubIndexTransport,
+        allow_yanked: bool,
+        client: oci::Client,
+        trusted_hosts: Vec<String>,
+    ) -> OcxIndex {
         OcxIndex::new(OcxIndexConfig {
             transport: Box::new(transport),
             base_url: BASE.to_string(),
             namespace: NAMESPACE.to_string(),
-            client: stub_client(),
+            client,
             allow_yanked,
+            trusted_hosts,
         })
     }
 
@@ -1150,14 +1191,19 @@ mod tests {
     }
 
     /// Seeds config + root (tag `3.28` → obs) + observation, returning the obs
-    /// digest and its verbatim bytes. `yanked` toggles the per-tag marker.
+    /// digest and its verbatim bytes. `yanked` toggles the per-tag marker
+    /// (wire object `{"reason": "...", "at": "..."}`, omitted when `false`).
     fn seed_package(transport: &StubIndexTransport, yanked: bool) -> oci::Digest {
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         let obs_bytes = glibc_musl_observation();
         let obs_digest = Algorithm::Sha256.hash(obs_bytes);
+        let yanked_field = if yanked {
+            r#","yanked":{"reason":"critical security issue","at":"2026-02-01T00:00:00Z"}"#
+        } else {
+            ""
+        };
         let root = format!(
-            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{}","yanked":{}}}}}}}"#,
-            obs_digest, yanked
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{obs_digest}"{yanked_field}}}}}}}"#
         );
         transport.insert(&root_url(), root.as_bytes());
         transport.insert(&obs_url(&obs_digest), obs_bytes);
@@ -1195,7 +1241,7 @@ mod tests {
 
         let root: IndexRoot = serde_json::from_slice(
             format!(
-                r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","status":"deprecated","deprecated_message":"use 4.x","tags":{{"3.28":{{"content":"sha256:{}","observed":"2026-07-18T09:00:00Z","yanked":true}}}}}}"#,
+                r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","status":"deprecated","deprecated_message":"use 4.x","tags":{{"3.28":{{"content":"sha256:{}","observed":"2026-07-18T09:00:00Z","yanked":{{"reason":"critical security issue","at":"2026-02-01T00:00:00Z"}}}}}}}}"#,
                 "a".repeat(64)
             )
             .as_bytes(),
@@ -1206,7 +1252,13 @@ mod tests {
         assert_eq!(root.deprecated_message.as_deref(), Some("use 4.x"));
         let tag = root.tags.get("3.28").expect("tag present");
         assert_eq!(tag.content, oci::Digest::Sha256("a".repeat(64)));
-        assert_eq!(tag.yanked, Some(true));
+        assert_eq!(
+            tag.yanked,
+            Some(YankMarker {
+                reason: "critical security issue".to_string(),
+                at: "2026-02-01T00:00:00Z".to_string(),
+            })
+        );
 
         let observation: Observation = serde_json::from_slice(glibc_musl_observation()).unwrap();
         assert_eq!(observation.platforms.len(), 2);
@@ -1292,6 +1344,91 @@ mod tests {
                 crate::Error::OciIndex(super::super::error::Error::MalformedIndexDocument { .. })
             ),
             "expected MalformedIndexDocument, got {error:?}"
+        );
+    }
+
+    // ── SSRF read-path guard (X1-X3, ocx#218) ────────────────────────────────
+
+    /// Seeds config.json + a root whose `repository` points at
+    /// `physical_repository` (e.g. `oci://127.0.0.1/x`), so a physical deref runs
+    /// through the SSRF guard in `physical_identifier`.
+    fn seed_root_pointing_at(transport: &StubIndexTransport, physical_repository: &str) {
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let root = format!(
+            r#"{{"repository":"{physical_repository}","tags":{{"3.28":{{"content":"sha256:{}"}}}}}}"#,
+            "a".repeat(64)
+        );
+        transport.insert(&root_url(), root.as_bytes());
+    }
+
+    /// A digest-addressed identifier in this source's namespace/repo — routes
+    /// straight through `physical_identifier` to the physical fetch.
+    fn digest_id() -> oci::Identifier {
+        oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_digest(oci::Digest::Sha256("b".repeat(64)))
+    }
+
+    /// X3 ordering + #218 regression: a root whose physical host resolves to a
+    /// forbidden range is refused during `physical_identifier`, BEFORE the OCI
+    /// client is ever touched. The recording transport proves no physical
+    /// request was made.
+    #[tokio::test]
+    async fn ssrf_guard_refuses_forbidden_physical_host_before_any_transport_call() {
+        let transport = StubIndexTransport::new();
+        seed_root_pointing_at(&transport, "oci://127.0.0.1/x");
+
+        let recorder = StubTransportData::new();
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(recorder.clone())));
+        let source = make_source_with(transport, false, client, Vec::new());
+
+        let error = source
+            .fetch_manifest(&digest_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("a forbidden physical host must be refused");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
+                ))
+            ),
+            "expected an SSRF ForbiddenTarget refusal, got {error:?}"
+        );
+        assert!(
+            recorder.read().calls.is_empty(),
+            "the SSRF guard must fire before any physical registry request; recorded: {:?}",
+            recorder.read().calls
+        );
+    }
+
+    /// The cloud-metadata endpoint (169.254.169.254) is refused by default, and
+    /// reachable only when the operator lists it in `trusted_hosts`. When trusted,
+    /// the guard passes and the failure comes from the physical fetch itself
+    /// (no seeded manifest), proving the request was let through, not refused.
+    #[tokio::test]
+    async fn ssrf_guard_allows_metadata_host_only_when_trusted() {
+        let transport = StubIndexTransport::new();
+        seed_root_pointing_at(&transport, "oci://169.254.169.254/x");
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
+        let refused = make_source_with(transport, false, client, Vec::new());
+        assert!(
+            matches!(
+                refused.fetch_manifest(&digest_id(), IndexOperation::Resolve).await,
+                Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(_)))
+            ),
+            "the metadata endpoint must be refused by default"
+        );
+
+        let transport = StubIndexTransport::new();
+        seed_root_pointing_at(&transport, "oci://169.254.169.254/x");
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
+        let trusted = make_source_with(transport, false, client, vec!["169.254.169.254".to_string()]);
+        let error = trusted
+            .fetch_manifest(&digest_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("no manifest is seeded, so the physical fetch itself fails");
+        assert!(
+            !matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf(_))),
+            "a trusted host must pass the SSRF guard (failure must come from the fetch, not the guard); got {error:?}"
         );
     }
 

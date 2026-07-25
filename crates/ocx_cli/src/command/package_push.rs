@@ -3,6 +3,7 @@
 
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::{
     log, oci, package,
@@ -58,6 +59,16 @@ pub struct PackagePush {
     /// when no file layers are provided.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
+
+    /// After a successful push, append the pushed tag and any cascade tags
+    /// to this file (creating it if absent), so `ocx package announce
+    /// --tags-file` can pick them up.
+    ///
+    /// This is a scratch file for one pipeline run, not a persistent list -
+    /// a stale file left over from an earlier run could re-add a tag that
+    /// was deliberately dropped from a later announce.
+    #[clap(long = "announce-file", value_name = "PATH")]
+    announce_file: Option<std::path::PathBuf>,
 
     /// Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
@@ -180,15 +191,89 @@ impl PackagePush {
                 .await?
         };
 
-        // Emit the structured push report. Plain output is a one-row table
-        // (identifier, digest, cascade tags); `--format json` serializes the
-        // report consumed by `ocx-mirror pipeline push`.
+        let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
+        pushed_tags.extend(outcome.cascade_tags.iter().cloned());
+
+        // Emit the structured push report BEFORE the announce-file append. The
+        // push itself already succeeded and is not undoable, so an I/O failure
+        // writing the scratch file must not swallow the report — the caller
+        // still has to learn what landed in the registry. Plain output is a
+        // one-row table (identifier, digest, cascade tags); `--format json`
+        // serializes the report consumed by `ocx-mirror pipeline push`.
         context.api().report(&crate::api::data::push::PushReport::new(
             identifier.to_string(),
             outcome.manifest_digest.to_string(),
             outcome.cascade_tags,
         ))?;
 
+        // The append still decides the exit code: the caller asked for the file,
+        // so a failure is a failure — it just no longer costs them the report.
+        if let Some(path) = &self.announce_file
+            && let Err(error) = append_to_announce_file(path, &pushed_tags).await
+        {
+            context.ui().warn(format!(
+                "the push succeeded but the announce file {} was not written",
+                path.display()
+            ));
+            return Err(error);
+        }
+
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Appends `tags` onto the announce-file at `path` (created if absent),
+/// deduping against whatever is already there (design register C2).
+async fn append_to_announce_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
+    let existing = match tokio::fs::read(path).await {
+        Ok(bytes) => conventions::parse_tags_file(&bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err).with_context(|| format!("reading announce file {}", path.display())),
+    };
+    let merged = conventions::merge_tags_file(&existing, tags);
+    tokio::fs::write(path, merged)
+        .await
+        .with_context(|| format!("writing announce file {}", path.display()))
+}
+
+#[cfg(test)]
+mod announce_file_tests {
+    use super::append_to_announce_file;
+
+    #[tokio::test]
+    async fn creates_the_file_with_the_pushed_and_cascade_tags() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("announce.txt");
+
+        append_to_announce_file(
+            &path,
+            &[
+                "3.28.1".to_string(),
+                "3.28".to_string(),
+                "3".to_string(),
+                "latest".to_string(),
+            ],
+        )
+        .await
+        .expect("append succeeds");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read announce file");
+        assert_eq!(content, "3.28.1,3.28,3,latest");
+    }
+
+    #[tokio::test]
+    async fn a_second_overlapping_append_dedupes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("announce.txt");
+
+        append_to_announce_file(&path, &["3.28.1".to_string(), "3.28".to_string()])
+            .await
+            .expect("first append succeeds");
+        append_to_announce_file(&path, &["3.28.2".to_string(), "3.28".to_string()])
+            .await
+            .expect("second append succeeds");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read announce file");
+        assert_eq!(content, "3.28.1,3.28,3.28.2");
     }
 }

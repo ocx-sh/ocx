@@ -120,6 +120,23 @@ impl ClientBuilder {
         self
     }
 
+    /// Pins every connection through an SSRF [`GuardedResolver`](crate::oci::ssrf::GuardedResolver)
+    /// carrying `trusted_hosts`.
+    ///
+    /// Used for the physical-fetch client of an index source, whose target host
+    /// comes from remote-controlled root `repository` pointers: the resolver
+    /// re-validates the resolved addresses at connect time (resolve -> validate
+    /// -> pin), so the address a pre-flight approved cannot rebind to a forbidden
+    /// range before the socket opens. Hosts / CIDRs in `trusted_hosts` skip
+    /// validation (the private-registry escape hatch).
+    pub fn ssrf_guard(mut self, trusted_hosts: Vec<String>) -> Self {
+        let resolver: std::sync::Arc<dyn reqwest::dns::Resolve> = std::sync::Arc::new(
+            crate::oci::ssrf::GuardedResolver::new(std::sync::Arc::new(trusted_hosts)),
+        );
+        self.config.dns_resolver = Some(resolver);
+        self
+    }
+
     pub fn build(self) -> Client {
         let transport = NativeTransport::new(oci::native::Client::new(self.config), self.auth);
         Client {

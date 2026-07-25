@@ -19,8 +19,8 @@
 //! (`/config.json`, `/c`, `/p`). The two roles are path-disjoint, so the same
 //! host may co-serve both. The registry role feeds
 //! [`MirrorMap`](crate::oci::MirrorMap) (the OCI client read path) ONLY; the
-//! index role feeds the index client's base-URL resolution (a later work
-//! package) ONLY — never the other way around.
+//! index role feeds the index client's base-URL resolution ONLY — never the
+//! other way around.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -144,7 +144,7 @@ pub struct MirrorConfig {
 
     /// Endpoint for index-tree traffic (`/config.json`, `/c`, `/p`) to this
     /// host, if an index role was declared for it. Feeds the index client's
-    /// base-URL resolution only (a later work package).
+    /// base-URL resolution only.
     pub index: Option<String>,
 
     /// Runtime provenance marker: the `registry` role of this entry was
@@ -459,8 +459,7 @@ pub struct ResolvedMirrors {
     pub registry: BTreeMap<String, ParsedMirror>,
     /// Parsed index-role (index-tree traffic: `/config.json`, `/c`, `/p`)
     /// mirror endpoints, keyed by upstream traffic host — feeds the index
-    /// client's base-URL resolution (a later work package). Never carries a
-    /// registry-only entry.
+    /// client's base-URL resolution. Never carries a registry-only entry.
     pub index: BTreeMap<String, ParsedMirror>,
     /// The merged (`[mirrors]` config union the inherited `OCX_MIRRORS`, env
     /// wins per host) but not-yet-role-parsed entries, keyed by upstream

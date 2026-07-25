@@ -89,6 +89,16 @@ This is **resolution-affecting**: it is forwarded to every subprocess `ocx`
 spawns via `apply_ocx_config`, so child invocations — generated launchers,
 nested `ocx run` calls — honor the same opt-in.
 
+### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
+
+A GitHub personal access token, read only by [`ocx package announce`][cmd-package-announce] when opening or updating a fork pull request against the index repository (`--fork`). Writing locally with `--out` does not need one.
+
+```sh
+export OCX_ANNOUNCE_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a bearer header on requests to the index's forge, never logged or placed in a URL. `--fork` without this variable set fails immediately rather than falling back to an unauthenticated attempt.
+
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
 The authentication type for the registry.
@@ -674,6 +684,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote
 [cmd-index-update]: command-line.md#index-update
+[cmd-package-announce]: command-line.md#package-announce
 [cmd-run]: command-line.md#run
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate

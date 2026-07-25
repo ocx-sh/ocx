@@ -53,6 +53,8 @@ pub use client::Client;
 pub use client::ClientBuilder;
 pub use client::MirrorMap;
 
+pub mod ssrf;
+
 pub mod index;
 pub use index::Index;
 

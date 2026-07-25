@@ -2208,7 +2208,7 @@ mod tests {
     /// pointer `oci://<REGISTRY>/<REPO>` so the C3 cross-check passes.
     fn yanked_root_bytes(content: &oci::Digest) -> Vec<u8> {
         format!(
-            r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"3.28":{{"content":"{content}","observed":"2026-07-18T09:00:00Z","yanked":true}}}}}}"#
+            r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"3.28":{{"content":"{content}","observed":"2026-07-18T09:00:00Z","yanked":{{"reason":"critical security issue","at":"2026-02-01T00:00:00Z"}}}}}}}}"#
         )
         .into_bytes()
     }
@@ -2526,6 +2526,7 @@ mod tests {
             namespace: REGISTRY.to_string(),
             client: oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new()))),
             allow_yanked: false,
+            trusted_hosts: Vec::new(),
         })
     }
 

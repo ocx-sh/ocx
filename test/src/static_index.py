@@ -82,7 +82,9 @@ def write_package(
 
     tag_entry: dict = {"content": f"sha256:{obs_hex}", "observed": "2026-01-01T00:00:00Z"}
     if yanked:
-        tag_entry["yanked"] = True
+        # Wire shape is an object (`RootTag::yanked` is `Option<YankMarker>` in
+        # `wire.rs`), never a bare boolean — a publisher's reason + timestamp.
+        tag_entry["yanked"] = {"reason": "critical security issue", "at": "2026-02-01T00:00:00Z"}
     root: dict = {"repository": physical_repository, "tags": {tag: tag_entry}}
     if status is not None:
         root["status"] = status

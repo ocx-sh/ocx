@@ -1,0 +1,1086 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+"""`ocx package announce` acceptance tests.
+
+Covers the announce initiative's Track-A gate (design register / meta-plan
+G-A): the fake-forge harness (`fake_forge.py`), the C6 unchanged/zero-PR
+short-circuit, the fork/PR state machine (idempotent create, 422 reuse,
+renamed fork, parent mismatch), the explicit target-owner shared-fork path
+(S12), token-leak assertions (X6), and SSRF acceptance (X1-X3, ordering, the
+`trusted_hosts` escape hatch, and the connect-time pin — see the module docs
+on individual tests for exact scope).
+
+Every scenario announces against a real `registry:2` instance (the `ocx`
+fixture / `registry` fixture from `test/conftest.py`) and a fresh
+per-test `fake_forge` (`test/tests/fake_forge.py`), never real network.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import time
+from pathlib import Path
+
+from announce_helpers import (
+    FIXED_CLOCK,
+    INDEX_FULL,
+    TOKEN,
+    announce,
+    announce_json,
+    branch_name,
+    committed_root,
+    configure_trusted_hosts,
+    registry_host,
+    seed_empty_root,
+)
+from fake_forge import FakeForge
+from src.helpers import make_package
+from src.runner import OcxRunner
+
+# ── --out mode: byte-exact root + content-addressed CAS objects ────────────
+
+
+def test_announce_out_writes_canonical_root_and_content_addressed_cas(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--out` writes the rebuilt root + CAS objects in the CONTRACTS §14 byte
+    form (root: 2-space indent, trailing newline; CAS: minified, sorted keys,
+    no trailing newline, content-addressed by its own sha256), without any
+    hand-computed digest in the assertions.
+
+    Scope, precisely: the round-trip check pins indentation, separators, and
+    the trailing newline, plus — for the CAS objects — key ordering, since
+    `sort_keys=True` is an independent statement of the required order. It does
+    NOT pin the ROOT's field order: `json.loads` preserves document order, so
+    re-dumping reproduces whatever order the serializer chose, alphabetized
+    included. Root field order is pinned by the vendored index fixture parity
+    suite against the Python serializer, which is where that contract lives.
+    The remaining assertions are self-contained: every CAS filename equals
+    sha256(its own bytes), the root's tag `content` pointer names the CAS file
+    it wrote, and a second independent `--out` run reproduces byte-identical
+    files (determinism without predicting any digest).
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    out_dir = tmp_path / "out"
+    report = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+
+    assert report["status"] == "updated"
+    assert report["pull_request_url"] is None
+    assert report["fork"] is None
+    written = report["written_paths"]
+    assert written, "at least the root must be written"
+    for relative in written:
+        assert (out_dir / relative).is_file(), f"reported written path {relative} does not exist on disk"
+
+    root_path = out_dir / "p" / f"{package}.json"
+    root_bytes = root_path.read_bytes()
+    root_obj = json.loads(root_bytes)
+    reproduced = (json.dumps(root_obj, indent=2) + "\n").encode()
+    assert reproduced == root_bytes, "root bytes must equal their own canonical re-serialization"
+
+    cas_files = [relative for relative in written if "/o/sha256/" in relative]
+    assert cas_files, "at least one CAS observation object must be written"
+    for relative in cas_files:
+        cas_bytes = (out_dir / relative).read_bytes()
+        expected_hex = Path(relative).stem
+        assert hashlib.sha256(cas_bytes).hexdigest() == expected_hex, f"{relative} is not content-addressed"
+        cas_obj = json.loads(cas_bytes)
+        reproduced_cas = json.dumps(cas_obj, sort_keys=True, separators=(",", ":")).encode()
+        assert reproduced_cas == cas_bytes, "CAS bytes must equal their own canonical re-serialization"
+
+    tag_content = root_obj["tags"]["1.0.0"]["content"]
+    hex_digest = tag_content.split(":", 1)[1]
+    assert f"p/{package}/o/sha256/{hex_digest}.json" in written
+
+    out_dir_2 = tmp_path / "out2"
+    report_2 = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir_2))
+    assert sorted(report_2["written_paths"]) == sorted(written)
+    for relative in written:
+        assert (out_dir_2 / relative).read_bytes() == (out_dir / relative).read_bytes()
+
+
+def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 is scoped to "no commit, no pull request" — a local write is neither,
+    so `--out` materializes the whole entry on every run. A pipeline shaped
+    `announce --out dir && publish dir` must never find an empty directory just
+    because nothing moved; only `status` reports that. The byte contract makes
+    the repeated write idempotent."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    first_dir = tmp_path / "first"
+    first = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(first_dir))
+    assert first["status"] == "updated"
+
+    # Seed the canonical bytes as the index-main root, so the next run rebuilds
+    # something byte-identical to what is already committed.
+    root_bytes = (first_dir / "p" / f"{package}.json").read_bytes()
+    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+
+    second_dir = tmp_path / "second"
+    second = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(second_dir))
+    assert second["status"] == "unchanged", "nothing moved, so the status must say so"
+    assert sorted(second["written_paths"]) == sorted(first["written_paths"]), (
+        "an unchanged --out run must still write the whole entry, not an empty directory"
+    )
+    for relative in first["written_paths"]:
+        assert (second_dir / relative).read_bytes() == (first_dir / relative).read_bytes()
+
+
+# ── fork mode: happy path + C6 unchanged (G-A / G-D gate) ──────────────────
+
+
+def test_announce_fork_happy_path_opens_pull_request(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    assert report["fork"] == "forkuser/index"
+    assert report["pull_request_url"]
+    assert report["pull_request_number"] is not None
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 1
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 1
+    # C8: the first announce (no pre-existing announce branch) must resolve
+    # its base SHA from the UPSTREAM index repo, not the fork's own main —
+    # forks share GitHub's object store, so the upstream SHA is a valid base
+    # to branch from even when the fork's main has diverged or is stale.
+    assert fake_forge.request_count("GET", "/repos/ocx-sh/index/git/ref/heads/main") == 1, (
+        "the first announce must fetch the base ref from the upstream index repo"
+    )
+    assert fake_forge.request_count("GET", "/repos/forkuser/index/git/ref/heads/main") == 0, (
+        "the first announce must not fetch the base ref from the fork's own main"
+    )
+
+
+def test_announce_fork_second_identical_run_is_unchanged_and_reuses_the_pull_request(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 (F1 amendment) / meta-plan gate G-A / G-D: an identical re-run whose
+    branch already diverges from the upstream base reports `status: "unchanged"`
+    and makes ZERO new commit or pull-request *create* calls, while still
+    reusing (never duplicating) the open PR."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args)
+    assert first["status"] == "updated"
+    assert first["pull_request_url"]
+
+    blobs_before = fake_forge.request_count("POST", "/repos/forkuser/index/git/blobs")
+    commits_before = fake_forge.request_count("POST", "/repos/forkuser/index/git/commits")
+
+    second = announce_json(ocx, fake_forge, *args)
+    assert second["status"] == "unchanged"
+    # C6 amendment (F1): the branch diverges from the upstream base, so an
+    # unchanged re-run ensures the PR still exists — it reuses the open one
+    # (same URL, no duplicate) rather than leaving the update stranded.
+    assert second["pull_request_url"] == first["pull_request_url"]
+    assert second["fork"] == "forkuser/index"
+    assert second["written_paths"] == []
+    # Load-bearing: ZERO new commit / blob work — the root is byte-identical.
+    assert fake_forge.request_count("POST", "/repos/forkuser/index/git/blobs") == blobs_before
+    assert fake_forge.request_count("POST", "/repos/forkuser/index/git/commits") == commits_before
+    # The PR is ensured (F1) but never DUPLICATED — still exactly one open PR.
+    assert len(fake_forge.open_prs.get(("ocx-sh", "index"), {})) == 1
+
+
+def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 (F1 amendment), the other half of the branch-ahead distinction: when
+    the committed root already matches AND no announce branch exists yet, the
+    run is a pure no-op — no fork, no commit, and (unlike the branch-ahead
+    case) NO pull-request call at all."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    # Materialize the canonical committed root via `--out`, then seed those exact
+    # bytes as the index-main root so the fork run reads an already-matching
+    # state. Seeding the RAW bytes (not a re-serialized dict) is essential: the
+    # unchanged short-circuit compares bytes, and only the canonical `--out`
+    # form is byte-identical to what a fork run would regenerate.
+    out_dir = tmp_path / "out"
+    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+    root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
+    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+
+    report = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL
+    )
+    assert report["status"] == "unchanged"
+    assert report["pull_request_url"] is None
+    assert report["fork"] is None
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 0
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 0
+    assert fake_forge.request_count("POST", "/repos/forkuser/index/git/commits") == 0
+
+
+def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 (F1 amendment): "branch exists" is NOT the ensure-PR predicate —
+    "branch is AHEAD of the upstream base" is. An announce branch sitting at the
+    index base carries nothing unmerged (the shape a merged-but-undeleted branch
+    leaves behind), so an unchanged run against it must stay a pure no-op rather
+    than ensuring a pull request for work that is already in the index."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    # Same setup as the no-branch no-op: materialize the canonical root via
+    # `--out` and seed those raw bytes as the index-main root (the byte compare
+    # only matches the canonical form).
+    out_dir = tmp_path / "out"
+    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+    root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
+    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+    # ...then park the announce branch exactly ON that base: it exists, and it
+    # is not ahead.
+    fake_forge.seed_branch_at(
+        "forkuser", "index", branch_name(package), source_owner="ocx-sh", source_repo="index"
+    )
+
+    report = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL
+    )
+    assert report["status"] == "unchanged"
+    assert report["pull_request_url"] is None
+    assert report["fork"] is None
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 0
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 0
+    assert fake_forge.request_count("POST", "/repos/forkuser/index/git/commits") == 0
+
+
+def test_announce_fork_recovers_stranded_pull_request_on_a_later_unchanged_run(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 (F1 amendment): if a run commits to the branch but its pull-request
+    open fails, the update is stranded (committed, no PR). A later identical run
+    reports `unchanged` yet — because the branch diverges from the upstream
+    base — ensures the PR is opened, so the update is never lost."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    # Run 1: the commit lands, but the pull-request open fails.
+    fake_forge.pull_fail_once = True
+    failed = announce(ocx, fake_forge, *args, check=False)
+    assert failed.returncode != 0, "the pull-request open failure must surface as a non-zero exit"
+    assert "1.0.0" in committed_root(fake_forge, package)["tags"], "the commit must have landed on the branch"
+
+    # Run 2: identical content ⇒ unchanged, but the diverged branch recovers the PR.
+    recovered = announce_json(ocx, fake_forge, *args)
+    assert recovered["status"] == "unchanged"
+    assert recovered["pull_request_url"], "a stranded update's PR must be recovered on the next run"
+    assert recovered["fork"] == "forkuser/index"
+
+
+def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_change(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C4 (F2 amendment): the branch ref update is fast-forward-only (CAS). When
+    a concurrent announce advances the branch between our read and our commit —
+    here yanking `1.0.0`, a change CI does NOT re-derive — our update is rejected
+    non-fast-forward, NOT force-overwritten. Announce re-reads the advanced head,
+    regenerates against it, and retries once. The result preserves BOTH changes:
+    the concurrent yank on `1.0.0` survives verbatim, and our new `2.0.0` lands —
+    exactly the lost-update the amendment closes."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    # A first announce commits `1.0.0` onto the branch.
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    # Script a racing announce that yanks `1.0.0` and advances the branch head.
+    # It reuses the real observed content, so on the retry `1.0.0` is an unmoved
+    # digest and its yank is carried verbatim. `1.0.0` must be in our curated set
+    # for the verbatim carry to fire, so our run curates both `1.0.0` and `2.0.0`.
+    concurrent = committed_root(fake_forge, package)
+    concurrent["tags"]["1.0.0"]["yanked"] = {"reason": "concurrent security yank", "at": FIXED_CLOCK}
+    branch = branch_name(package)
+    fake_forge.concurrent_ref_advance[f"forkuser/index/{branch}"] = {
+        f"p/{package}.json": json.dumps(concurrent).encode()
+    }
+
+    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+
+    assert report["status"] == "updated"
+    # The scripted advance fired (the non-FF was hit and the retry engaged).
+    assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
+    final_tags = committed_root(fake_forge, package)["tags"]
+    # BOTH preserved: our new tag AND the concurrent yank, not an overwrite.
+    assert set(final_tags) == {"1.0.0", "2.0.0"}
+    assert final_tags["1.0.0"].get("yanked", {}).get("reason") == "concurrent security yank", (
+        "the concurrent announce's yank on 1.0.0 must survive the fast-forward-only retry"
+    )
+
+
+def test_announce_tags_file_race_retry_unions_against_the_winning_head(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C3/C4: two concurrent `--tags-file` announces must UNION, never clobber.
+    The loser's fast-forward-only update is rejected, and its retry has to
+    re-resolve its curated universe against the WINNING head — `regenerate`
+    replaces the root's `tags` object wholesale, so a retry that replays the tag
+    set resolved from the pre-race root silently deletes whatever the winner
+    added.
+
+    The existing non-fast-forward regression test cannot catch this: it races a
+    yank on `1.0.0`, a tag already inside the loser's curated set, so a stale
+    replay still happens to cover the winning head. Here the winner adds
+    `2.0.0` — a tag the loser never resolved — which is exactly what a stale
+    replay drops.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "3.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    # Shared starting state both racers read: the branch carries `1.0.0`.
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    # The winner adds `2.0.0`, advancing the branch head between our read and
+    # our commit. Its `content` is a placeholder — the retry re-observes every
+    # curated tag, so the value the racer wrote must not survive verbatim.
+    placeholder = f"sha256:{'e' * 64}"
+    concurrent = committed_root(fake_forge, package)
+    concurrent["tags"]["2.0.0"] = {"content": placeholder, "observed": FIXED_CLOCK}
+    branch = branch_name(package)
+    fake_forge.concurrent_ref_advance[f"forkuser/index/{branch}"] = {
+        f"p/{package}.json": json.dumps(concurrent).encode()
+    }
+
+    # The loser announces `3.0.0` by file — additive union (C3).
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("3.0.0")
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+
+    assert report["status"] == "updated"
+    assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
+    final_tags = committed_root(fake_forge, package)["tags"]
+    assert set(final_tags) == {"1.0.0", "2.0.0", "3.0.0"}, (
+        "the retry must union against the winning head, never delete its 2.0.0"
+    )
+    assert final_tags["2.0.0"]["content"] != placeholder, (
+        "the concurrently added tag must be genuinely re-observed on the retry"
+    )
+
+
+def test_announce_identical_race_retry_makes_no_empty_diff_commit(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C4 + C6 (X7 empty-diff threat class): when the announce that WINS the
+    race committed exactly the bytes we were about to commit — two identical
+    concurrent announces — our retry must not commit again. The second commit's
+    tree would equal its base: an empty-diff commit on the PR branch, one of the
+    governance threat classes the index bot tests for. The retry re-applies the
+    unchanged predicate against the WINNING head (not the pre-race root it was
+    first evaluated against), skips the commit, and still ensures the pull
+    request so nothing is stranded."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    # Shared starting state both racers read: the branch carries `1.0.0`.
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    # Materialize the exact entry an announce of `1.0.0,2.0.0` produces. The
+    # clock is pinned (`FIXED_CLOCK`) and `regenerate` carries an unmoved digest
+    # verbatim, so these bytes are what the fork run below regenerates too.
+    out_dir = tmp_path / "winner"
+    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir))
+    winning_files = {
+        path.relative_to(out_dir).as_posix(): path.read_bytes() for path in out_dir.rglob("*") if path.is_file()
+    }
+    assert f"p/{package}.json" in winning_files
+
+    # Script the racer to commit precisely those bytes, advancing the branch
+    # head between our read and our commit.
+    branch = branch_name(package)
+    fake_forge.concurrent_ref_advance[f"forkuser/index/{branch}"] = winning_files
+
+    ref_update_path = f"/repos/forkuser/index/git/refs/heads/{branch}"
+    ref_updates_before = fake_forge.request_count("PATCH", ref_update_path)
+
+    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+
+    assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
+    assert report["status"] == "unchanged", "the winning head already carries our exact bytes"
+    assert report["pull_request_url"], "the pull request must still be ensured, never stranded"
+    # Load-bearing: exactly ONE ref update was attempted — the pre-race one that
+    # was rejected 422. A second one would be the empty-diff commit.
+    assert fake_forge.request_count("PATCH", ref_update_path) == ref_updates_before + 1, (
+        "the retry must push no second commit when the winning head already matches"
+    )
+    assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+
+# ── C6 ensure-PR gate: the compare verdict is never guessed ────────────────
+
+
+def test_announce_unchanged_indeterminate_compare_is_refused(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 amendment: the ensure-PR gate asks whether the announce branch carries
+    commits the upstream base does not. A compare 404 does not answer that — the
+    branch demonstrably exists (this very run just read its head), so a 404 is an
+    indeterminate compare, not "not ahead". Guessing "not ahead" would report a
+    clean unchanged no-op while a committed update sits on the branch with no
+    pull request — the stranded-commit window C6 exists to close."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    assert announce_json(ocx, fake_forge, *args)["status"] == "updated"
+
+    fake_forge.compare_404_once = True
+    result = announce(ocx, fake_forge, *args, check=False)
+    assert result.returncode != 0, "an indeterminate compare must not resolve to a clean unchanged no-op"
+    assert not fake_forge.compare_404_once, "the scripted compare 404 must have fired"
+
+
+def test_announce_unchanged_unmodelled_compare_status_is_refused(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C6 amendment, the other half: the compare `status` classification is
+    exhaustive over GitHub's four documented values. A value the client does not
+    model must surface, never fall through to "not ahead" — same stranded-commit
+    consequence as an indeterminate compare."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    assert announce_json(ocx, fake_forge, *args)["status"] == "updated"
+
+    fake_forge.compare_status_once = "sideways"
+    result = announce(ocx, fake_forge, *args, check=False)
+    assert result.returncode != 0, "an unmodelled compare status must not resolve to a clean unchanged no-op"
+    assert fake_forge.compare_status_once is None, "the scripted compare status must have fired"
+
+
+# ── curation semantics: --tags replace, --tags-file union, --refresh ───────
+
+
+def test_announce_tags_replace_drops_omitted_committed_tag(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+    announce_json(ocx, fake_forge, *args, "--tags", "2.0.0")
+    assert set(committed_root(fake_forge, package)["tags"]) == {
+        "2.0.0"
+    }, "a committed tag absent from --tags must be dropped"
+
+
+def test_announce_tags_file_union_adds_without_dropping(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+
+    assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+
+def test_announce_refresh_reobserves_and_updates_a_moved_digest(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    content_before = committed_root(fake_forge, package)["tags"]["1.0.0"]["content"]
+
+    # Move the tag: re-push it with a new build (a fresh random marker, per
+    # `make_package`), so the content-addressed observation must change. A
+    # distinct tmp_path subdir avoids colliding with the first build's
+    # deterministic `pkg-<repo>-<tag>` bundle directory.
+    second_build = tmp_path / "second-build"
+    second_build.mkdir()
+    make_package(ocx, unique_repo, "1.0.0", second_build, new=False, cascade=False)
+
+    report = announce_json(ocx, fake_forge, *args, "--refresh")
+    assert report["status"] == "updated", "a moved digest must not short-circuit as unchanged"
+    content_after = committed_root(fake_forge, package)["tags"]["1.0.0"]["content"]
+    assert content_after != content_before
+
+
+# ── yank / unyank (C7) ──────────────────────────────────────────────────────
+
+
+def test_announce_yank_and_unyank_apply_to_curated_tags(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args)
+    announce_json(ocx, fake_forge, *args, "--yank", "1.0.0", "--yank-reason", "critical security issue")
+    yanked = committed_root(fake_forge, package)["tags"]["1.0.0"]["yanked"]
+    assert yanked["reason"] == "critical security issue"
+
+    announce_json(ocx, fake_forge, *args, "--unyank", "1.0.0")
+    assert "yanked" not in committed_root(fake_forge, package)["tags"]["1.0.0"]
+
+
+def test_announce_yank_and_unyank_same_tag_errors(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--yank",
+        "1.0.0",
+        "--unyank",
+        "1.0.0",
+        "--yank-reason",
+        "x",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+        check=False,
+    )
+    assert result.returncode != 0
+
+
+# ── forge state machine: idempotent fork, PR 422 reuse, renamed fork,
+#    parent mismatch, explicit target-owner org fork (S12) ─────────────────
+
+
+def test_announce_fork_reused_across_runs_without_duplicate_creation(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Design register X5 "fork idempotent": `ensure_fork`'s GET-reuse-first
+    check means a fork already known never gets a duplicate create — proven
+    across two runs whose curated sets genuinely differ (both take the
+    Updated path, both call `ensure_fork`)."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 1
+
+
+def test_announce_pull_request_422_reuses_existing_pr_without_duplicate(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+
+    assert second["status"] == "updated"
+    assert first["pull_request_number"] == second["pull_request_number"], "the same PR must be reused, not duplicated"
+    assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 2
+    assert len(fake_forge.open_prs.get(("ocx-sh", "index"), {})) == 1
+
+
+def test_announce_renamed_fork_resolves_via_response_body(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.rename_fork_to = "forkuser/grimoire-index"
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    assert report["fork"] == "forkuser/grimoire-index", "endpoints must rebuild from the response full_name"
+    assert fake_forge.request_count("POST", "/repos/forkuser/grimoire-index/git/blobs") >= 1
+
+
+def test_announce_parent_mismatch_fork_is_refused(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.fork_parent_override = "someone-else/index"
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert (
+        fake_forge.request_count("POST", "/repos/forkuser/index/git/blobs") == 0
+    ), "no commit may happen after a parent mismatch"
+
+
+def test_announce_explicit_target_owner_fork_threads_organization(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """S12 shared-fork path: `--fork ocx-contrib/index` threads
+    `organization: "ocx-contrib"` into the fork-create body and opens the PR
+    against that fork, not a personal one."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "ocx-contrib/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    assert report["fork"] == "ocx-contrib/index"
+
+    fork_bodies = [body for path, body in fake_forge.bodies if path == "/repos/ocx-sh/index/forks"]
+    assert fork_bodies and fork_bodies[0].get("organization") == "ocx-contrib"
+
+
+# ── fork readiness poll ──────────────────────────────────────────────────
+
+
+def test_announce_fork_readiness_pending_then_ready_succeeds(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    # One not-ready GET before the fork reports ready — costs one 2s backoff
+    # sleep (`PollSchedule::default().initial_interval`).
+    fake_forge.not_ready["forkuser/index"] = 1
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    # Load-bearing: success alone would also be reported if the poll never ran,
+    # so pin that the not-ready probe was genuinely followed by a retry.
+    assert fake_forge.request_count("GET", "/repos/forkuser/index") >= 2, (
+        "the not-ready probe and at least one retry must have fired"
+    )
+
+
+def test_announce_fork_readiness_unresolvable_keeps_retrying(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`GitHubForge::wait_fork_ready` hardcodes `PollSchedule::default()`
+    (2s->30s doubling, 300s deadline) with no test seam to shorten it — the
+    exact backoff math is already pinned, deterministically and without
+    sleeping, by the Rust unit test `forge::poll::backoff_doubles_caps_at_30s_
+    and_bounds_the_deadline` (A4). Exhausting the real 300s deadline here to
+    additionally prove the terminal `ForkNotReady` outcome would cost ~5
+    minutes of wall time on every suite run for one already-covered
+    assertion. This test instead proves the cheaply-bounded half at the
+    acceptance level: the retry loop is genuinely engaged end-to-end against
+    a real HTTP round trip — still retrying past the first backoff window,
+    not failing or succeeding early.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.not_ready["forkuser/index"] = -1  # never ready
+
+    env = {
+        **ocx.env,
+        "__OCX_TESTING_FORGE_BASE_URL": fake_forge.base_url,
+        "OCX_ANNOUNCE_TOKEN": TOKEN,
+    }
+    process = subprocess.Popen(
+        [
+            str(ocx.binary),
+            "--format",
+            "json",
+            "package",
+            "announce",
+            "--package",
+            package,
+            "--tags",
+            "1.0.0",
+            "--fork",
+            "forkuser/index",
+            "--index-repo",
+            INDEX_FULL,
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        time.sleep(7)  # past the immediate probe + the first 2s backoff sleep
+        assert process.poll() is None, "the readiness poll must still be retrying, not have already returned"
+        assert (
+            fake_forge.request_count("GET", "/repos/forkuser/index") >= 2
+        ), "the immediate probe and at least one retry must have fired"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+# ── A4 deferred runtime proofs: no-redirect client, fresh-fork 404 retry ───
+
+
+def test_announce_forge_redirect_is_not_followed(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """X5: the forge client is built with `redirect::Policy::none()` — a 3xx
+    response must not be chased. Proven with a single server: the redirect
+    `Location` points at an otherwise-never-legitimately-requested path on
+    the SAME fake forge, and the assertion is that path was never hit."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    trap = f"{fake_forge.base_url}/__unreachable_redirect_trap__"
+    fake_forge.redirect_next_contents = trap
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+        check=False,
+    )
+    assert result.returncode != 0, "a 3xx from the forge must not resolve to success"
+    assert ("GET", "/__unreachable_redirect_trap__") not in fake_forge.requests, "the client must not chase the redirect"
+
+
+def test_announce_fresh_fork_first_request_404_race_retry_fires(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """X5, at the request the race actually hits first: the readiness poll asks
+    `GET /repos/{fork}` — repository METADATA, which GitHub makes ready BEFORE
+    the fork's git object store. So the first request of the commit sequence,
+    `GET .../git/commits/<base-sha>` (which reads the base tree), can still 404
+    after the poll passed. `commit_files` retries the WHOLE sequence once after
+    a 3s delay; scripted here as a 404-then-200 on that GET.
+
+    Guarding only a later write (the tree POST) would leave this request — and
+    the blob POSTs after it — unprotected, and a 404 there surfaced as a
+    `missing field tree.sha` error that gives the publisher no hint a retry
+    would fix it."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.base_commit_fail_once.add("forkuser/index")
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    base_tree_reads = [
+        path
+        for method, path in fake_forge.requests
+        if method == "GET" and path.startswith("/repos/forkuser/index/git/commits/")
+    ]
+    assert len(base_tree_reads) == 2, f"exactly one retry must fire, saw {base_tree_reads}"
+
+
+def test_announce_fresh_fork_tree_404_race_retry_fires(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """X5, the later-write half: the provisioning window can also close after
+    the base-tree read succeeds, so a 404 on `POST .../git/trees` must be
+    absorbed by the same single retry of the whole sequence."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.tree_fail_once.add("forkuser/index")
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert report["status"] == "updated"
+    assert fake_forge.request_count("POST", "/repos/forkuser/index/git/trees") == 2, "exactly one retry must fire"
+
+
+# ── token-leak (X6, first-class) ─────────────────────────────────────────
+
+
+def test_announce_token_never_leaks_to_stdout_stderr_or_forge_request_log(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """The token is env-only by construction (never placed on argv) — this
+    additionally proves it never reaches stdout, stderr, or any logged forge
+    request URL (headers legitimately carry it as a bearer value; a URL
+    never should)."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        "forkuser/index",
+        "--index-repo",
+        INDEX_FULL,
+    )
+    assert TOKEN not in result.stdout
+    assert TOKEN not in result.stderr
+    for _method, path in fake_forge.requests:
+        assert TOKEN not in path, f"the token leaked into a logged forge URL: {path}"
+
+
+# ── SSRF acceptance (X1-X3) ─────────────────────────────────────────────
+
+
+def test_announce_ssrf_forbidden_repository_refused_before_any_registry_call(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A root whose `repository` points at a private/loopback host outside
+    `trusted_hosts` is refused (`ConfigError`, exit 78) — and refused
+    *before* any registry request. Ordering is distinguished from a
+    "genuinely tried and failed to connect" outcome (`Unavailable`, exit 69)
+    by pointing at a fast-failing, nothing-listening loopback port (the
+    project's established deterministic-failure fixture host, `127.0.0.1:1`
+    — see `test_index.py`). A skipped pre-flight would have the real oci
+    client ECONNREFUSED against that port and surface `Unavailable` instead
+    — a different, distinguishable exit code from the one asserted here.
+    Every OTHER happy-path test in this module exercises the flip side (the
+    X2 `trusted_hosts` escape hatch letting the real registry:2 instance
+    through) as part of its normal setup.
+    """
+    package = f"acme/{unique_repo}"
+    seed_empty_root(fake_forge, package, "oci://127.0.0.1:1/x")
+    # No trusted_hosts entry at all for this namespace.
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--out",
+        str(tmp_path / "out"),
+        check=False,
+    )
+    assert result.returncode == 78, f"expected ConfigError (78), got {result.returncode}: {result.stderr}"
+
+
+def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Ruling 5: `trusted_hosts` exempts by exact host string OR, for an
+    IP-literal host, CIDR membership computed against the resolved address.
+    A CIDR entry — rather than an exact-hostname match — forces the pre-flight
+    (`resolve_and_validate`) to compute genuine IP-based validation, and the
+    observe succeeds only if it answers "trusted".
+
+    Scope, precisely: a green run here does NOT distinguish an engaged
+    connect-time `GuardedResolver` from an unwired one — both let a trusted
+    address through, so this test cannot fail if the resolver were dropped from
+    the observe client. That wiring is stated in `package_announce.rs::
+    announce_client` (`ClientBuilder::ssrf_guard`), and the resolver's refusal
+    behavior is pinned in isolation by the unit test
+    `oci::ssrf::guarded_resolver_refuses_forbidden_host_at_connect` (A2). A true
+    DNS-rebinding proof needs a controllable authoritative resolver, out of this
+    stdlib-only suite's scope.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    port = ocx.registry.split(":", 1)[1] if ":" in ocx.registry else "443"
+    physical = f"oci://127.0.0.1:{port}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, ["127.0.0.0/8"])
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--package",
+        package,
+        "--tags",
+        "1.0.0",
+        "--out",
+        str(tmp_path / "out"),
+        extra_env={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},127.0.0.1:{port}"},
+    )
+    assert report["status"] == "updated"

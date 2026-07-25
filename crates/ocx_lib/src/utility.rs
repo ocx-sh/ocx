@@ -9,4 +9,5 @@ pub mod result_ext;
 pub mod serde_ext;
 pub mod singleflight;
 pub mod string_ext;
+pub mod tls;
 pub mod vec_ext;

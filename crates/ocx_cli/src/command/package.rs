@@ -15,6 +15,9 @@ use clap::Subcommand;
 /// The toolchain-tier counterparts (`ocx env`, `ocx run`) remain at root.
 #[derive(Subcommand)]
 pub enum Package {
+    /// Observe an owner-curated set of registry tags and publish the rebuilt
+    /// package entry into the index.
+    Announce(super::package_announce::PackageAnnounce),
     /// Creates an archive from a local package directory.
     Create(super::package_create::PackageCreate),
     /// Push a description (README + optional logo) to a package repository.
@@ -51,6 +54,7 @@ pub enum Package {
 impl Package {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
+            Package::Announce(announce) => announce.execute(context).await,
             Package::Create(create) => create.execute(context).await,
             Package::Describe(describe) => describe.execute(context).await,
             Package::Deps(deps) => deps.execute(context).await,

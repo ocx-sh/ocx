@@ -90,9 +90,17 @@ def index_server(tmp_path: Path) -> Iterator[static_index.StaticIndexServer]:
 def configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServer) -> None:
     """Points `[registries."ocx.sh"] index` at the fixture and lists its host
     as insecure. Mirrors `test_index_ocx_sh.py::configure_index_source`.
+
+    Also trusts `ocx.registry`'s bare host (the SSRF guard's `trusted_hosts`
+    escape hatch, X2) — these fixtures resolve physical manifests against the
+    loopback `registry:2` test instance, which the default-on read-path SSRF
+    guard (`oci/ssrf.rs`, ocx#218) otherwise refuses.
     """
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."ocx.sh"]\nindex = "{server.base_url}"\n')
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path.write_text(
+        f'[registries."ocx.sh"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+    )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
 
 

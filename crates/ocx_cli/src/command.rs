@@ -31,6 +31,7 @@ pub mod lock;
 pub mod login;
 pub mod logout;
 pub mod package;
+pub mod package_announce;
 pub mod package_create;
 pub mod package_describe;
 pub mod package_info;

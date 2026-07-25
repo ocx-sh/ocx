@@ -66,9 +66,17 @@ def configure_index_source(
     per NAMESPACE (`adr_index_indirection.md` F5a) — an entry without it
     resolves as plain OCI, no probing. `namespace` defaults to `ocx.sh` but any
     configured namespace resolves through its own index source.
+
+    Also trusts `ocx.registry`'s bare host (the SSRF guard's `trusted_hosts`
+    escape hatch, X2) — every fixture here resolves physical manifests against
+    the loopback `registry:2` test instance, which the default-on read-path
+    SSRF guard (`oci/ssrf.rs`, ocx#218) otherwise refuses.
     """
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[registries."{namespace}"]\nindex = "{server.base_url}"\n')
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path.write_text(
+        f'[registries."{namespace}"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+    )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
 
 
@@ -1695,8 +1703,9 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
 
     dead_index_host = "no-such-index.invalid"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    registry_host = ocx.registry.split(":", 1)[0]
     config_path.write_text(
-        f'[registries."ocx.sh"]\nindex = "https://{dead_index_host}"\n\n'
+        f'[registries."ocx.sh"]\nindex = "https://{dead_index_host}"\ntrusted_hosts = ["{registry_host}"]\n\n'
         f'[mirrors."{dead_index_host}"]\nindex = "{index_server.base_url}"\n\n'
         f'[mirrors."{ocx.registry}"]\nregistry = "http://{mirror_registry}"\n'
     )
