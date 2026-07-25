@@ -27,6 +27,7 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
 | `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
 | `oci/client.rs` | `Client`: registry operations (list, fetch, push, pull) |
+| `oci/ssrf.rs` | Default-on SSRF guard for remote-controlled hosts: `is_forbidden_ip`, `host_is_trusted`, `resolve_and_validate` (pre-flight), `GuardedResolver` (`reqwest::dns::Resolve` pin) |
 | `oci/client/transport.rs` | `OciTransport` async trait (abstract HTTP transport) |
 | `oci/client/native_transport.rs` | Native transport using `oci_client` library |
 | `oci/client/hashing_reader.rs` | `HashingAsyncReader`: digest tee over sha256/sha384/sha512 |
@@ -369,6 +370,8 @@ into a `utility::fs::LayerPlacement`, called from `pull.rs` before
   never assume a package's obs digest is a stable long-term identity.
 - **`Platform::can_run` deleted.** Superseded by `is_compatible`/`select_best` (D1) at every real call site; its unit tests were either redundant with `is_compatible_truth_table` or ported into it.
 - **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. Bypasses cache, produces inconsistent results. All index ops should route through `default_index`.
+- **SSRF guard is default-on (`oci/ssrf.rs`, ocx#218).** An index root's `repository` pointer is remote-controlled data; `OcxIndex::physical_identifier` runs `resolve_and_validate` on the physical host **before** the first `oci::Client` fetch (X3 ordering) and the physical-fetch client is built with a `GuardedResolver` (`ClientBuilder::ssrf_guard`) so the connect pins the validated address (resolve → validate → pin, no DNS-rebinding window). The escape hatch is per-namespace `[registries."<ns>"].trusted_hosts` (exact host or CIDR) — never inferred from `[mirrors]`, `system_locked` applies. Refusal → `SsrfError` → `ConfigError` (78). Host *allowlisting* stays index-side governance; the client only enforces the private/loopback/link-local/metadata floor.
+- **`GuardedResolver` needs the fork's `ClientConfig::dns_resolver` seam.** The pin is realized by the vendored fork's injectable `dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>` on `ClientConfig`; `oci::Client`'s default reqwest client has no such hook. `ClientBuilder::ssrf_guard(trusted_hosts)` is the only production setter.
 - **Submodule at `external/rust-oci-client/`** patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
 - **When unsure about current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. Upstream crate evolves independently of patched fork; training-data knowledge of API shape decays fast.
 

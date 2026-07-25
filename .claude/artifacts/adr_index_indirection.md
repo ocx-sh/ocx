@@ -794,7 +794,9 @@ Grammar for a source-qualified logical reference (resolution input):
 
 ```ebnf
 logical-ref   = index-ns "/" namespace "/" package [ ":" tag | "@" digest ] ;
-index-ns      = "ocx.sh" ;                      (* the single baked known-index key *)
+index-ns      = prefix ;                        (* any `[registries."<prefix>"]` key carrying
+                                                    an `index` field (register §6), e.g.
+                                                    "ocx.sh" — no key is privileged/hardcoded *)
 repository    = scheme "://" host "/" path ;    (* physical, transport-only, never a storage key *)
 scheme        = "oci" ;                          (* type marker + wire contract, one-way door, C3;
                                                     the only scheme — source kind comes from the

@@ -107,7 +107,7 @@ Defaults per tier (before overlays apply):
 | Axis | low | high | max |
 |---|---|---|---|
 | breadth | minimal | full | adversarial |
-| reviewer | sonnet | sonnet | sonnet (→ opus on adversarial breadth) |
+| reviewer | sonnet | opus | opus |
 | doc-reviewer | sonnet | sonnet | sonnet |
 | rca | off | on (Block/High) | on (>Suggest) |
 | codex | off | off (auto-on for One-Way Door signals) | on (mandatory) |

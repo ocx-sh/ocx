@@ -189,6 +189,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `utility::child_process::propagate_exit_code` | `utility/child_process.rs` |
 | Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `utility::path::move_to_front` | `utility/path.rs` |
 | File error with path context | `error::file_error(path, io_err)` | `crates/ocx_lib/src/error.rs` |
+| Seed a hand-rolled `reqwest::ClientBuilder` with the bundled Mozilla CA roots | `utility::tls::seed_embedded_roots` | `utility/tls.rs` |
 
 ## Locking Policy
 

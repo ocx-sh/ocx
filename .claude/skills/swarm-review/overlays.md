@@ -52,15 +52,17 @@ Evidence from `.claude/artifacts/research_model_capability_matrix.md`: Opus 4.7 
 | Value | Effect |
 |---|---|
 | `haiku` | `worker-reviewer` with model=haiku. Explicit user override only — never an automatic default, and never on security/structural-marker paths. |
-| `sonnet` | `worker-reviewer` with model=sonnet. Default at every tier (the floor). |
-| `opus` | `worker-reviewer` with model=opus. Used at tier=max when `--breadth=adversarial` fires — CLI-UX, architecture-boundary, SOTA-gap perspectives benefit from deeper reasoning. |
+| `sonnet` | `worker-reviewer` with model=sonnet. Explicit downgrade for trivial diffs only — never on security, auth/credential, SSRF/network-policy, exit-code, or wire-format paths. |
+| `opus` | `worker-reviewer` with model=opus. **Default at high and max**, and mandatory for any diff touching security, auth/credentials, SSRF/network policy, error/exit-code semantics, or wire formats. |
 
 Per-tier defaults:
 - low → `sonnet`
-- high → `sonnet`
-- max → `sonnet` (→ `opus` when `--breadth=adversarial`)
+- high → `opus`
+- max → `opus`
 
-Sonnet is the floor; haiku only via explicit user override and never on security-relevant paths.
+Opus is the floor for security and correctness review — a cheap review of a
+security diff is a false economy. Downgrade to sonnet only for trivial diffs;
+haiku only via explicit user override and never on security-relevant paths.
 
 ### doc-reviewer axis
 
@@ -126,7 +128,7 @@ User-supplied flags always override classifier-inferred overlays. When `classify
 | Axis | low | high | max |
 |---|---|---|---|
 | breadth | minimal | full | adversarial |
-| reviewer | sonnet | sonnet | sonnet (→ opus on adversarial breadth) |
+| reviewer | sonnet | opus | opus |
 | doc-reviewer | sonnet | sonnet | sonnet |
 | rca | off | on (Block/High) | on (>Suggest) |
 | codex | off | off (auto-on for One-Way Door signals) | on (mandatory) |

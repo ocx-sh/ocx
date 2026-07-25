@@ -178,7 +178,7 @@ dependency, and the same shape ports to GitLab's Commits API later.
   `--yank`/`--unyank`/`--yank-reason` — all already forge-neutral in the Python reference.
   Shipping any `--github-*`-prefixed flag is the door slamming.
 - **Config schema:** the announce target derives from the index config
-  (`[indices."<ns>"]`), *not* a GitHub-specific block. The forge is **inferred from the
+  (`[registries."<ns>"]`), *not* a GitHub-specific block. The forge is **inferred from the
   target host** (`github.com` → GitHub REST; a GitLab host → GitLab REST). See D5 for the
   one genuinely new config field (index *source-repo* coordinate), which must carry a
   forge-neutral shape (`github:owner/repo` / `gitlab:group/proj`).
@@ -257,15 +257,16 @@ serializer, one code path" discipline applied on the Rust side) that both the in
 and announce depend on. Sequencing: either (a) `feat/index-indirection` lands first and
 announce imports the extracted `wire.rs`, or (b) announce extracts `wire.rs` from the
 branch ahead of the merge. Planning against unmerged code is a real risk — **flagged as an
-open sequencing item.** Announce does **not** need PR #217's `IndexConfig` read plumbing,
-`ChainedIndex`, or `SnapshotStore`.
+open sequencing item.** Announce does **not** need the landed `RegistryConfig`'s (PR #217,
+`crates/ocx_lib/src/config/registry.rs`) read plumbing, `ChainedIndex`, or `SnapshotStore`.
 
-**New config field (genuinely additive).** `IndexConfig` on the branch carries only `url`
-(the served `index.ocx.sh` endpoint). Announce needs the index's **source-repo**
-coordinate (owner/repo for the forge), which is distinct from the served URL. Add a
-forge-neutral field to `[indices."<ns>"]`, e.g. `repository = "github:ocx-sh/index"`, with
-the forge inferred from the prefix. This is the one schema addition; it must ship
-forge-neutral (D2) and is compat-bound once a `system_locked` tier carries it.
+**New config field (genuinely additive).** The landed `RegistryConfig` carries `index` (the
+served `index.ocx.sh` endpoint) and, independently, `url` (an OCI-registry hostname alias) —
+two distinct fields on the one entry, not one. Announce needs the index's **source-repo**
+coordinate (owner/repo for the forge), which is distinct from both. Add a forge-neutral
+field to `[registries."<ns>"]`, e.g. `repository = "github:ocx-sh/index"`, with the forge
+inferred from the prefix. This is the one schema addition; it must ship forge-neutral (D2)
+and is compat-bound once a `system_locked` tier carries it.
 
 **Recommendation: D5** — announce orchestration in `ocx_lib`; depends on a new forge REST
 client (D2) + `Publisher` (main) + an extracted shared `wire.rs` canonical serializer;
@@ -349,9 +350,9 @@ ocx package announce --package <id> (--tags <list> | --tags-file <path>)
                      [--yank <tag> | --unyank <tag>] [--yank-reason <text>]
 ocx package push … --announce-file <path>     # appends primary+cascade tags (comma/newline)
 
-[indices."<ns>"]
-url        = "https://index.ocx.sh"      # served sparse index (existing, branch)
-repository = "github:ocx-sh/index"       # NEW: forge-neutral source-repo coordinate (D5)
+[registries."<ns>"]
+index      = "https://index.ocx.sh"      # served sparse index (landed, main)
+repository = "github:ocx-sh/index"       # NEW: forge-neutral source-repo coordinate (D5) — not yet added to RegistryConfig
 ```
 
 Wire/serializer contract: index-repo `bot/CONTRACTS.md` §14 (root: `indent=2`,
@@ -370,7 +371,7 @@ fixtures.
    build CAS bytes → fork/commit/PR), reused by `ocx-mirror`.
 4. [ ] Thin `command/package_announce.rs` + `api/data/announce.rs` report; `--announce-file`
    append on `package_push`.
-5. [ ] Forge-neutral `[indices."<ns>"].repository` config field + host-inferred forge.
+5. [ ] Forge-neutral `[registries."<ns>"].repository` config field + host-inferred forge.
 6. [ ] Conformance tests against index golden fixtures; idempotency + dedupe tests.
 7. [ ] CI units (D1): GitHub reusable workflow in `setup-ocx`; GitLab CI/CD Component (D4).
 8. [ ] Docs: publisher how-to (GitHub Actions + GitLab CI), token setup, fork prerequisite.
@@ -442,3 +443,4 @@ fixtures.
 |------|--------|--------|
 | 2026-07-18 | Michael Herwig + Claude design swarm | Initial Proposed draft: publisher-side announce integration surface — CI-unit shape (D1), GitHub-only-behind-neutral-surface forge posture (D2), token model (D3), CI-unit placement (D4), ocx_lib layering + wire-serializer dependency (D5); NFRs; open items for owner |
 | 2026-07-19 | Michael Herwig (owner) | Accepted. Ratified: additive `--tags-file` union, unchanged⇒no-op, fork auto-create, land-#217-first sequencing, GitLab-hosted index as real future track (forge-neutral line enforced), live-real-index E2E topology. D4 placement deferred to CI-unit phase. |
+| 2026-07-22 | Michael Herwig (owner) + Claude design swarm | This ADR predates the `design_spec_announce_initiative.md` register session — ratified/detailed there: S3 (always fork, no direct push ever, first-party included), S4 (PAT-only day one via a dedicated `ocx-bot` machine account, fine-grained PATs cannot fork/PR public repos), C4 (update from the existing announce branch's head, not `main`, so sequential announces accumulate into one open PR), C5 (`--refresh` re-observes every curated tag plus file additions to catch moved digests without becoming registry-scan), X1–X3 (default-on range-based SSRF guard resolving-then-validating connect-time IPs, `trusted_hosts` per-`[registries."<ns>"]` escape hatch, guard ordered before announce's first registry request). See register §1, §2, §4. |

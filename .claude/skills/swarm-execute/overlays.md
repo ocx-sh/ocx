@@ -32,12 +32,12 @@ Controls model for Stub + Implement phases. Review-Fix Loop builders
 
 | Value | Effect |
 |---|---|
-| `sonnet` | `worker-builder` with model=sonnet for Stub + Implement. Default for low and high tiers. |
-| `opus` | `worker-builder` with model=opus. Used for architecturally complex or cross-subsystem implementation. Mandatory at tier=max. |
+| `sonnet` | `worker-builder` with model=sonnet for Stub + Implement. Default at tier=low, and for mechanical work at any tier (rename, doc fix, fixture, single-file edit against an existing pattern). |
+| `opus` | `worker-builder` with model=opus. Default at high and max: non-mechanical implementation — multi-file, async/concurrency, error and exit-code semantics, wire-format/serializer, auth/SSRF/credential paths. |
 
 Per-tier defaults:
 - low → `sonnet`
-- high → `sonnet` (opus via `--builder=opus` when classifier detects novel architecture or cross-subsystem change)
+- high → `opus` (`--builder=sonnet` to downgrade when the work is genuinely mechanical)
 - max → `opus` (mandatory — overrides any explicit `--builder=sonnet`)
 
 ### tester axis
@@ -65,15 +65,17 @@ Evidence from `.claude/artifacts/research_model_capability_matrix.md`: Opus 4.7 
 | Value | Effect |
 |---|---|
 | `haiku` | `worker-reviewer` with model=haiku. Explicit user override only — never an automatic default, and never on security/structural-marker paths. |
-| `sonnet` | `worker-reviewer` with model=sonnet. Default at every tier (the floor). |
-| `opus` | `worker-reviewer` with model=opus. Used at tier=max when `--breadth=adversarial` fires — CLI-UX, architecture-boundary, SOTA-gap perspectives benefit from deeper reasoning. |
+| `sonnet` | `worker-reviewer` with model=sonnet. Explicit downgrade for trivial diffs (docs, fixtures, single-file mechanical change). |
+| `opus` | `worker-reviewer` with model=opus. **Default at high and max**, and mandatory for any diff touching security, auth/credentials, SSRF/network policy, error/exit-code semantics, or wire formats. |
 
 Per-tier defaults:
 - low → `sonnet`
-- high → `sonnet`
-- max → `sonnet` (→ `opus` when `--breadth=adversarial`)
+- high → `opus`
+- max → `opus`
 
-Sonnet is the floor; haiku only via explicit user override and never on security-relevant paths.
+Opus is the floor for security and correctness review — a cheap review of a
+security diff is a false economy. Downgrade to sonnet only for trivial diffs;
+haiku only via explicit user override and never on security-relevant paths.
 
 ### doc-reviewer axis
 

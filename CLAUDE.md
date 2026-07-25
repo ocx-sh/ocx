@@ -16,11 +16,14 @@ Applies to EVERY subagent spawn (Agent tool, Workflow `agent()` incl. ultracode,
 
 | Task | Model |
 |---|---|
-| **Default** — implementation, research, web fetch, review, docs, tests, exploration, ALL planning workers | **Sonnet 5** (`sonnet`) |
-| Task stretches multiple subsystems, or Sonnet demonstrably falls short | Opus (`opus`) — justify in spawn prompt; Opus may itself fan work back out to Sonnet workers |
+| **Security review, code review, adversarial/verification passes** | **Opus 5** (`opus`) |
+| **Non-mechanical implementation** — multi-subsystem, async/concurrency, error + exit-code semantics, OCI/wire-format or serializer work, auth/SSRF/credential paths | **Opus 5** (`opus`) |
+| ADR / architecture decisions; or Sonnet demonstrably fell short twice on the same subtask | Opus (`opus`) — may fan work back out to Sonnet workers |
+| **Default** — exploration, codebase search, research, web fetch, docs, mechanical edits, test scaffolding, planning workers | **Sonnet 5** (`sonnet`) |
 | Final synthesis/decision over results multiple agents prepared (research + context pre-digested) | Fable — main loop / last instance only; (near-)NEVER as subagent; prefer Opus even here |
 
-- **Never** Fable for review, research, implementation. Scale **out** (more parallel Sonnet workers with crisp handovers: goal, inputs, output contract), not **up**.
+- **Never** Fable for review, research, implementation. Scale **out** (parallel workers with crisp handovers: goal, inputs, output contract) *and* **up** on the review/correctness axis — a cheap review of a security diff is a false economy.
+- "Mechanical" = local change, shape already decided (rename, doc fix, fixture, single-file edit against an existing pattern). If the *design* is still open, it is Opus.
 - **Cross-model (Codex) reviews**: `luna` (trivial) / `terra` (**default** — cost-efficient, use in small review loops too, not just high tiers) / `sol` (max-tier one-way-door gates). One-shot adversarial pass, no cross-family looping. See "Cross-model model tiers" in [workflow-swarm.md](./.claude/rules/workflow-swarm.md).
 
 ## Project Identity

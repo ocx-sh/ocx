@@ -2,7 +2,7 @@
 name: worker-reviewer
 description: Code review and security analysis worker with OCX quality checklist. Specify focus mode in prompt.
 tools: Read, Glob, Grep, Bash
-model: sonnet
+model: opus
 ---
 
 # Reviewer Worker

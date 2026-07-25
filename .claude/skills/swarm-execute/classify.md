@@ -70,9 +70,9 @@ multiple triggers may fire. Axis defs in `overlays.md`.
 
 | Overlay | Triggered by |
 |---|---|
-| `--builder=opus` | Plan "Subsystems Touched" lists ≥2; plan or prompt mentions "novel algorithm", "new trait hierarchy", "cross-subsystem", "protocol change" |
+| `--builder=sonnet` | Explicit downgrade at tier=high when the work is genuinely mechanical (rename, doc fix, fixture, single-file edit against an existing pattern) |
 | `--tester=opus` | tier=max (mandatory — reflects the exhaustive edge-case coverage work documented in `tier-max.md` Phase 4) |
-| `--reviewer=opus` | tier=max AND `--breadth=adversarial` |
+| `--reviewer=sonnet` | Explicit downgrade — trivial diffs only; never on security, auth/credential, SSRF/network-policy, exit-code, or wire-format paths |
 | `--loop-rounds=1` | tier=low; or plan tags the feature as Two-Way Door |
 | `--loop-rounds=3` | tier=high or tier=max (default) |
 | `--review=adversarial` | Security-sensitive paths (`oci/`, `auth`, `crypto/`, `signing/`); plan labels `security`; diff touches `package_manager/` |
@@ -82,9 +82,9 @@ Defaults per tier (before overlays):
 
 | Axis | low | high | max |
 |---|---|---|---|
-| builder | sonnet | sonnet | opus |
+| builder | sonnet | opus | opus |
 | tester | sonnet | sonnet | opus |
-| reviewer | sonnet | sonnet | sonnet (→ opus on adversarial breadth) |
+| reviewer | sonnet | opus | opus |
 | doc-reviewer | sonnet | sonnet | sonnet |
 | loop-rounds | 1 | 3 | 3 |
 | review | minimal | full | adversarial |

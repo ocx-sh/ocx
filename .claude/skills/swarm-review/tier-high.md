@@ -22,7 +22,7 @@ languages.
 
 ## Phase 2: Stage 1 — Correctness (parallel, 2 workers)
 
-> **Reviewer model**: every `worker-reviewer` launch in this tier use resolved `--reviewer` overlay value (tier=high default `sonnet`). See `overlays.md` reviewer axis.
+> **Reviewer model**: every `worker-reviewer` launch in this tier use resolved `--reviewer` overlay value (tier=high default `opus`). See `overlays.md` reviewer axis.
 
 Launch **in single message with multiple Agent tool calls** so run concurrently:
 

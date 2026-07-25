@@ -13,7 +13,7 @@ Rules for efficient multi-agent swarm execution.
 1. **Workers inherit session context** - CLAUDE.md and rules loaded, workers use focused tool sets
 2. **Narrow scope** - Each worker one task
 3. **Minimal tools** - Only tools needed
-4. **Sonnet is the model floor everywhere** — exploration, research, review, implementation. Opus for multi-subsystem / one-way-door work (may fan back out to Sonnet workers). Fable (near-)never a subagent — main-loop synthesis only. Haiku only as an explicit user override
+4. **Opus for review and non-mechanical implementation; Sonnet for everything mechanical.** Security/code review, adversarial passes, multi-file or async/error-semantics/wire-format/credential-path implementation, and one-way-door architecture → Opus (may fan back out to Sonnet workers). Exploration, search, research, docs, fixtures, renames, test scaffolding → Sonnet. Fable (near-)never a subagent — main-loop synthesis only. Haiku only as an explicit user override
 
 ## Universal Worker Protocol (Critical Steps for Every Build/Test/Review Worker)
 
@@ -30,9 +30,9 @@ Rules for efficient multi-agent swarm execution.
 |--------|-------|-------|-----|
 | `worker-architecture-explorer` | sonnet | Read, Glob, Grep | Architecture discovery |
 | `worker-explorer` | sonnet | Read, Glob, Grep | Fast codebase search |
-| `worker-builder` | sonnet (opus override for complex implementation) | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring (see model rationale below) |
-| `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Specification tests and validation |
-| `worker-reviewer` | sonnet (default) | Read, Glob, Grep, Bash | Code review/security/spec-compliance (diff-scoped; model scales per tier via `--reviewer` overlay — see `.claude/artifacts/adr_tier_model_correlation.md`) |
+| `worker-builder` | opus for non-mechanical work; sonnet for mechanical | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring (see model rationale below) |
+| `worker-tester` | sonnet (opus at tier=max) | Read, Write, Edit, Bash, Glob, Grep | Specification tests and validation |
+| `worker-reviewer` | **opus** (sonnet only as an explicit downgrade for trivial diffs) | Read, Glob, Grep, Bash | Code review/security/spec-compliance (diff-scoped; see `.claude/artifacts/adr_tier_model_correlation.md`) |
 | `worker-researcher` | sonnet | Read, Glob, Grep, WebFetch, WebSearch | External research |
 | `worker-architect` | opus | Read, Write, Edit, Glob, Grep | Complex design decisions |
 | `worker-doc-reviewer` | sonnet | Read, Glob, Grep, Bash | Documentation consistency review |
@@ -48,7 +48,7 @@ Orchestrators specialize workers via focus mode in prompt.
 - `testing`: Write tests, cover happy path + edge cases, ensure deterministic. Sonnet default.
 - `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see quality-core.md). Sonnet default.
 
-**Model selection rationale:** Opus 4.7 leads Sonnet 4.6 by 8.0pp on SWE-bench Verified at 1.67× input cost, lower throughput. Gap shows on multi-step agentic chains and novel-reasoning; narrows to near-parity on single-pass review. OCX policy: Sonnet 5 is the capability floor for every subagent — exploration, research, review, testing, implementation, all planning workers; Opus for one-way-door architecture and multi-subsystem work, and may itself fan work back out to Sonnet workers; Fable is the main-loop/last-instance decider that synthesizes pre-digested multi-agent results, (near-)never spawned as a subagent; Haiku is no longer an automatic default anywhere — legal only as an explicit user override. Per-tier overrides in `.claude/artifacts/adr_tier_model_correlation.md` and per-skill `overlays.md` files. Source benchmark data: `.claude/artifacts/research_model_capability_matrix.md` (owner policy 2026-07-16 supersedes haiku auto-routing).
+**Model selection rationale (owner policy 2026-07-24, Opus 5 release — supersedes the 2026-07-16 Sonnet-floor policy):** the axis is *nature of the work*, not tier alone. **Opus** for security and code review, adversarial/verification passes, and non-mechanical implementation — multi-file, async/concurrency, error and exit-code semantics, OCI/wire-format or serializer work, auth/SSRF/credential paths, ADR and one-way-door architecture; Opus may itself fan work back out to Sonnet workers. **Sonnet** for mechanical and breadth work — exploration, codebase search, research, web fetch, docs, fixtures, renames, test scaffolding, planning workers. "Mechanical" = local change whose shape is already decided; if the design is still open, it is Opus. **Fable** is the main-loop/last-instance decider over pre-digested multi-agent results, (near-)never a subagent. **Haiku** only as an explicit user override, never on security paths. Per-tier defaults in each skill's `overlays.md`; benchmark background in `.claude/artifacts/research_model_capability_matrix.md` and `adr_tier_model_correlation.md` (both predate Opus 5 — treat their per-tier tables as superseded by this rule where they disagree).
 
 **worker-tester focus modes:**
 - `specification`: Write tests from design record BEFORE implementation. Tests encode expected behavior as executable spec. Must fail against stubs.
@@ -256,5 +256,6 @@ Plans must define per WP: name, owned files (disjoint across concurrently-runnin
 - NO sharing state between workers
 - NO workers spawning workers (single-level only)
 - NO long-running workers (timeout at 5 min)
-- NO opus for simple tasks (cost optimization)
+- NO opus for genuinely mechanical tasks (renames, fixtures, doc fixes, codebase search)
+- NO sonnet review on security, auth/credential, SSRF/network-policy, exit-code, or wire-format diffs
 - NO pushing to remote (human decides when to push — CI has real cost)
