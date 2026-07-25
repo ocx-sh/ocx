@@ -551,7 +551,13 @@ class FakeForge(http.server.ThreadingHTTPServer):
                 handler._reply_json(422, {"message": "Update is not a fast forward"})
                 return
             if branch not in self.refs.get(full, {}):
-                handler._reply_json(404, {"message": "not found"})
+                # Real GitHub answers **422**, not 404, when this endpoint is
+                # PATCHed for a ref that does not exist — the same status it
+                # uses for a rejected fast-forward. Verified live against
+                # api.github.com. Modelling it as 404 here let the client's
+                # then-wrong 404-means-absent split pass the acceptance suite
+                # while every first announce failed in production.
+                handler._reply_json(422, {"message": "Reference does not exist"})
                 return
             sha = body.get("sha")
             self.refs[full][branch] = sha
