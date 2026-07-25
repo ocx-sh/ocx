@@ -2256,6 +2256,7 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
 - `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
+- `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -2274,6 +2275,27 @@ ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.
 
 ::: warning Bring your own archives
 `ocx package push` does not bundle a directory for you. Each file layer must be a pre-built archive. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy) and defeats layer reuse — use [`ocx package create`](#package-create) to produce a stable archive once, then push and reference it by digest from later commands.
+:::
+
+#### Annotations {#package-push-annotations}
+
+`--annotation KEY=VALUE` records an [OCI annotation][oci-annotations] on the [image index][oci-image-index] of every tag the push writes — the primary tag and, under `--cascade`, each rolling tag it re-points. The flag is repeatable, splits at the first `=` (so values may contain `=`), and keeps the last value for a repeated key. A key that is empty, or an argument with no `=` at all, is a usage error (exit 64).
+
+Values are written verbatim: OCX never derives an annotation from the environment or from the repository path. Omitting the flag writes nothing and leaves whatever the index already carries untouched, so an earlier annotation survives a later plain push. Supplying a key overwrites that one key and leaves the rest of the index's annotations alone.
+
+The annotation that matters in practice is `org.opencontainers.image.source`. It is the documented mechanism by which a registry links a package back to its source repository — on [GHCR][ghcr-repo-link] this is what produces the repository link on the package page and what makes the package inherit that repository's permissions. Registries derive nothing from the repository path, so a package published to `ghcr.io/acme/tools/widget` links to nothing until the annotation says otherwise:
+
+```shell
+# In GitHub Actions, the runner already knows the answer.
+ocx package push -c -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
+  --annotation org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY \
+  widget-1.2.3-linux-amd64.tar.xz
+```
+
+Any other annotation key works the same way — `org.opencontainers.image.revision` for the commit that produced the build, `org.opencontainers.image.licenses` for the SPDX expression. The [OCI annotation spec][oci-annotations] lists the pre-defined keys and the reverse-domain convention for custom ones; OCX does not validate keys beyond rejecting an empty one.
+
+::: tip Catalog display lives elsewhere
+Title, description, and keywords shown in a catalog come from [`ocx package describe`](#package-describe), which publishes them on the separate `__ocx.desc` tag. `--annotation` is for facts about a *published build* that a registry reads off the index itself.
 :::
 
 #### Layer layout {#package-push-layout}
@@ -3392,6 +3414,9 @@ or a registry error) — the report then degrades to a local-state-only summary
 [nixos]: https://nixos.org/
 [nix-ld]: https://github.com/nix-community/nix-ld
 [gentoo-prefix]: https://wiki.gentoo.org/wiki/Project:Prefix
+[oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views

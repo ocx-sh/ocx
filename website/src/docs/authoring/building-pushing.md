@@ -66,6 +66,22 @@ Cascade is a publisher convention, not a registry-enforced rule. The registry se
 
 <Terminal src="/casts/authoring/package-cascade.cast" title="Cascading rolling tags across releases" collapsed />
 
+## Linking the Source Repository {#source-annotation}
+
+A published package tells a consumer nothing about where it came from. Registries do not infer it: the path `ghcr.io/acme/tools/widget` names a package, not a repository, and a registry that guessed otherwise would be wrong the moment a publisher mirrors someone else's software under their own namespace — which is exactly what a mirror repository does.
+
+The [OCI image spec][oci-annotations] reserves `org.opencontainers.image.source` for the answer, and [GHCR][ghcr-repo-link] reads it: set it and the package page shows the repository link and the package inherits that repository's permissions; omit it and neither happens, whatever the path looks like. State it at push time with `--annotation`:
+
+```shell
+ocx package push -c -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
+  --annotation org.opencontainers.image.source=https://github.com/acme/widget \
+  widget-1.2.3-linux-amd64.tar.xz
+```
+
+In CI the value is already in the environment — on [GitHub Actions][github-actions-docs] it is `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY`. OCX deliberately does not read that variable itself: a package built anywhere other than the forge you assumed would then silently claim provenance it does not have, and OCX publishes to any registry from any forge.
+
+The annotation lands on the [image index][oci-image-index] of every tag the push writes, cascade tags included, so a rolling alias never advertises weaker provenance than the version tag it points at. Repeat the flag for other keys — `org.opencontainers.image.revision` for the commit, `org.opencontainers.image.licenses` for the SPDX expression. Leaving the flag off writes nothing and leaves any annotation an earlier push set in place.
+
 ## Reusing Layers Across Packages {#layer-reuse}
 
 A package's content is the union of its layers — a base, optional middle layers, a top layer with the binary. Re-pushing a layer that already exists in the target registry is wasteful: the registry GC will dedupe in the background, but the publisher already spent the upload bandwidth and the consumer pays the download cost on first install.
@@ -93,6 +109,7 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 ## See Also {#see-also}
 
 - [`ocx package push` reference][cmd-package-push]
+- [`ocx package push --annotation` reference][cmd-package-push-annotations]
 - [Versioning in depth — cascades][in-depth-versioning-cascades]
 - [Storage in depth — layers][in-depth-storage-layers]
 - [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
@@ -101,11 +118,15 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
+[cmd-package-push-annotations]: ../reference/command-line.md#package-push-annotations
 [cmd-package-describe]: ../reference/command-line.md#package-describe
 [arg-remote]: ../reference/command-line.md#arg-remote
 [arg-offline]: ../reference/command-line.md#arg-offline
