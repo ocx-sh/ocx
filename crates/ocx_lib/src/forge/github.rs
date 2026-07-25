@@ -269,6 +269,11 @@ impl GitHubForge {
     /// design register C4): a non-fast-forward — a concurrent announce advanced
     /// the branch — surfaces as [`ForgeError::NonFastForward`] for the caller to
     /// re-read and retry, never a silent force-overwrite.
+    ///
+    /// A rejected update costs one extra request: GitHub reports "absent ref"
+    /// and "not a fast-forward" with the same 422, so the ref is read to tell
+    /// them apart. That read is off the happy path entirely — a successful
+    /// update returns without it.
     async fn upsert_branch(&self, repo: &RepoCoordinate, branch: &str, commit_sha: &str) -> Result<(), ForgeError> {
         let update_url = self.url(&format!("/repos/{}/{}/git/refs/heads/{branch}", repo.owner, repo.repo));
         let update_body = json!({ "sha": commit_sha, "force": false });
@@ -281,18 +286,26 @@ impl GitHubForge {
         if status.is_success() {
             return Ok(());
         }
-        // A fast-forward-only update of an existing ref that is not an ancestor
-        // returns 422 — the concurrent-advance (CAS) case.
-        if status == StatusCode::UNPROCESSABLE_ENTITY {
-            return Err(ForgeError::NonFastForward {
-                branch: branch.to_string(),
-            });
-        }
-        // Only a genuinely absent ref (404) falls through to creation.
-        if status != StatusCode::NOT_FOUND {
+        // GitHub answers **422 for both** rejection modes of this endpoint: a
+        // fast-forward-only update that is not an ancestor (the concurrent-
+        // advance CAS case) AND a ref that does not exist at all (verified live:
+        // `{"message":"Reference does not exist"}`, 422 — not the 404 the shape
+        // of the endpoint suggests). The two are told apart by asking the ref
+        // itself, never by matching GitHub's English prose, which is not a
+        // stable API contract. 404 joins the same path: it is not observed for
+        // an absent ref, but a fresh fork whose git objects are still
+        // provisioning can answer it, and the probe classifies that as absent
+        // too — so the create below runs and its own 404 drives the X5 retry,
+        // exactly as before.
+        if status != StatusCode::UNPROCESSABLE_ENTITY && status != StatusCode::NOT_FOUND {
             return Err(ForgeError::Status {
                 url: update_url,
                 status: status.as_u16(),
+            });
+        }
+        if self.get_ref_sha(repo, &format!("heads/{branch}")).await?.is_some() {
+            return Err(ForgeError::NonFastForward {
+                branch: branch.to_string(),
             });
         }
         let create_url = self.url(&format!("/repos/{}/{}/git/refs", repo.owner, repo.repo));
@@ -303,7 +316,7 @@ impl GitHubForge {
         if create_status.is_success() {
             return Ok(());
         }
-        // A concurrent first announce created the branch between our 404 and
+        // A concurrent first announce created the branch between our probe and
         // this create — treat it as a CAS conflict and retry as an update.
         if create_status == StatusCode::UNPROCESSABLE_ENTITY {
             return Err(ForgeError::NonFastForward {
@@ -740,7 +753,262 @@ fn testing_base_url_override() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{TcpListener, TcpStream};
+
     use super::*;
+
+    /// One recorded request against [`FakeForge`].
+    #[derive(Clone)]
+    struct Recorded {
+        method: String,
+        path: String,
+        body: String,
+    }
+
+    impl Recorded {
+        fn route(&self) -> String {
+            format!("{} {}", self.method, self.path)
+        }
+    }
+
+    /// A one-request-per-connection HTTP/1.1 fake for the forge endpoints.
+    ///
+    /// The real `reqwest` stack is driven end to end rather than a transport
+    /// seam: what is under test is a *status-code* classification, and a fake
+    /// above the HTTP layer would have to restate the very mapping the tests
+    /// exist to pin. Every response carries `connection: close`, so the handler
+    /// sees one request per connection, in order, and can answer the same URL
+    /// differently on a later call.
+    struct FakeForge {
+        base_url: String,
+        calls: Arc<Mutex<Vec<Recorded>>>,
+    }
+
+    impl FakeForge {
+        /// Bind an ephemeral loopback port and serve `handler`, which maps
+        /// (method, path) to a (status, JSON body) response.
+        async fn start(
+            handler: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
+        ) -> Result<Self, std::io::Error> {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base_url = format!("http://{}", listener.local_addr()?);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&calls);
+            let handler = Arc::new(handler);
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    let handler = Arc::clone(&handler);
+                    let recorder = Arc::clone(&recorder);
+                    tokio::spawn(async move {
+                        if let Some(request) = read_request(&mut stream).await {
+                            let (status, body) = handler(&request.method, &request.path);
+                            if let Ok(mut calls) = recorder.lock() {
+                                calls.push(request);
+                            }
+                            let _ = write_response(&mut stream, status, &body).await;
+                        }
+                    });
+                }
+            });
+            Ok(Self { base_url, calls })
+        }
+
+        fn forge(&self) -> GitHubForge {
+            GitHubForge::with_base_url(ForgeToken::new("token".to_string()), self.base_url.clone())
+                .expect("client builds")
+        }
+
+        fn recorded(&self) -> Vec<Recorded> {
+            self.calls.lock().expect("recorder not poisoned").clone()
+        }
+
+        fn routes(&self) -> Vec<String> {
+            self.recorded().iter().map(Recorded::route).collect()
+        }
+    }
+
+    /// Read one request: the head byte-at-a-time to the `\r\n\r\n` boundary,
+    /// then exactly `content-length` body bytes. Draining the body matters —
+    /// closing a socket with bytes still queued makes the kernel answer RST,
+    /// which discards the response already written.
+    async fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.ok()?;
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        let mut request_line = head.lines().next()?.split_whitespace();
+        let method = request_line.next()?.to_string();
+        let path = request_line.next()?.to_string();
+        let length = head
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .map(str::trim)
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(0_usize);
+        let mut body = vec![0_u8; length];
+        if length > 0 {
+            stream.read_exact(&mut body).await.ok()?;
+        }
+        Some(Recorded {
+            method,
+            path,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
+    async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), std::io::Error> {
+        let response = format!(
+            "HTTP/1.1 {status} Status\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await
+    }
+
+    fn test_repo() -> RepoCoordinate {
+        RepoCoordinate {
+            owner: "forkuser".to_string(),
+            repo: "index".to_string(),
+        }
+    }
+
+    const BRANCH: &str = "indexbot-announce-acme-widget";
+    const UPDATE_PATH: &str = "/repos/forkuser/index/git/refs/heads/indexbot-announce-acme-widget";
+    const PROBE_PATH: &str = "/repos/forkuser/index/git/ref/heads/indexbot-announce-acme-widget";
+    const CREATE_PATH: &str = "/repos/forkuser/index/git/refs";
+    /// GitHub's real answer to a PATCH of a ref that does not exist — a 422,
+    /// not the 404 the endpoint shape suggests.
+    const REFERENCE_DOES_NOT_EXIST: &str = r#"{"message":"Reference does not exist"}"#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_branch_creates_the_branch_when_a_422_means_the_ref_is_absent() {
+        // The first announce for a package: the announce branch does not exist
+        // on the fork yet. Reading that 422 as a non-fast-forward sent the
+        // caller into the C4 retry against a branch with no head at all.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("PATCH", UPDATE_PATH) => (422, REFERENCE_DOES_NOT_EXIST.to_string()),
+            ("GET", PROBE_PATH) => (404, r#"{"message":"Not Found"}"#.to_string()),
+            ("POST", CREATE_PATH) => (201, r#"{"ref":"refs/heads/b","object":{"sha":"newsha"}}"#.to_string()),
+            _ => (500, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        fake.forge()
+            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .await
+            .expect("an absent ref is created, not reported as a conflict");
+
+        assert_eq!(
+            fake.routes(),
+            [
+                format!("PATCH {UPDATE_PATH}"),
+                format!("GET {PROBE_PATH}"),
+                format!("POST {CREATE_PATH}"),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_branch_reports_non_fast_forward_when_the_ref_is_present() {
+        // The same 422, but the ref resolves: a concurrent announce advanced the
+        // branch, so the caller must re-read and regenerate (design register C4).
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("PATCH", UPDATE_PATH) => (422, r#"{"message":"Update is not a fast forward"}"#.to_string()),
+            ("GET", PROBE_PATH) => (200, r#"{"object":{"sha":"headsha"}}"#.to_string()),
+            _ => (500, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let error = fake
+            .forge()
+            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .await
+            .expect_err("a present ref that rejected the update is a conflict");
+
+        assert!(matches!(error, ForgeError::NonFastForward { ref branch } if branch == BRANCH));
+        assert_eq!(
+            fake.routes(),
+            [format!("PATCH {UPDATE_PATH}"), format!("GET {PROBE_PATH}")],
+            "a conflict must never fall through to create"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_branch_probes_nothing_when_the_update_succeeds() {
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("PATCH", UPDATE_PATH) => (200, r#"{"object":{"sha":"commitsha"}}"#.to_string()),
+            _ => (500, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        fake.forge()
+            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .await
+            .expect("a successful update needs nothing else");
+
+        assert_eq!(fake.routes(), [format!("PATCH {UPDATE_PATH}")]);
+        // The update is fast-forward-only compare-and-swap (design register C4):
+        // `force` must be stated false, never omitted and never true.
+        let update: Value =
+            serde_json::from_str(&fake.recorded()[0].body).expect("the update body is the JSON we sent");
+        assert_eq!(update, json!({ "sha": "commitsha", "force": false }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_branch_reports_non_fast_forward_when_the_create_loses_the_race() {
+        // A concurrent first announce created the branch between our probe and
+        // our create; the caller re-reads that head rather than overwriting it.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("PATCH", UPDATE_PATH) => (422, REFERENCE_DOES_NOT_EXIST.to_string()),
+            ("GET", PROBE_PATH) => (404, r#"{"message":"Not Found"}"#.to_string()),
+            ("POST", CREATE_PATH) => (422, r#"{"message":"Reference already exists"}"#.to_string()),
+            _ => (500, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let error = fake
+            .forge()
+            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .await
+            .expect_err("a lost create race is a conflict");
+
+        assert!(matches!(error, ForgeError::NonFastForward { ref branch } if branch == BRANCH));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upsert_branch_surfaces_other_statuses_without_probing_or_creating() {
+        // A 401/403/500 says nothing about whether the ref exists. Probing (and
+        // worse, creating) on one would turn "cannot see this repository" into
+        // a write attempt against it.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("PATCH", UPDATE_PATH) => (403, r#"{"message":"Resource not accessible"}"#.to_string()),
+            _ => (500, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let error = fake
+            .forge()
+            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .await
+            .expect_err("an unmodelled status must surface");
+
+        assert!(matches!(error, ForgeError::Status { status, .. } if status == 403));
+        assert_eq!(fake.routes(), [format!("PATCH {UPDATE_PATH}")]);
+    }
 
     #[test]
     fn fork_create_body_includes_organization_when_targeted() {
