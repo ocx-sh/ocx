@@ -575,6 +575,51 @@ To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$G
 [Storage In Depth → Packages][in-depth-storage-packages] — why concurrent CI writes are safe.
 :::
 
+## Publish and announce a package {#publish}
+
+[`ocx package push`][cmd-package-push] puts bytes in a registry — nothing more. It does not make `<ns>/<pkg>` resolvable to anyone who does not already know the exact registry coordinates. Announcing is the extra step that tells the [public index][in-depth-indices-public] a namespace, package, and tag combination exists, so [`ocx package install`][cmd-install] `<ns>/<pkg>` works for anyone, not just people you have personally handed a registry URL.
+
+Skip that step and the packages stay invisible outside your own config. Months of `ocx package push` to a private `ghcr.io` repository leave a registry full of correctly built packages and zero outside install-ability: nobody can resolve `<ns>/<pkg>` because nothing points at it. [winget-pkgs][winget-pkgs] solves the equivalent "make my thing discoverable" problem with a review-gated pull request against a central manifest repository — a publisher submits a manifest, an [automated pipeline validates it and tests the installer][winget-submit], and a moderator approves the merge; only then does the package show up in the catalogue `winget` resolves from.
+
+OCX takes the same shape, minus the manifest-authoring step. [`ocx package push --announce-file <path>`][cmd-package-push] records which tags this push should announce, then [`ocx package announce --fork <owner>/<repo>`][cmd-package-announce] opens an ordinary pull request — from the publisher's own GitHub account — against the [public index repository][index-repo]. It is the same trust model as any open-source contribution: no index-side credential is ever required. `OCX_ANNOUNCE_TOKEN` authenticates to GitHub to open that PR and nothing else: it is read from the environment only, never from a stored credential, and it never reaches the [`~/.docker/config.json` that `ocx login` writes][authentication-storing]. Announcing and registry authentication are two separate trust boundaries with two separate credentials.
+
+### First-time setup {#publish-first-time-setup}
+
+Two one-time steps happen on the [index site][index-ocx-sh] itself, before the first announce:
+
+1. [Claim your namespace][index-claim-namespace] — a short, reviewed pull request that registers your GitHub account (or org) as the owner of a namespace prefix.
+2. Obtain [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] and [set it up][index-announce-package] — a classic GitHub PAT for a single maintainer, or a machine-account token for a CI fleet publishing many packages. OCX reads it the same way it reads every other environment variable — see the [environment variable reference][env-ref].
+
+### Announcing from CI {#publish-announcing-from-ci}
+
+Most publishers already have a release workflow that builds and uploads binaries; slotting announce into it is additive, not a rewrite. The [copy-paste GitHub Actions snippet][index-announce-ci-snippet] on the index site shows where `push --announce-file` and `announce` go relative to your existing build steps, plus the `OCX_ANNOUNCE_TOKEN` secret wiring for both a classic-PAT and a machine-account setup. The snippet lives there, not here, so it stays in sync with the index bot's own contract instead of drifting out of two copies.
+
+### What your consumers need today {#publish-consumer-prerequisite}
+
+One honest caveat about the install side. Resolving `<ns>/<pkg>` through the
+public index requires the consumer's ocx to treat that namespace as
+index-kind, and today that means an explicit [`[registries."<prefix>"]`
+entry][config-registries-index] carrying an `index` URL — keyed on the
+**registry prefix** (`ocx.sh`), not on your package's namespace. Two things
+follow. That config field is not in a released ocx yet: 0.4.3 rejects it with
+`unknown field 'index', expected 'url'`. And `ocx.sh` is not index-kind by
+default, so even on a build that accepts the field, a consumer has to opt in
+by hand until that default ships.
+
+Until then, announce is worth doing early — the index entry is durable and
+your package is discoverable the moment consumers can resolve it — but a
+colleague on a released ocx cannot yet `ocx package install <ns>/<pkg>`
+without the registry coordinates you were trying to stop handing out.
+
+### What happens after {#publish-what-happens-after}
+
+Once the pull request is open, one of two lanes picks it up. A routine refresh from a package's already-verified owner — a new tag, a moved digest, green checks — merges itself automatically; there is nothing to wait on. A first-time package, or any change touching a governance-sensitive field, always goes to a person: index maintainers review it as they would any other pull request. The [governance contracts reference][index-governance-contracts] documents which fields route to which lane.
+
+::: tip Learn more
+[Building and pushing packages][authoring-building-pushing] — the full push workflow: dependency pins, cascading rolling tags, layer reuse.
+[index.ocx.sh][in-depth-indices-public] — how the public index resolves an announced package back into an install.
+:::
+
 ## Authenticate with a private registry {#authentication}
 
 OCX uses a layered approach to authentication. Most methods are scoped per registry, so different registries can use different credentials. Methods are queried in order; the first one to succeed wins:
@@ -958,6 +1003,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- authoring -->
 [authoring-libc]: ./authoring/multi-platform.md#libc
+[authoring-building-pushing]: ./authoring/building-pushing.md#first-push
 
 <!-- external -->
 [github-releases-ocx]: https://github.com/ocx-sh/ocx/releases
@@ -997,6 +1043,13 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [oras]: https://oras.land/
 [index-ocx-sh]: https://index.ocx.sh
+[winget-pkgs]: https://github.com/microsoft/winget-pkgs
+[winget-submit]: https://learn.microsoft.com/en-us/windows/package-manager/package/repository
+[index-repo]: https://github.com/ocx-sh/index
+[index-claim-namespace]: https://index.ocx.sh/docs/how-to/claim-a-namespace
+[index-announce-package]: https://index.ocx.sh/docs/how-to/announce-a-package
+[index-announce-ci-snippet]: https://index.ocx.sh/docs/how-to/announce-a-package#copy-paste-github-actions-snippet
+[index-governance-contracts]: https://index.ocx.sh/docs/reference/governance-contracts
 
 <!-- github issues -->
 [gh-trust-policy]: https://github.com/ocx-sh/ocx/issues/98
@@ -1032,6 +1085,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-uninstall]: ./reference/command-line.md#package-uninstall
 [cmd-index-update]: ./reference/command-line.md#index-update
 [cmd-package-pull]: ./reference/command-line.md#package-pull
+[cmd-package-push]: ./reference/command-line.md#package-push
+[cmd-package-announce]: ./reference/command-line.md#package-announce
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env]: ./reference/command-line.md#env
 [cmd-env-root]: ./reference/command-line.md#env-root
@@ -1066,6 +1121,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
 [env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
+[env-ocx-announce-token]: ./reference/environment.md#ocx-announce-token
 [env-ref]: ./reference/environment.md
 
 <!-- reference pages -->
@@ -1082,6 +1138,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-composition-ref]: ./reference/env-composition.md
 [getting-started]: ./getting-started.md
 [install-bare-binary]: #install-bare-binary
+[authentication-storing]: #authentication-storing
+[config-registries-index]: ./reference/configuration.md#keys-registries-index
 [config-schema]: https://ocx.sh/schemas/config/v1.json
 
 <!-- in-depth -->
