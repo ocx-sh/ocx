@@ -17,6 +17,7 @@
 //! | [`validate_managed_config_payload`] | Pure: size cap, TOML parse as [`crate::config::Config`], `[managed]` rejection | Unit-testable with synthetic bytes |
 //! | [`publish_managed_config`] | I/O + network: stage, bundle, push (cascade-aware) | Acceptance test |
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::oci::{Identifier, Platform};
@@ -266,16 +267,18 @@ pub async fn publish_managed_config(
         // Canonical tagging (`adr_index_indirection.md` Decision E) is a
         // `ocx package push` CLI contract; managed-config publishing has no
         // `--[no-]canonical-tag` surface of its own, so it opts out to keep
-        // today's tag set unchanged.
+        // today's tag set unchanged. Index annotations are likewise a
+        // `ocx package push --annotation` contract with no `ocx config push`
+        // surface, so none are written.
         publisher
-            .push_cascade(vec![info], &layers, existing_versions, None, false)
+            .push_cascade(vec![info], &layers, existing_versions, None, false, &BTreeMap::new())
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),
             })?
     } else {
         publisher
-            .push(vec![info], &layers, None, false)
+            .push(vec![info], &layers, None, false, &BTreeMap::new())
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),

@@ -11,7 +11,7 @@
 //! composes the algebra with [`Client`](crate::oci::Client) OCI transport
 //! to implement cascade pushes that correctly handle multi-platform registries.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use crate::{
@@ -200,6 +200,9 @@ pub async fn resolve_cascade_tags(
 /// Decision E) — looked up once from the primary tag's merged index, so a
 /// cascade never retags a pre-existing entry for a platform this call did
 /// not push.
+///
+/// `annotations` land on the primary tag's index and on every cascade tag's
+/// index alike.
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
@@ -207,6 +210,7 @@ pub async fn push_with_cascade(
     other_versions: BTreeSet<Version>,
     version: &Version,
     canonical_tag: bool,
+    annotations: &BTreeMap<String, String>,
 ) -> Result<(oci::Digest, Vec<String>)> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
@@ -218,7 +222,7 @@ pub async fn push_with_cascade(
     .await?;
 
     let (manifest_digest, index) = client
-        .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags)
+        .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags, annotations)
         .await?;
 
     if canonical_tag {
@@ -958,7 +962,7 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true)
+            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
                 .await
                 .expect("cascade push succeeds");
 
@@ -980,7 +984,7 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false)
+            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
                 .await
                 .expect("cascade push succeeds");
 

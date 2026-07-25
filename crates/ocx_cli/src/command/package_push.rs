@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use anyhow::Context as _;
@@ -59,6 +60,23 @@ pub struct PackagePush {
     /// when no file layers are provided.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
+
+    /// Record an OCI annotation on the published image index. Repeatable.
+    ///
+    /// Written verbatim onto the index of every tag this push writes,
+    /// including cascade tags. A repeated key keeps the last value. Omitting
+    /// the flag writes no annotations and leaves any the registry already
+    /// holds untouched.
+    ///
+    /// Set `org.opencontainers.image.source` to the HTTPS URL of the source
+    /// repository: on GHCR this is what links the package to its repository
+    /// and lets it inherit that repository's permissions. Registries derive
+    /// nothing from the repository path, so state it explicitly - for example
+    /// in GitHub Actions:
+    ///
+    ///   --annotation org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+    #[clap(long = "annotation", value_name = "KEY=VALUE", value_parser = parse_annotation)]
+    annotation: Vec<(String, String)>,
 
     /// After a successful push, append the pushed tag and any cascade tags
     /// to this file (creating it if absent), so `ocx package announce
@@ -158,6 +176,9 @@ impl PackagePush {
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
         let canonical_tag = self.canonical_tag.enabled();
+        // Last-wins on a repeated key, matching the POSIX convention for
+        // repeated flags.
+        let annotations: BTreeMap<String, String> = self.annotation.iter().cloned().collect();
 
         let outcome = if self.cascade {
             let existing_tags = match publisher.list_tags(identifier.clone()).await {
@@ -183,11 +204,12 @@ impl PackagePush {
                     existing_versions,
                     build_meta.as_deref(),
                     canonical_tag,
+                    &annotations,
                 )
                 .await?
         } else {
             publisher
-                .push(infos, &self.layers, build_meta.as_deref(), canonical_tag)
+                .push(infos, &self.layers, build_meta.as_deref(), canonical_tag, &annotations)
                 .await?
         };
 
@@ -222,6 +244,22 @@ impl PackagePush {
     }
 }
 
+/// Splits a `KEY=VALUE` annotation argument at the first `=`.
+///
+/// The value may contain `=` (URLs with query strings do) and may be empty;
+/// the key may not be empty. Beyond that OCX does not police annotation keys —
+/// the OCI spec only *recommends* reverse-domain notation, and a registry is
+/// free to define its own.
+fn parse_annotation(argument: &str) -> anyhow::Result<(String, String)> {
+    let (key, value) = argument
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got '{argument}'"))?;
+    if key.is_empty() {
+        return Err(anyhow::anyhow!("annotation key is empty in '{argument}'"));
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
 /// Appends `tags` onto the announce-file at `path` (created if absent),
 /// deduping against whatever is already there (design register C2).
 async fn append_to_announce_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
@@ -234,6 +272,48 @@ async fn append_to_announce_file(path: &std::path::Path, tags: &[String]) -> any
     tokio::fs::write(path, merged)
         .await
         .with_context(|| format!("writing announce file {}", path.display()))
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use std::collections::BTreeMap;
+
+    use super::parse_annotation;
+
+    #[test]
+    fn splits_at_the_first_equals_sign() {
+        let (key, value) =
+            parse_annotation("org.opencontainers.image.source=https://github.com/ocx-sh/ocx?ref=main").expect("parses");
+        assert_eq!(key, "org.opencontainers.image.source");
+        assert_eq!(value, "https://github.com/ocx-sh/ocx?ref=main");
+    }
+
+    #[test]
+    fn accepts_an_empty_value() {
+        let (key, value) = parse_annotation("org.opencontainers.image.source=").expect("parses");
+        assert_eq!(key, "org.opencontainers.image.source");
+        assert_eq!(value, "");
+    }
+
+    #[test]
+    fn rejects_an_argument_without_an_equals_sign() {
+        let error = parse_annotation("org.opencontainers.image.source").expect_err("must reject");
+        assert!(error.to_string().contains("expected KEY=VALUE"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_an_empty_key() {
+        let error = parse_annotation("=https://github.com/ocx-sh/ocx").expect_err("must reject");
+        assert!(error.to_string().contains("annotation key is empty"), "got: {error}");
+    }
+
+    #[test]
+    fn a_repeated_key_keeps_the_last_value() {
+        let parsed = ["a=first", "b=x", "a=second"].map(|argument| parse_annotation(argument).expect("parses"));
+        let collected: BTreeMap<String, String> = parsed.into_iter().collect();
+        assert_eq!(collected.get("a").map(String::as_str), Some("second"));
+        assert_eq!(collected.get("b").map(String::as_str), Some("x"));
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ pub mod publish_gate;
 pub use layer_ref::{ArchiveMediaType, LayerRef, LayerRefParseError};
 pub use publish_gate::{PublishGateError, verify_dependency_pins};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::{
@@ -88,12 +88,17 @@ impl Publisher {
     /// deletion safety net (`adr_index_indirection.md` Decision E). Applies
     /// only to the platform manifest pushed by this call, never to
     /// pre-existing entries the merge picks up from the registry.
+    ///
+    /// `annotations` are publisher-stated OCI annotations (`ocx package push
+    /// --annotation`) written onto the image index of every tag this push
+    /// touches. An empty map writes nothing at all.
     pub async fn push(
         &self,
         infos: Vec<Info>,
         layers: &[LayerRef],
         build_meta: Option<&str>,
         canonical_tag: bool,
+        annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
@@ -105,7 +110,7 @@ impl Publisher {
             );
             let identifier = info.identifier.clone();
             let platform = info.platform.clone();
-            let (digest, manifest) = self.client.push_package(info, layers).await?;
+            let (digest, manifest) = self.client.push_package(info, layers, annotations).await?;
             if canonical_tag {
                 self.client
                     .push_canonical_tag(&identifier, &manifest, &platform)
@@ -126,8 +131,8 @@ impl Publisher {
     /// used to compute which rolling tags each platform's push should update
     /// (cascade blocker checks are platform-aware). The same `build_meta`
     /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
-    /// ordered union across platforms. `canonical_tag` has the same meaning
-    /// as [`Self::push`].
+    /// ordered union across platforms. `canonical_tag` and `annotations` have
+    /// the same meaning as in [`Self::push`].
     pub async fn push_cascade(
         &self,
         infos: Vec<Info>,
@@ -135,6 +140,7 @@ impl Publisher {
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
         canonical_tag: bool,
+        annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
@@ -155,6 +161,7 @@ impl Publisher {
                 existing_versions.clone(),
                 &version,
                 canonical_tag,
+                annotations,
             )
             .await?;
             manifest_digest = Some(digest);
@@ -313,7 +320,7 @@ mod tests {
             StubTransportData::new(),
         ))));
         let err = publisher
-            .push(Vec::new(), &[], None, false)
+            .push(Vec::new(), &[], None, false, &BTreeMap::new())
             .await
             .expect_err("empty set");
         assert!(err.to_string().contains("at least one target platform"), "got: {err}");
@@ -330,7 +337,7 @@ mod tests {
         let mut mac = test_info("1.0.0");
         mac.platform = "darwin/arm64".parse().expect("platform parses");
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None, false)
+            .push(vec![test_info("1.0.0"), mac], &[], None, false, &BTreeMap::new())
             .await
             .expect("fan-out push succeeds");
 
@@ -374,7 +381,7 @@ mod tests {
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
         publisher
-            .push(vec![test_info("1.0.0")], &[], None, true)
+            .push(vec![test_info("1.0.0")], &[], None, true, &BTreeMap::new())
             .await
             .expect("push succeeds");
 
@@ -395,7 +402,7 @@ mod tests {
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
         publisher
-            .push(vec![test_info("1.0.0")], &[], None, false)
+            .push(vec![test_info("1.0.0")], &[], None, false, &BTreeMap::new())
             .await
             .expect("push succeeds");
 

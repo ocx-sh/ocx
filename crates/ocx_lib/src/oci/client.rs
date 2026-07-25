@@ -8,6 +8,8 @@ use crate::{
     package::{self, info::Info, tag::InternalTag},
 };
 
+use std::collections::BTreeMap;
+
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use super::{Algorithm, Digest, Identifier, native};
@@ -239,6 +241,13 @@ impl Client {
     /// Used by `package push --cascade` to merge a single-platform manifest into
     /// each rolling tag without destroying entries for other platforms.
     ///
+    /// `annotations` are the publisher-stated index-level annotations (`ocx
+    /// package push --annotation`). They are merged into whatever the index
+    /// already carries — an empty map leaves the index's `annotations` field
+    /// exactly as found, so a push without the flag produces byte-identical
+    /// bytes to before the flag existed and never clears a link an earlier
+    /// push established.
+    ///
     /// Returns the digest and data of the pushed index.
     pub(crate) async fn merge_platform_into_index(
         &self,
@@ -247,6 +256,7 @@ impl Client {
         platform: &oci::Platform,
         manifest_sha256: &str,
         manifest_size: i64,
+        annotations: &BTreeMap<String, String>,
     ) -> Result<(Digest, oci::ImageIndex)> {
         let target_identifier = source_identifier.clone_with_tag(target_tag);
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
@@ -311,6 +321,13 @@ impl Client {
             artifact_type: None,
             annotations: None,
         });
+
+        if !annotations.is_empty() {
+            index
+                .annotations
+                .get_or_insert_default()
+                .extend(annotations.iter().map(|(key, value)| (key.clone(), value.clone())));
+        }
 
         let index_data = serde_json::to_vec(&index).map_err(ClientError::Serialization)?;
         let index_digest = Algorithm::Sha256.hash(&index_data);
@@ -806,8 +823,11 @@ impl Client {
         &self,
         package_info: Info,
         layers: &[crate::publisher::LayerRef],
+        annotations: &BTreeMap<String, String>,
     ) -> Result<(Digest, oci::Manifest)> {
-        let (index_digest, index) = self.push_manifest_and_merge_tags(&package_info, layers, &[]).await?;
+        let (index_digest, index) = self
+            .push_manifest_and_merge_tags(&package_info, layers, &[], annotations)
+            .await?;
         Ok((index_digest, oci::Manifest::ImageIndex(index)))
     }
 
@@ -820,12 +840,17 @@ impl Client {
     /// the rolling/cascade tag set (e.g. `["3.28", "3", "latest"]`);
     /// pass `&[]` for a plain single-tag push.
     ///
+    /// `annotations` are written onto every index this call touches — the
+    /// primary tag and each of `extra_tags` — so a cascade never leaves a
+    /// rolling tag with weaker provenance than the version tag it mirrors.
+    ///
     /// Returns the digest + data of the primary tag's image index.
     pub(crate) async fn push_manifest_and_merge_tags(
         &self,
         package_info: &Info,
         layers: &[crate::publisher::LayerRef],
         extra_tags: &[String],
+        annotations: &BTreeMap<String, String>,
     ) -> Result<(Digest, oci::ImageIndex)> {
         log::debug!(
             "Pushing package {} with {} layer(s)",
@@ -850,6 +875,7 @@ impl Client {
                 &package_info.platform,
                 &manifest_sha256,
                 manifest_size,
+                annotations,
             )
             .await?;
 
@@ -861,6 +887,7 @@ impl Client {
                 &package_info.platform,
                 &manifest_sha256,
                 manifest_size,
+                annotations,
             )
             .await?;
         }
@@ -3290,7 +3317,14 @@ mod tests {
             let id = test_identifier("3.28");
 
             client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &BTreeMap::new(),
+                )
                 .await
                 .unwrap();
 
@@ -3330,7 +3364,14 @@ mod tests {
 
             let client = stub_with_capture(&data);
             client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:amd64_new", 200)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:amd64_new",
+                    200,
+                    &BTreeMap::new(),
+                )
                 .await
                 .unwrap();
 
@@ -3368,7 +3409,14 @@ mod tests {
 
             let client = stub_with_capture(&data);
             client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:new_amd64", 200)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:new_amd64",
+                    200,
+                    &BTreeMap::new(),
+                )
                 .await
                 .unwrap();
 
@@ -3405,7 +3453,14 @@ mod tests {
 
             let client = stub_with_capture(&data);
             client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:new_manifest", 300)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:new_manifest",
+                    300,
+                    &BTreeMap::new(),
+                )
                 .await
                 .unwrap();
 
@@ -3438,7 +3493,14 @@ mod tests {
             let id = test_identifier("3.28");
 
             let result = client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &BTreeMap::new(),
+                )
                 .await;
 
             assert!(result.is_err(), "expected error to propagate, got Ok");
@@ -3447,6 +3509,169 @@ mod tests {
             assert!(
                 inner.manifests.is_empty(),
                 "no manifest should have been pushed on error"
+            );
+        }
+
+        // ── index annotations (`ocx package push --annotation`) ───────
+
+        /// Seed the stub with an index carrying `annotations` at `tag`.
+        fn seed_index_with_annotations(
+            data: &StubTransportData,
+            tag: &str,
+            annotations: Option<BTreeMap<String, String>>,
+        ) {
+            let id = test_identifier(tag);
+            let existing = oci::ImageIndex {
+                schema_version: 2,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: "sha256:arm64_digest".to_string(),
+                    size: 50,
+                    platform: Some(platform("linux/arm64").into()),
+                    artifact_type: None,
+                    annotations: None,
+                }],
+                annotations,
+            };
+            let bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
+            let digest = oci::Algorithm::Sha256.hash(&bytes).to_string();
+            data.write()
+                .manifests
+                .insert(id.canonical_reference().to_string(), (bytes, digest));
+        }
+
+        fn source_annotation(url: &str) -> BTreeMap<String, String> {
+            BTreeMap::from([(oci::annotations::SOURCE.to_string(), url.to_string())])
+        }
+
+        #[tokio::test]
+        async fn supplied_annotations_land_on_a_fresh_index() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &source_annotation("https://github.com/ocx-sh/ocx"),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(
+                index
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get(oci::annotations::SOURCE))
+                    .map(String::as_str),
+                Some("https://github.com/ocx-sh/ocx"),
+            );
+        }
+
+        /// The absent-value case: no `--annotation` must leave the field
+        /// absent, so a manifest-less push stays byte-identical to what
+        /// ocx produced before the flag existed.
+        #[tokio::test]
+        async fn no_annotations_leaves_a_fresh_index_field_absent() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert!(index.annotations.is_none(), "got: {:?}", index.annotations);
+        }
+
+        /// A later annotation-less push must not un-link a repository an
+        /// earlier push already linked.
+        #[tokio::test]
+        async fn no_annotations_preserves_what_the_index_already_carries() {
+            let data = StubTransportData::new();
+            seed_index_with_annotations(&data, "3.28", Some(source_annotation("https://github.com/ocx-sh/ocx")));
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(
+                index
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get(oci::annotations::SOURCE))
+                    .map(String::as_str),
+                Some("https://github.com/ocx-sh/ocx"),
+            );
+        }
+
+        #[tokio::test]
+        async fn supplied_annotations_merge_over_the_existing_ones() {
+            let data = StubTransportData::new();
+            seed_index_with_annotations(
+                &data,
+                "3.28",
+                Some(BTreeMap::from([
+                    (
+                        oci::annotations::SOURCE.to_string(),
+                        "https://example.invalid".to_string(),
+                    ),
+                    (oci::annotations::VENDOR.to_string(), "OCX".to_string()),
+                ])),
+            );
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &source_annotation("https://github.com/ocx-sh/ocx"),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            let annotations = index.annotations.expect("annotations present");
+            assert_eq!(
+                annotations.get(oci::annotations::SOURCE).map(String::as_str),
+                Some("https://github.com/ocx-sh/ocx"),
+                "the supplied key overwrites",
+            );
+            assert_eq!(
+                annotations.get(oci::annotations::VENDOR).map(String::as_str),
+                Some("OCX"),
+                "an unrelated key another tool set is left alone",
             );
         }
     }
@@ -3749,7 +3974,7 @@ mod tests {
                 path: archive_path,
                 layout: oci::LayerLayoutSpec::default(),
             }];
-            let _ = client.push_package(info, &layers).await;
+            let _ = client.push_package(info, &layers, &BTreeMap::new()).await;
             let calls = auth_calls(&data);
             // Must authenticate with Push before any blob/manifest operations.
             assert!(!calls.is_empty(), "push_package must call ensure_auth");
@@ -3794,7 +4019,14 @@ mod tests {
             let id = test_identifier("3.28");
 
             let _ = client
-                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:abc",
+                    100,
+                    &BTreeMap::new(),
+                )
                 .await;
             let calls = auth_calls(&data);
             assert!(!calls.is_empty(), "merge_platform_into_index must call ensure_auth");
@@ -3868,7 +4100,7 @@ mod tests {
                 path: archive_path,
                 layout: oci::LayerLayoutSpec::default(),
             }];
-            let _ = client.push_package(info, &layers).await;
+            let _ = client.push_package(info, &layers, &BTreeMap::new()).await;
 
             // Verify auth happened before any transport method calls.
             let inner = data.read();
@@ -4087,7 +4319,7 @@ mod tests {
             }];
             let extra_tags = ["3".to_string(), "latest".to_string()];
             client
-                .push_manifest_and_merge_tags(&info("1.2.3"), &layers, &extra_tags)
+                .push_manifest_and_merge_tags(&info("1.2.3"), &layers, &extra_tags, &BTreeMap::new())
                 .await
                 .expect("push should succeed");
 
@@ -4116,6 +4348,44 @@ mod tests {
                 "push_manifest_raw", // extra_tags[1] push
             ];
             assert_eq!(relevant, expected, "cascade calls must follow input tag order");
+        }
+
+        /// A cascade must not leave a rolling tag with weaker provenance than
+        /// the version tag it mirrors — every index the push writes carries
+        /// the same annotations.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn annotations_land_on_the_primary_tag_and_every_cascade_tag() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+
+            let extra_tags = ["3".to_string(), "latest".to_string()];
+            let annotations = BTreeMap::from([(
+                oci::annotations::SOURCE.to_string(),
+                "https://github.com/ocx-sh/ocx".to_string(),
+            )]);
+            client
+                .push_manifest_and_merge_tags(&info("1.2.3"), &[], &extra_tags, &annotations)
+                .await
+                .expect("push should succeed");
+
+            let inner = data.read();
+            for tag in ["1.2.3", "3", "latest"] {
+                let key = format!("example.com/test/pkg:{tag}");
+                let (bytes, _) = inner.manifests.get(&key).unwrap_or_else(|| panic!("no index at {key}"));
+                let manifest: oci::Manifest = serde_json::from_slice(bytes).expect("index parses");
+                let oci::Manifest::ImageIndex(index) = manifest else {
+                    panic!("{key} is not an image index");
+                };
+                assert_eq!(
+                    index
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.get(oci::annotations::SOURCE))
+                        .map(String::as_str),
+                    Some("https://github.com/ocx-sh/ocx"),
+                    "missing source annotation at {key}",
+                );
+            }
         }
     }
 
@@ -5274,7 +5544,7 @@ mod tests {
                 os_features: vec!["libc.glibc".to_string(), "libc.x".to_string()],
             };
             client
-                .merge_platform_into_index(&id, "3.28", &first_platform, "sha256:first_push", 100)
+                .merge_platform_into_index(&id, "3.28", &first_platform, "sha256:first_push", 100, &BTreeMap::new())
                 .await
                 .unwrap();
 
@@ -5288,7 +5558,14 @@ mod tests {
                 os_features: vec!["libc.x".to_string(), "libc.glibc".to_string()],
             };
             client
-                .merge_platform_into_index(&id, "3.28", &second_platform, "sha256:second_push", 200)
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &second_platform,
+                    "sha256:second_push",
+                    200,
+                    &BTreeMap::new(),
+                )
                 .await
                 .unwrap();
 
