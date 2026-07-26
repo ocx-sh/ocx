@@ -24,17 +24,17 @@
 //! `argv` requires clap ≥ 4.5.57. clap 4.5.55 introduced a regression in
 //! this combination; 4.5.57 fixed it. The floor is set in `Cargo.toml`.
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::env;
 use ocx_lib::project::{
-    ALL_GROUP, DEFAULT_GROUP, Origin, SelectedTool, expand_all_keyword, resolve_selected_tools, select_tool_set,
+    DEFAULT_GROUP, Origin, SelectedTool, expand_all_keyword, resolve_selected_tools, select_tool_set,
 };
 use ocx_lib::utility::child_process;
 
 use crate::app::project_context::load_project_with_lock;
+use crate::options;
 
 /// Run a command with the composed environment from the project toolchain.
 ///
@@ -52,16 +52,8 @@ use crate::app::project_context::load_project_with_lock;
 /// (lock-file order).
 #[derive(Parser, Clone)]
 pub struct Run {
-    /// Restrict the env composition to the named group(s).
-    ///
-    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table.
-    /// The reserved name `all` expands to `default` + every declared
-    /// `[group.*]`. When omitted, scope is exactly `[tools]`
-    /// (matches `ocx pull` precedent: omitted `-g` does NOT mean
-    /// "everything"; it means "the default group").
-    #[arg(short = 'g', long = "group", value_delimiter = ',')]
-    pub groups: Vec<String>,
+    #[clap(flatten)]
+    pub groups: options::GroupSelection,
 
     /// Start with a clean environment containing only the package
     /// variables, instead of inheriting the current shell environment.
@@ -73,27 +65,8 @@ pub struct Run {
     #[arg(long = "self", default_value_t = false)]
     pub self_view: bool,
 
-    /// Set an environment variable for the command, as `KEY[:TYPE]=VALUE`.
-    ///
-    /// Repeatable; a later `--env` for the same key wins. The value is split
-    /// on the FIRST `=`, so `--env FOO=a=b` sets `FOO` to `a=b`. Values are
-    /// literal - no interpolation.
-    ///
-    /// `TYPE` is `constant` (replace the existing value) or `path` (prepend to
-    /// it), and defaults to `constant`. A relative `path` value resolves
-    /// against the current directory, so `--env PATH:path=node_modules/.bin`
-    /// puts a project-local directory in front of the composed `PATH`. Without
-    /// `:path` a `PATH` override replaces the composed value outright,
-    /// dropping every package directory.
-    ///
-    /// Applied last, so it overrides the project's `[env]`, any selected
-    /// group's `[env]`, and every package-declared variable.
-    ///
-    /// A bare `--env FOO` (pass the ambient value through) is not accepted;
-    /// keys matching `OCX_*` or `__OCX_*` are rejected; so is a `TYPE` that is
-    /// neither `constant` nor `path`. All exit 64.
-    #[arg(long = "env", value_name = "KEY[:TYPE]=VALUE")]
-    pub env: Vec<String>,
+    #[clap(flatten)]
+    pub env: options::EnvOverride,
 
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
@@ -160,11 +133,7 @@ impl Run {
         // Reject empty comma segments (`-g ci,,lint`) BEFORE any filesystem
         // or network work. `clap`'s `value_delimiter = ','` splits the value
         // into `["ci", "", "lint"]`; an empty string is a user-typing error.
-        for raw in &self.groups {
-            if raw.is_empty() {
-                return Err(cli::UsageError::new("empty group segment in --group value").into());
-            }
-        }
+        crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
         // Reject a malformed `--env` before any filesystem or network work,
         // for the same reason as the group check above. Bound here; the
@@ -176,7 +145,7 @@ impl Run {
         // `ocx.toml` form uses.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
-        let env_overrides = parse_env_overrides(&self.env, &cwd)?;
+        let env_overrides = self.env.entries(&cwd)?;
 
         // ── Phase B: project context ──────────────────────────────────────
         // Errors propagate to the `main.rs` boundary: logged once and
@@ -187,18 +156,11 @@ impl Run {
         // Phase B.3: validate `-g` groups against the loaded config.
         // `default` and `all` are always valid (all is expanded later).
         // Anything else must appear in config.groups.
-        for raw in &self.groups {
-            if raw == DEFAULT_GROUP || raw == ALL_GROUP {
-                continue;
-            }
-            if !ctx.config.groups.contains_key(raw) {
-                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
-            }
-        }
+        crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
 
         // ── Phase C: `all` expansion + default scope ───────────────────────
 
-        let mut expanded = expand_all_keyword(&self.groups, &ctx.config);
+        let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
         // Default scope: if groups is empty (no -g flags) or expansion produced
         // an empty list, scope = [DEFAULT_GROUP] — matches pull semantics.
         if expanded.is_empty() {
@@ -339,93 +301,6 @@ impl Run {
         let err = child_process::exec(&resolved, args, process_env);
         Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
     }
-}
-
-/// Parse the repeatable `--env KEY[:TYPE]=VALUE` flag into resolved entries.
-///
-/// Splits each argument on the FIRST `=` so a value may itself contain `=`.
-/// The segment before it is `KEY` or `KEY:TYPE`, where `TYPE` names a
-/// [`ModifierKind`] — `constant` (replace) or `path` (prepend). Omitted, it is
-/// `constant`, so a plain `KEY=VALUE` means exactly what it always did.
-/// Values are literal, never interpolated. A later occurrence of a key
-/// overrides an earlier one.
-///
-/// The grammar is unambiguous because [`ocx_lib::env::is_valid_env_key`]
-/// admits no `:` — a colon in the pre-`=` segment is therefore always the type
-/// marker, and a Windows value like `C:\tools\bin` is untouched because only
-/// that segment is inspected.
-///
-/// A relative `path` value resolves against `cwd`, the directory the flag was
-/// typed in. This deliberately differs from the `ocx.toml` form, which anchors
-/// to the project root for cwd-independence: a checked-in file must mean the
-/// same thing from any subdirectory, whereas a flag is composed by whatever
-/// script is invoking ocx, and cwd is the one base such a script can compute.
-/// `cwd` is a parameter rather than a `current_dir()` call inside the body so
-/// the function stays pure and directly unit-testable.
-///
-/// # Errors
-///
-/// [`cli::UsageError`] (exit 64) when an argument carries no `=` (bare
-/// `--env FOO` ambient pass-through is not accepted in v1: it has meaning
-/// only under `--clean`, and admitting it later is purely additive), when the
-/// declared `TYPE` names no modifier, when the key is outside the POSIX
-/// environment-name grammar, or when a key matches the reserved `OCX_*` /
-/// `__OCX_*` namespace — the same gate the file form applies, so the flag
-/// cannot be the way in.
-fn parse_env_overrides(
-    raw: &[String],
-    cwd: &Path,
-) -> Result<Vec<ocx_lib::package::metadata::env::entry::Entry>, ocx_lib::cli::UsageError> {
-    use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
-
-    if raw.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut entries = Vec::with_capacity(raw.len());
-    for argument in raw {
-        // First `=` only: everything after it is the value, verbatim. This is
-        // what makes `--env FOO=a=b` set `FOO` to `a=b` rather than erroring.
-        let Some((qualified_key, value)) = argument.split_once('=') else {
-            return Err(ocx_lib::cli::UsageError::new(format!(
-                "--env value '{argument}' is not KEY[:TYPE]=VALUE; passing an ambient variable through by name is not supported"
-            )));
-        };
-        // Strip the qualifier BEFORE the key gates, so `PATH:path=/x` is
-        // reported against `PATH` — running them on the raw segment would
-        // reject a well-formed argument as an invalid variable name.
-        let (key, kind) = match qualified_key.split_once(':') {
-            None => (qualified_key, ModifierKind::Constant),
-            Some((key, declared_type)) => {
-                let kind = declared_type
-                    .parse::<ModifierKind>()
-                    .map_err(|error| ocx_lib::cli::UsageError::new(format!("--env value '{argument}': {error}")))?;
-                (key, kind)
-            }
-        };
-        if !ocx_lib::env::is_valid_env_key(key) {
-            return Err(ocx_lib::cli::UsageError::new(format!(
-                "--env key '{key}' is not a valid environment variable name"
-            )));
-        }
-        if ocx_lib::env::is_reserved_ocx_key(key) {
-            return Err(ocx_lib::cli::UsageError::new(format!(
-                "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
-            )));
-        }
-        entries.push(Entry {
-            key: key.to_owned(),
-            value: match kind {
-                ModifierKind::Constant => value.to_owned(),
-                // Same `join` resolution the file form uses: an absolute value
-                // replaces the base outright, a relative one lands under it,
-                // and a driveless-but-rooted POSIX-authored value gets anchored
-                // to a drive on Windows instead of following the process's.
-                ModifierKind::Path => cwd.join(value).to_string_lossy().into_owned(),
-            },
-            kind,
-        });
-    }
-    Ok(entries)
 }
 
 /// Errors from the CLI-layer NAME filter applied after `select_tool_set`.
@@ -642,230 +517,6 @@ mod tests {
         let result = filter_by_names(composed, &names).expect("dedup must succeed");
         assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
         assert_eq!(result[0].binding, "cmake");
-    }
-
-    // ── parse_env_overrides (--env, L1/L2/X1) ────────────────────────────────
-
-    /// The cwd every `--env` unit test resolves a relative `:path` against.
-    /// A distinctive absolute stand-in, so an assertion that a value is rooted
-    /// here cannot pass by accident.
-    fn parse_cwd() -> &'static Path {
-        Path::new(if cfg!(windows) {
-            r"C:\invocation\dir"
-        } else {
-            "/invocation/dir"
-        })
-    }
-
-    /// Parse one `--env` argument against [`parse_cwd`], for the single-value
-    /// cases that make up most of this section.
-    fn parse_one(
-        argument: &str,
-    ) -> Result<Vec<ocx_lib::package::metadata::env::entry::Entry>, ocx_lib::cli::UsageError> {
-        parse_env_overrides(&[argument.to_string()], parse_cwd())
-    }
-
-    /// A plain `KEY=VALUE` becomes a constant entry — the unqualified form's
-    /// meaning is unchanged by the optional `:TYPE` qualifier.
-    #[test]
-    fn env_override_parses_key_value_as_constant() {
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
-
-        let parsed = parse_one("FOO=bar").expect("KEY=VALUE must parse");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].key, "FOO");
-        assert_eq!(parsed[0].value, "bar");
-        assert_eq!(parsed[0].kind, ModifierKind::Constant);
-    }
-
-    /// L1: split on the FIRST `=` only, so a value may itself contain `=`.
-    #[test]
-    fn env_override_splits_on_first_equals_only() {
-        let parsed = parse_one("FOO=a=b").expect("a value containing '=' must parse");
-        assert_eq!(parsed[0].key, "FOO");
-        assert_eq!(parsed[0].value, "a=b", "only the first '=' separates key from value");
-
-        // An empty value is legitimate — `FOO=` sets FOO to the empty string.
-        let parsed = parse_one("FOO=").expect("an empty value must parse");
-        assert_eq!(parsed[0].value, "");
-    }
-
-    /// L2: a bare `--env FOO` (docker-style ambient pass-through) is a usage
-    /// error in v1 — it has meaning only under `--clean`, and admitting it
-    /// later is purely additive.
-    #[test]
-    fn env_override_rejects_bare_name() {
-        let error = parse_one("FOO").expect_err("a bare name must be rejected");
-        assert!(
-            error.to_string().contains("KEY[:TYPE]=VALUE"),
-            "the error must name the expected form; got: {error}"
-        );
-    }
-
-    /// X1 applies to the flag, not just the file: `--env` must not be the way
-    /// in for a key that reconfigures how ocx itself resolves.
-    #[test]
-    fn env_override_rejects_reserved_ocx_keys() {
-        for reserved in ["OCX_DEFAULT_REGISTRY=evil.example.com", "__OCX_TESTING_X=1"] {
-            let error = parse_one(reserved).expect_err("a reserved key must be rejected: {reserved}");
-            assert!(
-                error.to_string().contains("reserved"),
-                "the error must say the key is reserved; got: {error}"
-            );
-        }
-    }
-
-    /// X2: keys route through the shared POSIX name validator, so the flag
-    /// cannot inject through the key slot of an emitted assignment line.
-    #[test]
-    fn env_override_rejects_invalid_key_grammar() {
-        for invalid in ["A B=1", "1A=1", "=1"] {
-            assert!(
-                parse_one(invalid).is_err(),
-                "'{invalid}' must be rejected by the shared key validator"
-            );
-        }
-    }
-
-    /// Repeatable: every occurrence is kept, in order, so the last one wins at
-    /// application time (`Env::apply_entries` replays the vector).
-    #[test]
-    fn env_override_keeps_every_occurrence_in_order() {
-        let parsed =
-            parse_env_overrides(&["FOO=first".to_string(), "FOO=second".to_string()], parse_cwd()).expect("ok");
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].value, "first");
-        assert_eq!(parsed[1].value, "second", "a later --env must be applied last");
-    }
-
-    // ── parse_env_overrides: the optional `:TYPE` qualifier ───────────────────
-
-    /// Both spellings of the qualifier are accepted, and each selects its
-    /// modifier. `:constant` exists for symmetry with the file's explicit
-    /// `{ type = "constant", … }` form.
-    #[test]
-    fn env_override_qualifier_selects_the_modifier() {
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
-
-        let parsed = parse_one("JAVA_OPTS:constant=-Xmx2g").expect("an explicit :constant must parse");
-        assert_eq!(parsed[0].key, "JAVA_OPTS", "the qualifier must not leak into the key");
-        assert_eq!(parsed[0].value, "-Xmx2g");
-        assert_eq!(parsed[0].kind, ModifierKind::Constant);
-
-        let parsed = parse_one(if cfg!(windows) {
-            r"PATH:path=C:\opt\tools\bin"
-        } else {
-            "PATH:path=/opt/tools/bin"
-        })
-        .expect("a :path must parse");
-        assert_eq!(parsed[0].key, "PATH");
-        assert_eq!(
-            parsed[0].kind,
-            ModifierKind::Path,
-            "a :path entry must prepend, not replace"
-        );
-    }
-
-    /// An absolute `:path` value passes through; a relative one anchors to the
-    /// supplied cwd. This is the behavior that distinguishes the flag from the
-    /// `ocx.toml` form, which anchors to the project root.
-    #[test]
-    fn env_override_path_resolves_relative_against_cwd() {
-        let absolute = if cfg!(windows) {
-            r"C:\opt\tools\bin"
-        } else {
-            "/opt/tools/bin"
-        };
-        let parsed = parse_one(&format!("PATH:path={absolute}")).expect("an absolute :path must parse");
-        assert_eq!(
-            Path::new(&parsed[0].value),
-            Path::new(absolute),
-            "an absolute value must pass through untouched"
-        );
-
-        let parsed = parse_one("PATH:path=node_modules/.bin").expect("a relative :path must parse");
-        let resolved = Path::new(&parsed[0].value);
-        assert!(
-            resolved.is_absolute(),
-            "a relative value must resolve absolute: {resolved:?}"
-        );
-        assert!(
-            resolved.starts_with(parse_cwd()),
-            "a relative value must anchor to the invocation directory, not the project root: {resolved:?}"
-        );
-    }
-
-    /// The first-`=` split survives the qualifier: only the segment BEFORE the
-    /// first `=` is inspected for a type marker.
-    #[test]
-    fn env_override_qualifier_preserves_first_equals_split() {
-        let parsed = parse_one("FOO:constant=a=b").expect("a qualified value containing '=' must parse");
-        assert_eq!(parsed[0].key, "FOO");
-        assert_eq!(parsed[0].value, "a=b");
-    }
-
-    /// A Windows-shaped value carries its own colon. Because only the pre-`=`
-    /// segment is split on `:`, the drive letter is never mistaken for a type
-    /// marker — the invariant, asserted without pinning a platform-specific
-    /// resolved literal.
-    #[test]
-    fn env_override_qualifier_ignores_colons_in_the_value() {
-        let parsed = parse_one(r"PATH:path=C:\tools\bin").expect("a drive-lettered value must parse");
-        assert_eq!(parsed[0].key, "PATH", "the drive letter must not be read as a type");
-        assert!(
-            parsed[0].value.ends_with(r"C:\tools\bin"),
-            "the value must survive intact; got: {}",
-            parsed[0].value
-        );
-    }
-
-    /// A `TYPE` naming no modifier is CLI misuse (exit 64), not a config-shape
-    /// fault — and the message must name what is accepted, since the user has
-    /// no file to look at.
-    #[test]
-    fn env_override_rejects_unknown_and_empty_type() {
-        for invalid in ["X:bogus=v", "X:=v"] {
-            let error = parse_one(invalid).expect_err("'{invalid}' names no modifier");
-            let message = error.to_string();
-            assert!(
-                message.contains("path") && message.contains("constant"),
-                "the error must name the accepted types; got: {message}"
-            );
-        }
-
-        let error = parse_one("X:bogus=v").expect_err("must reject");
-        assert!(
-            error.to_string().contains("bogus"),
-            "the error must quote the offending type; got: {error}"
-        );
-    }
-
-    /// The security-relevant case: the reserved-namespace gate runs on the key
-    /// AFTER the qualifier is stripped, so `:path` is not a way past it.
-    #[test]
-    fn env_override_reserved_gate_survives_qualifier_stripping() {
-        for reserved in [
-            "OCX_DEFAULT_REGISTRY:path=evil.example.com",
-            "__OCX_TESTING_X:constant=1",
-        ] {
-            let error = parse_one(reserved).expect_err("a qualified reserved key must still be rejected");
-            assert!(
-                error.to_string().contains("reserved"),
-                "the error must say the key is reserved; got: {error}"
-            );
-        }
-    }
-
-    /// The grammar gate still applies to the key portion once the qualifier is
-    /// removed — stripping must not become a way to smuggle an invalid name.
-    #[test]
-    fn env_override_key_grammar_applies_after_qualifier_stripping() {
-        for invalid in ["A B:path=1", "1A:constant=1", ":path=1"] {
-            assert!(
-                parse_one(invalid).is_err(),
-                "'{invalid}' must be rejected by the shared key validator"
-            );
-        }
     }
 
     // ── select → filter → resolve (named scope regression) ────────────────────
