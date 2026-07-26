@@ -347,7 +347,21 @@ Stages 4-6 are appended to the same entry vector in that order. Constants replac
 
 > **No in-repo precedent exists for a repeatable `KEY=VALUE` flag.** Discovery grepped the whole `ocx_cli` tree: zero matches. The nearest shape is `project::compose::parse_positional` (`project/compose.rs:93-124`, `[name=]identifier` split on first `=`), but it has **zero callers in `ocx_cli`** — it is unit-tested dead code from the CLI's perspective. This flag will therefore be the first of its kind and needs its own clap `value_parser`. The dead `parse_positional` should be raised as a separate cleanup issue, not folded in here.
 
-**L3.** Scope: `--env` lands on `ocx run` in v1. `ocx env` and `ocx exec` do not get it — `ocx env` emits rather than executes (a caller can post-process), and `ocx exec` is OCI-tier where the ambient shell is the caller's own concern. Additive later if asked.
+**L3.** ~~Scope: `--env` lands on `ocx run` in v1. `ocx env` and `ocx exec` do not get it — `ocx env` emits rather than executes (a caller can post-process), and `ocx exec` is OCI-tier where the ambient shell is the caller's own concern. Additive later if asked.~~
+
+> **L3 AMENDED — `--env` lands on every env-composing command, both tiers.** The escape hatch L3 itself wrote ("additive later if asked") was taken. Two of the original three reasons did not survive contact:
+>
+> - *"`ocx env` emits rather than executes (a caller can post-process)."* `ocx run` **never** prints — it diverges into `execvp` — so a stage-6 environment was observable only by executing it. Post-processing presupposes something to post-process. OCX is a backend tool for tools (D9): a caller that builds an argv array must be able to **export** the environment it would otherwise **execute** in, and until now it could not. The pinning test is differential — `ocx env --env X` and `ocx run --env X` are asserted against one shared oracle, so a divergence between them fails.
+> - *"`ocx exec` is OCI-tier where the ambient shell is the caller's own concern."* This conflated the tier boundary with the flag. `--env` is a **per-invocation CLI argument, not project configuration**. Adding it to `ocx package exec` / `package env` / `package test` / `patch test` makes nothing read `ocx.toml`: those commands carry `EnvScope::Package`, which has no `no_patches` and no project entries by construction. The verification item below and `env-composition.md`'s "never reads any `ocx.toml`" both remain true and unedited.
+>
+> Two mechanical consequences the amendment forced:
+>
+> - `PatchScope` became `EnvScope`. The old type conflated "is a project in scope" with "does the caller contribute env" — `NoProjectContext::project_env()` returned an empty slice *by construction* — so an OCI-tier override could not ride it. `NoProjectContext` is now `Package { env }`; both arms stay struct variants, so C5's compile-forcing property survives and extends to overrides.
+> - `ocx package exec` gained `set_forwarded_env`, which it never had. Its launcher re-entry is the same R1 failure the project tier closes, reached by the same path.
+>
+> **`ocx patch why` is deliberately excluded** — it applies no env and spawns nothing; it reports which companion contributed which key. An override row would have no companion to attribute.
+>
+> Separately, `--self` was **removed from `ocx run`** (see S6's amendment note below).
 
 ### Lock and hashing
 
@@ -515,7 +529,7 @@ Project `[env]` reading ambient is correct: it is the user's own file, already e
 
 S5's path modifier is what makes this deferral viable — PATH prepending, the one case that genuinely needs a dynamic value, is expressible without a template engine, and relative-path resolution against project root removes the `${projectRoot}` motivation.
 
-**Also out of scope:** `--env` on `ocx env`/`ocx exec` (L3); `required` on path entries (Q4); `force` per-entry ambient control (Q6); `toml_edit` migration for comment preservation (Q1); a fresh-clone trust gate (X3); closing the non-CI constant-collision gap (C3/C4).
+**Also out of scope:** ~~`--env` on `ocx env`/`ocx exec` (L3);~~ *(shipped — see the L3 amendment)* `required` on path entries (Q4); `force` per-entry ambient control (Q6); `toml_edit` migration for comment preservation (Q1); a fresh-clone trust gate (X3); closing the non-CI constant-collision gap (C3/C4).
 
 ---
 
@@ -565,9 +579,12 @@ Every surface below is touched by this change and must be updated in the same PR
 - [ ] Path entry is idempotent across repeated `direnv export` re-evaluation (`move_to_front`)
 - [ ] Project constant overrides a package constant of the same key (C2); CI export does not warn on it (C4)
 - [ ] `ocx run`, `ocx env --shell`, `ocx env --ci=github`, `ocx direnv export` all emit project env identically (C1)
-- [ ] `ocx exec` / `ocx package env` emit **no** project env (OCI tier reads no `ocx.toml`)
+- [ ] `ocx exec` / `ocx package env` emit **no** project env (OCI tier reads no `ocx.toml`) — still true after the L3 amendment: they carry `--env` overrides only, and a test pins that an `ocx.toml` beside the invocation contributes nothing
+- [ ] `ocx env --env X` exports exactly what `ocx run --env X` executes with; likewise `ocx package env --env X` vs `ocx package exec --env X` (L3 amendment — assert against one shared oracle, not two independent expectations)
+- [ ] A `--env` override on `ocx package exec` survives a generated entrypoint launcher. **The override must target a key the package itself declares** — one it does not declare survives the hop by plain inheritance, so a test using such a key passes with forwarding disabled and proves nothing
+- [ ] `ocx direnv export -g <group>` composes that group's `[env]`, and an unknown `-g` exits 64
 - [ ] `--global` env applies to `ocx --global run` and never to project resolution (Q2)
-- [ ] `--self` does not change project env emission (S6)
+- [ ] ~~`--self` does not change project env emission (S6)~~ — **vacuous since `--self` was removed from `ocx run`.** S6's substance stands (project env has no visibility axis); there is simply no flag left on the project tier to vary. The removal is its own decision: the self view *drops* a package's `entrypoints/` from PATH, because launchers exist for consumers and a package running itself calls `bin/` directly. A toolchain is a consumer of every tool it declares, so `ocx run --self` composed a strictly worse toolchain rather than a fuller one. The flag stays on `ocx package exec` / `package env` / `package test`, where a package's own surface is the thing being asked about
 - [ ] **Package-composed env byte-identical with and without `--clean`** (hermeticity pin)
 - [ ] Windows: separator handling and PowerShell/`cmd` emission for a path entry
 

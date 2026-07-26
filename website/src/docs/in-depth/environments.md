@@ -66,8 +66,9 @@ The `ocx launcher exec` subcommand â€” used by every generated launcher script â
 | Command | Default | Notes |
 |---|---|---|
 | [`ocx package exec`][cmd-package-exec] | off | OCI-tier entry point; launchers embed `--self` |
-| [`ocx run`][cmd-run] | off | Project-tier counterpart to `package exec`; binding names from `ocx.toml` |
 | [`ocx package env`][cmd-package-env] | off | Inspect the resolved env for one or more packages |
+
+`--self` is package vocabulary and exists only on the OCI tier. The project-tier commands ([`ocx run`][cmd-run], [`ocx env`][cmd-env]) do not accept it: the self view leaves a package's own `entrypoints/` off `PATH`, and a project toolchain is a consumer of every tool it declares, so it would compose a strictly worse toolchain rather than a fuller one.
 | [`ocx env`][cmd-env] | off | Toolchain-tier env exporter (reads `ocx.toml`); eval-safe via `--shell` |
 | [`ocx package deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 

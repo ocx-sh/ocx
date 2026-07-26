@@ -68,7 +68,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
 | `update [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock against the LIVE registry by default (update-family verb: writes `ocx.lock` only, never tag pointers; `--remote` redundant-but-accepted; `--frozen` caps at snapshot, unknown tag exit 81); whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64). ADR `adr_toolchain_update_family.md` | `-g/--group`, `--check`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env. No `--self`: the self view is package vocabulary and drops a package's own `entrypoints/` from `PATH`, so it composes a strictly worse toolchain | `-g/--group`, `--clean`, `--env` |
-| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (never in `--shell`/`--ci` output) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
+| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (never in `--shell`/`--ci` output) | `-g/--group`, `--env`, `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 
 ### OCI-Tier Commands (`ocx package`)
@@ -80,15 +80,15 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package uninstall PKGS...` | Remove candidate symlink | `-d/--deselect`, `--purge` |
 | `package select PKGS...` | Set `current` symlink | `-p` |
 | `package deselect PKGS...` | Remove `current` symlink | — |
-| `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self` |
-| `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (`{name, package}`, `package` = canonical resolved identifier, possibly tagless digest-pinned; never in `--shell`/`--ci` output; plain mode gets a hint line) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self` |
+| `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self`, `--env` |
+| `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (`{name, package}`, `package` = canonical resolved identifier, possibly tagless digest-pinned; never in `--shell`/`--ci` output; plain mode gets a hint line) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self`, `--env` |
 | `package pull PKGS...` | Download to object store only | `-p` |
 | `package create PATH` | Bundle directory into archive; `--bin-scan`/`--no-bin-scan` fill or verify the `binaries` claim | `-o`, `-m`, `-l`, `-j`, `--force`, `--bin-scan`/`--no-bin-scan` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp`, `--canonical-tag/--no-canonical-tag` (default on — pushes `sha256.<hex>` per platform manifest, registry-side deletion safety net; `index.ocx.sh` ignores it), `--announce-file` (append pushed + cascade tags to a scratch file `package announce --tags-file` can consume) |
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); `--closure` adds a metadata-only dependency closure OBJECT without installing — `closure.deps` (transitive dependencies in transitive-closure order, root excluded, each with `effective_visibility` + tri-state `binaries` + `entrypoints` + own `dependencies`), `closure.surface.{interface,private}` (the two symmetric projections: binaries/entrypoints `{name, package}` + env `{key, type, package}` value-omitted + `binaries_complete`; public entries cross both axes), and `closure.conflicts`. Read-only inspect never grows the local index (writes content to the GC-able blob cache only). Keyed object for multiple | `--resolve`, `--closure`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
-| `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
+| `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean`, `--env` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
 
@@ -134,7 +134,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `patch freeze` | Write `patches.snapshot.json` pinning companion + descriptor digests beside `ocx.lock` (or `$OCX_HOME/ocx.lock` under `--global`) | — |
 | `patch sync [OPTIONS]` | Re-fetch every patch descriptor for all installed packages, install newly-referenced companions | `-p/--platform` |
 | `patch publish --descriptor <FILE> [--global \| <BASE-ID>]` | Push a patch descriptor to the configured (or `--registry`) `[patches]` registry | `--descriptor`, `--global`, `--registry` |
-| `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview) | `--descriptor`, `--companion-archive`, `-p/--platform`, `--script`, `--registry` |
+| `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview) | `--descriptor`, `--companion-archive`, `-p/--platform`, `--script`, `--registry`, `--env` |
 | `patch why <BASE-ID>` | List which companion, and which descriptor rule, contributes each patched env var to a base | — |
 
 **`patch` group notes:**
@@ -163,7 +163,7 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` | `--force` |
-| `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline | `--pull/--no-pull` |
+| `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline. `-g` selects groups (hand-edit the generated `.envrc` line); an unknown group or malformed `--env` exits 64 — argv faults fail loudly, toolchain-state faults do not | `-g/--group`, `--env`, `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
 | `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index collection from remote via `IndexSync::refresh_package` — writes the per-tag dispatch object plus root document (never a leaf manifest, A3), so a version choice resolves fully offline afterwards; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
@@ -203,6 +203,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | Either, CI sink (later-step) | `ocx [--global] env --ci=github` / `ocx package env <ids...> --ci=gitlab [--export-file PATH]` | GitHub two-file sink / GitLab JSON-lines |
 
 Rules:
+- `--env KEY[:TYPE]=VALUE` is on **both** tiers — it is a per-invocation override, not project configuration, so adding it to an OCI-tier command does not make that command read `ocx.toml`. `-g` stays project-tier only (no groups without a project file). `ocx env --env X` composes exactly what `ocx run --env X` executes with; same pairing for `package env` / `package exec`.
 - `--shell` is the **only eval-safe form**. Plain/JSON are NOT sourceable.
 - `eval "$(ocx env)"` is a user error. `eval "$(ocx env --shell=bash)"` is correct.
 - `--shell=sh` ≡ `--shell=dash` (POSIX strict; `sh` is a `PossibleValue` alias on `Shell::Dash` — no new enum variant).

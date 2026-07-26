@@ -23,8 +23,8 @@ Per-package, identifier-driven, no `ocx.toml` at any tier:
 - `ocx package uninstall <id>` — remove from object store
 - `ocx package select <id>` — set `current` symlink
 - `ocx package deselect <id>` — clear `current` symlink
-- `ocx package exec <id> -- cmd` — run package binary, clean env
-- `ocx package env <ids...> [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH]` — composed env for the named packages (reuses `env.rs`); `--ci` writes to a CI sink (see below)
+- `ocx package exec <id> [--env KEY[:TYPE]=VALUE]... -- cmd` — run package binary, clean env
+- `ocx package env <ids...> [--env KEY[:TYPE]=VALUE]... [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH]` — composed env for the named packages (reuses `env.rs`); `--ci` writes to a CI sink (see below)
 - `ocx package which <ids...>` — resolve installed packages to paths (`--candidate`/`--current` for stable symlink anchor)
 - `ocx package deps <ids...>` — show dependency tree/flat/why for installed packages (`--flat`/`--why`/`--depth`/`--self`)
 
@@ -33,8 +33,8 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 `--global` is a **root flag** (before the subcommand), peer of `--project`, defined once on `ContextOptions`.
 Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] update [-g GROUP]... [NAME...]` (bare = whole-file bump; scoped by name/group re-resolves only the named bindings via `resolve_lock_touched` and carries the rest forward verbatim — same pin-preserving primitive as `add`/`remove`; resolves live against the registry by default and never writes tag pointers — see `adr_toolchain_update_family.md`)
-- `ocx [--global] run -- cmd` — compose toolchain env for child process only; never mutates parent shell
-- `ocx [--global] env [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
+- `ocx [--global] run [-g GROUP]... [--env KEY[:TYPE]=VALUE]... -- cmd` — compose toolchain env for child process only; never mutates parent shell. No `--self` (package vocabulary; the self view drops a package's own `entrypoints/` from `PATH`)
+- `ocx [--global] env [-g GROUP]... [--env KEY[:TYPE]=VALUE]... [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
 
 ### `ocx shell` — reduced to one survivor
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
@@ -141,6 +141,26 @@ struct — never read the two raw booleans at the call site.
 - **Never read the raw booleans directly** in a command's `execute` — always go through
   the struct's resolution method, so the mode name (not two independently-checked flags)
   is what call sites and tests reason about.
+
+## Cross-Cutting: `--env` Per-Invocation Override
+
+`--env KEY[:TYPE]=VALUE` is flattened from `options::EnvOverride` into **every** command that
+composes an environment, on both tiers: `run`, `env`, `direnv export` (project) and
+`package exec`, `package env`, `package test`, `patch test` (OCI). Never read the raw `Vec<String>`
+at a call site — go through `EnvOverride::entries(cwd)`.
+
+- **It does not cross the tier boundary.** The flag is a per-invocation CLI argument, not project
+  configuration. OCI-tier commands carry `EnvScope::Package { env }`, which has no `no_patches` and
+  no project entries by construction, so they still read no `ocx.toml`.
+- **`-g` is project-tier only** (`options::GroupSelection`). Flattened onto an OCI-tier command it
+  would parse and silently do nothing — there are no groups without a project file.
+- **Export/execute parity is the point.** `ocx run` never prints (it `exec`s), so `ocx env --env X`
+  must compose exactly what `ocx run --env X` executes with. Same pairing for
+  `package env` / `package exec`. Tests assert the two against one shared oracle.
+- **A command that composes AND spawns must forward.** `set_forwarded_env(&overrides)` after
+  `apply_ocx_config` (which strips a stale `OCX_ENV` first — the order is load-bearing). Without it
+  a generated entrypoint launcher re-enters `ocx launcher exec`, re-applies the package's own
+  entries, and silently reverts the override. `ocx run` and `ocx package exec` both do this.
 
 ## Cross-Cutting: CI Env Export (`--ci`)
 

@@ -575,6 +575,7 @@ ocx env [OPTIONS]
 | `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx run`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
 | `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends) — the same two kinds [`[env]`][config-project-env] uses. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `-h`, `--help` | | Print help information. | — |
 
 **Reserved group keywords**
@@ -813,14 +814,21 @@ ocx direnv export [OPTIONS]
 
 **Options**
 
+- `--group <NAME>` / `-g`: Scope composition to the named group(s), same grammar as [`ocx run -g`](#run). Omitted, the scope is the top-level `[tools]` table and its `[env]` — a group's `[env]` is otherwise unreachable from an `.envrc`.
+- `--env <KEY[:TYPE]=VALUE>`: Set an environment variable for this invocation only, same grammar as [`ocx run --env`](#run). A relative `path` value resolves against the directory ocx runs in, which under direnv is the directory holding `.envrc`.
 - `--pull` / `--no-pull`: `--pull` (default) installs a missing tool on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
 - `-h`, `--help`: Print help information.
+
+::: tip Widening the scope
+[`ocx direnv init`](#direnv-init) writes an `.envrc` that calls this command with no arguments. The line is yours to edit afterwards — `eval "$(ocx direnv export -g ci --env FORCE_COLOR=1)"` — and direnv picks it up on the next reload.
+:::
 
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success (no project, or exports emitted). |
+| 64 | Malformed `--env` argument, empty `-g` comma segment, or a `-g` naming no declared group. Unlike a missing lock or an unmaterialised tool, these are argv faults in a file you edited — they fail loudly rather than exporting nothing. |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
 | 74 | I/O error during resolution. |
 | 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
@@ -2368,6 +2376,7 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... --script <PATH|
 | `--output <DIR>` | `-o` | Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep. Must reside on the same filesystem as `$OCX_HOME/layers/`. On Windows, must point under `$OCX_HOME/`. Mutually exclusive with `--keep`. | — |
 | `--self` | — | Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self]. | false |
 | `--clean` | — | Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean]. | false |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends); a relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--help` | `-h` | Print help information. | — |
 
 **Examples**
@@ -2874,6 +2883,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `-p`, `--platform` | | Target platform to consider. |
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends); a relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `-h`, `--help` | | Print help information. |
 
 #### `env` {#package-env}
@@ -2911,6 +2921,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
 | `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
 | `--show-patches` | | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the package's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends); a relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `-h`, `--help` | | Print help information. |
 
 ::: warning `--ci=gitlab` requires GitLab Functions / step runner
@@ -3092,6 +3103,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
 | `--registry <HOST/PATH>` | | Patch registry to compose against, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can preview a descriptor against a new patch registry without a config block. Defaults to the configured registry. |
 | `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends); a relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `-h`, `--help` | | Print help information. |
 
 **Exit codes**

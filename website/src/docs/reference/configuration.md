@@ -543,7 +543,7 @@ Two key classes are rejected everywhere `[env]` can appear — the project table
 - A key that is not a POSIX environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`).
 - A key starting `OCX_` or `__OCX_`. Without this rejection, a checked-in `ocx.toml` could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other resolution-affecting variable and reconfigure how `ocx` itself resolves for every contributor who clones the repository. Rejection happens at parse for `[env]` / `[group.<name>.env]` (`ExitCode::ConfigError`, 78) and at flag-parse for `--env` (`ExitCode::UsageError`, 64) — see [`--env`][cmd-run] and [`OCX_ENV`][env-ocx-env] for the flag form and the forwarded wire key.
 
-`[env]` entries carry no visibility axis. Unlike a package's own declared env, a project is never a dependency of anything, so there is no interface/private surface to gate — `--self` has no effect on which project or group entries are emitted. See [Project Environment][env-composition-project-env] in the Environment Composition reference for where these entries land in the full resolution order.
+`[env]` entries carry no visibility axis. Unlike a package's own declared env, a project is never a dependency of anything, so there is no interface/private surface to gate — which is also why the project-tier commands carry no `--self` flag at all. See [Project Environment][env-composition-project-env] in the Environment Composition reference for where these entries land in the full resolution order.
 
 ## JSON Schemas {#schemas}
 

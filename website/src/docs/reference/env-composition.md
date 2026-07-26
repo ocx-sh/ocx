@@ -121,7 +121,7 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 
 Each OCX package declares two environment surfaces: the **interface surface** (what consumers see) and the **private surface** (what the package's own launchers see).
 
-The `--self` flag on `exec`, `run`, `package env`, `package exec`, and `package deps` switches which surface is emitted:
+The `--self` flag on `package env`, `package exec`, `package test`, and `package deps` switches which surface is emitted. It is OCI-tier only — the project-tier commands do not accept it, because a toolchain is a consumer of every tool it declares and the self view leaves those tools' `entrypoints/` off `PATH`:
 
 | `--self` | Surface emitted | Use case |
 |----------|----------------|----------|
@@ -142,7 +142,7 @@ See [In Depth — Project Toolchain → Composition order rule][in-depth-project
 
 ## Project Environment {#project-env}
 
-`ocx.toml` can declare its own environment on top of what packages provide: [`[env]`][config-project-env] for project-wide constants, [`[group.<name>.env]`][config-project-env] for group-scoped ones, and `ocx run`'s [`--env`][cmd-run] flag for a one-off override.
+`ocx.toml` can declare its own environment on top of what packages provide: [`[env]`][config-project-env] for project-wide constants, [`[group.<name>.env]`][config-project-env] for group-scoped ones, and the [`--env`][cmd-run] flag for a one-off override.
 
 Before this stage existed, the only channel was the ambient shell (`FOO=bar ocx run -- …`). That fails outright on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate session state that persists after the command — and it fails for any caller that builds an argv array rather than a shell command line, which is the shape a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules], or a Python subprocess call all use.
 
@@ -157,15 +157,32 @@ Project and group `[env]` entries materialize as ordinary env entries and are **
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend |
 | 5 | Group [`[group.<name>.env]`][config-project-env] | In `-g` selection order — a group listed later wins |
-| 6 (highest) | [`ocx run --env KEY[:TYPE]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use |
+| 6 (highest) | [`--env KEY[:TYPE]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use |
 
-A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). Stage 6's `path` resolution differs from stages 4 and 5 in one respect: a relative value anchors to the directory `ocx run` was invoked from, not the project root — see [`--env`][cmd-run] for why. A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
+A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). Stage 6's `path` resolution differs from stages 4 and 5 in one respect: a relative value anchors to the directory ocx was invoked from, not the project root — see [`--env`][cmd-run] for why. A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
+
+### Where `--env` lives {#project-env-flag-surfaces}
+
+`--env` is a **per-invocation override, not project configuration**, so it is available on every command that composes an environment — on both tiers:
+
+| Tier | Commands | Also available |
+|---|---|---|
+| Project toolchain | [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | `-g/--group` selects which groups' `[env]` composes |
+| Package (OCI) | [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx package test`][cmd-package-test], [`ocx patch test`][cmd-patch-test] | `--self` selects the visibility surface |
+
+The package tier still reads no `ocx.toml` — see the boundary note above. `--env` there composes only what the caller typed on that invocation; stages 4 and 5 do not exist, because there is no project file to declare them.
+
+::: tip Export what you would execute
+`ocx run` never prints — it replaces itself with the child process — so the only way to see a composed environment is to ask the command that emits one. `ocx env --env X` composes stages 1–6 exactly as `ocx run --env X` does, so the export and the execution agree by construction. The same pairing holds on the package tier between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec].
+:::
 
 ::: warning `--clean` is not the hermeticity boundary
 `--clean` controls only stage 1 — what the child process inherits from the parent shell. It is not what makes the package-composed set (stage 2) reproducible. That comes from the resolver's scope: package env values are computed from `ocx.lock` and the resolved digests alone, identically with or without `--clean`. Project `[env]` (stage 4) is the opposite case by design — it is the user's own file, deliberately allowed to read ambient state, and is excluded from the lock's `declaration_hash` for exactly that reason.
 :::
 
-`--self` has no effect on project or group `[env]` entries — see [Visibility surfaces](#visibility-surfaces) above. A project is never a dependency of anything, so there is no interface/private surface to gate; project and group entries are emitted on both.
+`--self` is package vocabulary and does not exist on the project tier. It selects a package's own private surface — which by construction leaves that package's `entrypoints/` off `PATH`, because launchers exist for a *consumer* to invoke the package while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every tool it declares, so the self view would compose a strictly worse toolchain, not a fuller one. The flag lives on [`ocx package exec`][cmd-package-exec] and [`ocx package env`][cmd-package-env], where a package's own surface is the thing being asked about; see [Visibility surfaces](#visibility-surfaces) above.
+
+Project and group `[env]` entries have no visibility axis at all — a project is never a dependency of anything, so there is no interface/private edge to gate.
 
 <!-- external -->
 [volta]: https://volta.sh/
@@ -183,6 +200,9 @@ A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path
 [cmd-update]: ./command-line.md#update
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec
+[cmd-package-env]: ./command-line.md#package-env
+[cmd-package-test]: ./command-line.md#package-test
+[cmd-patch-test]: ./command-line.md#patch-test
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

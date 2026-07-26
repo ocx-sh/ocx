@@ -487,7 +487,16 @@ The relative value resolves against the **project root** — the directory holdi
 [Cargo][cargo]'s `.cargo/config.toml` has its own `[env]` table, and [GitHub Actions][github-actions-docs] has a workflow-level `env:` block — both are precedent for "declare environment alongside the tool config, not in a separate script." The `path` type mirrors [direnv][direnv]'s `PATH_add` and [mise][mise]'s `_.path`: an idempotent prepend rather than a hand-rolled `PATH="$X:$PATH"` string, which breaks across shells and double-prepends on re-entry.
 :::
 
-For a one-off override that should not go in the committed file, `ocx run --env KEY[:TYPE]=VALUE` wins over everything else. `TYPE` is `constant` (the default) or `path` — the same two kinds `[env]` supports — so `--env PATH:path=node_modules/.bin` prepends instead of replacing. This is the one thing the ambient-shell channel could never do: a caller that builds an argv array rather than a shell command line — a [GitHub Action][github-actions-docs] step, a [Bazel rule][bazel-rules], a Python `subprocess.run` call — has no way to splice `$PATH` or `%PATH%` into a value it constructs, so `:path` is how it says "prepend a directory to `PATH` for this invocation." [`ocx run`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
+For a one-off override that should not go in the committed file, `--env KEY[:TYPE]=VALUE` wins over everything else. `TYPE` is `constant` (the default) or `path` — the same two kinds `[env]` supports — so `--env PATH:path=node_modules/.bin` prepends instead of replacing. This is the one thing the ambient-shell channel could never do: a caller that builds an argv array rather than a shell command line — a [GitHub Action][github-actions-docs] step, a [Bazel rule][bazel-rules], a Python `subprocess.run` call — has no way to splice `$PATH` or `%PATH%` into a value it constructs, so `:path` is how it says "prepend a directory to `PATH` for this invocation."
+
+The flag is on every command that composes an environment, not just `ocx run`. That matters because `ocx run` never prints — it replaces itself with the child process — so the only way to *see* what it would run with is to ask a command that emits:
+
+```shell
+ocx run --env PATH:path=node_modules/.bin -- vitest        # execute in it
+ocx env --env PATH:path=node_modules/.bin --shell=bash     # print the same thing
+```
+
+Both compose identically, which is what makes the second useful for debugging the first. The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec] — those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx run`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
 
 ### Shell activation
 
