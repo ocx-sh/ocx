@@ -831,6 +831,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         }
         // Data errors and other structural failures — not retryable.
         ClientError::InvalidManifest(_)
+        | ClientError::InvalidImageIndex(_)
         | ClientError::DigestMismatch { .. }
         | ClientError::DecompressionCapExceeded { .. }
         | ClientError::UnexpectedManifestType

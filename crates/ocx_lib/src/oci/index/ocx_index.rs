@@ -660,11 +660,14 @@ impl OcxIndex {
             .into());
         }
 
-        // Admission is on document KIND only: this must be an image index. It
-        // deliberately does NOT inspect `artifactType` — nothing in ocx reads an
-        // image index's artifact type, and gating on it would refuse or warn
-        // about documents that are structurally exactly what we asked for.
+        // Admission is on document KIND and image-spec semantics: this must be
+        // an image index, and a valid one — deserialisation proves shape only
+        // (`schemaVersion` is an unconstrained `u8`). It deliberately does NOT
+        // inspect `artifactType` — nothing in ocx reads an image index's
+        // artifact type, and gating on it would refuse or warn about documents
+        // that are structurally exactly what we asked for.
         let index: oci::ImageIndex = parse_document(&bytes, &url)?;
+        crate::oci::manifest::validate_image_index(&index).map_err(super::error::Error::from)?;
         Ok(Some((bytes, index)))
     }
 
@@ -1501,6 +1504,52 @@ mod tests {
                 crate::Error::OciIndex(super::super::error::Error::MalformedIndexDocument { .. })
             ),
             "expected MalformedIndexDocument, got {error:?}"
+        );
+    }
+
+    /// A dispatch object that hashes correctly and IS an image index, but
+    /// declares `schemaVersion: 1`, is refused.
+    ///
+    /// This is the fail-open case the digest anchor cannot catch: the bytes are
+    /// exactly what the root pointed at, so the publisher — not an attacker —
+    /// put them there. Without the semantic check the document parses, the
+    /// selection comes back empty, and the client reports an ordinary "no
+    /// matching platform" instead of "this index is malformed".
+    ///
+    /// The fixture is a byte literal for a reason: `schemaVersion: 1` cannot be
+    /// produced by serialising an `oci::ImageIndex`, so a fixture built by the
+    /// code under test could never contradict it.
+    #[tokio::test]
+    async fn resolve_index_object_refuses_a_wrong_schema_version() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let body = br#"{"schemaVersion":1,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        assert!(
+            serde_json::from_slice::<oci::ImageIndex>(body).is_ok(),
+            "the payload must parse, or the semantic check is not what refuses it"
+        );
+        let digest = Algorithm::Sha256.hash(body);
+        let root = format!(
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{digest}"}}}}}}"#,
+        );
+        transport.insert(&root_url(), root.as_bytes());
+        transport.insert(&dispatch_url(&digest), body);
+
+        let error = make_source(transport, false)
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("an invalid image index must not resolve");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::InvalidImageIndex(_))
+            ),
+            "expected InvalidImageIndex, got {error:?}"
+        );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "malformed public-index data is a data error"
         );
     }
 

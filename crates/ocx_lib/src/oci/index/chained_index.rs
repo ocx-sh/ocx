@@ -13,14 +13,16 @@ use crate::{Result, log, oci};
 
 /// Whether `err` reports a present-but-corrupt dispatch object — its on-disk
 /// bytes no longer hash to the digest that names them (`adr_index_indirection.md`
-/// A3, CWE-345). Distinct from an absent object, which the local read path
-/// reports as `Ok(None)`. `ChainedIndex` uses this to decide whether a corrupt
-/// local read can be healed by a source re-fetch (online `Resolve`) or must be
-/// escalated to a hard `DataError` (`--offline`, or any pure `Query`).
+/// A3, CWE-345), or they do hash correctly but are not a valid OCI image index.
+/// Distinct from an absent object, which the local read path reports as
+/// `Ok(None)`. `ChainedIndex` uses this to decide whether a corrupt local read
+/// can be healed by a source re-fetch (online `Resolve`) or must be escalated to
+/// a hard `DataError` (`--offline`, or any pure `Query`).
 fn is_corrupt_index_object(err: &crate::Error) -> bool {
     matches!(
         err,
         crate::Error::FileStructure(crate::file_structure::error::Error::DigestMismatch { .. })
+            | crate::Error::OciIndex(super::error::Error::InvalidImageIndex(_))
     )
 }
 
@@ -2710,6 +2712,58 @@ mod chain_refs_tests {
             *fetch_root_document_calls.lock().unwrap(),
             0,
             "corrupt-object recovery must never re-fetch the published root"
+        );
+    }
+
+    /// A dispatch object whose bytes hash correctly but declare
+    /// `schemaVersion: 1` is corruption of the same class as a digest
+    /// mismatch — under `--offline` there is no source to heal it from, so it
+    /// escalates to a hard `DataError` instead of being reported as a cache
+    /// miss (which would surface as "nothing to install", hiding malformed
+    /// index data behind a plausible verdict).
+    ///
+    /// The object is written at the digest its own bytes hash to, so the A4
+    /// digest anchor passes and only the semantic check can refuse it. The
+    /// fixture is a byte literal: serialising an `oci::ImageIndex` cannot emit
+    /// `schemaVersion: 1`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_dispatch_object_is_a_data_error_offline() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let store = index_store(&cache_dir);
+
+        let invalid_bytes: &[u8] =
+            br#"{"schemaVersion":1,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        let invalid_digest = Algorithm::Sha256.hash(invalid_bytes);
+        let root_bytes = format!(
+            r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"{TAG}":{{"content":"{invalid_digest}","observed":"2026-07-18T00:00:00Z"}}}}}}"#,
+        )
+        .into_bytes();
+        store
+            .write_dispatch_object(REGISTRY, REPO, &invalid_digest, invalid_bytes)
+            .await
+            .unwrap();
+        store.write_root_document(REGISTRY, REPO, &root_bytes).await.unwrap();
+
+        let source = PublishedSource {
+            fetch_root_document_calls: Arc::new(Mutex::new(0)),
+        };
+        let chained = Index::from_chained(cache, vec![super::super::Index::from_impl(source)], ChainMode::Offline);
+
+        let error = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect_err("an invalid dispatch object must not read back as a miss");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::InvalidImageIndex(_))
+            ),
+            "expected InvalidImageIndex, got {error:?}"
+        );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
         );
     }
 

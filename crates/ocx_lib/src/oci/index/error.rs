@@ -106,6 +106,16 @@ pub enum Error {
         found: String,
     },
 
+    /// A dispatch object deserialised as an OCI image index but violates an
+    /// invariant of the image spec — a wrong `schemaVersion`, or a descriptor
+    /// that cannot address its child. Raised on the read side at both index
+    /// boundaries (the live `index.ocx.sh` fetch and the local read-back), so
+    /// malformed index data is refused rather than reported as an ordinary
+    /// empty selection. Distinct from [`Self::MalformedIndexDocument`], which
+    /// means the bytes did not deserialise at all.
+    #[error(transparent)]
+    InvalidImageIndex(#[from] crate::oci::manifest::InvalidImageIndex),
+
     /// A static-file index document (root, dispatch object, or catalog) could
     /// not be parsed as the expected frozen wire shape.
     #[error("malformed index document at {url}")]
@@ -197,6 +207,7 @@ impl ClassifyExitCode for Error {
             | Self::MalformedPhysicalRef { .. }
             | Self::RootRepositoryMismatch { .. }
             | Self::MalformedCatalogKey { .. }
+            | Self::InvalidImageIndex(_)
             | Self::MalformedIndexDocument { .. } => ExitCode::DataError,
             // A transport-layer failure reaching the static-file index — the
             // resource is unavailable, same class as a registry outage.

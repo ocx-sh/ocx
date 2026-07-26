@@ -682,7 +682,7 @@ impl LocalIndex {
         {
             // Present but not an image index: a recoverable state, routed as a
             // fetch-by-digest recovery rather than surfaced as corruption.
-            Some(bytes) => Ok(Some(match decode_index_manifest(&bytes) {
+            Some(bytes) => Ok(Some(match decode_index_manifest(&bytes)? {
                 Some(index) => DispatchResolution::Dispatch {
                     content,
                     index: Box::new(index),
@@ -897,17 +897,30 @@ pub(super) fn records_root_tag(tag: &str, manifest: &oci::Manifest) -> bool {
 /// is no second codec and no fallback — the index has no business defining
 /// object shapes of its own, so the only parse is the OCI one.
 ///
-/// `None` = the bytes are not an image index. That is the fail-closed shape:
-/// [`oci::ImageIndex`] requires `schemaVersion` and `manifests`, so a leaf
-/// platform manifest, a truncated file, or any other payload is refused here
-/// and surfaced as [`DispatchResolution::AbsentDispatch`] — a recoverable cache
-/// miss the caller heals by fetching `content` by digest, never a silent load
-/// of the wrong shape. Unknown sibling fields (`subject`, keys a newer writer
-/// adds) are tolerated: the fleet reads one another's documents, and the bytes
-/// are stored verbatim and never re-serialised, so nothing is lost by ignoring
-/// them (A4 is load-bearing exactly here).
-fn decode_index_manifest(bytes: &[u8]) -> Option<oci::ImageIndex> {
-    serde_json::from_slice::<oci::ImageIndex>(bytes).ok()
+/// `Ok(None)` = the bytes are not an image index. That is the fail-closed
+/// shape: [`oci::ImageIndex`] requires `schemaVersion` and `manifests`, so a
+/// leaf platform manifest, a truncated file, or any other payload is refused
+/// here and surfaced as [`DispatchResolution::AbsentDispatch`] — a recoverable
+/// cache miss the caller heals by fetching `content` by digest, never a silent
+/// load of the wrong shape. Unknown sibling fields (`subject`, keys a newer
+/// writer adds) are tolerated: the fleet reads one another's documents, and the
+/// bytes are stored verbatim and never re-serialised, so nothing is lost by
+/// ignoring them (A4 is load-bearing exactly here).
+///
+/// # Errors
+///
+/// [`Error::InvalidImageIndex`](super::error::Error::InvalidImageIndex) when the
+/// bytes *are* an image index but an invalid one. Deserialisation proves shape
+/// only — `schemaVersion` is an unconstrained `u8` — so the semantics are
+/// checked on read-back too, not just at the boundary that admitted the bytes.
+/// This is not the recoverable-miss case: a document carrying `manifests` can
+/// never be a leaf, so it is malformed index data and is refused, never healed.
+fn decode_index_manifest(bytes: &[u8]) -> Result<Option<oci::ImageIndex>> {
+    let Ok(index) = serde_json::from_slice::<oci::ImageIndex>(bytes) else {
+        return Ok(None);
+    };
+    crate::oci::manifest::validate_image_index(&index).map_err(super::error::Error::from)?;
+    Ok(Some(index))
 }
 
 #[async_trait]
@@ -1797,27 +1810,55 @@ mod tests {
     #[test]
     fn decode_index_manifest_returns_the_image_index_it_was_given() {
         let (index_object_bytes, _) = index_bytes();
-        let index = decode_index_manifest(&index_object_bytes).expect("an image index must decode");
+        let index = decode_index_manifest(&index_object_bytes)
+            .expect("a valid image index is not a refusal")
+            .expect("an image index must decode");
         assert_eq!(index.manifests.len(), 1);
     }
 
     #[test]
     fn decode_index_manifest_returns_none_for_non_oci_bytes() {
-        // Fail-closed, by type: there is no second codec and no `Err` arm. A
-        // bare platform manifest, a `{"platforms":[...]}` projection,
-        // and plain garbage are all simply "not a dispatch object" — surfaced
-        // as `AbsentDispatch` and healed by a fetch-by-digest, never loaded as
-        // something they are not.
+        // Fail-closed, by type: there is no second codec. A bare platform
+        // manifest, a `{"platforms":[...]}` projection, and plain garbage are
+        // all simply "not a dispatch object" — surfaced as `AbsentDispatch` and
+        // healed by a fetch-by-digest, never loaded as something they are not.
+        // The `Err` arm is reserved for bytes that ARE an image index but an
+        // invalid one; none of these are.
         let (manifest_bytes, _) = image_manifest_bytes();
         assert!(
-            decode_index_manifest(&manifest_bytes).is_none(),
+            decode_index_manifest(&manifest_bytes).expect("not a refusal").is_none(),
             "a bare platform manifest is not a dispatch object"
         );
         assert!(
-            decode_index_manifest(br#"{"platforms":[]}"#).is_none(),
+            decode_index_manifest(br#"{"platforms":[]}"#)
+                .expect("not a refusal")
+                .is_none(),
             "a document with no schemaVersion and no manifests is not a dispatch object"
         );
-        assert!(decode_index_manifest(b"not a manifest at all").is_none());
+        assert!(
+            decode_index_manifest(b"not a manifest at all")
+                .expect("not a refusal")
+                .is_none()
+        );
+    }
+
+    /// A locally stored dispatch object that IS an image index but declares
+    /// `schemaVersion: 1` is refused, not reported as an absent dispatch.
+    ///
+    /// The distinction is the whole point: a document carrying `manifests` can
+    /// never be a leaf manifest, so "heal it by fetching `content` by digest"
+    /// is not available — the bytes are malformed index data and the only
+    /// honest outcome is `DataError` (65). The fixture is a byte literal: no
+    /// serialisation of `oci::ImageIndex` can emit `schemaVersion: 1`.
+    #[test]
+    fn decode_index_manifest_refuses_an_index_with_the_wrong_schema_version() {
+        let error = decode_index_manifest(br#"{"schemaVersion":1,"manifests":[]}"#)
+            .expect_err("an invalid image index must be refused, never reported as absent");
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "malformed index data is a data error, not a generic failure"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
