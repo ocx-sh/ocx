@@ -28,7 +28,7 @@ mod identity;
 mod poll;
 
 pub use error::ForgeError;
-pub use github::GitHubForge;
+pub use github::{BranchComparison, GitHubForge, RefUpdate};
 
 /// Announce credential, sourced from `OCX_ANNOUNCE_TOKEN`.
 ///

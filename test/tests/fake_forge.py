@@ -323,6 +323,26 @@ class FakeForge(http.server.ThreadingHTTPServer):
             self.refs.setdefault(full, {})[branch] = self.refs[source_full][source_branch]
             self.repos.setdefault(full, {"full_name": full, "owner": owner, "parent": source_full})
 
+    def close_pull_request(self, owner: str, repo: str, head: str) -> None:
+        """Drop the open pull request whose head is `head` (`"<owner>:<branch>"`),
+        leaving its branch in place. Models both halves of the trap #228 is about:
+        a merged pull request and a closed-unmerged one look identical from the
+        branch's side, because the branch is per package and outlives either."""
+        with self.lock:
+            self.open_prs.get((owner, repo), {}).pop(head, None)
+
+    def commit_parent(self, owner: str, repo: str, branch: str) -> str | None:
+        """The parent sha of `branch`'s head commit — what a committed announce
+        was actually built ON, as opposed to what it contains."""
+        with self.lock:
+            head = self.refs.get(f"{owner}/{repo}", {}).get(branch)
+            return None if head is None else self.commits[head]["parent"]
+
+    def branch_head(self, owner: str, repo: str, branch: str) -> str | None:
+        """The head sha of `branch`, or `None` when the ref does not exist."""
+        with self.lock:
+            return self.refs.get(f"{owner}/{repo}", {}).get(branch)
+
     def _seed_files_locked(self, owner: str, repo: str, files: dict[str, bytes], branch: str) -> None:
         """Commit `files` onto `branch`, advancing its head (caller holds `self.lock`)."""
         full = f"{owner}/{repo}"
@@ -530,16 +550,31 @@ class FakeForge(http.server.ThreadingHTTPServer):
 
     def handle_patch_ref(self, handler: _Handler, owner: str, repo: str, branch: str, body: dict[str, Any]) -> None:
         force = body.get("force")
-        if force is not False:
-            # The branch update is fast-forward-only CAS (design register C4
-            # amendment F2): the client must state `force: false` explicitly.
-            # A regression to `force: true` (or a dropped field) answers with a
-            # status the client models nowhere, so it surfaces as a hard failure
-            # instead of silently passing through the 422 retry branch.
-            handler._reply_json(400, {"message": f"expected force:false, got {force!r}"})
+        if force not in (True, False):
+            # The client must STATE the field, never leave it to GitHub's
+            # default: a dropped field would silently pick a rewrite policy
+            # nobody chose. A missing value answers with a status the client
+            # models nowhere, so it surfaces as a hard failure instead of
+            # passing through the 422 retry branch.
+            handler._reply_json(400, {"message": f"expected an explicit force flag, got {force!r}"})
             return
         full = f"{owner}/{repo}"
         key = f"{full}/{branch}"
+        if force:
+            # `force: true` repoints the ref unconditionally — no CAS, no
+            # ancestry check, and no "reference does not exist" split, because
+            # GitHub creates nothing here either way. This is the announce
+            # branch-reset path (#228); a concurrent-advance injection is
+            # deliberately NOT consulted, since a reset is not racing anyone for
+            # a fast-forward.
+            with self.lock:
+                if branch not in self.refs.get(full, {}):
+                    handler._reply_json(422, {"message": "Reference does not exist"})
+                    return
+                sha = body.get("sha")
+                self.refs[full][branch] = sha
+            handler._reply_json(200, {"object": {"sha": sha}})
+            return
         with self.lock:
             advance = self.concurrent_ref_advance.pop(key, None)
             if advance is not None:

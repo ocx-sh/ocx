@@ -41,6 +41,58 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Fixed delay before the single fresh-fork write retry (design register X5).
 const FRESH_FORK_RETRY_DELAY: Duration = Duration::from_secs(3);
 
+/// How a branch stands relative to a base ref, as GitHub's compare API reports it.
+///
+/// The distinction that matters to announce is [`Ahead`](Self::Ahead) versus
+/// [`Diverged`](Self::Diverged), and it is not cosmetic. An `Ahead` branch
+/// fast-forwards onto the base, so appending to it always produces a mergeable
+/// pull request. A `Diverged` branch does not — and the ordinary way an announce
+/// branch becomes `Diverged` is that its pull request was **squash-merged**, which
+/// puts its content on the base under a new commit while leaving none of its own
+/// commits in the base's history. Appending there re-proposes work that is already
+/// merged, and the pull request conflicts on the very file every announce edits
+/// (ocx-sh/ocx#228).
+///
+/// Git alone cannot tell that case apart from "my commits are genuinely unmerged
+/// and the base moved on underneath me", so `Diverged` is never a verdict by
+/// itself: the caller pairs it with whether an open pull request still exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchComparison {
+    /// The branch is the base commit.
+    Identical,
+    /// The branch holds commits the base does not, and the base holds none the
+    /// branch does not — a fast-forward.
+    Ahead,
+    /// The base has moved on; the branch holds nothing of its own.
+    Behind,
+    /// Both sides hold commits the other does not.
+    Diverged,
+}
+
+/// Whether a ref update may rewrite history.
+///
+/// [`FastForward`](Self::FastForward) is the default and the one every ordinary
+/// announce uses: it is the compare-and-swap that makes a concurrent announce
+/// surface as [`ForgeError::NonFastForward`] instead of being silently
+/// overwritten (design register C4). [`Reset`](Self::Reset) is reserved for the
+/// one case where a non-fast-forward is the *intent* — repointing a spent
+/// announce branch at the upstream base, where refusing to rewrite would preserve
+/// exactly the already-merged commits that make the branch unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefUpdate {
+    /// Reject an update that is not a fast-forward.
+    FastForward,
+    /// Repoint the ref even when the new commit is not a descendant.
+    Reset,
+}
+
+impl RefUpdate {
+    /// The value GitHub's ref-update endpoint expects in its `force` field.
+    fn force(self) -> bool {
+        matches!(self, Self::Reset)
+    }
+}
+
 /// GitHub REST forge client.
 ///
 /// One no-redirect [`reqwest::Client`] per instance (design register X5); the
@@ -265,18 +317,28 @@ impl GitHubForge {
     }
 
     /// Point `refs/heads/<branch>` at `commit_sha`, creating the ref when it
-    /// does not yet exist. The update is **fast-forward-only** (compare-and-swap,
-    /// design register C4): a non-fast-forward — a concurrent announce advanced
-    /// the branch — surfaces as [`ForgeError::NonFastForward`] for the caller to
-    /// re-read and retry, never a silent force-overwrite.
+    /// does not yet exist.
+    ///
+    /// Under [`RefUpdate::FastForward`] — every ordinary announce — the update is
+    /// a compare-and-swap (design register C4): a non-fast-forward, meaning a
+    /// concurrent announce advanced the branch, surfaces as
+    /// [`ForgeError::NonFastForward`] for the caller to re-read and retry, never
+    /// a silent force-overwrite. Under [`RefUpdate::Reset`] the rewrite is the
+    /// point, so no such rejection can occur.
     ///
     /// A rejected update costs one extra request: GitHub reports "absent ref"
     /// and "not a fast-forward" with the same 422, so the ref is read to tell
     /// them apart. That read is off the happy path entirely — a successful
     /// update returns without it.
-    async fn upsert_branch(&self, repo: &RepoCoordinate, branch: &str, commit_sha: &str) -> Result<(), ForgeError> {
+    async fn upsert_branch(
+        &self,
+        repo: &RepoCoordinate,
+        branch: &str,
+        commit_sha: &str,
+        update: RefUpdate,
+    ) -> Result<(), ForgeError> {
         let update_url = self.url(&format!("/repos/{}/{}/git/refs/heads/{branch}", repo.owner, repo.repo));
-        let update_body = json!({ "sha": commit_sha, "force": false });
+        let update_body = json!({ "sha": commit_sha, "force": update.force() });
         let (status, _) = self
             .send(
                 self.json_request(Method::PATCH, &update_url, &update_body)?,
@@ -382,13 +444,13 @@ impl GitHubForge {
         Ok(Some(sha.to_string()))
     }
 
-    /// Whether `head_owner:head_branch` carries commits `base` does not.
+    /// How `head_owner:head_branch` stands relative to `base`.
     ///
     /// One compare call answers ancestry exactly, which a bare ref-SHA equality
-    /// check cannot: GitHub reports `identical` when the branch *is* the base
-    /// and `behind` when it is an ancestor of the base (both "not ahead" —
-    /// nothing unmerged to recover), against `ahead` / `diverged` when the
-    /// branch holds commits of its own.
+    /// check cannot. The four states are kept distinct rather than collapsed to
+    /// a boolean because [`BranchComparison::Diverged`] and
+    /// [`BranchComparison::Ahead`] demand *opposite* handling — see that type's
+    /// documentation.
     ///
     /// Fails closed on anything else. A 404 here is an **indeterminate** compare,
     /// not a verdict: the only caller asks this after already observing that the
@@ -407,13 +469,13 @@ impl GitHubForge {
     /// Returns a [`ForgeError`] on transport failure, any non-success status
     /// (404 included), a missing `status` field, or a `status` value the client
     /// does not model.
-    pub async fn branch_is_ahead(
+    pub async fn compare_branch(
         &self,
         repo: &RepoCoordinate,
         base: &str,
         head_owner: &str,
         head_branch: &str,
-    ) -> Result<bool, ForgeError> {
+    ) -> Result<BranchComparison, ForgeError> {
         let url = self.url(&format!(
             "/repos/{}/{}/compare/{base}...{head_owner}:{head_branch}",
             repo.owner, repo.repo
@@ -431,7 +493,43 @@ impl GitHubForge {
                 url: url.clone(),
                 field: "status".to_string(),
             })?;
-        compare_status_is_ahead(&url, status)
+        parse_compare_status(&url, status)
+    }
+
+    /// The open pull request whose head is `head_owner:branch`, or `None`.
+    ///
+    /// Read-only, and deliberately scoped to **open** pull requests: the
+    /// announce branch is per package and outlives every pull request opened
+    /// from it, so "a pull request exists" is not the same question as "this
+    /// branch is still carrying one".
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ForgeError`] on transport failure, a non-success status, or
+    /// a malformed pull-request response body.
+    pub async fn find_open_pull_request(
+        &self,
+        index: &RepoCoordinate,
+        head_owner: &str,
+        branch: &str,
+    ) -> Result<Option<PullRequest>, ForgeError> {
+        let pulls_url = self.url(&format!("/repos/{}/{}/pulls", index.owner, index.repo));
+        let head = pr_head(head_owner, branch);
+        let request = self
+            .request(Method::GET, &pulls_url)
+            .query(&[("head", head.as_str()), ("state", "open")]);
+        let (status, body) = self.send(request, &pulls_url).await?;
+        if !status.is_success() {
+            return Err(ForgeError::Status {
+                url: pulls_url,
+                status: status.as_u16(),
+            });
+        }
+        let list = Self::parse_json(&pulls_url, &body)?;
+        let Some(existing) = list.as_array().and_then(|pulls| pulls.first()) else {
+            return Ok(None);
+        };
+        pull_request_from_body(&pulls_url, existing, true).map(Some)
     }
 
     /// Look up an existing fork of `upstream` at `fork`, **without creating
@@ -549,11 +647,16 @@ impl GitHubForge {
         base_sha: &str,
         message: &str,
         files: &BTreeMap<String, Vec<u8>>,
+        update: RefUpdate,
     ) -> Result<String, ForgeError> {
-        match self.commit_files_once(repo, branch, base_sha, message, files).await {
+        match self
+            .commit_files_once(repo, branch, base_sha, message, files, update)
+            .await
+        {
             Err(error) if is_fresh_fork_race(&error) => {
                 tokio::time::sleep(FRESH_FORK_RETRY_DELAY).await;
-                self.commit_files_once(repo, branch, base_sha, message, files).await
+                self.commit_files_once(repo, branch, base_sha, message, files, update)
+                    .await
             }
             result => result,
         }
@@ -568,6 +671,7 @@ impl GitHubForge {
         base_sha: &str,
         message: &str,
         files: &BTreeMap<String, Vec<u8>>,
+        update: RefUpdate,
     ) -> Result<String, ForgeError> {
         let base_tree_sha = self.base_tree_sha(repo, base_sha).await?;
         let mut tree_entries = Vec::with_capacity(files.len());
@@ -577,7 +681,7 @@ impl GitHubForge {
         }
         let tree_sha = self.create_tree(repo, &base_tree_sha, tree_entries).await?;
         let commit_sha = self.create_commit(repo, message, &tree_sha, base_sha).await?;
-        self.upsert_branch(repo, branch, &commit_sha).await?;
+        self.upsert_branch(repo, branch, &commit_sha, update).await?;
         Ok(commit_sha)
     }
 
@@ -620,25 +724,12 @@ impl GitHubForge {
                 status: status.as_u16(),
             });
         }
-        let request = self
-            .request(Method::GET, &pulls_url)
-            .query(&[("head", head.as_str()), ("state", "open")]);
-        let (list_status, list_body) = self.send(request, &pulls_url).await?;
-        if !list_status.is_success() {
-            return Err(ForgeError::Status {
-                url: pulls_url,
-                status: list_status.as_u16(),
-            });
-        }
-        let list = Self::parse_json(&pulls_url, &list_body)?;
-        let existing = list
-            .as_array()
-            .and_then(|pulls| pulls.first())
+        self.find_open_pull_request(index, head_owner, branch)
+            .await?
             .ok_or_else(|| ForgeError::MissingField {
-                url: pulls_url.clone(),
+                url: pulls_url,
                 field: "pull_request".to_string(),
-            })?;
-        pull_request_from_body(&pulls_url, existing, true)
+            })
     }
 }
 
@@ -679,10 +770,12 @@ fn pr_head(head_owner: &str, branch: &str) -> String {
 /// Exhaustive over GitHub's documented four values; an unmodelled value is an
 /// error, never a guess — a wrong "not ahead" strands a committed announce with
 /// no pull request (design register C6 amendment).
-fn compare_status_is_ahead(url: &str, status: &str) -> Result<bool, ForgeError> {
+fn parse_compare_status(url: &str, status: &str) -> Result<BranchComparison, ForgeError> {
     match status {
-        "ahead" | "diverged" => Ok(true),
-        "identical" | "behind" => Ok(false),
+        "identical" => Ok(BranchComparison::Identical),
+        "ahead" => Ok(BranchComparison::Ahead),
+        "behind" => Ok(BranchComparison::Behind),
+        "diverged" => Ok(BranchComparison::Diverged),
         unknown => Err(ForgeError::UnknownCompareStatus {
             url: url.to_string(),
             status: unknown.to_string(),
@@ -904,7 +997,7 @@ mod tests {
         .expect("fake forge starts");
 
         fake.forge()
-            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .upsert_branch(&test_repo(), BRANCH, "commitsha", RefUpdate::FastForward)
             .await
             .expect("an absent ref is created, not reported as a conflict");
 
@@ -932,7 +1025,7 @@ mod tests {
 
         let error = fake
             .forge()
-            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .upsert_branch(&test_repo(), BRANCH, "commitsha", RefUpdate::FastForward)
             .await
             .expect_err("a present ref that rejected the update is a conflict");
 
@@ -954,7 +1047,7 @@ mod tests {
         .expect("fake forge starts");
 
         fake.forge()
-            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .upsert_branch(&test_repo(), BRANCH, "commitsha", RefUpdate::FastForward)
             .await
             .expect("a successful update needs nothing else");
 
@@ -981,7 +1074,7 @@ mod tests {
 
         let error = fake
             .forge()
-            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .upsert_branch(&test_repo(), BRANCH, "commitsha", RefUpdate::FastForward)
             .await
             .expect_err("a lost create race is a conflict");
 
@@ -1002,7 +1095,7 @@ mod tests {
 
         let error = fake
             .forge()
-            .upsert_branch(&test_repo(), BRANCH, "commitsha")
+            .upsert_branch(&test_repo(), BRANCH, "commitsha", RefUpdate::FastForward)
             .await
             .expect_err("an unmodelled status must surface");
 
@@ -1032,26 +1125,40 @@ mod tests {
     }
 
     #[test]
-    fn compare_status_ahead_and_diverged_carry_unmerged_commits() {
-        assert!(compare_status_is_ahead("https://api", "ahead").expect("modelled"));
-        assert!(compare_status_is_ahead("https://api", "diverged").expect("modelled"));
-    }
-
-    #[test]
-    fn compare_status_identical_and_behind_carry_nothing_unmerged() {
-        assert!(!compare_status_is_ahead("https://api", "identical").expect("modelled"));
-        assert!(!compare_status_is_ahead("https://api", "behind").expect("modelled"));
+    fn compare_status_maps_each_github_value_to_its_own_state() {
+        // `ahead` and `diverged` must NOT collapse together: appending to an
+        // `ahead` branch fast-forwards, appending to a `diverged` one re-proposes
+        // squash-merged commits and conflicts (#228).
+        for (status, expected) in [
+            ("identical", BranchComparison::Identical),
+            ("ahead", BranchComparison::Ahead),
+            ("behind", BranchComparison::Behind),
+            ("diverged", BranchComparison::Diverged),
+        ] {
+            assert_eq!(
+                parse_compare_status("https://api", status).expect("modelled"),
+                expected,
+                "status {status}"
+            );
+        }
     }
 
     #[test]
     fn compare_status_unmodelled_value_errors_instead_of_guessing() {
-        // A wrong "not ahead" strands a committed announce with no pull
-        // request, so an unrecognized value must surface, never default.
-        let error = compare_status_is_ahead("https://api", "sideways").expect_err("unmodelled status must error");
+        // Every wrong verdict here is silent: guessing "spent" discards an
+        // unmerged announce, guessing "live" rebuilds the #228 conflict. An
+        // unrecognized value must surface, never default.
+        let error = parse_compare_status("https://api", "sideways").expect_err("unmodelled status must error");
         assert!(matches!(
             error,
             ForgeError::UnknownCompareStatus { ref status, .. } if status == "sideways"
         ));
+    }
+
+    #[test]
+    fn only_a_reset_forces_the_ref_update() {
+        assert!(!RefUpdate::FastForward.force());
+        assert!(RefUpdate::Reset.force());
     }
 
     #[test]
