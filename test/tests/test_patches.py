@@ -1316,6 +1316,61 @@ def test_patch_test_composes_env_locally_without_publishing(
     assert len(report["companions"]) >= 1, "patch test report must list at least one companion"
 
 
+def test_frozen_patch_test_refuses_to_resolve_an_unindexed_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--frozen` must reach `patch test`'s scratch resolution chain.
+
+    `patch test` builds its own chain over a scratch root rather than reusing
+    `default_index`, so the invocation's policy ceiling has to be threaded into
+    it explicitly. It is not decoration: that chain now carries every
+    index-bearing namespace's source, so a hardcoded `Default` lets a frozen
+    invocation resolve an unpinned companion live — dialling the index and then
+    the physical host — which is the exact egress `--frozen` exists to prevent.
+
+    The two halves are deliberately asymmetric so the assertion can only be
+    about the companion. The base IS indexed locally, so frozen resolves it
+    with no network and the run gets as far as the companion; the companion is
+    published to the registry but `index=False`, so it has no local tag pointer
+    and an unpinned-tag miss under a no-resolve policy is a policy block (81),
+    the same contract `ocx --frozen pull` honours for the same identifier.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("frozen_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.0",
+        tmp_path,
+        bins=[],
+        env=[{"key": "FROZEN_PATCH_VAR", "type": "constant", "value": "v", "visibility": "interface"}],
+        new=True,
+        cascade=True,
+        platform="any",
+        # The whole point: resolvable from the registry, absent from the local
+        # index, so only a chain that still walks its sources can find it.
+        index=False,
+    )
+
+    descriptor_path = tmp_path / "frozen_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    result = ocx.plain(
+        "--frozen",
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        check=False,
+    )
+    assert result.returncode == 81, (
+        "ocx --frozen patch test must refuse to resolve an unpinned, unindexed companion "
+        f"(exit 81 PolicyBlocked); got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scenario 10: publish round-trip — install discovers companion via lazy discovery
 # ---------------------------------------------------------------------------
