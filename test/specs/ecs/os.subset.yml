@@ -1,0 +1,27 @@
+# subset of elastic/ecs v9.1.0 schemas/os.yml
+- name: os
+  title: Operating System
+  group: 2
+  reusable:
+    top_level: false
+    expected:
+      - observer
+      - host
+      - user_agent
+  fields:
+    - name: type
+      level: extended
+      type: keyword
+      short: "Which commercial OS family (one of: linux, macos, unix, windows, ios or android)."
+      expected_values:
+        - linux
+        - macos
+        - unix
+        - windows
+        - ios
+        - android
+      example: macos
+      otel:
+        - relation: conflict
+          attribute: os.type
+          note: "The expected values in ECS for `os.type` do not correspond with the values defined in semantic conventions!"

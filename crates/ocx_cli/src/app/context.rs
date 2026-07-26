@@ -95,6 +95,20 @@ pub struct Context {
     /// effective source via the shared `snapshot_matches_source` predicate.
     /// Any I/O/parse failure is treated as absent (benign-state rule).
     managed_config_snapshot: Option<ocx_lib::managed_config::ManagedConfigSnapshot>,
+    /// Digest of the active patch snapshot's own file bytes, from the same read
+    /// at `try_init` that handed the manager its pins. `None` when
+    /// `OCX_PATCH_SNAPSHOT` designated nothing.
+    patch_snapshot_digest: Option<ocx_lib::oci::Digest>,
+    /// The `[records]` config-file tier, already SYSTEM-clamped by the loader.
+    ///
+    /// Held as the raw tier rather than a resolved policy because the fold's
+    /// third layer is a per-command flag pair: a resolved policy could not be
+    /// re-folded without losing the clamp, which is precisely what the clamp
+    /// exists to prevent.
+    records_config: ocx_lib::record::RecordsOptions,
+    /// The `OCX_RECORDS_*` tier, read once so every frame of one invocation
+    /// folds the same values.
+    records_env: ocx_lib::record::RecordsOptions,
 }
 
 /// The two `[managed]` tier gates `Context::try_init` needs, wrapped in a named
@@ -370,13 +384,29 @@ impl Context {
         // package tier). A future `--patch-snapshot` flag would populate it
         // here first.
         let patch_snapshot_path = env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
-        let patch_snapshot = if let Some(ref path) = patch_snapshot_path {
+        let loaded_patch_snapshot = if let Some(ref path) = patch_snapshot_path {
             ocx_lib::patch::PatchSnapshot::read(path)
                 .await
                 .map_err(anyhow::Error::new)?
         } else {
             None
         };
+        // Split here rather than at the read: the manager takes the pins, the
+        // execution record takes the digest of the bytes those pins came from,
+        // and one read produced both.
+        let (patch_snapshot, patch_snapshot_digest) = match loaded_patch_snapshot {
+            Some((snapshot, digest)) => (Some(snapshot), Some(digest)),
+            None => (None, None),
+        };
+
+        // The two lower `[records]` tiers, captured once. They are kept raw
+        // rather than resolved here because the fold's top layer is a per-command
+        // flag pair (`--records-dir` / `--records-name`), and a policy resolved
+        // now could not absorb them without losing the SYSTEM clamp that
+        // `RecordsOptions::merge` enforces by early-returning on the accumulator.
+        // The config tier arrives already clamped from the loader.
+        let records_config = config.records.clone().unwrap_or_default();
+        let records_env = env::records();
 
         // `OCX_NO_CONFIG=1` is hermetic: it suppresses both the loader's
         // managed-config candidate AND the env-override read here.
@@ -554,6 +584,29 @@ impl Context {
         // per-command `--no-verify` flag is a one-shot choice and is not
         // forwarded. (`env::keys::OCX_NO_VERIFY`, see `subsystem-cli.md`.)
         config_view.no_verify = no_verify_env;
+        // Forward the hermetic-config opt-out for the same reason: without it
+        // the parent prunes the discovered config chain and the child — a fresh
+        // process — re-reads it in full, so the two frames of one launch chain
+        // resolve against different configuration. Read here, at the same seam
+        // the loader read it, rather than ambiently inside `apply_ocx_config`.
+        config_view.no_config = env::flag(env::keys::OCX_NO_CONFIG, false);
+        // Forward the sink and filename pattern the two lower tiers resolve to,
+        // so every frame of one launch chain records into the same place. This
+        // cannot be left to the child to re-derive: `apply_ocx_config` is
+        // set-or-**remove**, so an unforwarded `OCX_RECORDS_DIR` inherited from
+        // this process's own environment would be stripped from the child.
+        //
+        // A launching command that carries `--records-dir` / `--records-name`
+        // overwrites this on its own forwarded copy, which is the only tier a
+        // child cannot re-derive for itself.
+        // The clamp is applied by the merge itself, so the lock must still be on
+        // the accumulator here; only afterwards are the two non-forwarded fields
+        // cleared.
+        let mut forwarded_records = records_config.clone();
+        forwarded_records.merge(records_env.clone());
+        forwarded_records.required = None;
+        forwarded_records.system_locked = false;
+        config_view.records = forwarded_records;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
@@ -587,7 +640,30 @@ impl Context {
             managed_config_env_override,
             insecure_hosts,
             managed_config_snapshot,
+            patch_snapshot_digest,
+            records_config,
+            records_env,
         })
+    }
+
+    /// Fold this invocation's `[records]` tiers into a recording policy.
+    ///
+    /// `args` is the launching command's own `--records-dir` / `--records-name`
+    /// contribution — [`options::Records::options`](crate::options::Records) —
+    /// or [`RecordsOptions::default`] for a frame that takes no flags. The
+    /// config and environment tiers were captured at `try_init`, so two frames
+    /// of one invocation cannot disagree about them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordsError`](ocx_lib::record::RecordsError) when the winning
+    /// filename template is malformed — a configuration error (exit 78) raised
+    /// here, before any child starts, rather than at write time.
+    pub fn records(
+        &self,
+        args: ocx_lib::record::RecordsOptions,
+    ) -> Result<ocx_lib::record::RecordingPolicy, ocx_lib::record::RecordsError> {
+        ocx_lib::record::resolve_records(self.records_config.clone(), self.records_env.clone(), args)
     }
 
     /// Shared span-free progress manager (ADR adr_progress_architecture).
@@ -954,6 +1030,13 @@ impl Context {
     /// (benign-state rule) or identity mismatch.
     pub fn managed_config_snapshot(&self) -> Option<&ocx_lib::managed_config::ManagedConfigSnapshot> {
         self.managed_config_snapshot.as_ref()
+    }
+
+    /// Digest of the patch snapshot in force, over the bytes `try_init` parsed
+    /// it from. `None` when `OCX_PATCH_SNAPSHOT` named nothing, which is the
+    /// common case — the patch tier resolves live unless a freeze is adopted.
+    pub fn patch_snapshot_digest(&self) -> Option<&ocx_lib::oci::Digest> {
+        self.patch_snapshot_digest.as_ref()
     }
 
     /// Returns the registry [`oci::Client`] `ocx package verify` reads through,

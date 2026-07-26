@@ -24,9 +24,11 @@ use super::super::PackageManager;
 /// Provenance for a single companion overlay entry.
 ///
 /// Attached per overlay entry so every patched env var can be traced back to
-/// (i) the descriptor rule glob that admitted the companion for the base and
-/// (ii) the companion identifier whose interface projection produced the entry.
-/// Surfaced by `--show-patches`, `ocx patch test`, and `ocx patch why`.
+/// (i) the descriptor rule glob that admitted the companion for the base,
+/// (ii) the companion identifier whose interface projection produced the entry,
+/// and (iii) the digest that identifier actually resolved to. Surfaced by
+/// `--show-patches`, `ocx patch test`, `ocx patch why`, and the execution
+/// record's `sh.ocx.role: companion` entries.
 ///
 /// Descriptive only — it does NOT gate composition. The C7 per-package opt-out
 /// and the system-required enforcement decide overlay membership upstream; this
@@ -37,6 +39,14 @@ pub struct PatchProvenance {
     pub rule_match: String,
     /// The companion identifier whose interface projection produced this entry.
     pub companion: oci::Identifier,
+    /// The install the companion identifier resolved to, digest-complete.
+    ///
+    /// Separate from [`Self::companion`] because the two answer different
+    /// questions and routinely disagree: the descriptor names a tag, and which
+    /// digest that tag reaches depends on the active `PatchSnapshot` and on what
+    /// the last `ocx patch sync` recorded. An audit trail that carried only the
+    /// tag could not say which companion bytes were composed.
+    pub pinned: oci::PinnedIdentifier,
 }
 
 /// The companion-overlay region of a composed entry vector, and the only way to
@@ -86,12 +96,15 @@ impl<'a> PatchOverlay<'a> {
 #[cfg(test)]
 mod patch_overlay_tests {
     use super::{PatchOverlay, PatchProvenance};
-    use crate::oci::Identifier;
+    use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
     fn provenance(rule: &str) -> PatchProvenance {
+        let companion = Identifier::new_registry("companion", "ocx.sh");
         PatchProvenance {
             rule_match: rule.to_string(),
-            companion: Identifier::new_registry("companion", "ocx.sh"),
+            pinned: PinnedIdentifier::try_from(companion.clone_with_digest(Digest::Sha256("a".repeat(64))))
+                .expect("digest present"),
+            companion,
         }
     }
 
@@ -1263,10 +1276,13 @@ impl PackageManager {
             for companion_entry in &companions {
                 let companion_id = &companion_entry.identifier;
                 // Provenance factory for every entry this companion contributes to the
-                // current base's overlay.
-                let make_provenance = || PatchProvenance {
+                // current base's overlay. The pin is a parameter rather than captured:
+                // it is only in hand once the companion has been resolved, which is the
+                // same moment the entries it produced are.
+                let make_provenance = |pinned: &oci::PinnedIdentifier| PatchProvenance {
                     rule_match: companion_entry.rule_match.clone(),
                     companion: companion_id.clone(),
+                    pinned: pinned.clone(),
                 };
 
                 // Cache hit: an earlier admitted base already resolved this
@@ -1385,9 +1401,10 @@ impl PackageManager {
                         // Either half may be empty (private-only companions produce no
                         // entries, and declaring no integrations is the common case);
                         // empty is still `Projected`, never `Missing`.
+                        let pinned = companion_arc.identifier().clone();
                         companion_overlay
                             .entries
-                            .extend(out.entries.into_iter().map(|entry| (entry, make_provenance())));
+                            .extend(out.entries.into_iter().map(|entry| (entry, make_provenance(&pinned))));
                         companion_overlay.integrations.extend(out.admitted_integrations);
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Projected);
                     }

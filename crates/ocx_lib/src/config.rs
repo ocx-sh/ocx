@@ -156,6 +156,17 @@ pub struct Config {
     /// and `ocx shell state`. See `adr_shell_env_overhaul.md` Decisions 4, 5
     /// and 7.
     pub shell: Option<ShellConfig>,
+
+    /// Execution-record sink (`[records]`).
+    ///
+    /// Designates where OCX writes one JSON resolution record per tool launch —
+    /// the resolved package closure with digests, plus the resolved executable.
+    /// Declared at SYSTEM scope it clamps: no lower tier can redirect or
+    /// disable it, which is what lets an operator make recording a fleet
+    /// property instead of a wrapper-script convention.
+    ///
+    /// Absent → no records written (opt-in).
+    pub records: Option<crate::record::RecordsOptions>,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -258,6 +269,12 @@ impl Config {
                 None => self.shell = Some(other_shell),
             }
         }
+        if let Some(other_records) = other.records {
+            match self.records.as_mut() {
+                Some(self_records) => self_records.merge(other_records),
+                None => self.records = Some(other_records),
+            }
+        }
     }
 
     /// The declared trust policies (empty when no `[trust]` section is set).
@@ -309,7 +326,10 @@ impl RegistryDefaults {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::record::RecordsOptions;
 
     // ── Parsing tests (Step 3.1) ─────────────────────────────────────────────
 
@@ -463,6 +483,47 @@ mod tests {
         assert!(
             !mirrors.contains_key("quay.io"),
             "an entry declaring only a future role contributes nothing, but must not fail the parse"
+        );
+    }
+
+    #[test]
+    fn parse_records_section_is_recognized() {
+        let config: Config = toml::from_str(
+            "[records]\ndir = \"/var/log/ocx/records\"\nname = \"{time}-{pid}-{rand}.json\"\nrequired = true\n",
+        )
+        .expect("[records] section must parse successfully");
+        let records = config.records.expect("[records] must populate Config.records");
+        assert_eq!(records.dir, Some(PathBuf::from("/var/log/ocx/records")));
+        assert_eq!(records.name.as_deref(), Some("{time}-{pid}-{rand}.json"));
+        assert_eq!(records.required, Some(true));
+        assert!(
+            !records.system_locked,
+            "system_locked is loader-set provenance, never read from disk"
+        );
+    }
+
+    /// `RecordsOptions` deliberately carries no `deny_unknown_fields`, the same
+    /// forward-compat posture [`Config`] itself takes: a `[records]` block
+    /// written for a newer ocx must not brick an older fleet binary reading the
+    /// same file.
+    #[test]
+    fn parse_records_section_ignores_unknown_fields() {
+        let result: Result<Config, _> = toml::from_str("[records]\ndir = \"/var/log/ocx\"\nfuture_field = \"x\"\n");
+        assert!(
+            result.is_ok(),
+            "[records] with unknown fields must not fail (no deny_unknown_fields): {result:?}"
+        );
+    }
+
+    /// `system_locked` is `#[serde(skip)]` — a config file cannot assert the
+    /// clamp for itself, only the loader can, and only for `/etc/ocx/config.toml`.
+    #[test]
+    fn parse_records_section_cannot_self_declare_system_locked() {
+        let config: Config =
+            toml::from_str("[records]\ndir = \"/var/log/ocx\"\nsystem_locked = true\n").expect("must parse");
+        assert!(
+            !config.records.expect("records present").system_locked,
+            "a config file must not be able to forge the SYSTEM clamp"
         );
     }
 
@@ -713,11 +774,11 @@ mod tests {
 
     /// Finding #15: one table-driven check that every lockable config section
     /// actually honors `system_locked` in its `merge` — a locked system tier
-    /// must ignore a lower-tier override. Covers all five sections that carry
+    /// must ignore a lower-tier override. Covers all six sections that carry
     /// the `lock_as_system` pattern (`[patches]`, `[managed]`, `[registry]`,
-    /// each `[registries.<name>]` entry, each `[mirrors."<host>"]` entry) so a
-    /// newly-added lockable section without merge wiring is caught here rather
-    /// than in scattered per-struct tests.
+    /// each `[registries.<name>]` entry, each `[mirrors."<host>"]` entry,
+    /// `[records]`) so a newly-added lockable section without merge wiring is
+    /// caught here rather than in scattered per-struct tests.
     #[test]
     fn every_lockable_section_respects_system_lock() {
         // Each row: section name + a closure that builds a system-locked
@@ -807,6 +868,25 @@ mod tests {
                 });
                 system.registry_system_locked
                     && system.registry.as_deref() == Some("https://system-mirror.corp/ghcr-remote")
+            }),
+            ("[records]", || {
+                // The clamp is binary and per-block: a system-scope [records]
+                // pins `dir`, `name` and `required` together, so one lower-tier
+                // section cannot redirect the sink while keeping the posture.
+                let mut system = RecordsOptions {
+                    dir: Some(PathBuf::from("/var/log/ocx/records")),
+                    required: Some(true),
+                    ..RecordsOptions::default()
+                };
+                system.lock_as_system();
+                system.merge(RecordsOptions {
+                    dir: Some(PathBuf::from("/tmp/lower-evil")),
+                    required: Some(false),
+                    ..RecordsOptions::default()
+                });
+                system.system_locked
+                    && system.dir == Some(PathBuf::from("/var/log/ocx/records"))
+                    && system.required == Some(true)
             }),
         ];
 

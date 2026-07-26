@@ -820,6 +820,8 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
+| `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
+| `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -850,9 +852,10 @@ The composer prepends env entries in iteration order, so the **last group listed
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a policy-covered binding's Sigstore bundle is tampered (auto-verify). |
 | 69 | Registry unreachable during auto-install of a missing package. |
+| 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the child never starts. |
 | 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
 | 77 | A policy-covered binding's certificate identity or OIDC issuer does not match (auto-verify). |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted; or the `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory (see [Execution Records][execution-records-ref]). |
 | 79 | Package not found in registry during auto-install; or no signature found for a policy-covered binding (auto-verify). |
 | 80 | Authentication failure during auto-install. |
 
@@ -4957,6 +4960,8 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front; the requested command's own invocation is what triggers materialization if it names one of the deferred package's entries. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. | *(inherit from `OCX_LAZY_MODE`; there is no `ocx.toml` to consult on this OCI-tier command)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
+| `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. Recording failure aborts the invocation when [`[records] required`][config-records] is `true` — exit 74 for an unwritable sink, exit 78 when the sink resolves through a symlink. | *(unset — recording off)* |
+| `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
 | `-h`, `--help` | | Print help information. |
 
 ::: info Stdin always inherits
@@ -4972,7 +4977,13 @@ On Unix, `ocx package exec` hands the current process image off to the target vi
 | Code | Meaning |
 |------|---------|
 | 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
+| 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the command never runs. |
+| 78 | The `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory. |
 | _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
+
+::: info `ocx launcher exec` takes no `--records-*` flags
+An entrypoint launcher's re-entry (`ocx launcher exec`) inherits the active sink only through the forwarded [`OCX_RECORDS_DIR`][env-ocx-records-dir]/[`OCX_RECORDS_NAME`][env-ocx-records-name] environment variables — the same mechanism that forwards every other resolution-affecting setting into a launcher re-entry. See [Two records per launcher invocation][execution-records-frames].
+:::
 
 #### `env` {#package-env}
 
@@ -5725,15 +5736,25 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-project-env]: ./configuration.md#project-config-env
 [config-project-package]: ./configuration.md#project-config-package
 [config-project-groups]: ./configuration.md#project-config-groups
+[config-records]: ./configuration.md#keys-records
+[config-records-dir]: ./configuration.md#keys-records-dir
+[config-records-name]: ./configuration.md#keys-records-name
 [config-schemas]: ./configuration.md#schemas
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [env-ocx-no-hook]: ./environment.md#ocx-no-hook
+[env-ocx-records-dir]: ./environment.md#ocx-records-dir
+[env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list
 [env-composition-list-separator]: ./env-composition.md#composition-order-list-separator
 [config-trust]: ./configuration.md#keys-trust
+
+<!-- execution records -->
+[execution-records-ref]: ./execution-records.md
+[execution-records-filename]: ./execution-records.md#execution-records-filename
+[execution-records-frames]: ./execution-records.md#execution-records-frames
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

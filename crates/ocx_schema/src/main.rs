@@ -12,7 +12,7 @@ fn main() {
         Some(json) => println!("{json}"),
         None => {
             eprintln!(
-                "Unknown schema type: {schema_type}. Available: metadata, config, project, project-lock, patch, reports"
+                "Unknown schema type: {schema_type}. Available: metadata, config, project, project-lock, patch, reports, execution-record"
             );
             std::process::exit(1);
         }

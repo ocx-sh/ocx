@@ -67,6 +67,24 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// The SYSTEM-scope config file exists but cannot be consulted.
+    ///
+    /// Fatal, unlike the user and `$OCX_HOME` tiers, where an unreadable
+    /// candidate is skipped with a warning: this file carries operator policy —
+    /// every `lock_as_system` section lives in it — so skipping it drops the
+    /// policy along with the file, silently, on every invocation. An operator
+    /// who symlinks it at a config-managed fleet file would otherwise take the
+    /// whole fleet out of a locked `[records]` sink without noticing.
+    ///
+    /// Absence is not this error: no `/etc/ocx/config.toml` is the ordinary
+    /// case and stays a silent skip.
+    #[error("cannot read system config file {}; it carries operator policy and is never skipped", path.display())]
+    SystemConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A config file exceeds the maximum allowed size (safety cap; config
     /// files are expected to be well under 1 KiB).
     #[error(
@@ -80,7 +98,10 @@ impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::FileNotFound { .. } => ExitCode::NotFound,
-            Self::FileTooLarge { .. } | Self::Parse { .. } => ExitCode::ConfigError,
+            // `SystemConfig` is 78, not the 74 its sibling `Io` takes: the
+            // operator fixes it by editing (or un-symlinking) a policy file,
+            // the same remediation a malformed one needs.
+            Self::FileTooLarge { .. } | Self::Parse { .. } | Self::SystemConfig { .. } => ExitCode::ConfigError,
             Self::Io { .. } => ExitCode::IoError,
             Self::InvalidBooleanString { .. } => ExitCode::DataError,
         })

@@ -16,13 +16,17 @@ vars:
   PROJECT_LOCK_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project-lock"
   PATCH_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/patch"
   REPORTS_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/reports"
+  EXECUTION_RECORD_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/execution-record"
+  # Vendored upstream specs the borrowed-vocabulary conformance test reads.
+  # Provenance, pins and checksums live in that directory's SOURCES.md.
+  SPECS_DIR: "{{.ROOT_DIR}}/crates/ocx_schema/tests/specs"
+  OCI_IMAGE_SPEC_TAG: v1.1.1
+  IN_TOTO_ATTESTATION_TAG: v1.1.0
 
 tasks:
   generate:
     desc: Generate JSON Schema for metadata.json
     sources: *schema-sources
-    status:
-      - test -f {{.METADATA_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.METADATA_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json
@@ -30,8 +34,6 @@ tasks:
   generate-config:
     desc: Generate JSON Schema for config.toml
     sources: *schema-sources
-    status:
-      - test -f {{.CONFIG_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.CONFIG_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json
@@ -39,8 +41,6 @@ tasks:
   generate-project:
     desc: Generate JSON Schema for ocx.toml
     sources: *schema-sources
-    status:
-      - test -f {{.PROJECT_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.PROJECT_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json
@@ -48,8 +48,6 @@ tasks:
   generate-project-lock:
     desc: Generate JSON Schema for ocx.lock
     sources: *schema-sources
-    status:
-      - test -f {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
     cmds:
       - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
@@ -57,8 +55,6 @@ tasks:
   generate-patch:
     desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)
     sources: *schema-sources
-    status:
-      - test -f {{.PATCH_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.PATCH_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json
@@ -66,11 +62,100 @@ tasks:
   generate-reports:
     desc: Generate the JSON Schema for every --format json report
     sources: *schema-sources
-    status:
-      - test -f {{.REPORTS_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.REPORTS_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- reports > {{.REPORTS_SCHEMA_DIR}}/v1.json
+
+  generate-execution-record:
+    desc: Generate JSON Schema for execution records (ocx exec / package exec / launcher exec / launcher shim)
+    sources: *schema-sources
+    cmds:
+      - mkdir -p {{.EXECUTION_RECORD_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- execution-record > {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json
+
+  specs:refresh:
+    desc: >-
+      Re-fetch the vendored upstream spec artifacts at their pinned tags and
+      check them against the checksums in SOURCES.md. Fails when upstream moved
+      under a pin; rerun as `FORCE=1 task schema:specs:refresh` to accept the
+      new bytes and rewrite the recorded checksums.
+    cmds:
+      - |
+        set -euo pipefail
+        specs='{{.SPECS_DIR}}'
+        stage="$(mktemp -d)"
+        trap 'rm -rf "$stage"' EXIT
+        mkdir -p "$stage/oci" "$stage/in-toto"
+
+        curl -fsSL -o "$stage/oci/image-index-schema.json" \
+          'https://raw.githubusercontent.com/opencontainers/image-spec/{{.OCI_IMAGE_SPEC_TAG}}/schema/image-index-schema.json'
+        curl -fsSL -o "$stage/in-toto/resource_descriptor.proto" \
+          'https://raw.githubusercontent.com/in-toto/attestation/{{.IN_TOTO_ATTESTATION_TAG}}/protos/in_toto_attestation/v1/resource_descriptor.proto'
+
+        # The in-toto field list is generated from the reference implementation
+        # already pinned in test/uv.lock, not scraped from the proto text.
+        cd '{{.ROOT_DIR}}/test'
+        uv run python - > "$stage/in-toto/resource_descriptor.fields.json" <<'PY'
+        import importlib.metadata as metadata
+        import json
+
+        from in_toto_attestation.v1 import resource_descriptor_pb2 as resource_descriptor
+
+        print(
+            json.dumps(
+                {
+                    "package": "in-toto-attestation",
+                    "version": metadata.version("in-toto-attestation"),
+                    "message": "in_toto_attestation.v1.resource_descriptor_pb2.ResourceDescriptor",
+                    "fields": [
+                        {"name": field.name, "json_name": field.json_name, "type": field.type}
+                        for field in resource_descriptor.ResourceDescriptor.DESCRIPTOR.fields
+                    ],
+                },
+                indent=2,
+            )
+        )
+        PY
+        cd "$specs"
+
+        files='oci/image-index-schema.json in-toto/resource_descriptor.proto in-toto/resource_descriptor.fields.json'
+        sed -n '/sha256:begin/,/sha256:end/p' SOURCES.md | sed -e '/sha256:/d' -e '/^```/d' > "$stage/RECORDED"
+
+        if (cd "$stage" && sha256sum -c --status RECORDED); then
+          echo 'vendored specs are unchanged at their pinned tags'
+          exit 0
+        fi
+
+        if [ "${FORCE:-0}" != '1' ]; then
+          echo 'upstream moved under a pinned tag — refusing to overwrite the vendored copies' >&2
+          echo 'recorded:' >&2
+          sed 's/^/  /' "$stage/RECORDED" >&2
+          echo 'downloaded:' >&2
+          # shellcheck disable=SC2086
+          (cd "$stage" && sha256sum $files) | sed 's/^/  /' >&2
+          echo "rerun as 'FORCE=1 task schema:specs:refresh' to accept the new bytes" >&2
+          exit 1
+        fi
+
+        for file in $files; do
+          cat "$stage/$file" > "$file"
+        done
+        # shellcheck disable=SC2086
+        sha256sum $files > "$stage/NEW"
+        awk -v new="$stage/NEW" '
+          /sha256:begin/ {
+            print
+            print "```"
+            while ((getline line < new) > 0) print line
+            print "```"
+            skip = 1
+            next
+          }
+          /sha256:end/ { skip = 0 }
+          !skip { print }
+        ' SOURCES.md > "$stage/SOURCES.md"
+        cat "$stage/SOURCES.md" > SOURCES.md
+        echo 'vendored specs updated and SOURCES.md checksums rewritten'
 
   default:
     desc: Generate all schemas
@@ -81,3 +166,4 @@ tasks:
       - task: generate-project-lock
       - task: generate-patch
       - task: generate-reports
+      - task: generate-execution-record

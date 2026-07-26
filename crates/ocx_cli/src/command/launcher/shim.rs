@@ -58,13 +58,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
+use ocx_lib::launch::Launch;
 use ocx_lib::oci::{Identifier, PinnedIdentifier};
 use ocx_lib::package::metadata::BinaryName;
+use ocx_lib::package_manager::Arrival;
 use ocx_lib::package_manager::EnvScope;
 use ocx_lib::package_manager::error::{PackageErrorKind, ShimClaim};
 use ocx_lib::project::ProjectConfig;
-use ocx_lib::utility::child_process;
-use ocx_lib::{env, lazy, log, oci};
+use ocx_lib::record::{RecordInputs, Scope};
+use ocx_lib::{env, launch, lazy, log, oci};
 
 use crate::options::LazyReport;
 
@@ -97,12 +99,24 @@ impl LauncherShim {
         // Step 1 — both `argv0` legs, before anything downloads. An unclaimed
         // name must not be able to trigger a materialization, so the check runs
         // against the store's own claim set first.
-        let (argv0, args) = self
+        // The child's own arguments are `argv[1..]`, but they are never bound
+        // here: the launch seam derives them from the record's `argv`, so the
+        // record cannot name one argument list while the tool receives another.
+        let (argv0, _) = self
             .argv
             .split_first()
             .expect("clap `required = true, num_args = 1..` guarantees at least one argv element");
         let claimed = manager.claimed_shim_names(&self.identifier).await?;
         let name = validate_argv0(argv0, &self.identifier, &claimed).map_err(anyhow::Error::new)?;
+
+        // Fold `[records]` before the download, the same point the three sibling
+        // frames fold at: a malformed name template is a configuration error,
+        // and the operator should hear about it before a multi-hundred-megabyte
+        // transfer rather than after. Like `launcher exec` this frame has no
+        // flag tier — the shim wire ABI carries a pinned identifier and an argv,
+        // not options — so the sink comes from the config chain and the
+        // environment, exactly as that sibling resolves it.
+        let records = context.records(ocx_lib::record::RecordsOptions::default())?;
 
         // Step 2 — materialize. The report tier is resolved here, at download
         // time, from whatever project this process happens to stand in; the
@@ -110,16 +124,32 @@ impl LauncherShim {
         // zero bytes.
         let report = self.report(project_in_scope(&context).await.as_ref());
         let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-        let info = manager
+        let found = manager
             .materialize_deferred(&self.identifier, platform.clone(), report)
             .await?;
+        // The one frame where a lazy tool's content is downloaded, so the only
+        // place `resolution.autoInstalled` can truthfully report that event for
+        // a deferred tool. A second invocation finds the same package already in
+        // the store and records an empty set.
+        let auto_installed: Vec<Identifier> = match found.arrival {
+            Arrival::Pulled => vec![self.identifier.as_identifier().clone()],
+            Arrival::Cached => Vec::new(),
+        };
+        let packages = [Arc::new(found.info)];
 
         // Step 3 — compose the tool's CONSUMER-facing environment. `self_view`
         // is false, unlike `launcher exec`: that verb dispatches a package's own
         // entrypoint from inside the package, while this one resolves a name the
         // package publishes to the outside world.
-        let mut entries = manager
-            .resolve_env(&[Arc::new(info)], false, EnvScope::package_tier(), &platform)
+        //
+        // `resolve_env_with_attribution` rather than the attribution-dropping
+        // wrapper: the record names which package claimed each executable on
+        // `PATH`, and that derivation already exists here.
+        // The patch provenance is kept, not dropped: the record names every
+        // companion the site tier overlaid onto this composition, and this call
+        // is the only place that attribution exists.
+        let (mut entries, _, patch_companions, admitted) = manager
+            .resolve_env_with_attribution(&packages, false, EnvScope::package_tier(), &platform)
             .await?;
         // Same per-key list-separator agreement `ocx exec` and `ocx package exec`
         // settle before applying: this process composes the closure afresh, so
@@ -180,8 +210,43 @@ impl LauncherShim {
             ))));
         }
 
-        let error = child_process::exec(&resolved, args, process_env);
-        Err(anyhow::Error::from(error).context(format!("failed to run '{}'", resolved.display())))
+        // Resolved once above, then handed to both the record and the launch: a
+        // second resolution could disagree with the first and make the audit
+        // trail name a binary other than the one that ran.
+        let launch = Launch::recording(
+            process_env,
+            RecordInputs {
+                packages: &packages,
+                admitted: &admitted,
+                patch_companions: &patch_companions,
+                executable: &resolved,
+                store_root: context.file_structure().packages.root(),
+                shim_root: context.file_structure().shims.root(),
+                argv: &self.argv,
+                config: context.config_view(),
+                insecure_registries: context.insecure_hosts(),
+                // Already in memory: the snapshot is read once at `try_init` and
+                // identity-gated there, so naming it here costs no I/O.
+                managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
+                // Likewise read once at `try_init`, alongside the pins it
+                // describes.
+                patch_snapshot_digest: context.patch_snapshot_digest(),
+                platform: Some(&platform),
+                // `Env::new()` inherits this process's environment, which is the
+                // whole reason the `PATH` prune above is necessary.
+                clean_env: false,
+                auto_installed: &auto_installed,
+                scope: Scope::LauncherShim {
+                    requested: self.identifier.clone(),
+                },
+            },
+            &records,
+        )?;
+
+        // Replace this process with the tool on Unix (`execvp(2)`); on Windows
+        // spawn+wait then `process::exit`. Either way the seam diverges on
+        // success — only start-up failures fall through here.
+        Err(anyhow::Error::from(launch::exec(launch).await))
     }
 
     /// Resolves the `lazy-report` setting for this materialization.

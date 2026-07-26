@@ -32,13 +32,14 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::env;
+use ocx_lib::launch::{self, Launch};
 use ocx_lib::package::metadata::env::entry::Entry;
 use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
 use ocx_lib::project::{
     DEFAULT_GROUP, Origin, check_duplicate_selection, expand_all_keyword, lazy_mode_for_tool, resolve_selected_tools,
     select_tool_set,
 };
-use ocx_lib::utility::child_process;
+use ocx_lib::record::{PackageBinding, RecordInputs, Scope};
 
 use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
@@ -80,6 +81,9 @@ pub struct ToolchainExec {
     /// inside the same child resolves to the materialized binary directly.
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
+
+    #[clap(flatten)]
+    pub records: options::Records,
 
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
@@ -159,6 +163,12 @@ impl ToolchainExec {
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
 
+        // Fold `[records]` with `OCX_RECORDS_*` and this invocation's flags, for
+        // the same reason and at the same point: a malformed name template is a
+        // configuration error, and the operator should hear about it before any
+        // filesystem or network work rather than after the tools are installed.
+        let records = context.records(self.records.options())?;
+
         // ── Phase B: project context ──────────────────────────────────────
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
@@ -231,6 +241,12 @@ impl ToolchainExec {
             context.ui().warn(advisory.to_string());
         }
         let install_infos = composed.roots;
+        // Which tools this invocation materialized on the spot — half of the drift
+        // signal an execution record publishes. Reported by `compose_roots`
+        // itself, which is the only layer that sees the per-root `Cached`/`Pulled`
+        // outcome: `composer::Materialization` is the policy going in,
+        // `ComposeRoots::pulled` the answer coming out.
+        let auto_installed = composed.pulled;
         // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
         // opted-out bases get no companion overlay unless the tier is
         // system-required. `toolchain_exec.rs` does not need the patch boundary index.
@@ -256,10 +272,16 @@ impl ToolchainExec {
         // A toolchain consumer is a consumer of every tool it declares, so the
         // self view would compose a strictly worse toolchain. The flag belongs
         // on `ocx package exec` / `ocx package env`, and only there.
-        let mut entries = manager
-            .resolve_env_with_patch_boundary(&install_infos, false, scope, &host)
-            .await?
-            .0;
+        //
+        // `resolve_env_with_attribution` rather than the attribution-dropping
+        // wrapper: the record names which package claimed each executable on
+        // `PATH`, and that derivation already exists here.
+        // The patch provenance is kept, not dropped: the record names every
+        // companion the site tier overlaid onto this composition, and this call
+        // is the only place that attribution exists.
+        let (mut entries, _, patch_companions, admitted) = manager
+            .resolve_env_with_attribution(&install_infos, false, scope, &host)
+            .await?;
 
         // W-11: `entries` and `project_env` are disjoint `Vec`s (the latter is
         // ALSO forwarded raw over `OCX_ENV` below) — reconcile them together so
@@ -304,6 +326,12 @@ impl ToolchainExec {
         if let Some(patches) = forwarded_config.patches.as_mut() {
             patches.no_patches = forwarded_no_patches;
         }
+        // Hand the resolved sink down. The config and environment tiers a child
+        // re-derives for itself; the flag tier it cannot, so without this a
+        // generated launcher's re-entry (`ocx launcher exec`) would record
+        // somewhere else — or, since `apply_ocx_config` is set-or-remove,
+        // nowhere — and the entrypoint pair would lose its inner half.
+        forwarded_config.records = records.forwarded();
         // Composed entries + forwarded ocx config + forwarded stages 4-6, in the
         // one order that is correct — see `Env::apply_child_env`. `project_env`
         // (stages 4-6) is the forwarded slice, NOT the whole composed set: the
@@ -319,23 +347,94 @@ impl ToolchainExec {
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.
 
+        // Project-tier facts the record's `scope` block names. The lock's
+        // declaration hash is reused verbatim rather than recomputed: it is the
+        // canonicalization the project tier already defines, and re-deriving it
+        // would need the project config plus file I/O on the exec path.
+        let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
+        let declaration_digest = ocx_lib::oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
+        let bindings = project_bindings(&resolved, &install_infos);
+
         // clap enforces `last = true, num_args = 1.., required = true` on the
         // `argv` field — `self.argv` is always non-empty at this point.
-        let (command, args) = self
+        let (command, _) = self
             .argv
             .split_first()
             .expect("clap last=true + num_args=1.. + required=true guarantees non-empty argv");
 
-        let resolved = process_env.resolve_command(command);
+        // Resolved once, then handed to both the record and the launch: a second
+        // resolution could disagree with the first and make the audit trail name
+        // a binary other than the one that ran.
+        let executable = process_env.resolve_command(command);
+        let launch = Launch::recording(
+            process_env,
+            RecordInputs {
+                packages: &install_infos,
+                admitted: &admitted,
+                patch_companions: &patch_companions,
+                executable: &executable,
+                store_root: context.file_structure().packages.root(),
+                shim_root: context.file_structure().shims.root(),
+                argv: &self.argv,
+                config: context.config_view(),
+                insecure_registries: context.insecure_hosts(),
+                // Already in memory: the snapshot is read once at `try_init` and
+                // identity-gated there, so naming it here costs no I/O on the
+                // exec path.
+                managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
+                // Likewise read once at `try_init`, alongside the pins it
+                // describes.
+                patch_snapshot_digest: context.patch_snapshot_digest(),
+                platform: Some(&host),
+                clean_env: self.clean,
+                auto_installed: &auto_installed,
+                scope: Scope::Project {
+                    root: project_root,
+                    lock: ctx.lock_path.clone(),
+                    declaration_digest,
+                    groups: expanded,
+                    bindings,
+                },
+            },
+            &records,
+        )?;
 
         // Replace this process with the child on Unix (PID inherited via
         // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
-        // `CreateProcess` has no exec equivalent. Either way the helper
-        // diverges on success — only start-up failures fall through to
-        // the error-wrapping path below.
-        let err = child_process::exec(&resolved, args, process_env);
-        Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
+        // `CreateProcess` has no exec equivalent. Either way the seam diverges
+        // on success — only start-up failures fall through to the
+        // error-wrapping path below.
+        Err(anyhow::Error::from(launch::exec(launch).await))
     }
+}
+
+/// Pair each root package with the `ocx.toml` binding it was selected under.
+///
+/// `compose_roots` returns one root per request in request order, and under
+/// `Materialization::Install` every request yields one, so the two slices line
+/// up index-for-index — the pinned identifier comes from the composition rather
+/// than from the selection, because only the former is digest-complete.
+///
+/// A tool selected as a positional rather than through a group carries no group
+/// name and is skipped: the record emits `sh.ocx.binding` and `sh.ocx.group`
+/// together or not at all. `ocx exec` passes no positionals to `select_tool_set`,
+/// so today the skip is unreachable.
+fn project_bindings(
+    resolved: &[ocx_lib::project::ResolvedTool],
+    install_infos: &[std::sync::Arc<ocx_lib::package::install_info::InstallInfo>],
+) -> Vec<PackageBinding> {
+    resolved
+        .iter()
+        .zip(install_infos)
+        .filter_map(|(tool, info)| match &tool.origin {
+            Origin::Group(group) => Some(PackageBinding {
+                binding: tool.binding.clone(),
+                group: group.clone(),
+                package: info.identifier().clone(),
+            }),
+            Origin::Explicit => None,
+        })
+        .collect()
 }
 
 /// Settles every `list` entry's separator across `entries` (composed, applied

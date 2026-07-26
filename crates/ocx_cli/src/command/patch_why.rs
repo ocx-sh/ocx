@@ -42,9 +42,9 @@ impl PatchWhyArgs {
         let manager = context.manager();
 
         let info = manager
-            .find_or_install_all(vec![base_id.clone()], platform.clone(), context.concurrency())
+            .find_or_install_all(std::slice::from_ref(&base_id), platform.clone(), context.concurrency())
             .await?;
-        let info: Vec<Arc<InstallInfo>> = info.into_iter().map(Arc::new).collect();
+        let info: Vec<Arc<InstallInfo>> = info.into_iter().map(|found| Arc::new(found.info)).collect();
 
         // ── Step 2: Reuse the existing provenance resolution — no new
         // resolution path. ──

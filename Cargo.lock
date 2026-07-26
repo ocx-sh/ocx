@@ -3727,6 +3727,7 @@ dependencies = [
  "lzma-rust2",
  "oci-client",
  "p256",
+ "packageurl",
  "pem",
  "percent-encoding",
  "regex",
@@ -3892,6 +3893,16 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "packageurl"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d33fa1a190c3c9024f21b82e6b30f94137d9c1bf25071e2ab2ba13020135fbaf"
+dependencies = [
+ "percent-encoding",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

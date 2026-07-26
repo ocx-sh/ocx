@@ -190,8 +190,15 @@ pub fn watch_paths(
     match recorded_tiers {
         Some(recorded) => paths.extend(recorded.iter().cloned()),
         None => {
+            // The system tier is unconditional, matching what the loader
+            // actually reads: `OCX_NO_CONFIG` prunes ambient configuration, not
+            // operator policy, so `/etc/ocx/config.toml` still loads for its
+            // system-locked sections and still seeds `config_tier_paths`. An
+            // operator adding a lock there changes the resolved config, and a
+            // cached `inert` verdict that does not watch the file cannot expire
+            // on it.
+            paths.push(crate::config::loader::ConfigLoader::system_path());
             if !crate::env::flag("OCX_NO_CONFIG", false) {
-                paths.push(crate::config::loader::ConfigLoader::system_path());
                 paths.extend(crate::config::loader::ConfigLoader::user_path());
                 paths.extend(crate::config::loader::ConfigLoader::home_path());
             }
@@ -594,6 +601,42 @@ mod watch_path_tests {
             !derived.contains(&explicit),
             "re-derivation structurally cannot see --config - that is why the list is recorded"
         );
+    }
+
+    /// The re-derive fallback under `OCX_NO_CONFIG=1` watches the system tier
+    /// and nothing below it — the same narrowing the loader records.
+    ///
+    /// Both halves, because either alone is half a proof: the system tier must
+    /// be present (it still loads, for its locked sections) *and* the user /
+    /// `$OCX_HOME` tiers must be absent (the flag genuinely prunes those). A
+    /// fallback that dropped all three would leave an `inert` verdict
+    /// unexpirable by an operator lock added at SYSTEM scope.
+    ///
+    /// Red state: put `system_path()` back inside the `if`, and the first
+    /// assertion fails.
+    #[test]
+    fn watch_paths_under_no_config_re_derive_the_system_tier_and_nothing_below_it() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_CONFIG", "1");
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
+
+        let paths = watch_paths(&file_structure, None, None, None);
+
+        assert!(
+            paths.contains(&crate::config::loader::ConfigLoader::system_path()),
+            "the system tier still loads under OCX_NO_CONFIG, so it stays watched; got: {paths:?}"
+        );
+        for pruned in crate::config::loader::ConfigLoader::user_path()
+            .into_iter()
+            .chain(crate::config::loader::ConfigLoader::home_path())
+        {
+            assert!(
+                !paths.contains(&pruned),
+                "OCX_NO_CONFIG prunes {} from the load, so watching it would be watching a file \
+                 this invocation never read",
+                pruned.display()
+            );
+        }
     }
 
     /// A-13 member 9 — the consent stamp joins the watch set, which is what

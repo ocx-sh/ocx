@@ -1,0 +1,31 @@
+# subset of elastic/ecs v9.1.0 schemas/process.yml
+- name: process
+  reusable:
+    top_level: true
+    expected:
+      - at: process
+        as: parent
+        short_override: Information about the parent process.
+  fields:
+    - name: pid
+      format: string
+      level: core
+      type: long
+      description: Process id.
+      example: 4242
+    - name: executable
+      level: extended
+      type: keyword
+      description: Absolute path to the process executable.
+      example: /usr/bin/ssh
+    - name: working_directory
+      level: extended
+      type: keyword
+      example: /home/alice
+      description: The working directory of the process.
+    - name: args
+      level: extended
+      type: keyword
+      short: Array of process arguments.
+      normalize:
+        - array

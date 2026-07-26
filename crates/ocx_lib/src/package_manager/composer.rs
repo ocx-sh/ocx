@@ -54,7 +54,7 @@ use crate::{
 use super::tasks::common;
 use super::tasks::common::ClosureNode;
 use super::{
-    LazyAdvisory, PackageManager,
+    Arrival, LazyAdvisory, PackageManager,
     concurrency::{Concurrency, acquire_permit},
 };
 
@@ -1223,6 +1223,20 @@ pub struct ComposeRoots {
     /// Requests dropped under [`Materialization::LocalOnly`] (S-009). Empty
     /// under every other policy, where a miss is a hard error.
     pub omitted: Vec<ComposeOmission>,
+
+    /// Requests this invocation materialized on the spot, in request order —
+    /// the drift signal an execution record publishes as
+    /// `resolution.autoInstalled`.
+    ///
+    /// Populated by the [`Materialization::Install`] arm only, and empty under
+    /// every other policy because none of them can pull: `Symlink` resolves
+    /// existing installs, `LocalOnly` probes and warn-and-omits on a miss, and
+    /// the deferred half generates a shim tree without downloading content.
+    ///
+    /// A plain list rather than an outcome aligned with [`Self::roots`]: the
+    /// only consumer asks "which of these did this invocation fetch", and an
+    /// aligned vector would carry a `Cached` entry per root that nobody reads.
+    pub pulled: Vec<oci::Identifier>,
 }
 
 impl PackageManager {
@@ -1272,6 +1286,7 @@ impl PackageManager {
         let mut slots: Vec<Option<Arc<InstallInfo>>> = (0..requests.len()).map(|_| None).collect();
         let mut advisories: Vec<LazyAdvisory> = Vec::new();
         let mut omitted: Vec<ComposeOmission> = Vec::new();
+        let mut pulled: Vec<oci::Identifier> = Vec::new();
 
         let eager: Vec<(usize, oci::Identifier)> = requests
             .iter()
@@ -1286,10 +1301,13 @@ impl PackageManager {
         match &materialization {
             Materialization::Install => {
                 let found = self
-                    .find_or_install_all(identifiers, platform.clone(), concurrency)
+                    .find_or_install_all(&identifiers, platform.clone(), concurrency)
                     .await?;
-                for ((index, _), info) in eager.iter().zip(found) {
-                    slots[*index] = Some(Arc::new(info));
+                for ((index, identifier), found) in eager.iter().zip(found) {
+                    if found.arrival == Arrival::Pulled {
+                        pulled.push(identifier.clone());
+                    }
+                    slots[*index] = Some(Arc::new(found.info));
                 }
             }
             Materialization::Symlink(kind) => {
@@ -1380,6 +1398,7 @@ impl PackageManager {
             roots: slots.into_iter().flatten().collect(),
             advisories,
             omitted,
+            pulled,
         })
     }
 
@@ -5837,24 +5856,31 @@ mod tests {
     // ── C-015 (d) / S-009: what `compose_roots` reports ─────────────────────
 
     /// The shape of `compose_roots`' return, pinned at compile time: the three
-    /// channels C-015 (d) and S-009 need are `roots`, `advisories`, `omitted`.
+    /// channels C-015 (d) and S-009 need are `roots`, `advisories`, `omitted`,
+    /// plus `pulled` for the execution record's `autoInstalled`.
     /// Referenced, never run.
     #[test]
-    fn compose_roots_returns_roots_advisories_and_omissions() {
+    fn compose_roots_returns_roots_advisories_omissions_and_pulls() {
         async fn signature_binding(
             manager: &PackageManager,
             requests: &[ComposeRequest],
             platform: &Platform,
-        ) -> (Vec<Arc<InstallInfo>>, Vec<LazyAdvisory>, Vec<ComposeOmission>) {
+        ) -> (
+            Vec<Arc<InstallInfo>>,
+            Vec<LazyAdvisory>,
+            Vec<ComposeOmission>,
+            Vec<crate::oci::Identifier>,
+        ) {
             let ComposeRoots {
                 roots,
                 advisories,
                 omitted,
+                pulled,
             } = manager
                 .compose_roots(requests, platform, Materialization::LocalOnly, Concurrency::default())
                 .await
                 .expect("compose_roots");
-            (roots, advisories, omitted)
+            (roots, advisories, omitted, pulled)
         }
 
         let _ = signature_binding;

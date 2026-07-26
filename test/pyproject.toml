@@ -46,6 +46,10 @@ tmp_path_retention_policy = "failed"
 # Python tool in this directory runs.
 
 [dependency-groups]
+# `jsonschema` binds an emitted execution record to the schema `ocx_schema`
+# publishes (test_execution_records.py). A hand-rolled subset check would be a
+# third description of the format, free to go stale on its own — which is the
+# drift the binding exists to close.
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.5",
@@ -55,4 +59,8 @@ dev = [
     "cryptography>=42",
     "pyjwt[crypto]>=2.8",
     "ruff>=0.16",
+    "jsonschema>=4.23",
+    "in-toto-attestation>=0.9.3",
+    "packageurl-python>=0.17.6",
+    "pyyaml>=6.0.3",
 ]

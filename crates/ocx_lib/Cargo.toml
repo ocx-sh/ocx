@@ -27,6 +27,7 @@ __testing = []
 
 [dependencies]
 schemars.workspace = true
+packageurl.workspace = true
 tokio.workspace = true
 
 oci-client.workspace = true

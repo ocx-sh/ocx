@@ -19,6 +19,8 @@ Config files are in [TOML][toml] format and are optional. OCX works without any 
 
 Missing files are silently skipped.
 
+**An unreadable *system* file is not.** `/etc/ocx/config.toml` is where operator policy lives — the locked sections no lower tier can override — so a system file that exists and cannot be consulted (it is a symlink, a permission error, a stale mount) aborts the invocation with exit 78 rather than being skipped. Dropping it would drop every locked section along with it, on every invocation, behind a warning. The user and [`$OCX_HOME`][env-ocx-home] tiers stay best-effort: an unreadable candidate there is skipped with a warning and discovery continues. Absence is still absence at every tier, system included.
+
 ### Explicit additions {#file-locations-explicit}
 
 Two mechanisms add a file *on top of* the discovery chain — they do not replace it. Missing files are an error in this case (explicit paths must exist).
@@ -484,6 +486,110 @@ honor `no-patches`. It composes the same companion overlay [`ocx package env`][c
 would for the same base.
 
 See [Patch Opt-Out Scope][env-composition-patch-opt-out] for the full forwarding mechanics.
+
+### `[records]` section {#keys-records}
+
+The `[records]` tier turns on the [exec-time resolution record][execution-records-ref] — one
+JSON file written to an operator-designated directory immediately before OCX starts a tool,
+naming the exact package digests that composed the environment. Where [`[patches]`](#keys-patches)
+adapts what environment a tool runs in, `[records]` answers, after the fact, exactly what ran.
+Absent at every tier, nothing is written and the exec path gains no I/O.
+
+```toml
+[records]
+dir      = "/var/log/ocx/records"
+name     = "{time}-{pid}-{rand}.json"
+required = true
+```
+
+See the [Execution Records reference][execution-records-ref] for the full record format, the
+sink's no-clobber write behavior, and a working policy-check example.
+
+#### `dir` {#keys-records-dir}
+
+**Type**: string (directory path)
+**Default**: unset — recording is off
+**Overridden by**: [`OCX_RECORDS_DIR`][env-ocx-records-dir], then `--records-dir` on
+[`ocx exec`][cmd-run] / [`ocx package exec`][cmd-package-exec]
+
+The sink directory. Always a directory, never a single file — see
+[why the sink is a directory][execution-records-sink].
+
+```toml
+[records]
+dir = "/var/log/ocx/records"
+```
+
+**OCX does not create this directory.** It must already exist and be writable before the first
+record is written, or the invocation fails with the same I/O error a permissions problem would
+produce. Create it out of band — a provisioning step, a container image layer, a `mkdir -p` in
+the job that sets `dir` — before pointing OCX at it.
+
+#### `name` {#keys-records-name}
+
+**Type**: string (filename template)
+**Default**: `"{time}-{pid}-{rand}.json"`
+**Overridden by**: [`OCX_RECORDS_NAME`][env-ocx-records-name], then `--records-name`
+
+Filename template over a closed placeholder set (`{time}`, `{pid}`, `{rand}`, `{host}`) — see
+[Filename grammar][execution-records-filename] for the full expansion table. An unknown
+placeholder is a config error (exit 78) at resolve time, never a silently-unexpanded literal.
+
+#### `required` {#keys-records-required}
+
+**Type**: boolean
+**Default**: `false` when no [SYSTEM lock](#keys-records-scopes) applies; `true` when one does
+**Config-file only** — there is no `OCX_RECORDS_REQUIRED` and no `--records-required`.
+Recording posture is an operator decision, not a per-invocation one.
+
+Fail posture when a record cannot be written.
+
+| Value | Behavior |
+|-------|----------|
+| `true` | The invocation aborts before the child starts — exit 74 for an unwritable sink, exit 78 when the sink resolves through a symlink. |
+| `false` (default, unlocked) | OCX prints a warning to stderr; the child still runs. |
+
+Setting `required = true` is not reserved for the SYSTEM scope — it is that scope's *default*
+when a `[records]` block is present there, but any tier, including an operator-published
+[`[managed]`](#keys-managed) payload, may set it explicitly. A managed configuration asserting
+the strictest posture is the intended use of that tier, not a special case requiring its own
+error path.
+
+`required = true` needs a [`dir`](#keys-records-dir) to be reachable at some tier. Writing it
+alone is a configuration error (exit 78) rather than recording turned off — a block saying only
+"recording is mandatory" must not resolve to a policy with nowhere to write. A SYSTEM-scope
+block with neither key is the one exception: that is an operator locking recording *off* for the
+host, and it resolves cleanly.
+
+A `true` posture also refuses the maintainer-preview exemption: [`ocx package test`][cmd-package-test]
+and [`ocx patch test`][cmd-patch-test] normally write no record, but under a fail-closed policy
+they exit 74 instead of running unrecorded. See
+[the exemption's bound][execution-records-frames].
+
+#### Scopes and lock {#keys-records-scopes}
+
+A `[records]` section declared at the system scope (`/etc/ocx/config.toml`) locks the **whole
+block** — `dir`, `name`, and `required` together — rather than field by field, unlike
+[`[mirrors]`'s per-role lock](#keys-mirrors-system-lock) or
+[`[patches]`'s system-required posture](#keys-patches-scopes). A collector downstream depends
+on the sink location *and* the filename pattern together, so a partial override would break
+collection exactly as surely as redirecting `dir` alone. Once locked, no lower config tier,
+`OCX_RECORDS_DIR`/`OCX_RECORDS_NAME`, or `--records-dir`/`--records-name` can change any of the
+three fields.
+
+Without a system-scope declaration, `dir` and `name` merge through the ordinary highest-wins
+fold — config file → environment variable → CLI flag — and `required` merges across config
+tiers only.
+
+A system-scope lock is not ambient configuration a caller can step around: it survives
+[`OCX_NO_CONFIG=1`][env-no-config], which prunes the discovered user/`$OCX_HOME` tiers and the
+`[managed]` tier but still loads `/etc/ocx/config.toml`'s locked sections. See
+[`OCX_NO_CONFIG`][env-no-config] for the full interaction.
+
+It also survives a system file that cannot be read: an unreadable `/etc/ocx/config.toml` aborts
+the invocation rather than being skipped like an unreadable user-tier one, so a locked
+`[records]` policy cannot be dropped by a symlink or a stale mount — see
+[File Locations](#file-locations).
 
 ### `[managed]` section {#keys-managed}
 
@@ -1371,9 +1477,11 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] | `[managed] source` | Invocation-only override, never written back; `=""` is treated as unset |
 | [`OCX_LAZY_MODE`][env-ocx-lazy-mode] | toolchain-level `lazy-mode` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the five-level ladder — `--lazy-mode`, `[package."<id>"]`, and `[group.<name>]` all outrank both the config key and this variable; not forwarded to child processes |
 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] | toolchain-level `lazy-report` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the four-level ladder; not forwarded to child processes |
+| [`OCX_RECORDS_DIR`][env-ocx-records-dir] | `[records] dir` | Env var wins when both are set; a SYSTEM-scope [`[records]`][config-records] declaration locks the whole section and this variable has no effect once locked |
+| [`OCX_RECORDS_NAME`][env-ocx-records-name] | `[records] name` | Same SYSTEM-scope lock as `dir` |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
-| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read |
+| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read. A SYSTEM-scope [`[records]`][config-records] lock survives it — the system file still loads, filtered to its locked sections |
 | [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] | None | Kill switch for the [`[managed]`](#keys-managed) background refresh tick only; explicit `ocx config update`, and the setup-time re-sync `ocx self setup` / `ocx config setup` run against an already-adopted seed, still work |
 | [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
@@ -1394,6 +1502,7 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 | `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG` env var pointed at a non-config file (e.g. an archive or binary). |
 | `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
 | `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG`][env-config] must point to a regular, readable file. |
+| `error: cannot read system config file /etc/ocx/config.toml; it carries operator policy and is never skipped` | The system tier exists but cannot be consulted — it is a symlink, or stat fails for any reason other than absence | Point `/etc/ocx/config.toml` at a regular file (copy the fleet file in rather than linking to it), or remove it. Unlike the user tiers, this one is never skipped — see [File Locations](#file-locations). |
 
 ## Project Configuration — `ocx.toml` {#project-config}
 
@@ -1530,6 +1639,7 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
 | `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v1.json`][schema-reports] |
+| Execution record (`[records]` sink) | [`https://ocx.sh/schemas/execution-record/v1.json`][schema-execution-record] |
 
 `ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
 
@@ -1580,6 +1690,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
 [schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json
 
 <!-- in-depth -->
 [config-indepth]: ../in-depth/configuration.md
@@ -1617,6 +1728,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-package-sign]: ./command-line.md#package-sign
 [cmd-package-verify-attestations]: ./command-line.md#package-verify-attestations
 [exit-codes]: ./command-line.md#exit-codes
+[cmd-package-test]: ./command-line.md#package-test
+[cmd-patch-test]: ./command-line.md#patch-test
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home
@@ -1639,6 +1752,14 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-consent-namespaces]: ./environment.md#ocx-consent-namespaces
 [env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
 [env-external-proxies]: ./environment.md#external-proxies
+[env-ocx-records-dir]: ./environment.md#ocx-records-dir
+[env-ocx-records-name]: ./environment.md#ocx-records-name
+
+<!-- execution records -->
+[execution-records-ref]: ./execution-records.md
+[execution-records-sink]: ./execution-records.md#execution-records-sink
+[execution-records-filename]: ./execution-records.md#execution-records-filename
+[execution-records-frames]: ./execution-records.md#execution-records-frames
 
 <!-- user guide -->
 [user-guide-managed-config]: ../user-guide.md#managed-config

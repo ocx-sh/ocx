@@ -179,10 +179,16 @@ impl PatchSnapshot {
         self.write_json(path).await
     }
 
-    /// Read a snapshot from the given path.
+    /// Read a snapshot from the given path, with the digest of the bytes it was
+    /// parsed from.
     ///
     /// Returns `Ok(None)` when the file is absent so callers can fall back to
     /// live lookups without treating a missing snapshot as an error.
+    ///
+    /// The digest rides along rather than being a second call the caller makes,
+    /// because it is the identity of *this* parse: an execution record naming a
+    /// snapshot digest that a later read produced would describe a file the
+    /// invocation never composed against.
     ///
     /// # Errors
     ///
@@ -190,7 +196,7 @@ impl PatchSnapshot {
     /// carries a `version` other than [`SnapshotVersion::CURRENT`] — a
     /// snapshot is derived state, so the remedy is to rewrite it with
     /// `ocx patch freeze` rather than to keep a reader for the older shape.
-    pub async fn read(path: &Path) -> crate::Result<Option<Self>> {
+    pub async fn read(path: &Path) -> crate::Result<Option<(Self, oci::Digest)>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             // Absent file is not an error — fall back to live lookups.
@@ -213,7 +219,8 @@ impl PatchSnapshot {
             .into());
         }
 
-        Ok(Some(serde_json::from_slice(&bytes)?))
+        let digest = oci::Algorithm::Sha256.hash(&bytes);
+        Ok(Some((serde_json::from_slice(&bytes)?, digest)))
     }
 }
 
@@ -288,11 +295,18 @@ mod spec_tests {
         // write() delegates to SerdeExt::write_json — already implemented.
         original.write(&path).await.expect("write must succeed");
 
-        let restored = PatchSnapshot::read(&path)
+        let (restored, digest) = PatchSnapshot::read(&path)
             .await
             .expect("read must not error")
             .expect("file exists; must return Some");
 
+        assert_eq!(
+            digest,
+            Digest::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                std::fs::read(&path).expect("the file just written")
+            ))),
+            "the reported digest must be of the snapshot file's own bytes"
+        );
         assert_eq!(original.version, restored.version, "version must round-trip");
         assert_eq!(
             original.companions, restored.companions,

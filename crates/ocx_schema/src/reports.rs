@@ -153,7 +153,15 @@ pub fn reports_schema() -> String {
 /// Walks the whole document: any object carrying `properties` has its own
 /// `required` corrected, then every child is visited so nested and inline
 /// object schemas are corrected too.
-fn normalize(node: &mut Value) {
+///
+/// Not report-specific despite living here: the correction is driven entirely
+/// by the [`ABSENT_WHEN_NONE`] marker each `skip_serializing_if` field carries,
+/// so it applies to any schema generated from a type ocx **serializes**. The
+/// execution record is the second such family and uses it through
+/// [`crate::schema_for`]. It must NOT be run over the schemas ocx *reads*
+/// (`config`, `metadata`, `project`) — there an absent key is an input the
+/// deserializer defaults, and `required` already means the right thing.
+pub fn normalize(node: &mut Value) {
     match node {
         Value::Array(items) => {
             for item in items {
