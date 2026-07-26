@@ -8,6 +8,25 @@ use super::Client;
 use super::MirrorMap;
 use super::native_transport::NativeTransport;
 
+/// Largest upload request body a registry is known to accept.
+///
+/// GHCR rejects any single blob-upload request whose body exceeds 4 MiB with
+/// `416 REQUESTED_RANGE_NOT_SATISFIABLE` — "the request body is too large and
+/// exceeds the maximum permissible limit of 4.00MiB". Every chunk ocx sends must
+/// stay at or under this, or layers above the cap become unpublishable on GHCR.
+pub(crate) const MAX_UPLOAD_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Body size of one chunked-push `PATCH`.
+///
+/// A blob at or under this goes up in a single request; anything larger is split
+/// into this many bytes per `PATCH`, each carrying its own `Content-Range`, with
+/// the whole-blob digest committed by the final `PUT`. Held below
+/// [`MAX_UPLOAD_REQUEST_BYTES`] with a 1 MiB margin so transfer framing cannot
+/// push a request over the registry's cap. Independent of the 128 KiB
+/// progress-frame size in `native_transport::progress_body_stream` — that governs
+/// progress granularity, this governs request size.
+pub(crate) const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024;
+
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
@@ -21,11 +40,7 @@ impl ClientBuilder {
         ClientBuilder {
             auth: auth::Auth::default(),
             config: oci::native::ClientConfig {
-                // 16 MiB PATCH bodies keep chunked-push round-trips low for large
-                // package blobs (the fork default is 4 MiB). Independent of the
-                // 128 KiB progress-frame size in `native_transport::progress_body_stream`
-                // — that governs progress granularity, this governs request count.
-                push_chunk_size: 16 * 1024 * 1024,
+                push_chunk_size: PUSH_CHUNK_SIZE,
                 // CA roots are seeded by the fork's `ClientConfig::default()`
                 // (self-contained on hosts with no system trust store), inherited
                 // here via `..Default::default()`. Single source of truth: the fork.
@@ -413,6 +428,347 @@ mod tests {
         assert!(
             client.mirrors.get("quay.io").is_some(),
             "the registry-bearing quay.io entry must appear in Client.mirrors"
+        );
+    }
+}
+
+/// Chunked blob upload — wire-shape proof against a stub registry.
+///
+/// The registries that reject an oversized upload request (GHCR: 4 MiB) cannot be
+/// stood up locally, and the `registry:2` test container imposes no cap at all, so
+/// the guarantee is asserted on the request shape ocx emits rather than on a live
+/// rejection: how many `PATCH`es a blob is split into, what `Content-Range` each
+/// carries, and that the committing `PUT` names the whole-blob digest.
+#[cfg(test)]
+mod push_wire_tests {
+    use super::*;
+    use crate::oci::client::transport::{OciTransport as _, no_progress};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        method: String,
+        target: String,
+        content_range: Option<String>,
+        body_len: usize,
+    }
+
+    /// Minimal HTTP/1.1 stub of an OCI blob-upload session.
+    ///
+    /// Speaks only the four requests a push makes — `HEAD` (blob absent), `POST`
+    /// (open session), `PATCH` (one chunk), `PUT` (commit) — and records each one.
+    /// Answers every `PATCH` with a `Range` header reporting cumulative progress,
+    /// which is what a real registry does and what the client is required to trust
+    /// over its own offsets.
+    struct StubRegistry {
+        address: String,
+        recorded: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    impl StubRegistry {
+        /// `accepted_first_chunk` overrides the byte count reported for the first
+        /// `PATCH`, simulating a registry that stored less than it was sent.
+        async fn start(accepted_first_chunk: Option<usize>) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+
+            let log = Arc::clone(&recorded);
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    let log = Arc::clone(&log);
+                    tokio::spawn(async move {
+                        serve_connection(socket, log, accepted_first_chunk).await;
+                    });
+                }
+            });
+
+            Self { address, recorded }
+        }
+
+        fn recorded(&self) -> Vec<RecordedRequest> {
+            self.recorded.lock().unwrap().clone()
+        }
+
+        fn patches(&self) -> Vec<RecordedRequest> {
+            self.recorded().into_iter().filter(|r| r.method == "PATCH").collect()
+        }
+
+        fn puts(&self) -> Vec<RecordedRequest> {
+            self.recorded().into_iter().filter(|r| r.method == "PUT").collect()
+        }
+    }
+
+    async fn serve_connection(
+        socket: tokio::net::TcpStream,
+        recorded: Arc<Mutex<Vec<RecordedRequest>>>,
+        accepted_first_chunk: Option<usize>,
+    ) {
+        let (read_half, mut write_half) = socket.into_split();
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let mut stored: usize = 0;
+        let mut patch_count: usize = 0;
+
+        loop {
+            let mut request_line = String::new();
+            match reader.read_line(&mut request_line).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let mut parts = request_line.split_whitespace();
+            let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+                return;
+            };
+            let (method, target) = (method.to_string(), target.to_string());
+
+            let mut content_length = 0usize;
+            let mut chunked = false;
+            let mut content_range = None;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let header = header.trim_end();
+                if header.is_empty() {
+                    break;
+                }
+                let Some((name, value)) = header.split_once(':') else {
+                    continue;
+                };
+                let value = value.trim();
+                match name.to_ascii_lowercase().as_str() {
+                    "content-length" => content_length = value.parse().unwrap_or(0),
+                    "transfer-encoding" if value.eq_ignore_ascii_case("chunked") => chunked = true,
+                    "content-range" => content_range = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+
+            let body_len = if chunked {
+                read_chunked_body(&mut reader).await
+            } else {
+                let mut body = vec![0u8; content_length];
+                reader.read_exact(&mut body).await.unwrap();
+                content_length
+            };
+
+            recorded.lock().unwrap().push(RecordedRequest {
+                method: method.clone(),
+                target: target.clone(),
+                content_range,
+                body_len,
+            });
+
+            let response = match method.as_str() {
+                // Deliberately a *relative* Location — a registry may answer either
+                // way, and the client must resolve it against the request host.
+                "POST" => {
+                    "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nContent-Length: 0\r\n\r\n"
+                        .to_string()
+                }
+                "PATCH" => {
+                    stored += body_len;
+                    patch_count += 1;
+                    let reported = match accepted_first_chunk {
+                        Some(accepted) if patch_count == 1 => accepted,
+                        _ => stored,
+                    };
+                    format!(
+                        "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nRange: 0-{}\r\nContent-Length: 0\r\n\r\n",
+                        reported.saturating_sub(1)
+                    )
+                }
+                "PUT" => format!("HTTP/1.1 201 Created\r\nLocation: {target}\r\nContent-Length: 0\r\n\r\n"),
+                // HEAD (blob_exists) and anything else: not present.
+                _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
+            };
+            if write_half.write_all(response.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn read_chunked_body(reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>) -> usize {
+        let mut total = 0usize;
+        loop {
+            let mut size_line = String::new();
+            if reader.read_line(&mut size_line).await.unwrap_or(0) == 0 {
+                return total;
+            }
+            let size_field = size_line.trim().split(';').next().unwrap_or("0");
+            let size = usize::from_str_radix(size_field, 16).unwrap_or(0);
+            if size == 0 {
+                // Consume the terminating CRLF of the last-chunk marker.
+                let mut trailer = String::new();
+                let _ = reader.read_line(&mut trailer).await;
+                return total;
+            }
+            let mut chunk = vec![0u8; size + 2];
+            reader.read_exact(&mut chunk).await.unwrap();
+            total += size;
+        }
+    }
+
+    /// The stub's repository reference, built by parsing rather than by the
+    /// direct constructors: those are seam-restricted to the mirror-routing files
+    /// (`native_reference_direct_construction_restricted_to_seams`), and a stub
+    /// fixture is not a new read path.
+    fn stub_image(stub: &StubRegistry) -> oci::native::Reference {
+        format!("{}/test/blob:latest", stub.address).parse().unwrap()
+    }
+
+    fn sha256_digest(data: &[u8]) -> crate::oci::Digest {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        crate::oci::Digest::Sha256(hex::encode(hasher.finalize()))
+    }
+
+    /// Pushes through the transport the production [`ClientBuilder`] builds, so the
+    /// shipped `push_chunk_size` — not a value the test picked — drives the wire.
+    async fn push_through_production_client(
+        stub: &StubRegistry,
+        data: Vec<u8>,
+    ) -> super::super::transport::Result<String> {
+        let config = ClientBuilder::new()
+            .plain_http_registries(vec![stub.address.clone()])
+            .config;
+        let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
+        let image = stub_image(stub);
+        let digest = sha256_digest(&data);
+        transport.push_blob(&image, data, &digest, no_progress()).await
+    }
+
+    /// The shipped chunk size must never exceed what the strictest known registry
+    /// accepts in one request. A "raise it for throughput" commit that walks past
+    /// GHCR's cap re-breaks every layer over 4 MiB — this is the tripwire.
+    #[test]
+    fn shipped_chunk_size_stays_within_the_registry_request_cap() {
+        let configured = ClientBuilder::new().config.push_chunk_size;
+        assert!(
+            configured > 0,
+            "a zero chunk size would never terminate the upload loop"
+        );
+        assert!(
+            configured <= MAX_UPLOAD_REQUEST_BYTES,
+            "push_chunk_size {configured} exceeds the {MAX_UPLOAD_REQUEST_BYTES}-byte per-request cap GHCR enforces"
+        );
+    }
+
+    /// A blob larger than the chunk size goes up as several `PATCH`es whose
+    /// `Content-Range` values tile the blob exactly once, followed by one `PUT`
+    /// carrying the digest of the *whole* blob.
+    #[tokio::test]
+    async fn blob_over_the_chunk_size_uploads_as_contiguous_chunks() {
+        let stub = StubRegistry::start(None).await;
+        let data: Vec<u8> = (0..PUSH_CHUNK_SIZE * 2 + 1024).map(|i| (i % 251) as u8).collect();
+        // The digest travels as a query parameter, so `:` arrives percent-encoded —
+        // match on the hex, which is unambiguous either way.
+        let expected_digest = sha256_digest(&data).hex().to_string();
+        let total = data.len();
+
+        push_through_production_client(&stub, data).await.unwrap();
+
+        let patches = stub.patches();
+        assert_eq!(
+            patches.len(),
+            3,
+            "a blob of {total} bytes must be split into 3 chunks, got {patches:?}"
+        );
+
+        let mut next_start = 0usize;
+        for patch in &patches {
+            let range = patch
+                .content_range
+                .as_deref()
+                .expect("every chunk PATCH must carry Content-Range");
+            let (start, end) = range.split_once('-').expect("Content-Range must be `start-end`");
+            let (start, end) = (start.parse::<usize>().unwrap(), end.parse::<usize>().unwrap());
+            assert_eq!(
+                start, next_start,
+                "chunk ranges must be contiguous, got {range} after {next_start}"
+            );
+            assert_eq!(
+                end - start + 1,
+                patch.body_len,
+                "Content-Range {range} must describe exactly the {} bytes sent",
+                patch.body_len
+            );
+            assert!(
+                patch.body_len <= MAX_UPLOAD_REQUEST_BYTES,
+                "a {}-byte request body would be rejected by GHCR",
+                patch.body_len
+            );
+            next_start = end + 1;
+        }
+        assert_eq!(next_start, total, "the chunks must cover the whole blob exactly once");
+
+        let puts = stub.puts();
+        assert_eq!(puts.len(), 1, "the session must be committed by exactly one PUT");
+        assert!(
+            puts[0].target.contains(&expected_digest),
+            "the committing PUT must name the whole-blob digest {expected_digest}, got {}",
+            puts[0].target
+        );
+        assert_eq!(
+            puts[0].body_len, 0,
+            "the committing PUT carries no body — the bytes are already stored"
+        );
+    }
+
+    /// A blob at or under the chunk size goes up in a single body-bearing request.
+    #[tokio::test]
+    async fn blob_under_the_chunk_size_uploads_in_one_request() {
+        let stub = StubRegistry::start(None).await;
+        let data: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+
+        push_through_production_client(&stub, data).await.unwrap();
+
+        let patches = stub.patches();
+        assert_eq!(patches.len(), 1, "a 1 KiB blob must not be chunked, got {patches:?}");
+        assert_eq!(patches[0].content_range.as_deref(), Some("0-1023"));
+        assert_eq!(patches[0].body_len, 1024);
+        assert_eq!(stub.puts().len(), 1, "the session must still be committed by one PUT");
+    }
+
+    /// A registry that reports storing fewer bytes than it was sent must stop the
+    /// upload, never commit.
+    ///
+    /// Continuing from the client's own offsets would leave a gap in the stored
+    /// blob and then name it with the digest of the bytes that were *sent* — a blob
+    /// whose content does not match its own name. Neither push body can be rewound,
+    /// so the only safe move is to abandon the session; the caller re-pushes from a
+    /// fresh body. Asserted against the fork's `push_blob_stream` directly, because
+    /// the ocx transport wraps it in exactly that retry.
+    #[tokio::test]
+    async fn short_accepting_registry_never_reaches_the_committing_put() {
+        let stub = StubRegistry::start(Some(64)).await;
+        let data: Vec<u8> = (0..PUSH_CHUNK_SIZE + 1024).map(|i| (i % 251) as u8).collect();
+        let digest = sha256_digest(&data).to_string();
+        let total = data.len();
+
+        let config = ClientBuilder::new()
+            .plain_http_registries(vec![stub.address.clone()])
+            .config;
+        let client = oci::native::Client::new(config);
+        let image = stub_image(&stub);
+        let body = futures::stream::once(async move { Ok(bytes::Bytes::from(data)) });
+
+        let error = client
+            .push_blob_stream(&image, body, digest.as_str(), Some(total))
+            .await
+            .expect_err("a registry that stored 64 of the bytes sent must not yield a successful push");
+
+        assert!(
+            matches!(error, oci_client::errors::OciDistributionError::SpecViolationError(_)),
+            "a short accept must surface as a restartable spec violation, got {error:?}"
+        );
+        assert!(
+            stub.puts().is_empty(),
+            "no PUT may commit a blob the registry only partially stored, saw {:?}",
+            stub.puts()
         );
     }
 }
