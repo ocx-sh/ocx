@@ -39,11 +39,17 @@ announce_tag() {
 main() {
     local tag_a="${1:?usage: run_update_union.sh <tag-a> <tag-b>}"
     local tag_b="${2:?usage: run_update_union.sh <tag-a> <tag-b>}"
-    local pr_a pr_b committed union_result
+    local pr_a pr_b committed union_result t0
+
+    # Taken before the first announce: both polls below want the pull request
+    # *this* run produced, and announce #2 updates the one announce #1 opened,
+    # so one floor covers both. An earlier rehearsal's pull request on the same
+    # per-package branch predates it and can no longer be mistaken for either.
+    t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     ocx_step "announce #1 with $tag_a"
     announce_tag union-1 "$tag_a" >/dev/null
-    pr_a="$(poll_pr)" || ocx_fail "announce #1 opened no pull request"
+    pr_a="$(poll_pr "$t0")" || ocx_fail "announce #1 opened no pull request"
     ocx_done "announce #1 opened PR #$pr_a"
 
     # The union is only proved while #1 is still open — a merged PR would make
@@ -54,7 +60,7 @@ main() {
 
     ocx_step "announce #2 with $tag_b, PR #$pr_a deliberately left unmerged"
     announce_tag union-2 "$tag_b" >/dev/null
-    pr_b="$(poll_pr)" || ocx_fail "no pull request after announce #2"
+    pr_b="$(poll_pr "$t0")" || ocx_fail "no pull request after announce #2"
 
     if [[ $pr_b != "$pr_a" ]]; then
         evidence record --scenario update_union --status fail \

@@ -317,11 +317,11 @@ main() {
     sha="$(push_publisher_tag "$tag")"
 
     ocx_step "(b) waiting for the publisher's build + push + announce at ${sha:0:7}"
-    publisher_run="$(poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha")" ||
+    publisher_run="$(poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$t0")" ||
         ocx_fail "publisher CI did not conclude successfully — see PLAYBOOKS.md"
 
     ocx_step "(c) waiting for the tag-refresh PR on $ANNOUNCE_BRANCH"
-    pr="$(poll_pr)" || ocx_fail "no pull request appeared on $ANNOUNCE_BRANCH"
+    pr="$(poll_pr "$t0")" || ocx_fail "no pull request appeared on $ANNOUNCE_BRANCH"
     ocx_done "(c) pull request #$pr"
 
     ocx_step "(d) waiting for validate.yml on PR #$pr"
@@ -334,7 +334,7 @@ main() {
     merge_line="$(poll_merge "$pr")" || ocx_fail "PR #$pr did not merge"
     merge_sha="${merge_line%% *}"
     merged_at="${merge_line##* }"
-    deploy_run="$(poll_run "$GH_REPO_INDEX" render-deploy main "$merge_sha")" ||
+    deploy_run="$(poll_run "$GH_REPO_INDEX" render-deploy main "$merge_sha" "$t0")" ||
         ocx_fail "render-deploy did not conclude successfully at ${merge_sha:0:7}"
 
     ocx_step "(g) checking that $INDEX_SITE serves the root"

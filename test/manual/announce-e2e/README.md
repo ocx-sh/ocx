@@ -3,10 +3,11 @@
 Five drivers that prove the fork-PR announce lane works end to end against the
 **real** `ocx-sh/index` — not a sandbox. They are run by hand against live
 infrastructure and verified by checklist; nothing here is pytest-collected. The
-two surfaces that do run unattended are the pure logic in
-`test/src/announce_e2e/` (`cd test && uv run pytest
-tests/test_announce_e2e_evidence.py`) and the (g2) gate's own decision logic
-(`./scripts/selfcheck_g2.sh` — no network, no credentials).
+surfaces that do run unattended are the pure logic in `test/src/announce_e2e/`
+(`cd test && uv run pytest tests/test_announce_e2e_evidence.py`), the (g2)
+gate's own decision logic (`./scripts/selfcheck_g2.sh`) and the run /
+pull-request matchers (`./scripts/selfcheck_identity.sh`) — neither self-check
+touches a network or a credential.
 
 Each run leaves per-scenario evidence under `results/` (gitignored — real pull
 request URLs and live timestamps are scratch). The curated rollup lives in
@@ -115,9 +116,12 @@ request.
 **The branch trap — check this before `1.0.4` and before `1.0.5`.** The announce
 branch is **per-package, not per-tag** (`ANNOUNCE_BRANCH` in `scripts/env.sh`
 is `indexbot-announce-<ns>-<pkg>`). A fresh tag therefore reuses the same branch
-and lands on the **same open pull request** if one is still open — and the run
-then measures that older pull request's timeline, not this run's. Confirm no
-announce pull request is open for the package first:
+and lands on the **same open pull request** if one is still open. The drivers
+no longer *mis-measure* that: every poll carries a freshness floor taken before
+the push, so a pull request or workflow run from an earlier rehearsal is never
+mistaken for this run's. It shows up as a **timeout** instead — the driver waits
+for a pull request created after it acted, and an updated older one never
+qualifies. Confirm no announce pull request is open for the package first:
 
 ```sh
 gh pr list --repo ocx-sh/index --state open \
@@ -226,6 +230,16 @@ counting. No network, no credentials, no live state — run it after any edit to
 (g2). It does **not** test TLS, real registry auth, or whether the announce path
 writes a registry digest at all; the `1.0.4` run is the only thing that can
 prove that.
+
+**So does artifact identity.** `./scripts/selfcheck_identity.sh` sources
+`env.sh` with `gh` stubbed on `PATH` and drives `_run_concluded` and
+`pr_number` against recorded `gh` JSON: the freshness floor on both, newest-wins
+when several observations survive it, the polling gate that keeps an
+unconcluded run from reading as a verdict, and the head-repository and branch
+guards. Both matchers used to be able to answer with an earlier rehearsal's run
+or pull request, which is how a driver reports green off stale data — run this
+after any edit to either. It needs `jq` (test-only: it replays the drivers' own
+`--jq` programs offline, and `gh` embeds its own engine at run time).
 
 ## Idempotency Proof
 
