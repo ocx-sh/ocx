@@ -66,7 +66,7 @@ impl Exec {
             .resolve_env(
                 &install_infos,
                 self.self_view,
-                ocx_lib::package_manager::PatchScope::NoProjectContext,
+                ocx_lib::package_manager::EnvScope::package_tier(),
             )
             .await?;
         self.run_with_env(entries, context.config_view()).await

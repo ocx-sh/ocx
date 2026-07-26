@@ -125,7 +125,7 @@ impl Env {
             .resolve_env_with_attribution(
                 &info,
                 self.self_view,
-                ocx_lib::package_manager::PatchScope::NoProjectContext,
+                ocx_lib::package_manager::EnvScope::package_tier(),
             )
             .await?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline

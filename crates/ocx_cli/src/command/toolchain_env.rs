@@ -320,7 +320,7 @@ impl ToolchainEnv {
             // `ocx env` has no `--env`, so stage 6 is empty here). Uniformity
             // with `ocx run` is structural: both append to the same entry
             // vector, so what this command prints is what `ocx run` applies.
-            let scope = ocx_lib::package_manager::PatchScope::Project {
+            let scope = ocx_lib::package_manager::EnvScope::Project {
                 no_patches: ctx.config.no_patches_repositories(),
                 env: crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded),
             };
@@ -561,7 +561,7 @@ pub(crate) async fn resolve_global_pinned_env(
     // `offline_view` preserves the patch tier (the network alone is disabled).
     // Return the companion-overlay boundary so `--show-patches` can annotate
     // companion entries on the global path, exactly as on the project path.
-    let scope = ocx_lib::package_manager::PatchScope::Project {
+    let scope = ocx_lib::package_manager::EnvScope::Project {
         no_patches,
         env: project_env,
     };

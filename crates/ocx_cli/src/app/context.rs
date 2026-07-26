@@ -273,8 +273,8 @@ impl Context {
         // into unrelated child processes. The forwarded opt-out is meaningful
         // only at the launcher re-entry (`ocx launcher exec`), which decodes it
         // directly from the env at consumption time. Every other command computes
-        // its own opt-out from its own project (`PatchScope::Project(...)`) or is
-        // OCI-tier (`NoProjectContext`). The env-fallback branch below still
+        // its own opt-out from its own project (`EnvScope::Project(...)`) or is
+        // OCI-tier (`EnvScope::Package`). The env-fallback branch below still
         // forwards a pure env-sourced tier verbatim (there is no config tier to
         // be authoritative), which is correct.
         let resolved_patches = match ocx_lib::resolve_patch_config(&config).map_err(anyhow::Error::new)? {

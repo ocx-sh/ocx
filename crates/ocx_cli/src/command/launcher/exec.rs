@@ -81,7 +81,7 @@ impl LauncherExec {
         //
         // A DIRECT launcher invocation (`ocx package exec` → launcher) has no
         // forwarded `OCX_PATCHES` → `patches_from_env()` is `None` → `Project(empty)`,
-        // byte-identical to the former `NoProjectContext`. A system-required
+        // byte-identical to the former project-free scope. A system-required
         // tier still overlays regardless (the resolver enforces C7).
         let no_patches = ocx_lib::patches_from_env()
             .map_err(anyhow::Error::new)?
@@ -106,7 +106,7 @@ impl LauncherExec {
             .resolve_env(
                 &[std::sync::Arc::new(info)],
                 true,
-                ocx_lib::package_manager::PatchScope::Project {
+                ocx_lib::package_manager::EnvScope::Project {
                     no_patches,
                     env: project_env.clone(),
                 },

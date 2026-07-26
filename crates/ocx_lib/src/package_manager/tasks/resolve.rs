@@ -43,71 +43,93 @@ pub struct PatchProvenance {
 /// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
 pub type SitePatchSet = HashMap<oci::PinnedIdentifier, Vec<(Entry, PatchProvenance)>>;
 
-/// The patch-boundary decision, forced at every env-resolution call site.
+/// Which CLI tier a caller resolves env for, and what that caller contributes
+/// on top of the package-composed set. Forced at every env-resolution site.
 ///
-/// The companion overlay in [`PackageManager::resolve_env`] gates on the
-/// per-package `no-patches` opt-out. That set is a project-toolchain concern:
-/// it lives on `ProjectConfig::no_patches_repositories()` and is structurally
-/// un-derivable from `PackageManager` state, so the command layer that holds a
-/// `ProjectConfig` must thread it in. This enum names the two honest states so
-/// a caller cannot land in the wrong one by omitting a silent default. See
-/// `.claude/artifacts/adr_patch_env_resolution_uniformity.md`.
+/// Two things ride on this type, both un-derivable from `PackageManager` state:
+///
+/// 1. The companion overlay gates on the per-package `no-patches` opt-out,
+///    which lives on `ProjectConfig::no_patches_repositories()` — so the
+///    command layer holding a `ProjectConfig` must thread it in. See
+///    `.claude/artifacts/adr_patch_env_resolution_uniformity.md`.
+/// 2. The caller's own entries: the project and group `[env]` tables on the
+///    project tier, and on either tier the `--env` per-invocation overrides.
+///
+/// Both variants are struct variants, never tuples: every field must be named
+/// at each call site, so a new caller cannot silently omit a contribution the
+/// way an added tuple element or a `Default` shortcut would allow. That is the
+/// whole point of routing these through one type rather than adding required
+/// parameters beside it.
 ///
 /// Internal enum — no `#[non_exhaustive]` so matches stay total across the
 /// workspace (arch-principles: closed internal enum).
-pub enum PatchScope {
-    /// A project (or global) `ocx.toml` is in scope.
-    ///
-    /// A struct variant, not a tuple: every field must be named at each call
-    /// site, so a new caller cannot silently omit the project env the way an
-    /// added tuple element or a `Default` shortcut would allow. That is the
-    /// whole point of routing project env through this type rather than
-    /// adding a second required parameter beside it.
+pub enum EnvScope {
+    /// A project (or global) `ocx.toml` is in scope — `ocx run`, `ocx env`,
+    /// `ocx direnv export`, and the launcher re-entry replaying a forwarded
+    /// payload.
     Project {
         /// The `no-patches` opt-out repositories (canonical
         /// `registry/repository`, tag/digest excluded). An opted-out base
         /// gets NO companion overlay UNLESS the tier is system-required
         /// (enforcement wins).
         no_patches: std::collections::BTreeSet<String>,
-        /// Resolved project `[env]` then group `[env]` entries, already in
-        /// application order (project first, then groups in `-g` selection
-        /// order so a later group wins). Appended after the package-composed
+        /// Entries this caller contributes on top of the package-composed
+        /// set, already in application order: the project `[env]`, then each
+        /// selected group's `[env]` in `-g` order so a later group wins, then
+        /// any `--env` override last. Appended after the package-composed
         /// entries and the patch overlay, so constants replace and path
         /// entries land ahead of package paths.
         env: Vec<Entry>,
     },
-    /// No project toolchain is in scope — OCI-tier commands, the launcher
-    /// re-entry, isolated scratch managers, the self-update version probe.
-    /// Empty opt-out: every admitted base keeps its (non-enforced) companion
-    /// overlay.
-    NoProjectContext,
+    /// No project toolchain is in scope — OCI-tier commands, isolated scratch
+    /// managers, the self-update version probe. Empty opt-out: every admitted
+    /// base keeps its (non-enforced) companion overlay.
+    ///
+    /// The OCI tier reads no `ocx.toml`, so `env` here can only ever be
+    /// `--env` overrides. That is a per-invocation CLI argument, not project
+    /// configuration — carrying it does not cross the tier boundary.
+    Package {
+        /// The `--env` overrides this caller was given, in argument order.
+        /// [`EnvScope::package_tier`] is the shorthand for "none".
+        env: Vec<Entry>,
+    },
 }
 
-impl PatchScope {
+impl EnvScope {
+    /// The OCI tier with no `--env` overrides.
+    ///
+    /// Shorthand for the internal probes and tests that compose an env but
+    /// take no CLI arguments at all. A named constructor rather than a
+    /// `Default`: a caller still has to say which tier it is in, and the
+    /// failure mode this type guards — forgetting the *project* env — cannot
+    /// occur on this arm, because there is no project to forget.
+    pub fn package_tier() -> Self {
+        EnvScope::Package { env: Vec::new() }
+    }
+
     /// The opt-out set this scope contributes to the companion overlay.
     ///
-    /// `Project(set)` yields its set; `NoProjectContext` yields an empty set.
-    /// Converted exactly once inside `resolve_env_with_patch_boundary` so the
-    /// overlay logic keeps consuming a plain `&BTreeSet` reference.
+    /// `Project` yields its set; `Package` yields an empty one. Converted
+    /// exactly once inside `resolve_env_with_patch_boundary` so the overlay
+    /// logic keeps consuming a plain `&BTreeSet` reference.
     fn opt_out(&self) -> &std::collections::BTreeSet<String> {
         static EMPTY: std::sync::LazyLock<std::collections::BTreeSet<String>> =
             std::sync::LazyLock::new(std::collections::BTreeSet::new);
         match self {
-            PatchScope::Project { no_patches, .. } => no_patches,
-            PatchScope::NoProjectContext => &EMPTY,
+            EnvScope::Project { no_patches, .. } => no_patches,
+            EnvScope::Package { .. } => &EMPTY,
         }
     }
 
-    /// The project/group `[env]` entries this scope contributes, already in
-    /// application order.
+    /// The entries this scope contributes, already in application order.
     ///
-    /// `NoProjectContext` yields an empty slice by construction — the OCI tier
-    /// reads no `ocx.toml`, so there is nothing for it to contribute and no way
-    /// for a caller there to accidentally acquire some.
-    fn project_env(&self) -> &[Entry] {
+    /// Both variants carry them, so the resolver appends one slice without
+    /// caring which tier produced it — only the *sources* differ (a `Project`
+    /// mixes file-declared tables with overrides; a `Package` can only hold
+    /// overrides).
+    fn contributed_env(&self) -> &[Entry] {
         match self {
-            PatchScope::Project { env, .. } => env,
-            PatchScope::NoProjectContext => &[],
+            EnvScope::Project { env, .. } | EnvScope::Package { env } => env,
         }
     }
 }
@@ -534,14 +556,14 @@ impl PackageManager {
     /// pre-Phase-4 behaviour (no-config no-op guarantee).
     ///
     /// `scope` is the compile-forced patch-boundary decision — see
-    /// [`PatchScope`]. This wrapper forwards it unchanged to
+    /// [`EnvScope`]. This wrapper forwards it unchanged to
     /// [`Self::resolve_env_with_patch_boundary`] and drops the overlay index
     /// and per-entry provenance.
     pub async fn resolve_env(
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
-        scope: PatchScope,
+        scope: EnvScope,
     ) -> crate::Result<Vec<Entry>> {
         let (entries, _, _) = self.resolve_env_with_patch_boundary(packages, self_view, scope).await?;
         Ok(entries)
@@ -572,9 +594,9 @@ impl PackageManager {
     /// The CLI `--show-patches` flag uses this boundary + provenance to annotate each
     /// overlay entry's origin.
     ///
-    /// `scope` carries the caller's patch-boundary decision — see [`PatchScope`].
-    /// `PatchScope::Project { no_patches, .. }` supplies the opt-out (canonical
-    /// `"registry/repository"` keys, tag/digest excluded); `NoProjectContext`
+    /// `scope` carries the caller's patch-boundary decision — see [`EnvScope`].
+    /// `EnvScope::Project { no_patches, .. }` supplies the opt-out (canonical
+    /// `"registry/repository"` keys, tag/digest excluded); `Package`
     /// supplies an empty opt-out by construction. An opted-out base gets NO
     /// companion overlay UNLESS the tier is system-required (enforcement wins).
     ///
@@ -584,7 +606,7 @@ impl PackageManager {
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
-        scope: PatchScope,
+        scope: EnvScope,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>)> {
         let (entries, compose_count, provenance, _attribution) =
             self.resolve_env_with_attribution(packages, self_view, scope).await?;
@@ -603,7 +625,7 @@ impl PackageManager {
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
-        scope: PatchScope,
+        scope: EnvScope,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedBinaries)> {
         // Convert the scope to its opt-out set exactly once; the overlay logic
         // below (and `build_site_patch_set`) keeps consuming a plain reference.
@@ -650,10 +672,10 @@ impl PackageManager {
         // the two CI flavor writers, never on any process-env path, so a
         // project override cannot surface there as a package-vs-package
         // collision warning.
-        let project_env = scope.project_env();
-        if !project_env.is_empty() {
-            log_project_env_shadowing(&entries, project_env);
-            entries.extend_from_slice(project_env);
+        let contributed = scope.contributed_env();
+        if !contributed.is_empty() {
+            log_project_env_shadowing(&entries, contributed);
+            entries.extend_from_slice(contributed);
         }
 
         Ok((entries, compose_count, provenance, attribution))
@@ -2693,7 +2715,7 @@ mod phase4_spec_tests {
         // Manager with patches=None.
         let manager = make_manager(&dir); // patches=None by default
         let resolved = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -2762,7 +2784,7 @@ mod phase4_spec_tests {
         // With patches=Some but no descriptor persisted (NeverLooked → offline → no
         // fetch), resolve_env must succeed and produce exactly the compose output.
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -2907,7 +2929,7 @@ mod phase4_spec_tests {
         ));
 
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -3036,7 +3058,7 @@ mod phase4_spec_tests {
 
         // Consumer view: private dep NOT admitted → rule never matches → var ABSENT.
         let consumer = manager
-            .resolve_env(std::slice::from_ref(&root), false, super::PatchScope::NoProjectContext)
+            .resolve_env(std::slice::from_ref(&root), false, super::EnvScope::package_tier())
             .await
             .unwrap();
         assert!(
@@ -3046,7 +3068,7 @@ mod phase4_spec_tests {
 
         // Self view: private dep admitted → rule matches dep → var PRESENT.
         let self_view = manager
-            .resolve_env(std::slice::from_ref(&root), true, super::PatchScope::NoProjectContext)
+            .resolve_env(std::slice::from_ref(&root), true, super::EnvScope::package_tier())
             .await
             .unwrap();
         assert!(
@@ -3180,7 +3202,7 @@ mod phase4_spec_tests {
         // With no descriptor persisted (NeverLooked → offline → no fetch), resolve_env
         // succeeds and the companion's PRIVATE var is absent from the output.
         let entries = manager
-            .resolve_env(&[root], true, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], true, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -3293,7 +3315,7 @@ mod phase4_spec_tests {
         // companion overlay is attempted. But `compose([companion], store, false)`
         // (interface projection) must exclude the companion's PRIVATE var.
         let entries = manager
-            .resolve_env(&[root], true, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], true, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -3337,7 +3359,7 @@ mod phase4_spec_tests {
         // (NeverLooked → no fetch), build_site_patch_set reads local state only
         // and succeeds without contacting the network.
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_ok(),
@@ -3381,7 +3403,7 @@ mod phase4_spec_tests {
         // With no descriptor persisted (NeverLooked → offline → no fetch), the
         // merge algorithm finds no companions for either source and succeeds.
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_ok(),
@@ -3491,7 +3513,7 @@ mod phase4_spec_tests {
         // Companion is NOT installed locally: no tag-store entry, no package dir.
         // `find_companion_local` → `Ok(None)` → required=true → must return Err.
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -3646,7 +3668,7 @@ mod phase4_spec_tests {
         let mut baseline: Option<(Vec<String>, Vec<String>)> = None;
         for run in 0..12 {
             let entries = manager
-                .resolve_env(&roots, false, super::PatchScope::NoProjectContext)
+                .resolve_env(&roots, false, super::EnvScope::package_tier())
                 .await
                 .unwrap();
             let base_order = suffixes(&entries, "BASE_");
@@ -3807,7 +3829,7 @@ mod phase4_spec_tests {
         // Merged required flag: pkg-specific (true) overrides global (false).
         // C7 fail-closed: must return Err because merged required=true.
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -3989,7 +4011,7 @@ mod phase4_spec_tests {
 
         // ── Resolve and assert ─────────────────────────────────────────────────
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -4173,7 +4195,7 @@ mod phase4_spec_tests {
         ));
 
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -4329,7 +4351,7 @@ mod phase4_spec_tests {
         ));
 
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -4427,7 +4449,7 @@ mod phase4_spec_tests {
         // Non-required tier with all-optional companions over cap: must succeed
         // (warn + truncate, not Err).
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_ok(),
@@ -4548,7 +4570,7 @@ mod phase4_spec_tests {
         // also that if a later iteration reaches the cache hit for None, it
         // still fails closed (no silent bypass).
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -4669,7 +4691,7 @@ mod phase4_spec_tests {
         // as a package → fail closed).  Before the fix this returned Ok(()) because
         // the schema mismatch in `read_tag_digest` produced a silent Err → warn+skip.
         let result = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -4784,7 +4806,7 @@ mod phase4_spec_tests {
 
         // Must succeed and include the companion's CA_BUNDLE env var in the output.
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap();
 
@@ -5006,7 +5028,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap_or_else(|e| {
                 panic!("remote-mode overlay must resolve the locally-installed companion, got Err: {e:?}")
@@ -5051,7 +5073,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&offline.file_structure().packages.clone(), "rootpkg", 'r');
         let entries = offline
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .unwrap_or_else(|e| {
                 panic!("offline_view must apply the already-installed companion overlay, got Err: {e:?}")
@@ -5093,7 +5115,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&offline.file_structure().packages.clone(), "rootpkg", 'r');
         let result = offline
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await;
         assert!(
             result.is_err(),
@@ -5828,7 +5850,7 @@ mod phase5b_spec_tests {
 
         // This FAILS until Phase 5B implements snapshot preference in build_site_patch_set.
         let entries = manager_with_snapshot
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .expect("resolve_env with snapshot must succeed");
 
@@ -5885,7 +5907,7 @@ mod phase5b_spec_tests {
         // No snapshot — live tag must win.
         let root = seed_root_arc(&store, "root", 'r');
         let entries = manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .expect("resolve_env without snapshot must succeed");
 
@@ -5988,7 +6010,7 @@ mod phase5b_spec_tests {
             .with_patch_snapshot(Some(snapshot));
         let root = seed_root_arc(&frozen_manager.file_structure().packages.clone(), "root", 'r');
         let entries = frozen_manager
-            .resolve_env(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root], false, super::EnvScope::package_tier())
             .await
             .expect("frozen resolve_env");
         let snap_var = entries.iter().find(|e| e.key == "SNAP_VAR");
@@ -6003,7 +6025,7 @@ mod phase5b_spec_tests {
         let floating_manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let root2 = seed_root_arc(&floating_manager.file_structure().packages.clone(), "root", 'r');
         let live_entries = floating_manager
-            .resolve_env(&[root2], false, super::PatchScope::NoProjectContext)
+            .resolve_env(&[root2], false, super::EnvScope::package_tier())
             .await
             .expect("floating resolve_env");
         let live_var = live_entries.iter().find(|e| e.key == "SNAP_VAR");
@@ -6155,7 +6177,7 @@ mod phase5d_spec_tests {
             .resolve_env_with_patch_boundary(
                 &[root],
                 false,
-                super::PatchScope::Project {
+                super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
                 },
@@ -6193,7 +6215,7 @@ mod phase5d_spec_tests {
             .resolve_env_with_patch_boundary(
                 &[root],
                 false,
-                super::PatchScope::Project {
+                super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
                 },
@@ -6232,7 +6254,7 @@ mod phase5d_spec_tests {
             .resolve_env_with_patch_boundary(
                 &[root],
                 false,
-                super::PatchScope::Project {
+                super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
                 },
@@ -6248,7 +6270,7 @@ mod phase5d_spec_tests {
     }
 
     /// (14 — Contract 1 case (c)) For a base that is NOT opted out,
-    /// `PatchScope::NoProjectContext` and an empty `PatchScope::Project` produce
+    /// `EnvScope::package_tier()` and an empty `EnvScope::Project` produce
     /// byte-identical resolved entries. This locks the ADR guarantee that the
     /// named no-project state is observationally equal to a project carrying a
     /// zero-length opt-out set — the two are distinguishable *values*, not
@@ -6272,7 +6294,7 @@ mod phase5d_spec_tests {
             .resolve_env_with_patch_boundary(
                 &[root_project],
                 false,
-                super::PatchScope::Project {
+                super::EnvScope::Project {
                     no_patches: BTreeSet::new(),
                     env: Vec::new(),
                 },
@@ -6280,9 +6302,9 @@ mod phase5d_spec_tests {
             .await
             .expect("Project(empty) resolve must succeed");
         let (no_project_entries, no_project_start, _no_project_provenance) = manager
-            .resolve_env_with_patch_boundary(&[root_no_project], false, super::PatchScope::NoProjectContext)
+            .resolve_env_with_patch_boundary(&[root_no_project], false, super::EnvScope::package_tier())
             .await
-            .expect("NoProjectContext resolve must succeed");
+            .expect("package-tier resolve must succeed");
 
         // Both admit the companion overlay for the non-opted base.
         assert!(
@@ -6305,14 +6327,14 @@ mod phase5d_spec_tests {
             .collect();
         assert_eq!(
             project_pairs, no_project_pairs,
-            "test 14: NoProjectContext and Project(empty) must yield byte-identical entries for a non-opted base"
+            "test 14: Package and Project(empty) must yield byte-identical entries for a non-opted base"
         );
     }
 
     /// (15 — Contract 1 case (e)) The launcher path resolves via
-    /// `PatchScope::NoProjectContext`, which carries an empty opt-out. A
+    /// `EnvScope::package_tier()`, which carries an empty opt-out. A
     /// SYSTEM-REQUIRED tier must still overlay its companion under that scope:
-    /// `NoProjectContext` does not disable enforced patches. This is the
+    /// `Package` does not disable enforced patches. This is the
     /// direct-launcher analogue of test 12 (opt-out never suppresses a
     /// system-required tier).
     ///
@@ -6330,13 +6352,13 @@ mod phase5d_spec_tests {
         let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
 
         let (entries, _patch_start, _provenance) = manager
-            .resolve_env_with_patch_boundary(&[root], false, super::PatchScope::NoProjectContext)
+            .resolve_env_with_patch_boundary(&[root], false, super::EnvScope::package_tier())
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
 
         assert!(
             entries.iter().any(|e| e.key == key && e.value == value),
-            "test 15: a system_required tier must overlay its companion under NoProjectContext \
+            "test 15: a system_required tier must overlay its companion under the package tier \
              (the launcher path never disables enforced patches); '{key}={value}' must be present. \
              entries: {entries:?}"
         );
@@ -6345,7 +6367,7 @@ mod phase5d_spec_tests {
 
 /// Dependency-direction hygiene gate (ADR AF4 / Codex CX1).
 ///
-/// `PatchScope` is a `package_manager` resolver type. `ProjectConfig`
+/// `EnvScope` is a `package_manager` resolver type. `ProjectConfig`
 /// (`crates/ocx_lib/src/project/config.rs`) must stay zero-knowledge of it:
 /// the ~4 project/global command sites build the `Project` variant inline
 /// from `cfg.no_patches_repositories()`, so `project` never imports the

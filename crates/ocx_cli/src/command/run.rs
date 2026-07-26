@@ -219,7 +219,7 @@ impl Run {
         let mut project_env =
             crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         project_env.extend(env_overrides);
-        let scope = ocx_lib::package_manager::PatchScope::Project {
+        let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: no_patches.clone(),
             env: project_env.clone(),
         };

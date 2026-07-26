@@ -932,7 +932,7 @@ def test_no_patches_opt_out_suppresses_overlay_in_toolchain_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
     """`ocx env` (toolchain-tier project path, `command/toolchain_env.rs`'s
-    `execute` around the `PatchScope::Project(ctx.config.no_patches_repositories())`
+    `execute` around the `EnvScope::Project { no_patches: ctx.config.no_patches_repositories(), .. }`
     line) must honor a project's per-package `no-patches = true` opt-out, exactly
     like `ocx direnv export` (`test_no_patches_opt_out_suppresses_overlay_in_direnv_export`)
     and `ocx run` (`test_no_patches_opt_out_honored_across_launcher_in_run`) already do.
@@ -1003,7 +1003,7 @@ def test_global_no_patches_opt_out_suppresses_overlay_in_global_env(
 ) -> None:
     """The global toolchain env exporter's opt-out lookup
     (`resolve_global_pinned_env` in `command/toolchain_env.rs`, the
-    `PatchScope::Project(no_patches)` line built from
+    `EnvScope::Project { no_patches, .. }` line built from
     `$OCX_HOME/ocx.toml`'s `no_patches_repositories()`) must honor a
     per-package `no-patches = true` opt-out exactly like the project tier
     (`test_no_patches_opt_out_suppresses_overlay_in_toolchain_env`).

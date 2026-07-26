@@ -40,11 +40,7 @@ mod resolve_env_package_root_tests {
         let manager = make_test_manager(tmp.path());
         // Non-existent package root — PackageStore cannot read metadata.json.
         let result = manager
-            .resolve_env_from_package_root(
-                Path::new("/nonexistent/pkg"),
-                false,
-                super::PatchScope::NoProjectContext,
-            )
+            .resolve_env_from_package_root(Path::new("/nonexistent/pkg"), false, super::EnvScope::package_tier())
             .await;
         assert!(result.is_err(), "missing package root must return Err");
     }
@@ -58,7 +54,7 @@ mod resolve_env_package_root_tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let manager = make_test_manager(tmp.path());
         let result = manager
-            .resolve_env_from_package_root(&pkg_root, false, super::PatchScope::NoProjectContext)
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier())
             .await;
         assert!(result.is_err(), "missing metadata.json must return Err");
     }
@@ -79,7 +75,7 @@ mod resolve_env_package_root_tests {
             .unwrap();
         let manager = make_test_manager(tmp.path());
         let result = manager
-            .resolve_env_from_package_root(&pkg_root, false, super::PatchScope::NoProjectContext)
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier())
             .await;
         assert!(result.is_err(), "missing resolve.json must return Err");
     }
@@ -285,7 +281,7 @@ pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdate
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{
-    AdmittedBinaries, ChainBlob, ChainRole, PatchProvenance, PatchScope, ResolvedChain, SitePatchRoots,
+    AdmittedBinaries, ChainBlob, ChainRole, EnvScope, PatchProvenance, ResolvedChain, SitePatchRoots,
 };
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 
@@ -555,7 +551,7 @@ impl PackageManager {
         &self,
         pkg_root: &std::path::Path,
         self_view: bool,
-        scope: crate::package_manager::tasks::resolve::PatchScope,
+        scope: crate::package_manager::tasks::resolve::EnvScope,
     ) -> crate::Result<Vec<crate::package::metadata::env::entry::Entry>> {
         let info = self.install_info_from_package_root(pkg_root).await?;
         self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope).await

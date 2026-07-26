@@ -157,7 +157,7 @@ impl PackageManager {
             .resolve_env_with_patch_boundary(
                 std::slice::from_ref(base),
                 false,
-                crate::package_manager::PatchScope::NoProjectContext,
+                crate::package_manager::EnvScope::package_tier(),
             )
             .await
             .map_err(unwrap_resolve_env_error)?;

@@ -1818,7 +1818,7 @@ mod tests {
             .resolve_env(
                 &[root],
                 false,
-                crate::package_manager::tasks::resolve::PatchScope::NoProjectContext,
+                crate::package_manager::tasks::resolve::EnvScope::package_tier(),
             )
             .await;
         assert!(
@@ -2185,7 +2185,7 @@ mod tests {
             .resolve_env(
                 &[root],
                 false,
-                crate::package_manager::tasks::resolve::PatchScope::NoProjectContext,
+                crate::package_manager::tasks::resolve::EnvScope::package_tier(),
             )
             .await;
         assert!(

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use clap::Args;
 use ocx_lib::package::install_info::InstallInfo;
-use ocx_lib::package_manager::PatchScope;
+use ocx_lib::package_manager::EnvScope;
 
 use crate::{api, conventions, options};
 
@@ -34,7 +34,7 @@ impl PatchWhyArgs {
         // ── Step 1: Resolve the base identifier and find-or-install it. ──
         //
         // OCI-tier diagnostic: no project is in scope, so the resolution uses
-        // `PatchScope::NoProjectContext` — it shows what the configured
+        // `EnvScope::package_tier()` — it shows what the configured
         // `[patches]` tier overlays for the base, not a project opt-out
         // decision (there is no project to opt out from).
         let base_id = self.base.with_domain(context.default_registry())?;
@@ -49,7 +49,7 @@ impl PatchWhyArgs {
         // ── Step 2: Reuse the existing provenance resolution — no new
         // resolution path. ──
         let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(&info, false, PatchScope::NoProjectContext)
+            .resolve_env_with_patch_boundary(&info, false, EnvScope::package_tier())
             .await?;
 
         // ── Step 3: Zip the overlay slice with its aligned provenance. ──
