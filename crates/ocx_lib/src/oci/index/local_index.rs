@@ -360,7 +360,21 @@ impl LocalIndex {
                 );
                 continue;
             }
-            self.refresh_tags(&identifier, &source_index).await?;
+            // Non-fatal, for the same reason the skip above is: a per-package
+            // refresh failure must never veto the source-wide catalog + ETag
+            // commit. Publish skew alone reaches this (a catalog regenerated
+            // ahead of its roots, or a root rolled back, 404s `p/<key>.json`),
+            // and aborting here would leave the ETag pinned and every other
+            // moved package unlanded — permanently, since each later
+            // `ocx index update` repeats it identically and exits 0. The row
+            // adopts its fetched catalog value in step 4 like any other.
+            if let Err(error) = self.refresh_tags(&identifier, &source_index).await {
+                log::warn!(
+                    "index source '{namespace}': re-snapshot of '{repository}' failed, \
+                     adopting the fetched catalog value instead: {error}"
+                );
+                continue;
+            }
             refreshed.insert(repository);
         }
 
