@@ -249,8 +249,12 @@ for one of them (`_DESC_TAG`, `observe.py:25-32`). Two exclusions are required:
   **Not currently excluded.** See R3 — without this the rule breaks on every ocx-published repository.
 
 Exclusion is not a fallback shape: these tags are not version pointers, and the sweep's universe is "tags
-that could be a version". A publisher who *explicitly* curates `sha256.<hex>` still gets the (a) refusal —
-they asked for something that is not a version.
+that could be a version". A publisher who *explicitly* curates `sha256.<hex>` is not refused either: the
+tag is not a version, so there is nothing for (a) to rule on. It is dropped from the resolved selection
+under D7 — `resolve_curated_tags` partitions the reserved names out (`announce/pipeline.rs:139-140`) and
+carries them to the CLI, which names every drop on stderr and exits `0`
+(`crates/ocx_cli/src/command/package_announce.rs:164-171`). Refusal by (a) is for a curated tag that *is*
+a version pointer and resolves to the wrong document kind.
 
 **(c) CI validation over committed roots — recommended.** `cli/validate.py`'s per-PR gate asserts, for
 every `tags[].content`: a CAS object exists at `o/<algo>/<hex>.json`, its bytes hash to that digest, and
@@ -268,8 +272,11 @@ Verified in `crates/ocx_lib/src/oci/client.rs::merge_platform_into_index`:
 - either way, add the platform entry (`client.rs:315-323`) and push with `MEDIA_TYPE_OCI_IMAGE_INDEX`
   (`client.rs:332-336`).
 
-Both construction branches set `artifact_type: Some(MEDIA_TYPE_PACKAGE_V1)` —
-`application/vnd.sh.ocx.package.v1` (`client.rs:294`, `client.rs:307`, `media_type.rs:11`).
+The merged index describes itself as an ocx package index at one decision point after the match: the
+`artifact_type` field is filled with `MEDIA_TYPE_PACKAGE_V1` — `application/vnd.sh.ocx.package.v1`
+(`media_type.rs:11`) — when absent and a declared foreign value is left alone (`client.rs:335-341`).
+Filling an absent field states what we wrote; overwriting a declared one would relabel someone else's
+artifact.
 
 So every package-content tag `ocx package push` writes is an image index. The indices-only rule refuses
 nothing OCX produces; it refuses artifacts that were never OCX packages. The two ocx-written tags that are
@@ -392,6 +399,7 @@ __ocx.desc,sha256.abc…` is accepted today.
 | `crates/ocx_lib/src/oci/index/wire_writer.rs:53-98` | Delete `serialize_observation` + `platform_sort_key`; `serialize_root` stays (roots keep the §14 pretty form) |
 | `crates/ocx_lib/src/oci/index/wire_writer.rs:315-347, 369-387` | Delete the platform-sort and minified-form tests |
 | `crates/ocx_lib/src/oci/index.rs:19-20` | Drop `Observation`, `ObservationPlatform`, `serialize_observation` from the re-exports |
+| `crates/ocx_lib/src/oci/platform.rs:142-145` | Add `Platform::candidate_from_descriptor` — the single eligibility rule for an image-index descriptor: no `platform` key, or a platform OCX cannot represent, is not a candidate and is not an error. Both enumerations route through it — `Index::fetch_candidates` (`oci/index.rs:368-383`) for selection and `Platform::from_image_index` (`platform.rs:152-164`) for `ocx index list --platforms` (`crates/ocx_cli/src/command/index_list.rs:164`) — because verbatim bytes carry the attestation and referrer descriptors the projection filtered out (R4) |
 | `crates/ocx_lib/src/oci/index/ocx_index.rs:777-803` | Delete `observation_to_index` |
 | `crates/ocx_lib/src/oci/index/ocx_index.rs:623-657` | `resolve_observation` → `resolve_index_object`: same fetch, same `sha256` verify, parses `oci::Manifest::ImageIndex` |
 | `crates/ocx_lib/src/oci/index/ocx_index.rs:672-687, 902-906, 956-973` | `resolve_tag` / `fetch_manifest` / `fetch_manifest_raw_bytes` return the fetched index directly; synthetic-index construction disappears |
@@ -420,8 +428,11 @@ __ocx.desc,sha256.abc…` is accepted today.
 | `crates/ocx_lib/src/publisher.rs:42-51` | `PushOutcome` gains the canonical tags written (`push_canonical_tag` at `:114-118` currently returns `()`) |
 | `crates/ocx_cli/src/api/data/push.rs:21-42` | `PushReport` gains the canonical-tag field; `package_push.rs:225-229` populates it. `--announce-file` (`package_push.rs:217`) is **not** touched |
 
-`Index::fetch_candidates` / `select_best` need **no** change — they already consume
-`oci::Manifest::ImageIndex`; that is why the synthetic-index adapter exists (`ocx_index.rs:768-776`).
+`select_best` needs **no** change — it already consumes `oci::Manifest::ImageIndex`; that is why the
+synthetic-index adapter exists (`ocx_index.rs:768-776`). `Index::fetch_candidates` does change: verbatim
+bytes hand it the descriptors the projection used to filter out, so it asks
+`Platform::candidate_from_descriptor` per descriptor and skips the ones that are not candidates
+(`oci/index.rs:368-383`) — the R4 rule, in the selection half.
 
 ### `ocx-sh/index`
 
@@ -473,10 +484,13 @@ observation object" note anywhere on the website.
 **There is none, and that is the decision.** Pre-1.0 breaking changes just break
 (`project_breaking_compat_next_version`).
 
-- Every published `RootTag.content` value changes; every `o/` object is re-derived by re-announcing.
-- Every local index copy's `o/` objects are wrong-shaped for a published source and must be discarded.
-  `ocx index update` regenerates a copy; a user may delete `$OCX_HOME/index/<source>/` — the local index is
-  outside the GC graph (`adr_index_indirection.md` B1), so nothing else is affected.
+- There is no published `RootTag.content` value to change and no published-source `o/` object to
+  re-derive: `index.ocx.sh` has announced zero tags (measured below). The shape lands on an empty
+  population; it is not applied to one.
+- A derived source already stored the registry's verbatim image index (§Context), so a derived local copy
+  is already the shape this ADR names. A local copy is disposable in any case — `ocx index update`
+  regenerates one, a user may delete `$OCX_HOME/index/<source>/`, and the local index is outside the GC
+  graph (`adr_index_indirection.md` B1), so nothing else is affected.
 - No dual-read fallback, no shape probing, no transcoder, no "formerly an observation" comment.
 - **D7 needs no migration either.** No committed root contains a reserved tag today — `#57`'s root has
   `"tags": {}`, and push has never emitted one into a curated set. The rule lands as pure prevention, with
@@ -507,11 +521,11 @@ ever have.
 - **Two independent verification anchors** per object: its filename, and the registry serving the same
   digest. A published `o/` object has exactly one today.
 - **Decode is unconditional**, so a copied subtree resolves without knowing where it came from.
-- **Published absent-dispatch recovers offline.** An installed package's image index is staged into
-  `$OCX_HOME/blobs` at install time; with a registry-real digest, `recover_absent_leaf`
-  (`chained_index.rs:289-347`) now finds and self-heals it for published sources too — impossible today,
-  where the ADR warns an obs digest "is not a registry manifest digest, so that would 404 (the leaf-trap)"
-  (`local_index.rs:836-841`).
+- **Absent dispatch recovers offline, in both provenance kinds.** An installed package's image index is
+  staged into `$OCX_HOME/blobs` at install time, and a tag's `content` is a digest the registry serves, so
+  `recover_absent_dispatch` (`chained_index.rs:291-347`) finds the blob and self-heals it back into `o/`
+  for a published source exactly as for a derived one. The leaf-trap — a digest no registry blob endpoint
+  can serve, because the bot minted it — has no surface left.
 - **One invariant with no exceptions** beats a rule plus an absence convention. The "is `content` in `o/`?"
   branch and the "what does absence mean for this source kind?" question both disappear.
 - **Attestation-descriptor divergence disappears.** ocx's projection silently skips platform-less
@@ -600,11 +614,18 @@ ocx-published repository. This is a required, simultaneous change, not a follow-
   (`external/rust-oci-client/src/manifest.rs:44-53`). An image index has neither `config` nor `layers`, so
   it cannot match the `Image` arm — the same discrimination D4(a)'s check relies on, and the bot's
   `"manifests" in raw` test (`observe.py:177-181`) is its Python equivalent.
-- **Descriptor `platform` is optional.** `select_best` now sees attestation descriptors
-  (`platform: {"os":"unknown","architecture":"unknown"}`, or absent) that the projection filtered out.
-  Neither can satisfy a host requirement under `is_compatible`, so selection is unaffected — but anything
-  that *enumerates* platforms for display (`_catalog_platforms`, `PlatformMatrix.vue`,
-  `ocx index list --platforms`) must filter explicitly. Listed in §What Breaks.
+- **Descriptor `platform` is optional, and the absent case is the dangerous one.** Every enumeration over
+  an index now sees the attestation and referrer descriptors the projection filtered out — marked either
+  by the placeholder `unknown/unknown` or by omitting `platform` entirely. The placeholder is inert: it is
+  a platform OCX cannot represent, and propagating that `TryFrom` error would abort a whole enumeration
+  over one descriptor nobody asked to select. Omission is not: `TryFrom<Option<..>>` answers
+  `Platform::Any`, and an `Any` **offer** satisfies **every** requirement
+  (`adr_platform_model_unification.md` D1), so one platform-less descriptor is a universal match and two
+  make every selection ambiguous. Both cases are therefore simply not candidates, decided by one shared
+  predicate — `Platform::candidate_from_descriptor` (`oci/platform.rs:142-145`), consumed by
+  `Index::fetch_candidates` for selection and by `Platform::from_image_index` for display
+  (`ocx index list --platforms`); a non-candidate is skipped at `debug`, never an error. The index-side
+  enumerations (`_catalog_platforms`, `PlatformMatrix.vue`) carry the same rule. Listed in §What Breaks.
 
 ### R5 — Does digest-verifying a registry-served index need anything new?
 
@@ -644,24 +665,49 @@ No. Grepped both repos: the type has one field (`wire.rs:105-109`; `model.py:138
   is precisely the coupling this ADR removes elsewhere.
 
 - **OQ2 — should the check also require `artifactType == application/vnd.sh.ocx.package.v1`, or is "is an
-  image index" the right granularity?** **OPEN — not resolved here.**
+  image index" the right granularity?** **CLOSED — no. Document kind is the right granularity.**
+  Owner ruling 2026-07-25.
 
-  *For stricter:* refuses foreign artifacts at announce time rather than at install time; the index would
-  then catalog only OCX packages, which is arguably what it is for; the constant already exists
-  (`media_type.rs:11`) and both index-construction branches set it (`client.rs:294`, `client.rs:307`).
+  Recorded because the question is natural and should not be reopened without new reasons. The gate never
+  inspects `artifactType`: not as a refusal, and **not as a warning** either.
 
-  *Against stricter, with evidence:* `merge_platform_into_index` carries a **pre-existing** `ImageIndex`
-  through verbatim — `oci::Manifest::ImageIndex(idx) => idx` (`client.rs:299`) — and never re-stamps
-  `artifact_type`. An index created before `MEDIA_TYPE_PACKAGE_V1` existed, or by another tool, keeps its
-  original (possibly absent) `artifactType` across every subsequent ocx push. A strict check would therefore
-  refuse indices ocx itself maintains, and the failure would read as a publisher error while being an
-  artifact-history artefact. Separately, `pull.rs:398` already enforces `MEDIA_TYPE_PACKAGE_V1` on the
-  package manifest at pull time, so the failure mode that matters — installing a non-OCX artifact — is
-  already closed one layer down; an index-level check is partly redundant with it. And a strict check
-  forecloses artifact types OCX has not defined yet.
+  **Four grounds, each independently sufficient.**
 
-  A middle option exists and is not recommended without a decision: warn on a missing/foreign
-  `artifactType` at announce, refuse only on a *known-foreign* one.
+  First, **the invariant could not stay single.** D3's value is one rule with no exceptions and no
+  source-kind conditionality — D6 deletes exactly that conditionality from A3. An `artifactType`
+  requirement cannot be stated as one invariant over `o/`: a derived index stores a plain registry's image
+  index verbatim (§Context; `local_index.rs:400-409`), and a foreign multi-arch image carries no OCX
+  artifact type. The gate would therefore either delete derived indexing over foreign registries — a
+  capability D5 priced and deliberately kept — or apply to published sources only, reintroducing the
+  per-source-kind rule this ADR removes.
+
+  Second, **it refuses indices ocx itself maintains.** `merge_platform_into_index` fills `artifact_type`
+  only when it is absent and leaves a declared foreign value alone (`client.rs:335-341`, D5) — overwriting
+  it would relabel someone else's artifact. An index another tool created under its own artifact type
+  therefore keeps it across every subsequent ocx push into it. The refusal would name the publisher for a
+  property of the artifact's history whose only remedy is to hand-author and force-push an index — the
+  registry-practice dictation this ADR removes elsewhere, reached by a different road than OQ1's.
+
+  Third, **it stops no adversary.** `artifactType` is a publisher-controlled string inside
+  publisher-controlled bytes, in a namespace announce already requires the publisher to have claimed
+  (`AnnounceError::UnclaimedNamespace`, `announce/error.rs:60`). A hostile publisher writes the OCX string; an
+  honest one whose index predates the field cannot. A gate the attacker clears by choosing a value and the
+  honest party cannot clear at all inverts the sign of an admission control.
+
+  Fourth, **the failure that matters is closed one layer down, at the right layer.** `pull.rs:398` enforces
+  `MEDIA_TYPE_PACKAGE_V1` on the resolved **leaf** manifest — the document ocx authors end to end — so
+  installing a non-OCX artifact fails regardless of what any index catalogued. That is the pattern the
+  codebase follows: ocx enforces `artifactType` on manifests it authored whole (`pull_description`,
+  `client.rs:1258-1267`; `fetch_single_layer_artifact`, `client.rs:1379-1387`) and on no document it merges
+  into. Nothing in either repo reads an image index's `artifactType` — a gate on a field no consumer
+  consults buys nothing.
+
+  **The middle option — warn rather than refuse — is rejected, not deferred.** A warning must name an
+  action, and the only action available is hand-authoring an index (ground two). An absent `artifactType`
+  on an index ocx maintains is a common benign state, which project doctrine gives `debug` and
+  self-healing, not `WARN`; announce is machine-facing, so a diagnostic CI must learn to filter is worse
+  than none. "Refuse only on a *known-foreign* type" additionally obliges OCX to curate other people's
+  artifact types, permanently, and still yields nothing against ground three.
 
 - **OQ3 — the byte-exactness CI gate for CAS objects.** `cli/validate.py`'s byte-exact discipline re-derives
   the canonical form and compares (`bot/CONTRACTS.md:965-973`). Registry-served bytes cannot be re-derived
