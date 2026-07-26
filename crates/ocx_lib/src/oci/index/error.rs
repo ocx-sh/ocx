@@ -176,7 +176,16 @@ impl ClassifyExitCode for Error {
             // (e.g. a `ClientError::Authentication` inside a `crate::Error`)
             // are resolved via the generic `try_classify` ladder.
             Self::SourceWalkFailed(arc) => return Some(crate::cli::classify_error(arc.as_error())),
-            Self::SingleflightFailed(_) => ExitCode::Failure,
+            // Yield to the chain walker rather than answering here: the variant
+            // carries the singleflight error as `#[source]`, and that type
+            // classifies itself (a broadcast leader failure defers to the
+            // leader's own typed error, a timeout is `TempFail`). Answering
+            // `Failure` here would be a terminal `Some` that ends the walk, so
+            // every waiter would exit 1 while the leader exits 80/65/69 — the
+            // same operation reporting a different code depending on whether it
+            // happened to win the singleflight race. Mirrors
+            // `PackageManagerError::SetupFailed`, which wraps the same type.
+            Self::SingleflightFailed(_) => return None,
             // A deliberate local policy (offline / frozen) refused the
             // resolution — categorically the same as every other policy block.
             Self::PolicyResolutionBlocked { .. } => ExitCode::PolicyBlocked,
@@ -213,5 +222,74 @@ mod tests {
             ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         });
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// The exit code of a concurrent resolve must not depend on who reached the
+    /// key first.
+    ///
+    /// Both errors are built in the exact shape `walk_chain` produces: the
+    /// leader propagates `SourceWalkFailed(ArcError)`, and the waiter receives
+    /// that same error broadcast inside
+    /// `SingleflightFailed(Failed(SharedError(..)))`. Testing only the leader
+    /// cannot see the bug — the leader arm was always correct; it was the
+    /// waiter's terminal `Some(Failure)` that ended the walk before the typed
+    /// error underneath was ever reached.
+    ///
+    /// Chain-walked via [`crate::cli::classify_error`] rather than a single-hop
+    /// `classify()`, because the whole mechanism is the walk continuing through
+    /// `#[source]`.
+    #[test]
+    fn leader_and_waiter_classify_a_source_walk_failure_identically() {
+        use crate::utility::singleflight;
+
+        // One case per exit-code class a source walk realistically produces:
+        // a rejected credential, malformed publisher data, an unreachable index.
+        let cases: Vec<(crate::Error, ExitCode)> = vec![
+            (
+                crate::Error::OciClient(crate::oci::client::error::ClientError::Authentication(Box::new(
+                    std::io::Error::other("token refused"),
+                ))),
+                ExitCode::AuthError,
+            ),
+            (
+                crate::Error::OciIndex(Error::YankedRefused {
+                    identifier: "ocx.sh/kitware/cmake:3.28".to_string(),
+                }),
+                ExitCode::DataError,
+            ),
+            (
+                crate::Error::OciIndex(Error::IndexHttpFailed {
+                    url: "https://index.ocx.sh/c/index.json".to_string(),
+                    source: Box::new(std::io::Error::other("connection reset")),
+                }),
+                ExitCode::Unavailable,
+            ),
+        ];
+
+        for (inner, expected) in cases {
+            let arc = crate::error::ArcError::from(inner);
+            let leader = Error::SourceWalkFailed(arc.clone());
+            let waiter = Error::SingleflightFailed(singleflight::Error::Failed(singleflight::SharedError::for_test(
+                Error::SourceWalkFailed(arc),
+            )));
+
+            let leader_code = crate::cli::classify_error(&leader);
+            let waiter_code = crate::cli::classify_error(&waiter);
+            assert_eq!(leader_code, expected, "leader must report the source walk's own code");
+            assert_eq!(
+                waiter_code, leader_code,
+                "waiter must report the same code as the leader for the same failure"
+            );
+        }
+    }
+
+    /// A coordination failure with no leader error to defer to still carries its
+    /// own meaning: a singleflight timeout is transient, so it must reach
+    /// `TempFail` (75) — the retryable class — rather than collapsing to a
+    /// generic failure the way the terminal arm did.
+    #[test]
+    fn singleflight_timeout_classifies_as_temp_fail() {
+        let error = Error::SingleflightFailed(crate::utility::singleflight::Error::Timeout);
+        assert_eq!(crate::cli::classify_error(&error), ExitCode::TempFail);
     }
 }
