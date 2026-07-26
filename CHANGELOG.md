@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Declare project and group environment variables in `ocx.toml` via [`[env]` / `[group.<name>.env]`](website/src/docs/reference/configuration.md#project-config-env), composed on top of package env with project/group entries winning on collision *(cli)*
+- Add repeatable `ocx run --env KEY=VALUE` for a one-off, highest-precedence override — see [Project Environment](website/src/docs/reference/env-composition.md#project-env) *(cli)*
+- Reject `OCX_*` and `__OCX_*` keys in `[env]`, `[group.<name>.env]`, and `--env` so a checked-in `ocx.toml` cannot reconfigure how `ocx` itself resolves *(security)*
+
+### Changed
+
+- Restructure `[group.<name>]` to hold only `[group.<name>.tools]` and `[group.<name>.env]` sub-tables — see [`[group.<name>]`](website/src/docs/reference/configuration.md#project-config-groups) *(cli)* **BREAKING**: a tool binding declared directly under `[group.<name>]` (the previous flat form) is now a parse error naming the group and pointing at `[group.<name>.tools]`. `[group.default]` and `[group.all]` remain reserved. `ocx.lock`'s `declaration_hash` is unaffected, so a hand-edited `ocx.toml` triggers no re-lock.
+
 ## [0.4.3] - 2026-07-10
 
 ### Added

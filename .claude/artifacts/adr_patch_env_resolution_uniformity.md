@@ -8,7 +8,7 @@ Hardens the milestone design in adr_infrastructure_patches.md (C4/C5 site-tier +
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-01
 **Deciders:** @michael-herwig, architect
 **GitHub:** PR #172 maintainer review comments C4/C14 (+ launcher-semantic fork); milestone #111 (Corporate infrastructure v1)

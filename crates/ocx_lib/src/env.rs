@@ -74,6 +74,32 @@ pub mod keys {
     /// boundaries). Forwarded only when `[patches]` is configured; absent
     /// otherwise. Mirrors `OCX_MIRRORS` in forwarding semantics.
     pub const OCX_PATCHES: &str = "OCX_PATCHES";
+    /// JSON envelope carrying the resolved project/group `[env]` entries plus
+    /// any `ocx run --env` overrides, forwarded so a generated entrypoint
+    /// launcher's re-entry (`ocx launcher exec`) applies the same project env
+    /// the parent composed.
+    ///
+    /// Without it the launcher silently loses those entries: it builds a fresh
+    /// `Env` from the inherited environment, then re-applies the package's own
+    /// entries on top — reverting exactly the overrides the project declared,
+    /// with no signal to the user. A package that declares entrypoints
+    /// resolves *through* the launcher on the ordinary `ocx run` path, so this
+    /// is the primary path, not a corner case.
+    ///
+    /// **Decode is untrusted input and fails closed on the whole payload.** An
+    /// entry whose key is reserved (`OCX_*` / `__OCX_*`) or whose modifier
+    /// `kind` is unrecognized rejects the entire envelope rather than being
+    /// skipped: a misread `kind` would apply a value with the wrong
+    /// combination semantics and silently produce a wrong environment. This is
+    /// where [`OCX_PATCHES`]' leniency must NOT be copied — a forged
+    /// `no_patches` can only suppress an overlay, whereas a forged entry here
+    /// can set a value.
+    ///
+    /// Carries no version discriminator, matching [`OCX_PATCHES`]: the
+    /// envelope is not where this can break across versions — an unknown
+    /// modifier `kind` is, and rejecting that directly is strictly better than
+    /// a version field an older binary could not act on anyway.
+    pub const OCX_ENV: &str = "OCX_ENV";
     /// Boolean — when truthy, `ocx self setup` writes the env shims but does
     /// NOT modify any shell profile. Mirrors `--no-modify-path`. Not a
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
@@ -350,6 +376,14 @@ impl Env {
             Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
             None => self.remove(keys::OCX_MANAGED_CONFIG),
         }
+        // Unconditional clear, never a set: the forwarded project env is NOT a
+        // resolution-affecting config field and deliberately does not live on
+        // `OcxConfigView`. This half of the contract guarantees a stale
+        // `OCX_ENV` — exported by a shell, or inherited from an unrelated
+        // parent `ocx run` — can never reach a child. The invocation that
+        // genuinely has a payload writes it afterwards via
+        // [`Self::set_forwarded_env`].
+        self.remove(keys::OCX_ENV);
         // Resolution-affecting, but a pure env opt-in with no `ContextOptions`
         // / CLI counterpart (unlike the flags above): its authoritative value
         // IS the ambient env, which the outer ocx read the same way at the
@@ -359,6 +393,21 @@ impl Env {
             self.set(keys::OCX_ALLOW_YANKED, "1");
         } else {
             self.remove(keys::OCX_ALLOW_YANKED);
+        }
+    }
+
+    /// Writes the forwarded project/group `[env]` payload onto this env as
+    /// [`keys::OCX_ENV`], so a generated entrypoint launcher's re-entry
+    /// (`ocx launcher exec`) can re-apply it after the package entries.
+    ///
+    /// Call **after** [`Self::apply_ocx_config`], which unconditionally clears
+    /// the key. The two halves are deliberate: `apply_ocx_config` guarantees no
+    /// stale value survives, this method writes the payload of the invocation
+    /// that actually has one. An empty slice leaves the key absent.
+    pub fn set_forwarded_env(&mut self, entries: &[crate::package::metadata::env::entry::Entry]) {
+        match encode_forwarded_env(entries) {
+            Some(json) => self.set(keys::OCX_ENV, json),
+            None => self.remove(keys::OCX_ENV),
         }
     }
 
@@ -569,6 +618,222 @@ pub fn is_valid_env_key(key: &str) -> bool {
     bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Returns `true` when `key` falls in the `OCX_*` / `__OCX_*` namespace ocx
+/// reserves for its own resolution-affecting configuration.
+///
+/// The single gate behind the rule that user-declarable env surfaces — project
+/// `[env]`, `[group.<name>.env]`, `ocx run --env`, and the forwarded
+/// [`keys::OCX_ENV`] payload — cannot set an `OCX_*` key. Without it a
+/// checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_MIRRORS`,
+/// `OCX_PATCHES`, `OCX_OFFLINE` or `OCX_ALLOW_YANKED` and reconfigure how ocx
+/// itself resolves — and [`Env::apply_ocx_config`] would forward the result to
+/// every child. Config governing its own governance is a materialized
+/// vulnerability class, not a theoretical one.
+///
+/// Matched case-insensitively: Windows environment names are case-insensitive,
+/// so a lowercase `ocx_offline` would land in the same slot as `OCX_OFFLINE`.
+///
+/// Distinct from [`is_valid_env_key`], which enforces the POSIX *name grammar*.
+/// Both gates apply — grammar first, then namespace.
+pub fn is_reserved_ocx_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.starts_with("OCX_") || upper.starts_with("__OCX_")
+}
+
+/// Failure modes of decoding the forwarded [`keys::OCX_ENV`] payload.
+///
+/// Every variant is a hard error: the payload is untrusted input and the decode
+/// fails closed on the **whole** envelope rather than filtering the offending
+/// entry. A partially-applied payload would silently produce an environment
+/// that matches neither what the parent composed nor what the user declared.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ForwardedEnvError {
+    /// The value was present but not valid JSON.
+    #[error("malformed OCX_ENV env value")]
+    MalformedJson {
+        /// The underlying JSON parse failure.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// The mandatory `entries` array is absent or not an array. This is the
+    /// envelope sentinel — its presence is what proves the payload came from
+    /// [`Env::set_forwarded_env`] rather than an injected value.
+    #[error("OCX_ENV 'entries' field is absent or not an array")]
+    MissingEntries,
+
+    /// An array element is not an object carrying string `key`, `value` and
+    /// `type` fields.
+    #[error("OCX_ENV entry at index {index} is not an object with string 'key', 'value' and 'type'")]
+    InvalidEntry {
+        /// Zero-based position in the `entries` array.
+        index: usize,
+    },
+
+    /// An entry's `type` is not a recognized modifier.
+    ///
+    /// The one place [`crate::config::patch::patches_from_env`]'s leniency must
+    /// NOT be copied. A forged `no_patches` can only *suppress* an overlay; a
+    /// misread modifier actively sets a value with the wrong combination
+    /// semantics — replacing where it should prepend — and produces a wrong
+    /// environment with no signal.
+    #[error("OCX_ENV entry '{key}' has unrecognized modifier type '{found}'")]
+    UnknownKind {
+        /// The entry's env-var name.
+        key: String,
+        /// The unrecognized `type` value as received.
+        found: String,
+    },
+
+    /// An entry's key is outside the POSIX environment-name grammar
+    /// ([`is_valid_env_key`]).
+    #[error("OCX_ENV entry '{key}' is not a valid environment variable name")]
+    InvalidKey {
+        /// The offending env-var name.
+        key: String,
+    },
+
+    /// An entry's key is in the reserved `OCX_*` / `__OCX_*` namespace
+    /// ([`is_reserved_ocx_key`]).
+    #[error("OCX_ENV entry '{key}' is reserved; OCX_* and __OCX_* keys cannot be forwarded")]
+    ReservedKey {
+        /// The offending env-var name.
+        key: String,
+    },
+}
+
+impl crate::cli::ClassifyExitCode for ForwardedEnvError {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        // Every variant means the forwarded payload was malformed, truncated or
+        // forged — input data that failed validation, not a config-file fault
+        // and not a usage error (no user typed it).
+        Some(crate::cli::ExitCode::DataError)
+    }
+}
+
+/// Serializes resolved project/group env entries into the JSON envelope written
+/// to [`keys::OCX_ENV`].
+///
+/// Returns `None` for an empty slice so [`Env::set_forwarded_env`] removes the
+/// key rather than writing an empty envelope.
+///
+/// Envelope shape follows [`crate::config::patch::encode_patches`]: one
+/// mandatory sentinel field (`entries`) plus room for additive optional fields,
+/// and no version discriminator. A version field would buy nothing — the
+/// envelope is not where this breaks across versions. The one field that cannot
+/// evolve additively is a per-entry `kind`, and an older ocx rejecting an
+/// unknown `kind` outright is strictly better than being told "this is newer
+/// than me" and having no better response available.
+fn encode_forwarded_env(entries: &[crate::package::metadata::env::entry::Entry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let array: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "key":   entry.key,
+                "value": entry.value,
+                // `type`, not `kind`: the same spelling `ocx --format json env`
+                // already emits for an entry, the `[env]` table already accepts
+                // in `ocx.toml`, and `Modifier` already carries as its serde
+                // tag. One vocabulary for one concept. (`kind` is taken on the
+                // JSON surface — it discriminates `EntrySource`.)
+                "type":  entry.kind.to_string(),
+            })
+        })
+        .collect();
+    match serde_json::to_string(&serde_json::json!({ "entries": array })) {
+        Ok(json) => Some(json),
+        Err(error) => {
+            log::warn!("failed to encode OCX_ENV: {error}");
+            None
+        }
+    }
+}
+
+/// Parses [`keys::OCX_ENV`] back into the project/group env entries the parent
+/// composed, for a generated launcher's re-entry to re-apply on top of the
+/// package entries.
+///
+/// An absent or empty value yields an empty vector — a direct launcher
+/// invocation with no `ocx run` parent legitimately has no payload.
+///
+/// **The payload is untrusted input.** Each entry passes the same two gates the
+/// `ocx.toml` parse path applies — [`is_valid_env_key`] for the name grammar and
+/// [`is_reserved_ocx_key`] for the `OCX_*` namespace — and any failure rejects
+/// the **whole** envelope. Filtering the bad entry and keeping the rest would
+/// hand an attacker a way to shape the surviving set.
+///
+/// Honest scoping: a process that can set `OCX_ENV` already controls the child's
+/// environment outright, so the gate grants no new capability against that
+/// attacker. It exists to keep the forwarded map out of ocx's *own* resolution
+/// surface — [`Env::apply_ocx_config`] overwrites only the keys it knows, so a
+/// forged `OCX_DEFAULT_REGISTRY` arriving this way would otherwise survive into
+/// the child and reach any grandchild ocx.
+///
+/// # Errors
+///
+/// Returns [`ForwardedEnvError`] — see that type; every variant is fail-closed.
+pub fn forwarded_env() -> Result<Vec<crate::package::metadata::env::entry::Entry>, ForwardedEnvError> {
+    use crate::package::metadata::env::entry::Entry;
+    use crate::package::metadata::env::modifier::ModifierKind;
+
+    let Some(raw) = var(keys::OCX_ENV) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let envelope = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+        .map_err(|source| ForwardedEnvError::MalformedJson { source })?;
+
+    // Mandatory sentinel: a value not produced by `encode_forwarded_env` is
+    // corrupted or externally injected. Same fail-closed role `registry` plays
+    // in the `OCX_PATCHES` envelope.
+    let array = envelope
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ForwardedEnvError::MissingEntries)?;
+
+    let mut out = Vec::with_capacity(array.len());
+    for (index, element) in array.iter().enumerate() {
+        let Some(object) = element.as_object() else {
+            return Err(ForwardedEnvError::InvalidEntry { index });
+        };
+        let (Some(key), Some(value), Some(kind)) = (
+            object.get("key").and_then(serde_json::Value::as_str),
+            object.get("value").and_then(serde_json::Value::as_str),
+            object.get("type").and_then(serde_json::Value::as_str),
+        ) else {
+            return Err(ForwardedEnvError::InvalidEntry { index });
+        };
+        if !is_valid_env_key(key) {
+            return Err(ForwardedEnvError::InvalidKey { key: key.to_string() });
+        }
+        if is_reserved_ocx_key(key) {
+            return Err(ForwardedEnvError::ReservedKey { key: key.to_string() });
+        }
+        let kind = match kind {
+            "path" => ModifierKind::Path,
+            "constant" => ModifierKind::Constant,
+            unknown => {
+                return Err(ForwardedEnvError::UnknownKind {
+                    key: key.to_string(),
+                    found: unknown.to_string(),
+                });
+            }
+        };
+        out.push(Entry {
+            key: key.to_string(),
+            value: value.to_string(),
+            kind,
+        });
+    }
+    Ok(out)
+}
+
 /// Parses `OCX_INSECURE_REGISTRIES` into a list of registry hostnames.
 pub fn insecure_registries() -> Vec<String> {
     string("OCX_INSECURE_REGISTRIES", String::new())
@@ -691,6 +956,223 @@ mod tests {
         assert!(
             !flag(keys::OCX_NO_MODIFY_PATH, false),
             "unset OCX_NO_MODIFY_PATH must fall back to the false default"
+        );
+    }
+
+    // ── is_reserved_ocx_key (X1 namespace gate) ──────────────────────────
+
+    #[test]
+    fn is_reserved_ocx_key_matches_both_prefixes_case_insensitively() {
+        assert!(is_reserved_ocx_key("OCX_OFFLINE"));
+        assert!(is_reserved_ocx_key("OCX_DEFAULT_REGISTRY"));
+        assert!(is_reserved_ocx_key("__OCX_TESTING_INSTALL_BINARY"));
+        // Windows env names are case-insensitive, so a lowercase spelling
+        // lands in the same slot and must be caught by the same gate.
+        assert!(is_reserved_ocx_key("ocx_offline"));
+        assert!(is_reserved_ocx_key("__ocx_testing_x"));
+    }
+
+    #[test]
+    fn is_reserved_ocx_key_leaves_ordinary_keys_alone() {
+        assert!(!is_reserved_ocx_key("CI"));
+        assert!(!is_reserved_ocx_key("PATH"));
+        assert!(!is_reserved_ocx_key("SOURCE_DATE_EPOCH"));
+        // Prefix, not substring: a key that merely mentions ocx is fine.
+        assert!(!is_reserved_ocx_key("MY_OCX_HOME"));
+        assert!(!is_reserved_ocx_key("OCX"));
+    }
+
+    // ── OCX_ENV forwarding (R1 / R1a) ────────────────────────────────────
+
+    fn entry(
+        key: &str,
+        value: &str,
+        kind: crate::package::metadata::env::modifier::ModifierKind,
+    ) -> crate::package::metadata::env::entry::Entry {
+        crate::package::metadata::env::entry::Entry {
+            key: key.to_string(),
+            value: value.to_string(),
+            kind,
+        }
+    }
+
+    /// The forwarded payload survives encode → env → decode with both modifier
+    /// kinds and vector order intact. Order IS precedence, so it is part of the
+    /// contract, not an implementation detail.
+    #[test]
+    fn forwarded_env_round_trips_both_kinds_in_order() {
+        use crate::package::metadata::env::modifier::ModifierKind;
+
+        let guard = crate::test::env::lock();
+        let original = vec![
+            entry("CI", "1", ModifierKind::Constant),
+            entry("PATH", "/project/node_modules/.bin", ModifierKind::Path),
+            entry("RUSTFLAGS", "-C target-cpu=native", ModifierKind::Constant),
+        ];
+
+        let mut child = Env::clean();
+        child.set_forwarded_env(&original);
+        let encoded = child
+            .get(keys::OCX_ENV)
+            .expect("a non-empty payload must set OCX_ENV")
+            .to_str()
+            .expect("OCX_ENV must be valid UTF-8")
+            .to_string();
+        guard.set(keys::OCX_ENV, encoded);
+
+        let parsed = forwarded_env().expect("a self-encoded payload must decode");
+        assert_eq!(parsed.len(), original.len());
+        for (got, want) in parsed.iter().zip(&original) {
+            assert_eq!(got.key, want.key);
+            assert_eq!(got.value, want.value);
+            assert_eq!(got.kind, want.kind, "modifier kind must survive the round-trip");
+        }
+    }
+
+    /// An empty payload removes the key rather than writing an empty envelope,
+    /// and an absent key decodes to an empty vector — a launcher invoked
+    /// directly (no `ocx run` parent) is the normal no-payload case.
+    #[test]
+    fn forwarded_env_empty_payload_removes_key_and_decodes_empty() {
+        let guard = crate::test::env::lock();
+
+        let mut child = Env::clean();
+        child.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"STALE","value":"1","type":"constant"}]}"#,
+        );
+        child.set_forwarded_env(&[]);
+        assert!(
+            child.get(keys::OCX_ENV).is_none(),
+            "an empty payload must remove OCX_ENV, not write an empty envelope"
+        );
+
+        guard.remove(keys::OCX_ENV);
+        assert!(forwarded_env().expect("absent OCX_ENV is not an error").is_empty());
+        guard.set(keys::OCX_ENV, "");
+        assert!(forwarded_env().expect("empty OCX_ENV is not an error").is_empty());
+    }
+
+    /// `apply_ocx_config` clears any inherited `OCX_ENV` so a stale shell
+    /// export — or a payload inherited from an unrelated parent `ocx run` —
+    /// cannot leak into a child that has no project env of its own.
+    #[test]
+    fn apply_ocx_config_removes_stale_forwarded_env() {
+        let mut env = Env::clean();
+        env.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"STALE","value":"1","type":"constant"}]}"#,
+        );
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_ENV).is_none(),
+            "apply_ocx_config must clear an inherited OCX_ENV"
+        );
+    }
+
+    /// Malformed JSON is a hard error, never a silent empty decode.
+    #[test]
+    fn forwarded_env_rejects_malformed_json() {
+        let guard = crate::test::env::lock();
+        guard.set(keys::OCX_ENV, "not json {{{");
+        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MalformedJson { .. })));
+    }
+
+    /// The `entries` sentinel is mandatory: valid JSON without it was not
+    /// produced by our encoder, so it is corrupted or injected.
+    #[test]
+    fn forwarded_env_rejects_missing_entries_sentinel() {
+        let guard = crate::test::env::lock();
+        guard.set(keys::OCX_ENV, r#"{"env":[{"key":"CI","value":"1","type":"constant"}]}"#);
+        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
+        // Present but not an array is the same fault.
+        guard.set(keys::OCX_ENV, r#"{"entries":"CI=1"}"#);
+        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
+    }
+
+    /// An unrecognized modifier `kind` is a hard error — the one place
+    /// `OCX_PATCHES`' defaulting leniency must NOT be copied. A misread kind
+    /// would replace where it should prepend and produce a wrong environment
+    /// with no signal.
+    #[test]
+    fn forwarded_env_rejects_unknown_modifier_kind() {
+        let guard = crate::test::env::lock();
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"CI","value":"1","type":"append"}]}"#,
+        );
+        let error = forwarded_env().expect_err("an unknown modifier type must not decode");
+        assert!(
+            matches!(&error, ForwardedEnvError::UnknownKind { key, found } if key == "CI" && found == "append"),
+            "expected UnknownKind naming the key and the value; got: {error}"
+        );
+        // An absent `type` is equally refused — never defaulted to constant.
+        guard.set(keys::OCX_ENV, r#"{"entries":[{"key":"CI","value":"1"}]}"#);
+        assert!(matches!(
+            forwarded_env(),
+            Err(ForwardedEnvError::InvalidEntry { index: 0 })
+        ));
+        // `kind` is NOT an accepted alias: it is the `EntrySource` discriminant
+        // on the JSON env surface, so accepting both spellings here would be
+        // two vocabularies for one concept.
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"CI","value":"1","kind":"constant"}]}"#,
+        );
+        assert!(matches!(
+            forwarded_env(),
+            Err(ForwardedEnvError::InvalidEntry { index: 0 })
+        ));
+    }
+
+    /// A reserved key fails the WHOLE payload closed. Filtering the bad entry
+    /// and keeping the rest would let an attacker shape the surviving set.
+    #[test]
+    fn forwarded_env_reserved_key_fails_the_whole_payload_closed() {
+        let guard = crate::test::env::lock();
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"CI","value":"1","type":"constant"},
+                          {"key":"OCX_DEFAULT_REGISTRY","value":"evil.example.com","type":"constant"}]}"#,
+        );
+        let error = forwarded_env().expect_err("a reserved key must reject the payload");
+        assert!(
+            matches!(&error, ForwardedEnvError::ReservedKey { key } if key == "OCX_DEFAULT_REGISTRY"),
+            "expected ReservedKey naming the offender; got: {error}"
+        );
+
+        // `__OCX_*` is gated identically.
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"__OCX_TESTING_INSTALL_BINARY","value":"/tmp/x","type":"constant"}]}"#,
+        );
+        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::ReservedKey { .. })));
+    }
+
+    /// A key outside the POSIX name grammar is refused by the same shared
+    /// validator the shell emitters and CI flavors use.
+    #[test]
+    fn forwarded_env_rejects_invalid_key_grammar() {
+        let guard = crate::test::env::lock();
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"A\nB","value":"1","type":"constant"}]}"#,
+        );
+        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::InvalidKey { .. })));
+    }
+
+    /// Every decode failure exits 65 (`DataError`) — the payload is input data
+    /// that failed validation, not a config-file fault and not a usage error.
+    #[test]
+    fn forwarded_env_error_classifies_as_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+        assert_eq!(ForwardedEnvError::MissingEntries.classify(), Some(ExitCode::DataError));
+        assert_eq!(
+            ForwardedEnvError::ReservedKey {
+                key: "OCX_OFFLINE".to_string()
+            }
+            .classify(),
+            Some(ExitCode::DataError)
         );
     }
 

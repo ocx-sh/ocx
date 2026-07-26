@@ -392,7 +392,7 @@ cmake = "ocx.sh/cmake:3.28"
 ninja = "ocx.sh/ninja:1.11"
 mytool = "ghcr.io/acme/mytool:1.0"
 
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck:0.10"
 """
 

@@ -664,7 +664,7 @@ def test_lock_rejects_group_flag(
     _write_ocx_toml(
         project,
         f"""\
-[group.ci]
+[group.ci.tools]
 tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
@@ -920,7 +920,7 @@ def test_lock_resolves_root_and_all_groups(
 [tools]
 cmake = "{ocx.registry}/{repo_cmake}:3.0.0"
 
-[group.dev]
+[group.dev.tools]
 ruff = "{ocx.registry}/{repo_ruff}:0.11.0"
 """,
     )
@@ -965,7 +965,7 @@ def test_lock_same_name_across_groups_locks_both_entries(
 [tools]
 cmake = "{ocx.registry}/{repo}:3.0.0"
 
-[group.dev]
+[group.dev.tools]
 cmake = "{ocx.registry}/{repo}:3.0.0"
 """,
     )

@@ -98,7 +98,7 @@ def test_add_same_name_default_and_named_group_succeeds(
 ) -> None:
     """``ocx add cmake:1.0.0`` followed by ``ocx add --group ci cmake:1.0.0``
     must both succeed and leave ``cmake`` in both ``[tools]`` and
-    ``[group.ci]``.
+    ``[group.ci.tools]``.
 
     Per-group uniqueness contract: the same binding name may coexist in the
     default ``[tools]`` table and in any named ``[group.*]`` table.
@@ -118,7 +118,7 @@ def test_add_same_name_default_and_named_group_succeeds(
         f"ocx add to default group failed: rc={r1.returncode}, stderr={r1.stderr!r}"
     )
 
-    # Add same name to named group [group.ci].
+    # Add same name to named group [group.ci.tools].
     r2 = _add_tool(ocx, project_dir, pkg.fq, group="ci")
     assert r2.returncode == EXIT_SUCCESS, (
         f"ocx add --group ci same name failed: rc={r2.returncode}, stderr={r2.stderr!r}"
@@ -129,13 +129,13 @@ def test_add_same_name_default_and_named_group_succeeds(
     assert binding in toml, (
         f"binding {binding!r} must be in ocx.toml after add to default; got:\n{toml}"
     )
-    # The ci group section must also carry the binding.
-    assert "ci" in toml, (
-        f"[group.ci] section must appear in ocx.toml after --group ci add; got:\n{toml}"
+    # The ci group section must also carry the binding, nested under `.tools`.
+    assert "[group.ci.tools]" in toml, (
+        f"[group.ci.tools] section must appear in ocx.toml after --group ci add; got:\n{toml}"
     )
     # Both occurrences must be present: at least 2 lines with the binding key.
     assert toml.count(binding) >= 2, (
-        f"binding {binding!r} must appear in both [tools] and [group.ci]; "
+        f"binding {binding!r} must appear in both [tools] and [group.ci.tools]; "
         f"got {toml.count(binding)} occurrences:\n{toml}"
     )
 
@@ -198,7 +198,7 @@ def test_add_same_name_same_group_rejected(
 def test_remove_with_group_targets_named_group(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx remove cmake --group ci`` removes the binding from ``[group.ci]``
+    """``ocx remove cmake --group ci`` removes the binding from ``[group.ci.tools]``
     but leaves ``cmake`` intact in the default ``[tools]`` table.
     """
     short = uuid4().hex[:8]
@@ -233,7 +233,7 @@ def test_remove_with_group_targets_named_group(
     # After remove, there should be at most one occurrence of the binding key
     # (the one in [tools]); the ci entry must be gone.
     # We check that the ci group no longer holds the binding by verifying that
-    # no line of the form `{binding} = "..."` appears in a [group.ci] context.
+    # no line of the form `{binding} = "..."` appears in a [group.ci.tools] context.
     # Simplest proxy: the toml has binding appearing once, not twice.
     assert toml.count(f"{binding} =") == 1, (
         f"after --group ci remove, {binding!r} must appear exactly once "
@@ -250,7 +250,7 @@ def test_remove_without_group_when_ambiguous_errors(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx remove cmake`` (no ``--group``) when ``cmake`` exists in both
-    default and ``[group.ci]`` must exit 64 (UsageError) and mention
+    default and ``[group.ci.tools]`` must exit 64 (UsageError) and mention
     ``ambiguous`` plus both group names (``default``, ``ci``) in stderr.
 
     Error variant: ``BindingAmbiguous`` → ``UsageError`` (64).
@@ -307,7 +307,7 @@ def test_remove_without_group_when_unique_succeeds(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx remove cmake`` (no ``--group``) when ``cmake`` exists only in
-    ``[group.ci]`` succeeds and removes it from that group.
+    ``[group.ci.tools]`` succeeds and removes it from that group.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_uniq"

@@ -6,6 +6,7 @@ pub mod child_process;
 pub mod fs;
 pub mod path;
 pub mod result_ext;
+pub mod schema;
 pub mod serde_ext;
 pub mod singleflight;
 pub mod string_ext;

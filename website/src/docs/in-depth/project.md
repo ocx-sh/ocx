@@ -155,6 +155,22 @@ This rule determines iteration order through the resolved tool set. The composer
 
 `all` expansion inserts groups alphabetically by group name in place of `all` in the `-g` argument list, after the default group. So `ocx run -g ci,all,release` expands to `[ci, default, ci_alpha_ordered_named_groups..., release]` and then `compose_tool_set` deduplicates.
 
+### Project and group `[env]` {#running-project-env}
+
+The rule above governs package-composed env — stage 2 of a longer pipeline. [Project Environment][env-composition-project-env] in the Environment Composition reference is the full six-stage table: ambient, packages, patches, project `[env]`, group `[env]`, then `--env`. Project and group `[env]` entries append after every package's own entries, so a project or group value always wins a same-key collision with a package default.
+
+Worked example, continuing the `[tools]` / `[group.ci]` declaration from [Groups](#groups):
+
+```toml
+[env]
+SOURCE_DATE_EPOCH = "0"
+
+[group.ci.env]
+SOURCE_DATE_EPOCH = "1700000000"
+```
+
+`ocx run -g ci -- CMD` composes the project's own `[env]` (stage 4) and then `[group.ci.env]` (stage 5) — the later stage wins, so the child sees `SOURCE_DATE_EPOCH=1700000000`. This is the same later-wins rule the group-selection order above already applies to `-g ci,release`: whichever `[env]` stage is composed later in the pipeline overrides an earlier one for the same key.
+
 ### PATH precedence consequence {#running-path-precedence}
 
 Two groups may declare different bindings whose installed packages happen to ship a binary with the same filename. The group listed **last** in `-g` order controls which binary appears first in PATH.
@@ -199,15 +215,15 @@ Not every contributor needs every tool. CI needs `shellcheck` and `shfmt`; the r
 [tools]
 cmake = "ocx.sh/cmake:3.28"
 
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck:0.11"
 shfmt      = "ocx.sh/shfmt:3.7"
 
-[group.release]
+[group.release.tools]
 goreleaser = "ocx.sh/goreleaser:2.0"
 ```
 
-The top-level `[tools]` table is the implicit `default` group; named `[group.<name>]` tables add to it. `[group.default]` is reserved and produces a parse error — there is no ambiguity between "implicit default" and "named default."
+The top-level `[tools]` table is the implicit `default` group. Each named `[group.<name>]` holds exactly two optional sub-tables: `tools`, which adds to the default group's bindings, and `env` (see [Project and group `[env]`](#running-project-env)). A tool binding declared directly under `[group.<name>]` — outside its `tools` sub-table — is a parse error naming the group. `[group.default]` is reserved and produces a parse error regardless of contents — there is no ambiguity between "implicit default" and "named default."
 
 Pass `--group` (repeatable, comma-separated) to scope a command:
 
@@ -219,13 +235,13 @@ ocx lock                          # workstation — every group resolved
 
 ### Per-group binding identity {#groups-binding-identity}
 
-The same binding name may appear in the default `[tools]` table and in any named `[group.*]` table simultaneously — the identity of a binding is `(group, name)`, not `name` alone. This lets a project pin one version of a tool for daily workstation use and a different version in `ci` without conflict:
+The same binding name may appear in the default `[tools]` table and in any named `[group.*.tools]` table simultaneously — the identity of a binding is `(group, name)`, not `name` alone. This lets a project pin one version of a tool for daily workstation use and a different version in `ci` without conflict:
 
 ```toml
 [tools]
 shfmt = "ocx.sh/shfmt:3.7"       # workstation default
 
-[group.ci]
+[group.ci.tools]
 shfmt = "ocx.sh/shfmt:3.13"      # CI: pinned to a newer build
 ```
 
@@ -341,6 +357,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [user-run]: ../user-guide.md#run
 [user-guide-global]: ../user-guide.md#global-toolchain
 [env-composition-strict-isolation]: ../reference/env-composition.md#strict-isolation
+[env-composition-project-env]: ../reference/env-composition.md#project-env
 [in-depth-versioning-locking]: ./versioning.md#locking
 [in-depth-indices]: ./indices.md
 [in-depth-indices-local]: ./indices.md#local

@@ -140,8 +140,37 @@ For `ocx run`, the full order rule is:
 
 See [In Depth — Project Toolchain → Composition order rule][in-depth-project-composition] for the worked example with `-g ci,all,release`.
 
+## Project Environment {#project-env}
+
+`ocx.toml` can declare its own environment on top of what packages provide: [`[env]`][config-project-env] for project-wide constants, [`[group.<name>.env]`][config-project-env] for group-scoped ones, and `ocx run`'s [`--env`][cmd-run] flag for a one-off override.
+
+Before this stage existed, the only channel was the ambient shell (`FOO=bar ocx run -- …`). That fails outright on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate session state that persists after the command — and it fails for any caller that builds an argv array rather than a shell command line, which is the shape a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules], or a Python subprocess call all use.
+
+Project and group `[env]` entries materialize as ordinary env entries and are **appended** to the same vector [Composition order](#composition-order) already produces — the same uniform channel every consumer (`ocx run`, `ocx env`, `ocx direnv export`, the `--ci=github`/`--ci=gitlab` writers) reads.
+
+### Precedence {#project-env-precedence}
+
+| Stage | Source | Notes |
+|---|---|---|
+| 1 (lowest) | Ambient inherited env | Skipped entirely under [`--clean`][cmd-run] |
+| 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
+| 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
+| 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend |
+| 5 | Group [`[group.<name>.env]`][config-project-env] | In `-g` selection order — a group listed later wins |
+| 6 (highest) | [`ocx run --env KEY=VALUE`][cmd-run] | Repeatable; constant only, no path form |
+
+A stage-4 or stage-5 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
+
+::: warning `--clean` is not the hermeticity boundary
+`--clean` controls only stage 1 — what the child process inherits from the parent shell. It is not what makes the package-composed set (stage 2) reproducible. That comes from the resolver's scope: package env values are computed from `ocx.lock` and the resolved digests alone, identically with or without `--clean`. Project `[env]` (stage 4) is the opposite case by design — it is the user's own file, deliberately allowed to read ambient state, and is excluded from the lock's `declaration_hash` for exactly that reason.
+:::
+
+`--self` has no effect on project or group `[env]` entries — see [Visibility surfaces](#visibility-surfaces) above. A project is never a dependency of anything, so there is no interface/private surface to gate; project and group entries are emitted on both.
+
 <!-- external -->
 [volta]: https://volta.sh/
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[bazel-rules]: https://bazel.build/extending/rules
 
 <!-- commands -->
 [cmd-add]: ./command-line.md#add
@@ -164,6 +193,7 @@ See [In Depth — Project Toolchain → Composition order rule][in-depth-project
 [config-patches]: ./configuration.md#keys-patches
 [config-patches-no-patches]: ./configuration.md#keys-patches-no-patches
 [config-patches-scopes]: ./configuration.md#keys-patches-scopes
+[config-project-env]: ./configuration.md#project-config-env
 
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain

@@ -31,9 +31,12 @@
 //! "register at every project-tier touch" intent that this perf fix
 //! narrows.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use ocx_lib::project::{MutationGuard, ProjectConfig, ProjectLock, acquire_project_lock_for_file, lock::lock_path_for};
+use ocx_lib::package::metadata::env::entry::Entry;
+use ocx_lib::project::{
+    DEFAULT_GROUP, MutationGuard, ProjectConfig, ProjectLock, acquire_project_lock_for_file, lock::lock_path_for,
+};
 
 /// Result of resolving the project tier: owned paths, parsed config, parsed lock.
 ///
@@ -402,6 +405,45 @@ pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> 
         }
     }
     Ok(())
+}
+
+/// Materialize the project's declared `[env]` and the selected groups'
+/// `[group.<name>.env]` as resolved [`Entry`] values, in application order.
+///
+/// This is stages 4 and 5 of the composition order — appended to the entry
+/// vector after the package-composed env and the patch overlay, so a constant
+/// declared here replaces a package-declared one and a path entry lands ahead of
+/// package paths. Stage 6 (`ocx run --env`) is the caller's to append after this.
+///
+/// `groups` is the already-expanded selection list (post `all` expansion, with
+/// the empty case promoted to the default group), in `-g` order. A repeated name
+/// keeps only its **last** occurrence so `-g ci -g docs -g ci` really does let
+/// `ci` win — which is what "later group wins" means. [`DEFAULT_GROUP`] is
+/// skipped: the default group's env is the top-level `[env]` already emitted as
+/// stage 4, and there is no `[group.default]` table to read.
+///
+/// Relative `type = "path"` values resolve against the directory holding
+/// `config_path`, never the current directory, so `ocx run` from a subdirectory
+/// composes the same `PATH` as from the project root.
+pub(crate) fn project_env_entries(config: &ProjectConfig, config_path: &Path, groups: &[String]) -> Vec<Entry> {
+    // A resolved `ocx.toml` path always has a parent; `.` keeps a hand-built
+    // relative path from panicking rather than inventing a fallback root.
+    let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut entries = config.env.to_entries(project_root);
+
+    for (index, name) in groups.iter().enumerate() {
+        // Later-wins dedup: skip every occurrence but the last.
+        if name == DEFAULT_GROUP || groups[index + 1..].contains(name) {
+            continue;
+        }
+        let Some(group) = config.groups.get(name) else {
+            continue;
+        };
+        entries.extend(group.env.to_entries(project_root));
+    }
+
+    entries
 }
 
 /// Mutation-side counterpart to [`load_project_with_lock`].

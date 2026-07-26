@@ -1059,8 +1059,8 @@ def _make_multigroup_project(
     _write_ocx_toml(
         project,
         f'[tools]\n{repos["default"]} = "{reg}/{repos["default"]}:1.0.0"\n\n'
-        f'[group.lint]\n{repos["lint"]} = "{reg}/{repos["lint"]}:1.0.0"\n\n'
-        f'[group.ci]\n{repos["ci"]} = "{reg}/{repos["ci"]}:1.0.0"\n',
+        f'[group.lint.tools]\n{repos["lint"]} = "{reg}/{repos["lint"]}:1.0.0"\n\n'
+        f'[group.ci.tools]\n{repos["ci"]} = "{reg}/{repos["ci"]}:1.0.0"\n',
     )
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS

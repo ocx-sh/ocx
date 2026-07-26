@@ -201,7 +201,11 @@ pub fn add_binding_in_memory(
             config.tools.insert(key.clone(), identifier.clone());
         }
         Some(group_name) => {
-            if config.groups.get(group_name).is_some_and(|g| g.contains_key(&key)) {
+            if config
+                .groups
+                .get(group_name)
+                .is_some_and(|g| g.tools.contains_key(&key))
+            {
                 return Err(Error::Project(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingAlreadyExists {
@@ -214,6 +218,7 @@ pub fn add_binding_in_memory(
                 .groups
                 .entry(group_name.to_owned())
                 .or_default()
+                .tools
                 .insert(key.clone(), identifier.clone());
         }
     }
@@ -358,9 +363,9 @@ pub fn remove_binding_in_memory(
             }
         }
         Some(group_name) => {
-            let tools = config.groups.get_mut(group_name).filter(|g| g.contains_key(&key));
-            if let Some(t) = tools {
-                t.remove(&key);
+            let group = config.groups.get_mut(group_name).filter(|g| g.tools.contains_key(&key));
+            if let Some(g) = group {
+                g.tools.remove(&key);
             } else {
                 return Err(Error::Project(ProjectError::new(
                     path.to_path_buf(),
@@ -375,7 +380,7 @@ pub fn remove_binding_in_memory(
                 hits.push("default".to_owned());
             }
             for group_name in config.groups.keys() {
-                if config.groups[group_name].contains_key(&key) {
+                if config.groups[group_name].tools.contains_key(&key) {
                     hits.push(group_name.clone());
                 }
             }
@@ -397,6 +402,7 @@ pub fn remove_binding_in_memory(
                             .groups
                             .get_mut(target)
                             .expect("group must exist — just found it")
+                            .tools
                             .remove(&key);
                     }
                 }
@@ -553,7 +559,10 @@ mod tests {
 
         let cfg = reload_config(dir.path());
         assert!(
-            cfg.groups.get("ci").map(|g| g.contains_key("cmake")).unwrap_or(false),
+            cfg.groups
+                .get("ci")
+                .map(|g| g.tools.contains_key("cmake"))
+                .unwrap_or(false),
             "cmake must appear under [group.ci] after add_binding with group=ci"
         );
     }
@@ -610,7 +619,10 @@ mod tests {
         let cfg = reload_config(dir.path());
         assert!(cfg.tools.contains_key("cmake"), "cmake in [tools]");
         assert!(
-            cfg.groups.get("ci").map(|g| g.contains_key("cmake")).unwrap_or(false),
+            cfg.groups
+                .get("ci")
+                .map(|g| g.tools.contains_key("cmake"))
+                .unwrap_or(false),
             "cmake in [group.ci]"
         );
     }
@@ -645,7 +657,11 @@ mod tests {
         remove_binding(&toml(dir.path()), &id, None).await.unwrap();
 
         let cfg = reload_config(dir.path());
-        let gone = cfg.groups.get("ci").map(|g| !g.contains_key("cmake")).unwrap_or(true);
+        let gone = cfg
+            .groups
+            .get("ci")
+            .map(|g| !g.tools.contains_key("cmake"))
+            .unwrap_or(true);
         assert!(gone, "cmake must be gone from [group.ci] after remove_binding");
     }
 
@@ -686,7 +702,11 @@ mod tests {
 
         let cfg = reload_config(dir.path());
         assert!(cfg.tools.contains_key("cmake"), "cmake must remain in [tools]");
-        let ci_gone = cfg.groups.get("ci").map(|g| !g.contains_key("cmake")).unwrap_or(true);
+        let ci_gone = cfg
+            .groups
+            .get("ci")
+            .map(|g| !g.tools.contains_key("cmake"))
+            .unwrap_or(true);
         assert!(ci_gone, "cmake must be gone from [group.ci]");
     }
 
@@ -723,7 +743,11 @@ mod tests {
             .expect("unique binding without --group must succeed");
 
         let cfg = reload_config(dir.path());
-        let gone = cfg.groups.get("ci").map(|g| !g.contains_key("cmake")).unwrap_or(true);
+        let gone = cfg
+            .groups
+            .get("ci")
+            .map(|g| !g.tools.contains_key("cmake"))
+            .unwrap_or(true);
         assert!(gone, "cmake must be removed from [group.ci]");
     }
 
@@ -906,7 +930,10 @@ mod tests {
 
         let cfg = reload_config(dir.path());
         assert!(
-            cfg.groups.get("ci").map(|g| g.contains_key("cmake")).unwrap_or(false),
+            cfg.groups
+                .get("ci")
+                .map(|g| g.tools.contains_key("cmake"))
+                .unwrap_or(false),
             "cmake must appear under [group.ci] after add with normal group name"
         );
     }

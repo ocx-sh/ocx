@@ -260,11 +260,11 @@ fn select_touched(
             }
         }
     }
-    for (group, tools) in &config.groups {
+    for (group, body) in &config.groups {
         if !in_scope(group) {
             continue;
         }
-        for binding in tools.keys() {
+        for binding in body.tools.keys() {
             if selected(binding) {
                 touched.push((group.clone(), binding.clone()));
                 matched.insert(binding.clone());

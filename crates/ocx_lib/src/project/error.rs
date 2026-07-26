@@ -147,6 +147,65 @@ pub enum ProjectErrorKind {
     #[error("[group.{name}] is reserved; {hint}")]
     ReservedGroupName { name: String, hint: &'static str },
 
+    /// A `[group.<name>]` table declares a tool binding directly, the form
+    /// removed in favour of `[group.<name>.tools]`.
+    ///
+    /// `[group.<name>]` holds exactly two optional sub-tables, `tools` and
+    /// `env`; a direct string binding is the pre-restructure spelling. The
+    /// message carries the fix rather than merely reporting the fault,
+    /// because for the handful of files written against the old shape this
+    /// error IS the migration instruction.
+    #[error(
+        "group '{group}' declares tool binding '{binding}' directly; tool bindings belong under [group.{group}.tools] — [group.{group}] holds only the `tools` and `env` sub-tables"
+    )]
+    GroupHoldsDirectBinding { group: String, binding: String },
+
+    /// A `[group.<name>]` table declares a sub-table other than `tools` or
+    /// `env` — typically a typo (`[group.ci.tolos]`).
+    ///
+    /// Rejected rather than ignored: silently dropping an unrecognized key
+    /// would make a whole tool set vanish with no signal.
+    #[error("group '{group}' declares unknown section '{key}'; expected `tools` or `env`")]
+    UnknownGroupSection { group: String, key: String },
+
+    /// An `[env]` key matches the reserved `OCX_*` / `__OCX_*` namespace.
+    ///
+    /// Rejected at parse so a checked-in `ocx.toml` cannot set
+    /// `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_PATCHES`, `OCX_OFFLINE` or
+    /// `OCX_ALLOW_YANKED` and thereby reconfigure how `ocx` itself resolves —
+    /// [`crate::env::Env::apply_ocx_config`] would forward the result to
+    /// every child process.
+    #[error("[{scope}] key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set from ocx.toml")]
+    EnvReservedKey { scope: String, key: String },
+
+    /// An `[env]` key is not a valid POSIX environment-variable name
+    /// (`[A-Za-z_][A-Za-z0-9_]*`), per [`crate::env::is_valid_env_key`].
+    #[error("[{scope}] key '{key}' is not a valid environment variable name; expected [A-Za-z_][A-Za-z0-9_]*")]
+    EnvInvalidKey { scope: String, key: String },
+
+    /// An `[env]` table value declares a `type` that is neither `path` nor
+    /// `constant`.
+    #[error("[{scope}] key '{key}': unknown type '{found}'; expected \"path\" or \"constant\"")]
+    EnvUnknownModifier { scope: String, key: String, found: String },
+
+    /// An `[env]` value is neither a bare string nor a well-formed
+    /// `{ type, value }` table. `found` is the TOML type name of the
+    /// offending value (e.g. `"integer"`, `"boolean"`).
+    #[error("[{scope}] key '{key}': expected a string or {{ type, value }} table, found {found}")]
+    EnvInvalidValue { scope: String, key: String, found: String },
+
+    /// An `[env]` table value carries a field other than `type` or `value`.
+    ///
+    /// Rejected rather than ignored, for the same reason
+    /// [`Self::UnknownGroupSection`] is: accepting-and-dropping would let a
+    /// file authored against a newer ocx run here with different semantics
+    /// and no signal — `required` on a path entry is a deferred feature, so
+    /// silently ignoring it would discard a fail-if-absent intent. It also
+    /// keeps the runtime in step with the generated schema, which declares
+    /// `additionalProperties: false` on this table.
+    #[error("[{scope}] key '{key}': unknown field '{field}'; expected only `type` and `value`")]
+    EnvUnknownValueField { scope: String, key: String, field: String },
+
     /// A `--group` CLI argument contained an empty segment (e.g.
     /// `-g ci,,lint`). The CLI layer pre-validates this before calling
     /// the library; the variant exists as defense-in-depth for
@@ -398,6 +457,16 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::ToolValueInvalid { .. }
                 | ProjectErrorKind::PackageKeyMissingRegistry { .. }
                 | ProjectErrorKind::PackageKeyInvalid { .. }
+                // Schema-shape faults in `[group.*]` / `[env]`: the file is
+                // valid TOML but not a valid ocx.toml. Same class as a
+                // reserved group name, and the same remedy — edit the file.
+                | ProjectErrorKind::GroupHoldsDirectBinding { .. }
+                | ProjectErrorKind::UnknownGroupSection { .. }
+                | ProjectErrorKind::EnvReservedKey { .. }
+                | ProjectErrorKind::EnvInvalidKey { .. }
+                | ProjectErrorKind::EnvUnknownModifier { .. }
+                | ProjectErrorKind::EnvInvalidValue { .. }
+                | ProjectErrorKind::EnvUnknownValueField { .. }
                 | ProjectErrorKind::LockRepositoryNotBare { .. } => ExitCode::ConfigError,
                 ProjectErrorKind::EmptyGroupFilter
                 | ProjectErrorKind::UnknownGroup { .. }

@@ -138,7 +138,7 @@ def test_pull_group_emits_progress_event_in_stderr(
     _write_ocx_toml(
         project,
         f"""\
-[group.ci]
+[group.ci.tools]
 tool_a = "{ocx.registry}/{repo_a}:{tag_a}"
 tool_b = "{ocx.registry}/{repo_b}:{tag_b}"
 """,
@@ -192,7 +192,7 @@ def test_pull_single_package_also_emits_progress_event(
     _write_ocx_toml(
         project,
         f"""\
-[group.ci]
+[group.ci.tools]
 only_tool = "{ocx.registry}/{repo}:{tag}"
 """,
     )

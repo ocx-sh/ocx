@@ -9,9 +9,36 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use super::env::ProjectEnv;
 use super::error::{ProjectError, ProjectErrorKind};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
+
+/// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
+///
+/// Exactly two optional sub-tables, nothing else. A tool binding written
+/// directly under `[group.<name>]` is a parse error
+/// ([`ProjectErrorKind::GroupHoldsDirectBinding`]) — one place bindings can
+/// live, so nothing merges and nothing can collide across spellings.
+///
+/// A tool literally named `env` or `tools` needs no special handling: it is
+/// just a key inside [`Self::tools`], which is a plain map.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Group {
+    /// Tool bindings for this group. Values are fully-qualified
+    /// [`Identifier`]s, validated on the second parse pass exactly as
+    /// `[tools]` is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, Identifier>,
+
+    /// Environment variables applied when this group is selected.
+    ///
+    /// Skipped when empty so `ocx add -g ci` never writes a bare
+    /// `[group.ci.env]` into a file that declares none.
+    #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
+    pub env: ProjectEnv,
+}
 
 /// Per-package resolve-time settings declared in `ocx.toml` under
 /// `[package."<registry/repo[:tag]>"]`.
@@ -68,11 +95,23 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub tools: BTreeMap<String, Identifier>,
 
+    /// Environment variables for the default group; `[env]` in TOML.
+    ///
+    /// Standing in the same relation to `[group.<name>.env]` that `[tools]`
+    /// does to `[group.<name>.tools]`. Excluded from
+    /// [`super::declaration_hash`] — it does not change *which* packages
+    /// resolve, so an env edit must not force a re-lock.
+    #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
+    pub env: ProjectEnv,
+
     /// Named additive groups; `[group.<name>]` in TOML. `default` is
     /// reserved — a literal `[group.default]` declaration is a parse
     /// error (enforced at parse time, not at the serde layer).
+    ///
+    /// The Rust field is plural, the TOML table singular: `[group.<name>]`
+    /// is what users write. Do not rename the wire key.
     #[serde(default, rename = "group")]
-    pub groups: BTreeMap<String, BTreeMap<String, Identifier>>,
+    pub groups: BTreeMap<String, Group>,
 
     /// Per-package resolve-time settings; `[package."<id>"]` in TOML. Keyed by
     /// the canonical author string (registry/repo[:tag]) so Serialize
@@ -118,6 +157,7 @@ impl Clone for ProjectConfig {
         // designed to amortise.
         Self {
             tools: self.tools.clone(),
+            env: self.env.clone(),
             groups: self.groups.clone(),
             packages: self.packages.clone(),
             declaration_hash_cache: OnceLock::new(),
@@ -130,7 +170,10 @@ impl PartialEq for ProjectConfig {
         // The cache is a derived datum; comparing it would conflate "same
         // declaration" with "both cached" / "neither cached". Equality
         // speaks to the declared content only.
-        self.tools == other.tools && self.groups == other.groups && self.packages == other.packages
+        self.tools == other.tools
+            && self.env == other.env
+            && self.groups == other.groups
+            && self.packages == other.packages
     }
 }
 
@@ -153,8 +196,23 @@ struct RawProjectConfig {
     #[serde(default)]
     tools: BTreeMap<String, String>,
 
+    /// Raw `[env]` table. Held as a [`toml::Table`] rather than a
+    /// [`ProjectEnv`] so [`parse_project_env`] can attach the scope string
+    /// every env diagnostic needs — a value-position deserializer cannot see
+    /// which table it is inside.
+    #[serde(default)]
+    env: toml::Table,
+
+    /// Raw `[group.*]` bodies, each still an untyped table.
+    ///
+    /// Value-first, following the [`crate::config::mirror`] precedent: a
+    /// typed struct with `deny_unknown_fields` would reject a stray key, but
+    /// serde's message cannot name the enclosing group (it is the outer map
+    /// key, invisible from inside the value) and so cannot carry the
+    /// migration instruction. [`parse_group`] walks the table with the group
+    /// name in hand instead.
     #[serde(default, rename = "group")]
-    groups: BTreeMap<String, BTreeMap<String, String>>,
+    groups: BTreeMap<String, toml::Table>,
 
     /// Per-package settings. `PackageSettings` deserializes directly (only a
     /// bool) — the map KEY is validated as a strict [`Identifier`] in
@@ -168,13 +226,31 @@ impl ProjectConfig {
     /// that need to bypass the TOML round-trip in `from_toml_str`. Initialises
     /// the private declaration-hash cache as empty so the first call to
     /// [`Self::declaration_hash_cached`] computes the canonical value.
+    ///
+    /// Takes groups as plain tool maps rather than [`Group`] values: this
+    /// constructor exists for the tool dimension, and wrapping here keeps
+    /// every fixture that predates `[group.<name>.env]` compiling unchanged
+    /// — which is also what pins the frozen declaration-hash corpus.
+    /// Fixtures needing group env parse TOML through [`Self::from_toml_str`].
     pub fn from_parts(
         tools: BTreeMap<String, Identifier>,
         groups: BTreeMap<String, BTreeMap<String, Identifier>>,
     ) -> Self {
         Self {
             tools,
-            groups,
+            env: ProjectEnv::default(),
+            groups: groups
+                .into_iter()
+                .map(|(name, tools)| {
+                    (
+                        name,
+                        Group {
+                            tools,
+                            env: ProjectEnv::default(),
+                        },
+                    )
+                })
+                .collect(),
             // `packages` is resolve-time policy, not a tool binding; the
             // programmatic constructor starts with no opt-outs declared.
             packages: BTreeMap::new(),
@@ -430,11 +506,12 @@ impl ProjectConfig {
         }
 
         // Per-entry identifier validation across `[tools]` and every
-        // `[group.*]` table.
+        // `[group.*]` table, plus the env key/value grammar per scope.
         let tools = parse_tool_map(&raw.tools, &path)?;
-        let mut groups: BTreeMap<String, BTreeMap<String, Identifier>> = BTreeMap::new();
-        for (group_name, group_tools) in raw.groups {
-            let parsed = parse_tool_map(&group_tools, &path)?;
+        let env = parse_project_env(super::env::DEFAULT_ENV_SCOPE, &raw.env, &path)?;
+        let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+        for (group_name, group_body) in raw.groups {
+            let parsed = parse_group(&group_name, &group_body, &path)?;
             groups.insert(group_name, parsed);
         }
 
@@ -447,11 +524,105 @@ impl ProjectConfig {
 
         Ok(Self {
             tools,
+            env,
             groups,
             packages,
             declaration_hash_cache: OnceLock::new(),
         })
     }
+}
+
+/// Parse one `[group.<name>]` body into a [`Group`].
+///
+/// Walks the raw table key by key: `tools` and `env` are the two recognized
+/// sub-tables; a **string**-valued key is the removed flat binding form and
+/// raises [`ProjectErrorKind::GroupHoldsDirectBinding`] naming the group and
+/// pointing at `[group.<name>.tools]`; anything else raises
+/// [`ProjectErrorKind::UnknownGroupSection`] naming the offending key.
+///
+/// Value-first rather than a `deny_unknown_fields` derive: the group name is
+/// the outer map key and is unreachable from inside a value deserializer, so
+/// a derive cannot produce either diagnostic. Same reason
+/// [`crate::config::mirror::parse_mirror_value`] is hand-rolled.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::GroupHoldsDirectBinding`],
+/// [`ProjectErrorKind::UnknownGroupSection`], or any error from
+/// [`parse_tool_map`] / [`parse_project_env`] on the recognized sub-tables.
+fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, super::Error> {
+    // `[group.<name>]` with neither sub-table is a declared-but-empty group.
+    if raw.is_empty() {
+        return Ok(Group::default());
+    }
+
+    let mut group = Group::default();
+    for (key, value) in raw {
+        // Value shape decides first, key name second: a string is a tool
+        // binding in the removed flat form whatever it is called, so
+        // `tools = "ocx.sh/tools:1"` and `bar = "ocx.sh/bar:1"` both get the
+        // migration message rather than a type error or a bogus
+        // "unknown section".
+        if value.is_str() {
+            return Err(ProjectError::new(
+                path.to_path_buf(),
+                ProjectErrorKind::GroupHoldsDirectBinding {
+                    group: name.to_string(),
+                    binding: key.clone(),
+                },
+            )
+            .into());
+        }
+        match key.as_str() {
+            "tools" => {
+                let raw_tools: BTreeMap<String, String> = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
+                group.tools = parse_tool_map(&raw_tools, path)?;
+            }
+            "env" => {
+                let raw_env: toml::Table = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
+                group.env = parse_project_env(&format!("group.{name}.env"), &raw_env, path)?;
+            }
+            _ => {
+                return Err(ProjectError::new(
+                    path.to_path_buf(),
+                    ProjectErrorKind::UnknownGroupSection {
+                        group: name.to_string(),
+                        key: key.clone(),
+                    },
+                )
+                .into());
+            }
+        }
+    }
+    Ok(group)
+}
+
+/// Parse a raw `[env]` / `[group.<name>.env]` table, attaching `scope` to
+/// every diagnostic and `path` for file context.
+///
+/// Thin adapter over [`super::env::ProjectEnv::from_table`] — it exists to
+/// wrap the returned [`ProjectErrorKind`] in a path-bearing
+/// [`ProjectError`], which is the shape every other parse helper here
+/// returns.
+///
+/// # Errors
+///
+/// Propagates the key-policy and value-grammar errors documented on
+/// [`super::env::ProjectEnv::from_table`].
+fn parse_project_env(scope: &str, raw: &toml::Table, path: &Path) -> Result<ProjectEnv, super::Error> {
+    // Every `ocx.toml` reaches here, the overwhelming majority declaring no
+    // `[env]` at all. Short-circuit the absent case so the unimplemented
+    // grammar below is reachable only from a file that actually declares one.
+    if raw.is_empty() {
+        return Ok(ProjectEnv::default());
+    }
+    ProjectEnv::from_table(scope, raw).map_err(|kind| ProjectError::new(path.to_path_buf(), kind).into())
 }
 
 /// Walk a raw `(name → value)` map and validate every value as a
@@ -672,6 +843,34 @@ no-patches = true
         );
     }
 
+    /// H1: adding an `[env]` block must NOT change the declaration hash.
+    /// Mirrors [`declaration_hash_unchanged_by_no_patches`] exactly in shape
+    /// — deliberately: [`super::super::hash::declaration_hash`] reads only
+    /// `config.tools` / `config.groups`, so `[env]` is excluded from the
+    /// canonical JSON input by construction today. This test exists to stop
+    /// a future refactor from wiring `[env]` into the hash by accident, not
+    /// because the current algorithm could plausibly include it — an `[env]`
+    /// edit must never force a re-lock.
+    #[test]
+    fn declaration_hash_unchanged_by_env() {
+        let without = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+"#;
+        let with = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[env]
+CI = "1"
+"#;
+        let config_without = ProjectConfig::from_toml_str(without).expect("parse");
+        let config_with = ProjectConfig::from_toml_str(with).expect("parse");
+        assert_eq!(
+            crate::project::declaration_hash(&config_without),
+            crate::project::declaration_hash(&config_with),
+            "declaration hash must be invariant to [env] edits"
+        );
+    }
+
     /// Mutating the config in place after caching MUST invalidate the cache —
     /// otherwise the staleness gate would silently accept a divergent state.
     #[test]
@@ -769,11 +968,11 @@ cmake = "ocx.sh/cmake:3.28"
 cmake = "ocx.sh/cmake:3.28"
 ninja = "ocx.sh/ninja:1.11"
 
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck:0.10"
 shfmt = "ocx.sh/shfmt:3.7"
 
-[group.release]
+[group.release.tools]
 goreleaser = "ocx.sh/goreleaser:2.0"
 "#;
         let config = ProjectConfig::from_toml_str(toml_str).expect("full config parses");
@@ -784,15 +983,161 @@ goreleaser = "ocx.sh/goreleaser:2.0"
         let sc = config
             .groups
             .get("ci")
-            .and_then(|g| g.get("shellcheck"))
+            .and_then(|g| g.tools.get("shellcheck"))
             .expect("ci/shellcheck present");
         assert_eq!(sc.to_string(), "ocx.sh/shellcheck:0.10");
         let gr = config
             .groups
             .get("release")
-            .and_then(|g| g.get("goreleaser"))
+            .and_then(|g| g.tools.get("goreleaser"))
             .expect("release/goreleaser present");
         assert_eq!(gr.to_string(), "ocx.sh/goreleaser:2.0");
+    }
+
+    // ── Group restructure: [group.<name>.tools] / [group.<name>.env] (S2/S8) ──
+
+    /// `[group.ci.tools]` and `[group.ci.env]` both populate their
+    /// respective halves of the restructured `Group`.
+    #[test]
+    fn group_tools_and_env_both_populate() {
+        let toml_str = r#"
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[group.ci.env]
+CI = "1"
+"#;
+        let config = ProjectConfig::from_toml_str(toml_str).expect("nested group body must parse");
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert_eq!(
+            group.tools.get("shellcheck").map(ToString::to_string),
+            Some("ocx.sh/shellcheck:0.10".to_string())
+        );
+        assert_eq!(group.env.get("CI"), Some(&crate::project::EnvValue::constant("1")));
+    }
+
+    /// `[group.ci]` with only `env` (no `tools`) parses; `tools` stays empty.
+    #[test]
+    fn group_env_only_leaves_tools_empty() {
+        let toml_str = r#"
+[group.ci.env]
+CI = "1"
+"#;
+        let config = ProjectConfig::from_toml_str(toml_str).expect("env-only group body must parse");
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert!(
+            group.tools.is_empty(),
+            "tools must stay empty when only [env] is declared"
+        );
+        assert_eq!(group.env.get("CI"), Some(&crate::project::EnvValue::constant("1")));
+    }
+
+    /// `[group.ci]` with neither `tools` nor `env` parses as a
+    /// declared-but-empty group.
+    #[test]
+    fn group_with_neither_subtable_parses_empty() {
+        let toml_str = "[group.ci]\n";
+        let config = ProjectConfig::from_toml_str(toml_str).expect("empty group body must parse");
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert!(group.tools.is_empty());
+        assert!(group.env.is_empty());
+    }
+
+    /// S8: a tool binding declared directly under `[group.<name>]` (the
+    /// removed flat form) is a parse error naming the group and pointing at
+    /// `[group.<name>.tools]`, classified `ExitCode::ConfigError` (78) — the
+    /// error message IS the migration story for the handful of files
+    /// written against the old shape.
+    #[test]
+    fn group_direct_binding_is_parse_error_naming_group_and_tools() {
+        let toml_str = r#"
+[group.ci]
+bar = "ocx.sh/bar:1"
+"#;
+        let err = ProjectConfig::from_toml_str(toml_str).expect_err("direct binding under [group.ci] must reject");
+
+        let code = <crate::project::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::ConfigError),
+            "S8 break must classify as ConfigError (exit 78); got {code:?}"
+        );
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("[group.ci.tools]"),
+            "message must point at [group.ci.tools]; got {rendered:?}"
+        );
+
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        let ProjectErrorKind::GroupHoldsDirectBinding { group, binding } = &pe.kind else {
+            panic!("expected GroupHoldsDirectBinding, got {:?}", pe.kind);
+        };
+        assert_eq!(group, "ci");
+        assert_eq!(binding, "bar");
+    }
+
+    /// A `[group.ci.tolos]` typo (an unrecognized sub-table — neither
+    /// `tools` nor `env`) is rejected naming both the group and the
+    /// offending key.
+    #[test]
+    fn group_unknown_subsection_rejected_naming_group_and_key() {
+        let toml_str = r#"
+[group.ci.tolos]
+shellcheck = "ocx.sh/shellcheck:0.10"
+"#;
+        let err = ProjectConfig::from_toml_str(toml_str).expect_err("unknown [group.ci.tolos] must reject");
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        let ProjectErrorKind::UnknownGroupSection { group, key } = &pe.kind else {
+            panic!("expected UnknownGroupSection, got {:?}", pe.kind);
+        };
+        assert_eq!(group, "ci");
+        assert_eq!(key, "tolos");
+    }
+
+    /// A tool literally named `env` or `tools` inside `[group.ci.tools]`
+    /// needs no special handling — it is just a key inside a plain map
+    /// (S2).
+    #[test]
+    fn group_tools_named_env_or_tools_parse() {
+        let toml_str = r#"
+[group.ci.tools]
+env = "ocx.sh/env:1"
+tools = "ocx.sh/tools:1"
+"#;
+        let config = ProjectConfig::from_toml_str(toml_str).expect("tools named 'env'/'tools' must parse");
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert_eq!(
+            group.tools.get("env").map(ToString::to_string),
+            Some("ocx.sh/env:1".to_string())
+        );
+        assert_eq!(
+            group.tools.get("tools").map(ToString::to_string),
+            Some("ocx.sh/tools:1".to_string())
+        );
+    }
+
+    /// `[group.default]` / `[group.all]` stay rejected before any
+    /// group-body inspection — even now that a populated body is the
+    /// nested `.tools`/`.env` shape rather than the old flat one.
+    #[test]
+    fn reserved_default_group_rejected_even_with_nested_tools_body() {
+        let toml_str = r#"
+[group.default.tools]
+foo = "ocx.sh/foo:1"
+"#;
+        let err = ProjectConfig::from_toml_str(toml_str).expect_err("[group.default.*] must still reject");
+        let crate::project::Error::Project(ref pe) = err;
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::ReservedGroupName { name, .. } if name == "default"),
+            "expected ReservedGroupName {{ name: \"default\", .. }}; got {err:?}"
+        );
     }
 
     #[test]
@@ -836,7 +1181,7 @@ foo = "ocx.sh/foo:1"
 [tools]
 cmake = "ocx.sh/cmake:3.28"
 
-[group.ci]
+[group.ci.tools]
 cmake = "ocx.sh/cmake:3.29"
 "#;
         let config = ProjectConfig::from_toml_str(toml_str)
@@ -846,7 +1191,7 @@ cmake = "ocx.sh/cmake:3.29"
             config
                 .groups
                 .get("ci")
-                .map(|g| g.contains_key("cmake"))
+                .map(|g| g.tools.contains_key("cmake"))
                 .unwrap_or(false),
             "cmake must be present in [group.ci]"
         );
@@ -857,10 +1202,10 @@ cmake = "ocx.sh/cmake:3.29"
         // Same tool name in two groups (NOT in [tools]) is allowed at the
         // schema layer. The cross-group conflict check is exec-time.
         let toml_str = r#"
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck:0.10"
 
-[group.lint]
+[group.lint.tools]
 shellcheck = "ocx.sh/shellcheck:0.10"
 "#;
         let config =
@@ -924,7 +1269,7 @@ digest_and_tag = "ghcr.io/acme/tool:v1@sha256:abcdef0123456789abcdef0123456789ab
 [tools]
 cmake = "ocx.sh/cmake"
 
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck"
 "#;
         let config = ProjectConfig::from_toml_str(toml_str).expect("bare repo entries parse");
@@ -940,7 +1285,7 @@ shellcheck = "ocx.sh/shellcheck"
         let shellcheck = config
             .groups
             .get("ci")
-            .and_then(|g| g.get("shellcheck"))
+            .and_then(|g| g.tools.get("shellcheck"))
             .expect("ci/shellcheck binding present");
         assert_eq!(
             shellcheck.tag(),
@@ -1019,9 +1364,9 @@ cmake = "3.28"
 
     #[test]
     fn parse_rejects_bare_tag_value_in_group_with_missing_registry_diagnostic() {
-        // Same F1 contract applies inside `[group.*]` tables — the
+        // Same F1 contract applies inside `[group.*.tools]` tables — the
         // first pass walks both maps and validates uniformly.
-        let toml = r#"[group.ci]
+        let toml = r#"[group.ci.tools]
 shellcheck = "0.10"
 "#;
         let err = ProjectConfig::from_toml_str(toml).expect_err("bare tag must be rejected in groups");

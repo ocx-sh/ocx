@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod config;
+pub mod env;
 pub mod error;
 pub mod hash;
 pub mod hook;
@@ -20,7 +21,8 @@ pub use compose::{
     Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, compose_tool_set, expand_all_keyword,
     host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
 };
-pub use config::{PackageSettings, ProjectConfig};
+pub use config::{Group, PackageSettings, ProjectConfig};
+pub use env::{EnvValue, ProjectEnv};
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};

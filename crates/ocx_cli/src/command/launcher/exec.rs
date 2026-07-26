@@ -87,11 +87,29 @@ impl LauncherExec {
             .map_err(anyhow::Error::new)?
             .map(|forwarded| forwarded.no_patches)
             .unwrap_or_default();
+        // Decode the project/group `[env]` (+ `ocx run --env`) the parent
+        // composed, forwarded over `OCX_ENV` for the same reason as the
+        // `no-patches` opt-out: this process has no `ProjectConfig` and cannot
+        // re-derive them. Without the forward, `Env::new()` below inherits the
+        // parent's values and then `apply_entries` re-applies the package's own
+        // entries ON TOP, silently reverting the project's overrides — the
+        // failure R1 exists to close, and the primary path for any package that
+        // declares entrypoints.
+        //
+        // Untrusted input: `forwarded_env` fails closed on the whole payload
+        // (reserved key, invalid key, unrecognized modifier kind), never
+        // filtering the bad entry and keeping the rest. A direct launcher
+        // invocation with no `ocx run` parent has no payload and gets an empty
+        // vector — identical to the pre-forwarding behaviour.
+        let project_env = ocx_lib::env::forwarded_env().map_err(anyhow::Error::new)?;
         let entries = manager
             .resolve_env(
                 &[std::sync::Arc::new(info)],
                 true,
-                ocx_lib::package_manager::PatchScope::Project(no_patches),
+                ocx_lib::package_manager::PatchScope::Project {
+                    no_patches,
+                    env: project_env.clone(),
+                },
             )
             .await?;
 
@@ -122,7 +140,8 @@ impl LauncherExec {
             .unwrap_or(&[]);
 
         if baked.is_empty() {
-            self.run_with_env(entries, args, command, context.config_view()).await
+            self.run_with_env(entries, &project_env, args, command, context.config_view())
+                .await
         } else {
             // ADR D6: pass an empty dep_contexts map — the Usage::EntryPointArgs
             // capability gate rejects any ${deps.*} token before the dep regex
@@ -139,12 +158,19 @@ impl LauncherExec {
                 })?);
             }
             combined.extend_from_slice(args);
-            self.run_with_env(entries, &combined, command, context.config_view())
+            self.run_with_env(entries, &project_env, &combined, command, context.config_view())
                 .await
         }
     }
 
     /// Run the resolved entrypoint with the given env.
+    ///
+    /// `project_env` is the validated payload decoded from `OCX_ENV` — the
+    /// project/group `[env]` (+ `ocx run --env`) already folded into `entries`
+    /// as stages 4-6. It is re-emitted onto the child env so a *nested*
+    /// launcher (an entrypoint that itself invokes a generated launcher) can
+    /// re-apply it after its own package entries, instead of letting a package
+    /// value beat the project override at the second hop.
     ///
     /// Presentation flags are forced here (not baked in the launcher template):
     /// - log_level=off, color=never, format=plain were previously baked into the
@@ -158,6 +184,7 @@ impl LauncherExec {
     async fn run_with_env(
         &self,
         entries: Vec<EnvEntry>,
+        project_env: &[EnvEntry],
         args: &[String],
         command: &str,
         config_view: &OcxConfigView,
@@ -166,6 +193,14 @@ impl LauncherExec {
         process_env.apply_entries(&entries);
         // Forward resolution-affecting OCX config to any grandchild ocx processes.
         process_env.apply_ocx_config(config_view);
+        // Re-emit the forwarded payload AFTER `apply_ocx_config`, which cleared
+        // the key. Stripping then re-writing is what makes a stale ambient
+        // `OCX_ENV` harmless while still handing the *current* validated payload
+        // down the chain: an entrypoint that invokes another generated launcher
+        // would otherwise re-apply that package's env with no project payload
+        // present, and the package value would beat the project override that
+        // stage 4-6 precedence promises. `ocx run` does the same pair.
+        process_env.set_forwarded_env(project_env);
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim resolved via the default Windows PATHEXT.
 

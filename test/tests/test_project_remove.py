@@ -179,7 +179,7 @@ def test_remove_from_named_group(
     project_dir.mkdir()
     _write_ocx_toml(
         project_dir,
-        f'[tools]\n\n[group.ci]\n{repo} = "{ocx.registry}/{repo}:1.0.0"\n',
+        f'[tools]\n\n[group.ci.tools]\n{repo} = "{ocx.registry}/{repo}:1.0.0"\n',
     )
 
     # Lock the group so ocx.lock reflects the ci-group entry.

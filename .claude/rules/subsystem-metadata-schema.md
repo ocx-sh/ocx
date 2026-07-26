@@ -47,11 +47,13 @@ for the field is restricted to `["private", "public", "interface"]` via
 
 ## Custom `JsonSchema` Implementations
 
-Three types require a manual `impl schemars::JsonSchema` — they deviate from default schemars inference:
+Four types require a manual `impl schemars::JsonSchema` — they deviate from default schemars inference:
 
 1. **`Version`** — semver-inspired struct with custom string serialization. Schema hand-authored to match the string pattern accepted by the parser.
 2. **`Entrypoints`** — custom `MapAccess` `Deserialize` rejects duplicate keys (serde_json last-wins default is unsafe for registry data). Manual schema emits an `additionalProperties` + `propertyNames` object schema with a `description` that documents both the `command` field and the `args` array (fixed leading args, `${installPath}` interpolation only, `${deps.*}` not permitted).
 3. **`Binaries`** (`metadata/binary.rs`) — custom `Deserialize` accepts an untagged `string | object` element union (forward-compat read leniency for a hypothetical future per-binary object shape). Manual schema emits the **write contract only**: `{"type":"array","items":{"type":"string"},"uniqueItems":true}` — the read-side object-element leniency is an internal Rust affordance and never appears in the published schema. `BinaryElement` (the internal read-side enum) needs no schema of its own — it is never constructed by the writer and never reachable from a published field type.
+
+4. **`ProjectEnv`** (`crates/ocx_lib/src/project/env.rs`) — belongs to the `project` schema, not `metadata.json`, but shares this crate and this convention. Schemars infers from the normalized Rust struct, which describes only the table arm, so a *derived* schema silently drops the bare-string form — the common case (`CI = "1"`). That is not hypothetical: the `config` schema's `$defs.MirrorConfig` has exactly this defect today, unfixed (see `adr_project_env_declaration.md` S9a). The type-level impl emits `oneOf: [{type: string}, {type: object, properties: {type, value}, additionalProperties: false}]`. **Both arms are hand-written.** `Modifier`'s `#[serde(tag = "type")]` derive is deliberately *not* reused: `ModifierKind` derives no `JsonSchema` today, and `Modifier::Path` wraps `path::Path { required, value }`, whose extra `required` field does not match this shape. The `oneOf` is built through the reusable `utility::schema::string_or_table` helper rather than inline, so a future string-or-table union (the `[mirrors]` fix) applies the same helper instead of inventing a second style.
 
 One field uses `#[schemars(schema_with = "...")]` to override the inferred schema:
 

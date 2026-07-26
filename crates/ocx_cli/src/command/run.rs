@@ -72,6 +72,20 @@ pub struct Run {
     #[arg(long = "self", default_value_t = false)]
     pub self_view: bool,
 
+    /// Set an environment variable for the command, as `KEY=VALUE`.
+    ///
+    /// Repeatable; a later `--env` for the same key wins. The value is split
+    /// on the FIRST `=`, so `--env FOO=a=b` sets `FOO` to `a=b`. Values are
+    /// literal - no interpolation.
+    ///
+    /// Applied last, so it overrides the project's `[env]`, any selected
+    /// group's `[env]`, and every package-declared variable.
+    ///
+    /// A bare `--env FOO` (pass the ambient value through) is not accepted;
+    /// keys matching `OCX_*` or `__OCX_*` are rejected. Both exit 64.
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
     /// tools are resolved to a host leaf, so an unrelated tool in scope
@@ -142,6 +156,12 @@ impl Run {
                 return Err(cli::UsageError::new("empty group segment in --group value").into());
             }
         }
+
+        // Reject a malformed `--env` before any filesystem or network work,
+        // for the same reason as the group check above. Bound here; the
+        // composition stage that appends these as the highest-precedence
+        // entries consumes them alongside the project/group env.
+        let env_overrides = parse_env_overrides(&self.env)?;
 
         // ── Phase B: project context ──────────────────────────────────────
         // Errors propagate to the `main.rs` boundary: logged once and
@@ -214,7 +234,18 @@ impl Run {
         // into the child's patch tier (Phase G) so a generated launcher's
         // re-entry (`ocx launcher exec`) honours the same opt-out.
         let no_patches = ctx.config.no_patches_repositories();
-        let scope = ocx_lib::package_manager::PatchScope::Project(no_patches.clone());
+        // Stages 4-6 of the composition order: the project's `[env]`, then each
+        // selected group's `[env]` in `-g` order, then `--env` last. Bound once
+        // — the same vector both feeds the parent's own composition and is
+        // forwarded over `OCX_ENV` (Phase G) so a generated launcher's re-entry
+        // re-applies it after the package entries instead of reverting to them.
+        let mut project_env =
+            crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        project_env.extend(env_overrides);
+        let scope = ocx_lib::package_manager::PatchScope::Project {
+            no_patches: no_patches.clone(),
+            env: project_env.clone(),
+        };
         let entries = manager
             .resolve_env_with_patch_boundary(&install_infos, self.self_view, scope)
             .await?
@@ -258,6 +289,20 @@ impl Run {
             patches.no_patches = forwarded_no_patches;
         }
         process_env.apply_ocx_config(&forwarded);
+        // Forward stages 4-6 over `OCX_ENV`, after `apply_ocx_config` (which
+        // clears any stale inherited value).
+        //
+        // A package that declares entrypoints resolves THROUGH its generated
+        // launcher on the ordinary `ocx run` path — `composer` pushes the
+        // synthetic `entrypoints/` PATH entry last precisely so it shadows
+        // `bin/`. The launcher re-enters `ocx launcher exec`, which has no
+        // `ProjectConfig` by construction: it builds a fresh `Env` from the
+        // inherited environment and re-applies the package's own entries on
+        // top, silently reverting exactly the overrides this project declared.
+        // Forwarding the payload is what lets the launcher re-apply stages 4-6
+        // last and preserve them. Only the package-composed entries are
+        // re-derived on the child side; these are not.
+        process_env.set_forwarded_env(&project_env);
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.
@@ -279,6 +324,56 @@ impl Run {
         let err = child_process::exec(&resolved, args, process_env);
         Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
     }
+}
+
+/// Parse the repeatable `--env KEY=VALUE` flag into resolved entries.
+///
+/// Splits each argument on the FIRST `=` so a value may itself contain `=`.
+/// Every entry is a constant — there is no path form from the CLI in v1 — and
+/// values are literal, never interpolated. A later occurrence of a key
+/// overrides an earlier one.
+///
+/// # Errors
+///
+/// [`cli::UsageError`] (exit 64) when an argument carries no `=` (bare
+/// `--env FOO` ambient pass-through is not accepted in v1: it has meaning
+/// only under `--clean`, and admitting it later is purely additive), or when
+/// a key matches the reserved `OCX_*` / `__OCX_*` namespace — the same gate
+/// the file form applies, so the flag cannot be the way in.
+fn parse_env_overrides(
+    raw: &[String],
+) -> Result<Vec<ocx_lib::package::metadata::env::entry::Entry>, ocx_lib::cli::UsageError> {
+    use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::with_capacity(raw.len());
+    for argument in raw {
+        // First `=` only: everything after it is the value, verbatim. This is
+        // what makes `--env FOO=a=b` set `FOO` to `a=b` rather than erroring.
+        let Some((key, value)) = argument.split_once('=') else {
+            return Err(ocx_lib::cli::UsageError::new(format!(
+                "--env value '{argument}' is not KEY=VALUE; passing an ambient variable through by name is not supported"
+            )));
+        };
+        if !ocx_lib::env::is_valid_env_key(key) {
+            return Err(ocx_lib::cli::UsageError::new(format!(
+                "--env key '{key}' is not a valid environment variable name"
+            )));
+        }
+        if ocx_lib::env::is_reserved_ocx_key(key) {
+            return Err(ocx_lib::cli::UsageError::new(format!(
+                "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
+            )));
+        }
+        entries.push(Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Constant,
+        });
+    }
+    Ok(entries)
 }
 
 /// Errors from the CLI-layer NAME filter applied after `select_tool_set`.
@@ -495,6 +590,81 @@ mod tests {
         let result = filter_by_names(composed, &names).expect("dedup must succeed");
         assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
         assert_eq!(result[0].binding, "cmake");
+    }
+
+    // ── parse_env_overrides (--env, L1/L2/X1) ────────────────────────────────
+
+    /// A plain `KEY=VALUE` becomes a constant entry — the only modifier the
+    /// flag produces in v1 (no path form from the CLI).
+    #[test]
+    fn env_override_parses_key_value_as_constant() {
+        use ocx_lib::package::metadata::env::modifier::ModifierKind;
+
+        let parsed = parse_env_overrides(&["FOO=bar".to_string()]).expect("KEY=VALUE must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].key, "FOO");
+        assert_eq!(parsed[0].value, "bar");
+        assert_eq!(parsed[0].kind, ModifierKind::Constant);
+    }
+
+    /// L1: split on the FIRST `=` only, so a value may itself contain `=`.
+    #[test]
+    fn env_override_splits_on_first_equals_only() {
+        let parsed = parse_env_overrides(&["FOO=a=b".to_string()]).expect("a value containing '=' must parse");
+        assert_eq!(parsed[0].key, "FOO");
+        assert_eq!(parsed[0].value, "a=b", "only the first '=' separates key from value");
+
+        // An empty value is legitimate — `FOO=` sets FOO to the empty string.
+        let parsed = parse_env_overrides(&["FOO=".to_string()]).expect("an empty value must parse");
+        assert_eq!(parsed[0].value, "");
+    }
+
+    /// L2: a bare `--env FOO` (docker-style ambient pass-through) is a usage
+    /// error in v1 — it has meaning only under `--clean`, and admitting it
+    /// later is purely additive.
+    #[test]
+    fn env_override_rejects_bare_name() {
+        let error = parse_env_overrides(&["FOO".to_string()]).expect_err("a bare name must be rejected");
+        assert!(
+            error.to_string().contains("KEY=VALUE"),
+            "the error must name the expected form; got: {error}"
+        );
+    }
+
+    /// X1 applies to the flag, not just the file: `--env` must not be the way
+    /// in for a key that reconfigures how ocx itself resolves.
+    #[test]
+    fn env_override_rejects_reserved_ocx_keys() {
+        for reserved in ["OCX_DEFAULT_REGISTRY=evil.example.com", "__OCX_TESTING_X=1"] {
+            let error =
+                parse_env_overrides(&[reserved.to_string()]).expect_err("a reserved key must be rejected: {reserved}");
+            assert!(
+                error.to_string().contains("reserved"),
+                "the error must say the key is reserved; got: {error}"
+            );
+        }
+    }
+
+    /// X2: keys route through the shared POSIX name validator, so the flag
+    /// cannot inject through the key slot of an emitted assignment line.
+    #[test]
+    fn env_override_rejects_invalid_key_grammar() {
+        for invalid in ["A B=1", "1A=1", "=1"] {
+            assert!(
+                parse_env_overrides(&[invalid.to_string()]).is_err(),
+                "'{invalid}' must be rejected by the shared key validator"
+            );
+        }
+    }
+
+    /// Repeatable: every occurrence is kept, in order, so the last one wins at
+    /// application time (`Env::apply_entries` replays the vector).
+    #[test]
+    fn env_override_keeps_every_occurrence_in_order() {
+        let parsed = parse_env_overrides(&["FOO=first".to_string(), "FOO=second".to_string()]).expect("ok");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].value, "first");
+        assert_eq!(parsed[1].value, "second", "a later --env must be applied last");
     }
 
     // ── select → filter → resolve (named scope regression) ────────────────────

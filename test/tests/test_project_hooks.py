@@ -130,10 +130,10 @@ def test_run_later_group_env_overrides_earlier(
         f"""\
 [tools]
 
-[group.groupA]
+[group.groupA.tools]
 {repo_a} = "{ocx.registry}/{repo_a}:{tag}"
 
-[group.groupB]
+[group.groupB.tools]
 {repo_b} = "{ocx.registry}/{repo_b}:{tag}"
 """,
     )

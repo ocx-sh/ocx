@@ -56,11 +56,26 @@ pub type SitePatchSet = HashMap<oci::PinnedIdentifier, Vec<(Entry, PatchProvenan
 /// Internal enum — no `#[non_exhaustive]` so matches stay total across the
 /// workspace (arch-principles: closed internal enum).
 pub enum PatchScope {
-    /// A project (or global) `ocx.toml` is in scope. Carries its `no-patches`
-    /// opt-out repositories (canonical `registry/repository`, tag/digest
-    /// excluded). An opted-out base gets NO companion overlay UNLESS the tier
-    /// is system-required (enforcement wins).
-    Project(std::collections::BTreeSet<String>),
+    /// A project (or global) `ocx.toml` is in scope.
+    ///
+    /// A struct variant, not a tuple: every field must be named at each call
+    /// site, so a new caller cannot silently omit the project env the way an
+    /// added tuple element or a `Default` shortcut would allow. That is the
+    /// whole point of routing project env through this type rather than
+    /// adding a second required parameter beside it.
+    Project {
+        /// The `no-patches` opt-out repositories (canonical
+        /// `registry/repository`, tag/digest excluded). An opted-out base
+        /// gets NO companion overlay UNLESS the tier is system-required
+        /// (enforcement wins).
+        no_patches: std::collections::BTreeSet<String>,
+        /// Resolved project `[env]` then group `[env]` entries, already in
+        /// application order (project first, then groups in `-g` selection
+        /// order so a later group wins). Appended after the package-composed
+        /// entries and the patch overlay, so constants replace and path
+        /// entries land ahead of package paths.
+        env: Vec<Entry>,
+    },
     /// No project toolchain is in scope — OCI-tier commands, the launcher
     /// re-entry, isolated scratch managers, the self-update version probe.
     /// Empty opt-out: every admitted base keeps its (non-enforced) companion
@@ -78,8 +93,50 @@ impl PatchScope {
         static EMPTY: std::sync::LazyLock<std::collections::BTreeSet<String>> =
             std::sync::LazyLock::new(std::collections::BTreeSet::new);
         match self {
-            PatchScope::Project(set) => set,
+            PatchScope::Project { no_patches, .. } => no_patches,
             PatchScope::NoProjectContext => &EMPTY,
+        }
+    }
+
+    /// The project/group `[env]` entries this scope contributes, already in
+    /// application order.
+    ///
+    /// `NoProjectContext` yields an empty slice by construction — the OCI tier
+    /// reads no `ocx.toml`, so there is nothing for it to contribute and no way
+    /// for a caller there to accidentally acquire some.
+    fn project_env(&self) -> &[Entry] {
+        match self {
+            PatchScope::Project { env, .. } => env,
+            PatchScope::NoProjectContext => &[],
+        }
+    }
+}
+
+/// Emit one `debug` line per project-declared constant that shadows a
+/// package-declared constant of the same key.
+///
+/// `debug`, never `warn`: shadowing is the *declared intent* of project `[env]`
+/// — the composition order exists precisely so a project can override what a
+/// package ships. Warning on the happy path would be noise on every `ocx run`
+/// of a project that uses the feature as designed.
+///
+/// Path entries are excluded because they prepend rather than replace: nothing
+/// is shadowed, both values survive.
+fn log_project_env_shadowing(composed: &[Entry], project_env: &[Entry]) {
+    use crate::package::metadata::env::modifier::ModifierKind;
+
+    for entry in project_env {
+        if entry.kind != ModifierKind::Constant {
+            continue;
+        }
+        if composed
+            .iter()
+            .any(|existing| existing.key == entry.key && existing.kind == ModifierKind::Constant)
+        {
+            log::debug!(
+                "project env overrides the package-declared constant '{}'; the project value wins",
+                entry.key
+            );
         }
     }
 }
@@ -493,23 +550,30 @@ impl PackageManager {
     /// Like [`resolve_env`] but also returns the overlay boundary index and the
     /// per-overlay-entry [`PatchProvenance`].
     ///
-    /// The returned `usize` is the first index in the entry slice that belongs to the
-    /// companion overlay (entries at indices `[0..patch_start)` came from `composer::compose`,
-    /// entries at `[patch_start..)` came from the patch companion projections).
+    /// The returned entry vector has three consecutive regions:
     ///
-    /// The returned `Vec<PatchProvenance>` is aligned one-to-one with the overlay slice
-    /// `entries[patch_start..]` — `provenance.len() == entries.len() - patch_start` — so
-    /// `provenance[i]` names the rule glob + companion for `entries[patch_start + i]`.
-    /// Native (non-overlay) entries have no provenance by construction.
+    /// | Range | Origin |
+    /// |---|---|
+    /// | `[0 .. patch_start)` | `composer::compose` (package-composed env) |
+    /// | `[patch_start .. patch_start + provenance.len())` | patch companion projections |
+    /// | the remainder | `scope`'s project / group `[env]` (+ `ocx run --env`) |
     ///
-    /// When `self.patches = None` (no patch tier), `patch_start` equals the total entry
-    /// count and `provenance` is empty — byte-identical to the pre-Phase-4 output.
+    /// The returned `Vec<PatchProvenance>` is aligned one-to-one with the middle
+    /// region, so `provenance[i]` names the rule glob + companion for
+    /// `entries[patch_start + i]`. Native and project entries have no provenance by
+    /// construction — a consumer annotating by index must bound-check
+    /// `i - patch_start` against `provenance.len()` rather than assuming the overlay
+    /// runs to the end of the vector.
+    ///
+    /// When `self.patches = None` (no patch tier), `provenance` is empty and
+    /// `patch_start` equals the compose count — byte-identical to the pre-Phase-4
+    /// output for a scope that carries no project env.
     ///
     /// The CLI `--show-patches` flag uses this boundary + provenance to annotate each
     /// overlay entry's origin.
     ///
     /// `scope` carries the caller's patch-boundary decision — see [`PatchScope`].
-    /// `PatchScope::Project(set)` supplies `set` as the opt-out (canonical
+    /// `PatchScope::Project { no_patches, .. }` supplies the opt-out (canonical
     /// `"registry/repository"` keys, tag/digest excluded); `NoProjectContext`
     /// supplies an empty opt-out by construction. An opted-out base gets NO
     /// companion overlay UNLESS the tier is system-required (enforcement wins).
@@ -571,6 +635,25 @@ impl PackageManager {
                     }
                 }
             }
+        }
+
+        // Project / group `[env]` (plus any `ocx run --env`) as ordinary
+        // entries, appended last: stages 4-6 of the composition order. Vector
+        // position IS the precedence — `Env::apply_entries` replays the vector,
+        // so a constant here replaces a package-declared one and a path entry
+        // lands ahead of package paths. This is the whole reason project env is
+        // materialized as `Entry` rather than carried on a parallel channel:
+        // every consumer (`Env::apply_entries`, `conventions::emit_lines`,
+        // `conventions::export_ci`) already takes exactly one `&[Entry]`.
+        //
+        // Deliberately OUTSIDE the `ConstantTracker`: it is consulted only by
+        // the two CI flavor writers, never on any process-env path, so a
+        // project override cannot surface there as a package-vs-package
+        // collision warning.
+        let project_env = scope.project_env();
+        if !project_env.is_empty() {
+            log_project_env_shadowing(&entries, project_env);
+            entries.extend_from_slice(project_env);
         }
 
         Ok((entries, compose_count, provenance, attribution))
@@ -6069,7 +6152,14 @@ mod phase5d_spec_tests {
         // Opt the root base out by canonical registry/repository key.
         let no_patches: BTreeSet<String> = [ROOT_REPO_KEY.to_string()].into_iter().collect();
         let (entries, _patch_start, _provenance) = manager
-            .resolve_env_with_patch_boundary(&[root], false, super::PatchScope::Project(no_patches))
+            .resolve_env_with_patch_boundary(
+                &[root],
+                false,
+                super::PatchScope::Project {
+                    no_patches,
+                    env: Vec::new(),
+                },
+            )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
 
@@ -6100,7 +6190,14 @@ mod phase5d_spec_tests {
         // Same opt-out as test 11 — but the tier is system_required, so it is ignored.
         let no_patches: BTreeSet<String> = [ROOT_REPO_KEY.to_string()].into_iter().collect();
         let (entries, _patch_start, _provenance) = manager
-            .resolve_env_with_patch_boundary(&[root], false, super::PatchScope::Project(no_patches))
+            .resolve_env_with_patch_boundary(
+                &[root],
+                false,
+                super::PatchScope::Project {
+                    no_patches,
+                    env: Vec::new(),
+                },
+            )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
 
@@ -6132,7 +6229,14 @@ mod phase5d_spec_tests {
         // Empty opt-out set — the root base is NOT opted out.
         let no_patches: BTreeSet<String> = BTreeSet::new();
         let (entries, _patch_start, _provenance) = manager
-            .resolve_env_with_patch_boundary(&[root], false, super::PatchScope::Project(no_patches))
+            .resolve_env_with_patch_boundary(
+                &[root],
+                false,
+                super::PatchScope::Project {
+                    no_patches,
+                    env: Vec::new(),
+                },
+            )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
 
@@ -6144,7 +6248,7 @@ mod phase5d_spec_tests {
     }
 
     /// (14 — Contract 1 case (c)) For a base that is NOT opted out,
-    /// `PatchScope::NoProjectContext` and `PatchScope::Project(empty)` produce
+    /// `PatchScope::NoProjectContext` and an empty `PatchScope::Project` produce
     /// byte-identical resolved entries. This locks the ADR guarantee that the
     /// named no-project state is observationally equal to a project carrying a
     /// zero-length opt-out set — the two are distinguishable *values*, not
@@ -6165,7 +6269,14 @@ mod phase5d_spec_tests {
         let root_no_project = seed_root_arc(&store, "rootpkg", 'r');
 
         let (project_entries, project_start, _project_provenance) = manager
-            .resolve_env_with_patch_boundary(&[root_project], false, super::PatchScope::Project(BTreeSet::new()))
+            .resolve_env_with_patch_boundary(
+                &[root_project],
+                false,
+                super::PatchScope::Project {
+                    no_patches: BTreeSet::new(),
+                    env: Vec::new(),
+                },
+            )
             .await
             .expect("Project(empty) resolve must succeed");
         let (no_project_entries, no_project_start, _no_project_provenance) = manager
@@ -6236,8 +6347,9 @@ mod phase5d_spec_tests {
 ///
 /// `PatchScope` is a `package_manager` resolver type. `ProjectConfig`
 /// (`crates/ocx_lib/src/project/config.rs`) must stay zero-knowledge of it:
-/// the ~4 project/global command sites inline `PatchScope::Project(
-/// cfg.no_patches_repositories())`, so `project` never imports the resolver.
+/// the ~4 project/global command sites build the `Project` variant inline
+/// from `cfg.no_patches_repositories()`, so `project` never imports the
+/// resolver.
 /// A helper like `ProjectConfig::patch_scope()` would invert the dependency
 /// direction — this source-grep gate fails the build if such a reference ever
 /// creeps back.

@@ -447,16 +447,47 @@ CI needs `shellcheck` and `shfmt`; a release pipeline needs `goreleaser`; daily 
 [tools]
 cmake = "ocx.sh/cmake:3.28"
 
-[group.ci]
+[group.ci.tools]
 shellcheck = "ocx.sh/shellcheck:0.11"
 
-[group.release]
+[group.release.tools]
 goreleaser = "ocx.sh/goreleaser:2.0"
 ```
 
 <<< @/_scripts/user-guide/project-groups.sh{sh}
 
-The same binding name may appear in `[tools]` and any `[group.*]` table — identity is `(group, name)`. This lets a project pin one `shfmt` for daily use and a different one in `ci` without conflict.
+The same binding name may appear in `[tools]` and any `[group.*.tools]` table — identity is `(group, name)`. This lets a project pin one `shfmt` for daily use and a different one in `ci` without conflict.
+
+### Environment variables {#project-env}
+
+A tool binding pins *which binary* runs. It says nothing about the environment that binary needs — a `SOURCE_DATE_EPOCH` for reproducible builds, a `NODE_ENV`, a `node_modules/.bin` directory that will never be an OCX package because it does not have a publisher. Before `[env]`, the only channel for any of this was the ambient shell (`FOO=bar ocx run -- …`), and that channel does not exist on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate the session instead — and it does not exist for a caller that builds an argv array rather than a shell command line, which is exactly how a [GitHub Action][github-actions-docs] or a [Bazel rule][bazel-rules] invokes a tool.
+
+`[env]` declares project-wide constants; `[group.<name>.env]` scopes them to a group, the same way `[group.<name>.tools]` scopes bindings:
+
+```toml
+[env]
+SOURCE_DATE_EPOCH = "0"
+
+[group.ci.env]
+CI = "1"
+```
+
+Running with `-g ci` composes both — `SOURCE_DATE_EPOCH` from the project, `CI` from the group — the same layering [Groups](#groups) already uses for tool bindings.
+
+A `path`-typed value prepends instead of replacing, for the PATH case specifically:
+
+```toml
+[env]
+PATH = { type = "path", value = "node_modules/.bin" }
+```
+
+The relative value resolves against the **project root** — the directory holding `ocx.toml` — not the shell's current directory, so `ocx run` finds `node_modules/.bin` the same way whether it is invoked from the repo root or a subdirectory.
+
+::: info Comparable tools
+[Cargo][cargo]'s `.cargo/config.toml` has its own `[env]` table, and [GitHub Actions][github-actions-docs] has a workflow-level `env:` block — both are precedent for "declare environment alongside the tool config, not in a separate script." The `path` type mirrors [direnv][direnv]'s `PATH_add` and [mise][mise]'s `_.path`: an idempotent prepend rather than a hand-rolled `PATH="$X:$PATH"` string, which breaks across shells and double-prepends on re-entry.
+:::
+
+For a one-off override that should not go in the committed file, `ocx run --env KEY=VALUE` wins over everything else — [`ocx run`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
 
 ### Shell activation
 
@@ -1038,6 +1069,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
+[env-composition-project-env]: ./reference/env-composition.md#project-env
+[env-composition-ref]: ./reference/env-composition.md
 [getting-started]: ./getting-started.md
 [install-bare-binary]: #install-bare-binary
 [config-schema]: https://ocx.sh/schemas/config/v1.json

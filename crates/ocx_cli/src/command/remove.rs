@@ -95,13 +95,13 @@ impl Remove {
                     .config()
                     .groups
                     .get(g)
-                    .and_then(|grp| grp.get(&binding_key))
+                    .and_then(|grp| grp.tools.get(&binding_key))
                     .cloned(),
                 None => guard
                     .config()
                     .tools
                     .get(&binding_key)
-                    .or_else(|| guard.config().groups.values().find_map(|g| g.get(&binding_key)))
+                    .or_else(|| guard.config().groups.values().find_map(|g| g.tools.get(&binding_key)))
                     .cloned(),
             };
 

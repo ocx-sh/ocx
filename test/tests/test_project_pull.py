@@ -198,7 +198,7 @@ def test_pull_no_args_pulls_all_groups(
 [tools]
 default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
 
-[group.ci]
+[group.ci.tools]
 ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
 """,
     )
@@ -247,10 +247,10 @@ def test_pull_group_filter_pulls_only_named_group(
 [tools]
 default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
 
-[group.ci]
+[group.ci.tools]
 ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
 
-[group.lint]
+[group.lint.tools]
 lint_tool = "{ocx.registry}/{repo_lint}:{tag_lint}"
 """,
     )
@@ -308,7 +308,7 @@ def test_pull_group_default_pulls_only_top_level_tools(
 [tools]
 default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
 
-[group.ci]
+[group.ci.tools]
 ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
 """,
     )
@@ -356,10 +356,10 @@ def test_pull_group_filter_repeated_flag_unions(
 [tools]
 default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
 
-[group.ci]
+[group.ci.tools]
 ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
 
-[group.lint]
+[group.lint.tools]
 lint_tool = "{ocx.registry}/{repo_lint}:{tag_lint}"
 """,
     )
@@ -407,10 +407,10 @@ def test_pull_all_keyword_pulls_every_group(
 [tools]
 default_tool = "{ocx.registry}/{repo_default}:{tag_default}"
 
-[group.ci]
+[group.ci.tools]
 ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
 
-[group.lint]
+[group.lint.tools]
 lint_tool = "{ocx.registry}/{repo_lint}:{tag_lint}"
 """,
     )
@@ -639,10 +639,10 @@ def test_pull_empty_group_segment_exits_64(
     _write_ocx_toml(
         project,
         f"""\
-[group.ci]
+[group.ci.tools]
 a = "{ocx.registry}/{repo_ci}:{tag_ci}"
 
-[group.lint]
+[group.lint.tools]
 b = "{ocx.registry}/{repo_lint}:{tag_lint}"
 """,
     )
@@ -1364,7 +1364,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
 [tools]
 hello = "{ocx.registry}/{repo}:{tag}"
 
-[group.extra]
+[group.extra.tools]
 ignored = "{ocx.registry}/{repo}:{tag}"
 """
     )

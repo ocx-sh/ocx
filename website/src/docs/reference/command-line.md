@@ -1358,6 +1358,7 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | `--self` | — | Expose each package's private-visibility env entries (same semantics as `ocx exec --self`). | off |
+| `--env <KEY=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Constant only — there is no path form on the flag. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=` is rejected (exit 64) rather than treated as ambient pass-through. An `OCX_*` or `__OCX_*` key is rejected the same way (exit 64). | — |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1381,10 +1382,10 @@ The composer prepends env entries in iteration order, so the **last group listed
 |------|---------|
 | *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
 | 1 | Child spawn failed (binary not found, exec errno). |
-| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; or `--global` combined with `--project`. (OCX remaps clap's default exit 2 to 64.) |
+| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
 | 79 | Package not found in registry during auto-install. |
 | 80 | Authentication failure during auto-install. |
 
@@ -1408,6 +1409,9 @@ ocx run -g ci -- shellcheck --format=gcc ./script.sh
 
 # Clean environment — only package-declared vars, no shell inheritance
 ocx run --clean -- env
+
+# One-off override — wins over ambient, package, and project/group [env]
+ocx run --env CI=1 --env SOURCE_DATE_EPOCH=0 -- task build
 ```
 
 ::: tip Project-tier vs OCI-tier
@@ -3459,9 +3463,11 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
+[config-project-env]: ./configuration.md#project-config-env
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[env-composition-project-env]: ./env-composition.md#project-env
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

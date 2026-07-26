@@ -490,7 +490,7 @@ def test_update_group_scopes_to_group(
 [tools]
 tool = "{ocx.registry}/{repo_default}:latest"
 
-[group.ci]
+[group.ci.tools]
 citool = "{ocx.registry}/{repo_ci}:latest"
 """,
     )

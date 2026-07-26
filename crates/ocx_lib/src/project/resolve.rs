@@ -441,12 +441,12 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
     }
 
     // Named groups.
-    for (group_name, group_tools) in &config.groups {
+    for (group_name, group) in &config.groups {
         let include = selected.as_ref().is_none_or(|s| s.iter().any(|g| g == group_name));
         if !include {
             continue;
         }
-        for (name, id) in group_tools {
+        for (name, id) in &group.tools {
             work.push((group_name.clone(), name.clone(), id.clone()));
         }
     }
@@ -464,7 +464,7 @@ fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Optio
     if group == super::internal::DEFAULT_GROUP {
         config.tools.get(name).cloned()
     } else {
-        config.groups.get(group).and_then(|tools| tools.get(name)).cloned()
+        config.groups.get(group).and_then(|g| g.tools.get(name)).cloned()
     }
 }
 

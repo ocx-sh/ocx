@@ -315,8 +315,15 @@ impl ToolchainEnv {
                 }
                 infos
             };
-            // Per-package opt-out from the in-scope project `ocx.toml`.
-            let scope = ocx_lib::package_manager::PatchScope::Project(ctx.config.no_patches_repositories());
+            // Per-package opt-out from the in-scope project `ocx.toml`, plus
+            // its `[env]` and each selected group's `[env]` (stages 4-5 —
+            // `ocx env` has no `--env`, so stage 6 is empty here). Uniformity
+            // with `ocx run` is structural: both append to the same entry
+            // vector, so what this command prints is what `ocx run` applies.
+            let scope = ocx_lib::package_manager::PatchScope::Project {
+                no_patches: ctx.config.no_patches_repositories(),
+                env: crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded),
+            };
             let (entries, patch_start, provenance, attribution) =
                 manager.resolve_env_with_attribution(&infos, false, scope).await?;
             (
@@ -350,15 +357,18 @@ impl ToolchainEnv {
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                // Annotate origin when `--show-patches` is enabled. Entries at index
-                // `>= patch_start` came from companion overlay projections; the aligned
-                // `provenance` vec names the rule glob + companion for each.
-                let source = if self.show_patches && i >= patch_start {
-                    let prov = &provenance[i - patch_start];
-                    Some(api::data::env::EntrySource::Patch {
-                        rule: prov.rule_match.clone(),
-                        companion: prov.companion.to_string(),
-                    })
+                // Annotate origin when `--show-patches` is enabled. The overlay
+                // occupies `[patch_start .. patch_start + provenance.len())`;
+                // the project/group `[env]` stages follow it, so the bound
+                // check is what keeps a project entry from being mislabelled as
+                // a companion (and from indexing past `provenance`).
+                let source = if self.show_patches {
+                    i.checked_sub(patch_start)
+                        .and_then(|offset| provenance.get(offset))
+                        .map(|prov| api::data::env::EntrySource::Patch {
+                            rule: prov.rule_match.clone(),
+                            companion: prov.companion.to_string(),
+                        })
                 } else {
                     None
                 };
@@ -411,11 +421,18 @@ impl ToolchainEnv {
 /// by `current` back-refs — so dropping the `current` dependency here does not
 /// expose them to garbage collection.
 ///
-/// Returns `Ok(None)` for every benign "no usable global toolchain" outcome:
-/// no global `ocx.lock`, a corrupt/unreadable lock, or no global tool resolving
-/// locally. The caller maps `Ok(None)` to an empty env (exit 0) — a corrupt lock
-/// surfaces via the lock-rewriting commands (`ocx --global lock`/`add`/
-/// `update`), not this read-only exporter.
+/// The global `ocx.toml`'s own `[env]` / `[group.<name>.env]` is read
+/// independently of the lock and applies whenever the global tier is the one
+/// being resolved (ADR `adr_project_env_declaration.md` Q2). A declaration's
+/// effect never depends on package availability, so a global file carrying only
+/// `[env]` — or one whose locked tools are not materialised — still composes.
+///
+/// Returns `Ok(None)` only when NEITHER axis contributes: no global tool
+/// resolves locally (no `ocx.lock`, a corrupt/unreadable one, or nothing
+/// materialised) AND the global file declares no `[env]`. The caller maps
+/// `Ok(None)` to an empty env (exit 0) — a corrupt lock surfaces via the
+/// lock-rewriting commands (`ocx --global lock`/`add`/`update`), not this
+/// read-only exporter.
 ///
 /// Returns `Err` ONLY when a resolved toolchain's patch overlay / env composition
 /// fails — most importantly a C7 fail-closed failure (a `required` /
@@ -459,69 +476,95 @@ pub(crate) async fn resolve_global_pinned_env(
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
 
-    // A missing OR corrupt/unreadable global lock is benign here — the login
-    // exporter stays lenient (empty env). Only a patch-enforcement /
-    // env-composition failure of a RESOLVED toolchain (the `resolve_env_with_patch_boundary`
-    // call below) propagates. A corrupt lock surfaces loudly via the commands that
-    // rewrite it (`ocx --global lock`/`add`/`update`).
-    let lock = match ProjectLock::from_path(&global_lock_path).await {
-        Ok(Some(lock)) => lock,
-        Ok(None) => return Ok(None),
-        Err(error) => {
-            tracing::debug!("global lock unreadable; emitting empty env: {error:#}");
-            return Ok(None);
+    // Per-package opt-out AND the global file's own `[env]` / group `[env]`,
+    // read BEFORE the lock: a declared `[env]` applies to the global tier on
+    // its own authority (Q2), so its effect must not hinge on whether any
+    // package happens to be locked and materialised. A missing or unparseable
+    // file yields an empty opt-out and an empty env (lenient — the login
+    // exporter must never fail on a malformed global config, matching this
+    // path's overall posture).
+    //
+    // Strict isolation (Q2): this env belongs to the global tier alone. It
+    // applies to `ocx --global env` / `ocx --global run` and never composes
+    // into a project-tier resolution — the two tiers are resolved by disjoint
+    // branches of `execute`, never unioned.
+    let (no_patches, project_env) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+        Ok(config) => {
+            // Expand `all` against the CONFIG's groups, not the lock's: a group
+            // that declares only `[group.<name>.env]` and no tools has no lock
+            // entry, but its env is still selected by `-g all`.
+            let mut env_groups = expand_all_keyword(groups, &config);
+            if env_groups.is_empty() {
+                env_groups = vec![DEFAULT_GROUP.to_owned()];
+            }
+            let env = crate::app::project_context::project_env_entries(&config, &global_config, &env_groups);
+            (config.no_patches_repositories(), env)
         }
+        Err(_) => (std::collections::BTreeSet::new(), Vec::new()),
     };
-
-    let selected_groups = selected_groups_global(groups, &lock);
 
     // Offline-only manager clone: MUST NOT contact the registry regardless
     // of `--remote` (architect boundary; §4 login-path guarantee).
     let manager = context.manager().offline_view(context.local_index().clone());
 
-    let mut infos = Vec::new();
-    for tool in &lock.tools {
-        // Global tier is lenient: a group named on the command line that no
-        // lock entry carries simply matches nothing (no error, empty env).
-        if !selected_groups.iter().any(|g| g == &tool.group) {
-            continue;
+    // A missing OR corrupt/unreadable global lock is benign here — the login
+    // exporter stays lenient (no pinned tools contribute). Only a patch-enforcement
+    // / env-composition failure of a RESOLVED toolchain (the
+    // `resolve_env_with_attribution` call below) propagates. A corrupt lock
+    // surfaces loudly via the commands that rewrite it (`ocx --global lock`/
+    // `add`/`update`).
+    let lock = match ProjectLock::from_path(&global_lock_path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::debug!("global lock unreadable; emitting declared env only: {error:#}");
+            None
         }
-        // Resolve the lock entry to its `target`-platform identifier offline
-        // against the local object store: reconstruct `repository`+target
-        // leaf and find that directly. Absent OR ambiguous leaf → skip
-        // silently (global tier is lenient; the login exporter must never
-        // block a shell on a disambiguation it cannot perform).
-        let ocx_lib::oci::Selection::Found((leaf, _key)) = ocx_lib::project::lookup_host_leaf(&tool.platforms, target)
-        else {
-            continue;
-        };
-        let identifier: ocx_lib::oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
-        match manager.find(&identifier, target.clone()).await {
-            Ok(info) => infos.push(Arc::new(info)),
-            // Pinned package not materialised locally — skip silently
-            // (the login exporter must never block a shell).
-            Err(_) => continue,
+    };
+
+    let mut infos = Vec::new();
+    if let Some(lock) = &lock {
+        let selected_groups = selected_groups_global(groups, lock);
+        for tool in &lock.tools {
+            // Global tier is lenient: a group named on the command line that no
+            // lock entry carries simply matches nothing (no error, empty env).
+            if !selected_groups.iter().any(|g| g == &tool.group) {
+                continue;
+            }
+            // Resolve the lock entry to its `target`-platform identifier offline
+            // against the local object store: reconstruct `repository`+target
+            // leaf and find that directly. Absent OR ambiguous leaf → skip
+            // silently (global tier is lenient; the login exporter must never
+            // block a shell on a disambiguation it cannot perform).
+            let ocx_lib::oci::Selection::Found((leaf, _key)) =
+                ocx_lib::project::lookup_host_leaf(&tool.platforms, target)
+            else {
+                continue;
+            };
+            let identifier: ocx_lib::oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
+            match manager.find(&identifier, target.clone()).await {
+                Ok(info) => infos.push(Arc::new(info)),
+                // Pinned package not materialised locally — skip silently
+                // (the login exporter must never block a shell).
+                Err(_) => continue,
+            }
         }
     }
 
-    if infos.is_empty() {
+    // Nothing to say only when NEITHER axis contributes. A declared `[env]`
+    // with no usable package still composes: its effect is not conditional on
+    // package availability.
+    if infos.is_empty() && project_env.is_empty() {
         return Ok(None);
     }
-
-    // Per-package opt-out from the global `$OCX_HOME/ocx.toml`. The global lock
-    // can exist without a sibling `ocx.toml`; a missing or unparseable file
-    // yields an empty opt-out set (lenient — the login exporter must never fail
-    // on a malformed global config, matching this path's overall posture).
-    let no_patches = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
-        Ok(config) => config.no_patches_repositories(),
-        Err(_) => std::collections::BTreeSet::new(),
-    };
 
     // Patch overlays apply offline: companions are already installed locally and
     // `offline_view` preserves the patch tier (the network alone is disabled).
     // Return the companion-overlay boundary so `--show-patches` can annotate
     // companion entries on the global path, exactly as on the project path.
-    let scope = ocx_lib::package_manager::PatchScope::Project(no_patches);
+    let scope = ocx_lib::package_manager::PatchScope::Project {
+        no_patches,
+        env: project_env,
+    };
     let (entries, patch_start, provenance, attribution) =
         manager.resolve_env_with_attribution(&infos, false, scope).await?;
     Ok(Some((

@@ -126,7 +126,13 @@ impl DirenvExport {
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
         }
 
-        let scope = ocx_lib::package_manager::PatchScope::Project(project.config.no_patches_repositories());
+        // Stage 4 only: this command exports the default group, so there is no
+        // group `[env]` to select and no `--env` flag to append.
+        let project_env = crate::app::project_context::project_env_entries(&project.config, &project.config_path, &[]);
+        let scope = ocx_lib::package_manager::PatchScope::Project {
+            no_patches: project.config.no_patches_repositories(),
+            env: project_env,
+        };
         let (entries, _, _) = offline
             .resolve_env_with_patch_boundary(&applied.infos, false, scope)
             .await?;

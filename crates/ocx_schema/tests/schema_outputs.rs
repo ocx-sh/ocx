@@ -86,6 +86,122 @@ fn project_schema_exposes_tools_and_groups_objects() {
     );
 }
 
+/// Resolve a schema node that may be inlined or a `$ref` into `#/$defs/`.
+fn resolve<'a>(schema: &'a Value, node: &'a Value) -> &'a Value {
+    node.get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+        .and_then(|name| schema.get("$defs").and_then(|defs| defs.get(name)))
+        .unwrap_or(node)
+}
+
+/// S9a: the `[env]` value grammar is a string-or-table union, and schemars
+/// cannot infer one from the normalized Rust struct — the struct only
+/// describes the table arm. A derived schema therefore silently drops the
+/// bare-string form, which is the common case (`CI = "1"`).
+///
+/// This is not hypothetical: the shipped `config` schema's `$defs.MirrorConfig`
+/// has exactly that defect today. `taplo.toml` binds the `project` schema for
+/// live editor validation, so losing the string arm would flag every ordinary
+/// `[env]` entry as invalid in the user's editor.
+///
+/// Structural assertion rather than real validation because no JSON-Schema
+/// validator crate is vendored — the acceptance suite covers actual validation
+/// via `taplo check` against a freshly generated schema.
+#[test]
+fn project_schema_env_value_is_a_string_or_table_union() {
+    let schema = parse("project");
+    let env = schema
+        .get("properties")
+        .and_then(|p| p.get("env"))
+        .expect("project schema must declare `properties.env`");
+    let env = resolve(&schema, env);
+
+    let value_schema = env
+        .get("additionalProperties")
+        .expect("`env` must constrain its values via `additionalProperties`");
+    let arms = value_schema.get("oneOf").and_then(Value::as_array).unwrap_or_else(|| {
+        panic!(
+            "`env` value schema must be a `oneOf` union — a derived schema \
+                 drops the bare-string arm. Got: {value_schema}"
+        )
+    });
+    assert_eq!(
+        arms.len(),
+        2,
+        "expected exactly the string and table arms, got {arms:?}"
+    );
+
+    // Arm order is not load-bearing; find each by shape.
+    let string_arm = arms
+        .iter()
+        .find(|arm| arm.get("type").and_then(Value::as_str) == Some("string"))
+        .expect("union must carry a bare-string arm — the constant shorthand, and the common case");
+    assert!(
+        string_arm.get("description").is_some(),
+        "the string arm needs a description; it is what an editor shows on hover"
+    );
+
+    let table_arm = arms
+        .iter()
+        .find(|arm| arm.get("type").and_then(Value::as_str) == Some("object"))
+        .expect("union must carry a `{ type, value }` table arm");
+    let properties = table_arm
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("table arm must declare `properties`");
+    let modifier = properties
+        .get("type")
+        .map(|node| resolve(&schema, node))
+        .expect("table arm must declare a `type` discriminant");
+    let variants: Vec<&str> = modifier
+        .get("enum")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        variants.contains(&"path") && variants.contains(&"constant"),
+        "`type` must be constrained to exactly the two modifiers; got {variants:?}"
+    );
+    assert!(properties.contains_key("value"), "table arm must declare `value`");
+    assert_eq!(
+        table_arm.get("additionalProperties"),
+        Some(&Value::Bool(false)),
+        "table arm must reject unknown keys so a typo is caught in the editor"
+    );
+}
+
+/// A group body is exactly `tools` and `env` — nothing else. The flat form
+/// (`[group.ci] foo = "..."`) was removed deliberately (S8), so the schema
+/// must not leave a hole that re-admits it.
+#[test]
+fn project_schema_group_body_is_closed_to_tools_and_env() {
+    let schema = parse("project");
+    let groups = schema
+        .get("properties")
+        .and_then(|p| p.get("groups").or_else(|| p.get("group")))
+        .expect("project schema must declare a named-groups property");
+    let group = groups
+        .get("additionalProperties")
+        .map(|node| resolve(&schema, node))
+        .expect("named-groups must constrain its values via `additionalProperties`");
+
+    let properties = group
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("group body must declare `properties`");
+    assert!(
+        properties.contains_key("tools") && properties.contains_key("env"),
+        "group body must declare both `tools` and `env`; got {:?}",
+        properties.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        group.get("additionalProperties"),
+        Some(&Value::Bool(false)),
+        "group body must be closed — an open body would silently re-admit the removed flat form"
+    );
+}
+
 #[test]
 fn project_lock_schema_publishes_at_canonical_id() {
     let schema = parse("project-lock");

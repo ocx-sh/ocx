@@ -334,6 +334,25 @@ For the full patch semantics (descriptor format, companion installation, per-pac
 opt-out), see the [`[patches]`][config-patches] configuration reference and the
 [Patching packages guide][patches-user-guide].
 
+### `OCX_ENV` {#ocx-env}
+
+A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
+
+```sh
+# Managed by OCX; not set manually.
+export OCX_ENV='[...]'
+```
+
+This variable is **resolution-affecting** and is forwarded automatically; manually setting it overrides the project/group `[env]` tier for that subprocess tree. It carries no envelope version. Instead, each forwarded entry's own kind (constant or path) is validated strictly on decode: an ocx binary receiving a kind it does not recognize — from a newer release, or a forged value — fails closed on the **whole** payload rather than defaulting the unknown entry to a constant, which would silently apply the wrong semantics.
+
+::: warning Malformed values abort at startup
+A malformed `OCX_ENV` value — invalid JSON, or an entry with an unrecognized kind — is a **hard startup error**, mirroring [`OCX_PATCHES`](#ocx-patches) and [`OCX_MIRRORS`](#ocx-mirrors). Setting `OCX_DEFAULT_REGISTRY` or any other `OCX_*`/`__OCX_*` key through it has no effect: those keys are rejected before the payload is ever built (see below) and rejected again on decode, so a forged `OCX_ENV` cannot reach ocx's own resolution surface.
+:::
+
+A stale `OCX_ENV` inherited from a parent shell is removed before a child's own project/group `[env]` is applied, so it cannot leak into an unrelated invocation.
+
+**`OCX_*` and `__OCX_*` keys cannot be set from `ocx.toml`.** The project [`[env]`][config-project-env] table and every `[group.<name>.env]` reject any key starting `OCX_` or `__OCX_` at parse (exit 78); the [`ocx run --env`][cmd-run] flag rejects the same keys at flag-parse (exit 64). Without this, a checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other variable in this reference and reconfigure how `ocx` itself resolves for every contributor who clones the repository — this is the same forwarding mechanism `OCX_ENV` uses above, closed at the source rather than only on decode.
+
 ### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
 
 The OCI reference for the [`[managed]`][config-managed] corporate-configuration artifact. Overrides `[managed] source` for this invocation only — never written back to the seed. The persistent seed is written only by [`ocx config setup`][cmd-config-setup] and [`ocx self setup --managed-config`][cmd-self-setup].
@@ -710,6 +729,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md
+[config-project-env]: ./configuration.md#project-config-env
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote
@@ -717,6 +737,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- reference -->
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
+[env-composition-project-env]: ./env-composition.md#project-env
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects

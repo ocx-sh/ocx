@@ -66,9 +66,12 @@ pub fn declaration_hash(config: &ProjectConfig) -> String {
     );
 
     // "group.<name>" — `config.groups` is a BTreeMap, so iteration is
-    // already sorted by group name.
-    for (group_name, group_tools) in &config.groups {
-        let mut pairs: Vec<(&String, String)> = group_tools.iter().map(|(n, id)| (n, id.to_string())).collect();
+    // already sorted by group name. Only `.tools` participates: `[env]` does
+    // not change WHICH packages resolve, so it cannot stale `ocx.lock` and
+    // an env edit must not force a re-lock. Adding it here would be a
+    // breaking change requiring a DECLARATION_HASH_VERSION bump.
+    for (group_name, group) in &config.groups {
+        let mut pairs: Vec<(&String, String)> = group.tools.iter().map(|(n, id)| (n, id.to_string())).collect();
         pairs.sort();
         let json: Vec<serde_json::Value> = pairs.into_iter().map(|(n, t)| serde_json::json!([n, t])).collect();
         map.insert(format!("group.{group_name}"), serde_json::Value::Array(json));

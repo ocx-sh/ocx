@@ -479,6 +479,70 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 | `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
 | `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG`][env-config] must point to a regular, readable file. |
 
+## Project Configuration — `ocx.toml` {#project-config}
+
+The tiers above configure ocx itself. `ocx.toml` is a different file with a different lifecycle — see the [Project Toolchain guide][user-project] for discovery and locking. This section is the schema reference for the two `ocx.toml` tables that carry environment declarations: [`[group.<name>]`](#project-config-groups) and [`[env]`](#project-config-env).
+
+### `[group.<name>]` — `tools` and `env` {#project-config-groups}
+
+Each named group is a table with exactly two optional sub-tables: `tools` (the same binding-name-to-identifier map the top-level `[tools]` table holds) and `env` (see the [value grammar](#project-config-env) below). A group with neither sub-table is a valid, empty group.
+
+```toml
+[tools]                       # default group's tools
+foo = "ocx.sh/foo:1"
+
+[env]                         # default group's env
+CI = "1"
+
+[group.ci.tools]              # named group's tools
+bar = "ocx.sh/bar:1"
+
+[group.ci.env]                # named group's env
+SOURCE_DATE_EPOCH = "0"
+```
+
+A tool binding declared directly under `[group.<name>]` — not inside its `tools` sub-table — is a parse error naming the group and pointing at the fix, `ExitCode::ConfigError` (78):
+
+```
+error: group `ci` declares tool bindings directly
+  --> ocx.toml
+   |
+   |  [group.ci]
+   |  bar = "ocx.sh/bar:1"
+   |
+   = tool bindings belong under `[group.ci.tools]`
+   = `[group.ci]` holds only the `tools` and `env` sub-tables
+```
+
+An unrecognized sub-table (a typo such as `[group.ci.tolos]`) is rejected the same way, naming the offending key. `[group.default]` and `[group.all]` remain reserved names and are rejected at parse regardless of their contents — see [`ocx run`][cmd-run] for the full group-keyword semantics.
+
+This schema applies identically to the `--global` tier file at `$OCX_HOME/ocx.toml`.
+
+### `[env]` value grammar {#project-config-env}
+
+Each entry in `[env]` or `[group.<name>.env]` is either a bare string — a **constant** that replaces any earlier value for the same key — or a table with an explicit `type`:
+
+```toml
+[env]
+CI = "1"                                            # string → constant, same as below
+JAVA_OPTS = { type = "constant", value = "-Xmx2g" }
+PATH = { type = "path", value = "node_modules/.bin" }
+```
+
+| `type` | Behavior |
+|--------|----------|
+| `constant` (implicit for the bare-string form) | Replaces any earlier value for the key. |
+| `path` | Prepends to the key (typically `PATH`). A relative `value` resolves against the **project root** — the directory holding `ocx.toml` — never the process's current working directory; an absolute `value` passes through unchanged. |
+
+There is no interpolation in v1 — every value is literal. The `path` type is what makes a project-local directory like `node_modules/.bin` expressible without one: no `${projectRoot}` token is needed, because relative resolution already targets the project root.
+
+Two key classes are rejected everywhere `[env]` can appear — the project table, every `[group.<name>.env]`, and the [`--env`][cmd-run] flag on `ocx run`:
+
+- A key that is not a POSIX environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+- A key starting `OCX_` or `__OCX_`. Without this rejection, a checked-in `ocx.toml` could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other resolution-affecting variable and reconfigure how `ocx` itself resolves for every contributor who clones the repository. Rejection happens at parse for `[env]` / `[group.<name>.env]` (`ExitCode::ConfigError`, 78) and at flag-parse for `--env` (`ExitCode::UsageError`, 64) — see [`--env`][cmd-run] and [`OCX_ENV`][env-ocx-env] for the flag form and the forwarded wire key.
+
+`[env]` entries carry no visibility axis. Unlike a package's own declared env, a project is never a dependency of anything, so there is no interface/private surface to gate — `--self` has no effect on which project or group entries are emitted. See [Project Environment][env-composition-project-env] in the Environment Composition reference for where these entries land in the full resolution order.
+
 ## JSON Schemas {#schemas}
 
 OCX publishes JSON Schemas for every config, project, and patch file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
@@ -567,12 +631,15 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-patches]: ./environment.md#ocx-patches
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [env-ocx-no-config-refresh]: ./environment.md#ocx-no-config-refresh
+[env-ocx-env]: ./environment.md#ocx-env
 
 <!-- user guide -->
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[user-project]: ../user-guide.md#project
 
 <!-- env composition -->
 [env-composition-patch-opt-out]: ./env-composition.md#patch-opt-out-scope
+[env-composition-project-env]: ./env-composition.md#project-env
 
 <!-- patches user guide -->
 [patches-user-guide]: ../user-guide/patches.md

@@ -215,7 +215,7 @@ def test_run_golden_path(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 def test_run_with_named_group(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx run -g ci -- hello`` runs the binary from [group.ci].
+    """``ocx run -g ci -- hello`` runs the binary from [group.ci.tools].
 
     Plan §3.2 test 2: ``-g ci`` scopes composition to the named group.
     """
@@ -226,7 +226,7 @@ def test_run_with_named_group(ocx: OcxRunner, tmp_path: Path) -> None:
     _write_ocx_toml(project, f"""\
 [tools]
 
-[group.ci]
+[group.ci.tools]
 {repo} = "{ocx.registry}/{repo}:{tag}"
 """)
 
@@ -245,7 +245,7 @@ def test_run_with_named_group(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 def test_run_default_scope_excludes_named_groups(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Without ``-g``, scope is ``[tools]`` only — ``[group.ci]`` env excluded.
+    """Without ``-g``, scope is ``[tools]`` only — ``[group.ci.tools]`` env excluded.
 
     Plan §3.2 test 3: default scope = [tools] only. The ci-group package's
     ``{REPO}_HOME`` var must NOT appear in ``ocx run -- env``.
@@ -259,7 +259,7 @@ def test_run_default_scope_excludes_named_groups(ocx: OcxRunner, tmp_path: Path)
 [tools]
 {repo_default} = "{ocx.registry}/{repo_default}:1.0.0"
 
-[group.ci]
+[group.ci.tools]
 {repo_ci} = "{ocx.registry}/{repo_ci}:{tag_ci}"
 """)
 
@@ -303,10 +303,10 @@ def test_run_all_keyword_expands_to_default_plus_all_groups(
 [tools]
 {repo_default} = "{ocx.registry}/{repo_default}:1.0.0"
 
-[group.ci]
+[group.ci.tools]
 {repo_ci} = "{ocx.registry}/{repo_ci}:1.0.0"
 
-[group.release]
+[group.release.tools]
 {repo_release} = "{ocx.registry}/{repo_release}:1.0.0"
 """)
 
@@ -419,10 +419,10 @@ def test_run_ambiguous_name_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
     _write_ocx_toml(project, f"""\
 [tools]
 
-[group.ci]
+[group.ci.tools]
 conflict_tool = "{ocx.registry}/{repo_a}:{tag_a}"
 
-[group.release]
+[group.release.tools]
 conflict_tool = "{ocx.registry}/{repo_b}:{tag_b}"
 """)
 
@@ -460,10 +460,10 @@ def test_run_compose_conflict_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
     _write_ocx_toml(project, f"""\
 [tools]
 
-[group.ci]
+[group.ci.tools]
 conflict_tool = "{ocx.registry}/{repo_a}:{tag_a}"
 
-[group.release]
+[group.release.tools]
 conflict_tool = "{ocx.registry}/{repo_b}:{tag_b}"
 """)
 
@@ -531,10 +531,10 @@ def test_run_empty_group_segment_exits_64(ocx: OcxRunner, tmp_path: Path) -> Non
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, f"""\
-[group.ci]
+[group.ci.tools]
 {repo_ci} = "{ocx.registry}/{repo_ci}:1.0.0"
 
-[group.lint]
+[group.lint.tools]
 {repo_lint} = "{ocx.registry}/{repo_lint}:1.0.0"
 """)
 
@@ -1043,7 +1043,7 @@ def test_run_reserved_group_all_in_config_rejected(
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, """\
-[group.all]
+[group.all.tools]
 foo = "ocx.sh/foo:1"
 """)
 
