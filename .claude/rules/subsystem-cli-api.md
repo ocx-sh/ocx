@@ -85,6 +85,19 @@ Callers declare **what a line means**, never **how it looks**. Raw ANSI or manua
 
 Each `Printable::print_plain()` impl produce exactly one table. Multiple dimensions → encode as columns, not separate tables.
 
+## Plain-Mode Column Budget
+
+Plain is the **default** format, so every user sees it on every invocation. Plain is the human channel; JSON is the machine contract. `print_table` pads to the widest cell and **never truncates** (`data_interface.rs`), so one wide cell widens the header too.
+
+1. **No unbounded cell.** A `Vec` never renders as a joined list. Render `len()`, or one row per value when values are short and human-typed (`api/data/tag.rs` is the exemplar).
+2. **Digests are earned.** A full `sha256:<64hex>` (71 cols) appears at most once per view, only where it *is* the answer. Elsewhere: `Identifier::without_digest()` or a 12-hex short digest.
+3. **No constant, no derivable column.** A column whose every value is the same string, or is recoverable from another column on the same row, is noise.
+4. **Result data only.** Receipts and steps-along-the-way are diagnostics → stderr via `context.ui()`.
+5. **Budget: ≤5 columns, widest realistic row ≤120 cols.** "Realistic" means the worst case the command can actually produce, not the happy path.
+6. **Plain-only.** Never changes a JSON key, shape, or value. Check the inverse too — a field in JSON but absent from plain may be exactly what the user ran the command for.
+
+**Structural fix.** The recurring cause is pre-formatting into `String` at the call site (`DryRunEntry::new(id.to_string(), …)`). Where that happens, the report struct holds the **typed** value so `Serialize` emits the full pinned form while `print_plain` renders the short one. Verify the typed value's `Serialize` is byte-identical to the string it replaced before landing the change.
+
 ## Report Actual Results
 
 Commands report what happened, not echo input.
