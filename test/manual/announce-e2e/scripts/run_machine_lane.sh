@@ -49,10 +49,13 @@ main() {
     sha="$(git -C "$checkout" rev-parse "refs/tags/$tag^{commit}")"
 
     ocx_step "waiting for the publisher's announce at ${sha:0:7}"
-    poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" >/dev/null ||
+    poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$t0" >/dev/null ||
         fail_proof "publisher CI did not conclude successfully for tag $tag"
 
-    pr="$(poll_pr)" || fail_proof "no pull request appeared on $ANNOUNCE_BRANCH for tag $tag"
+    # $t0 predates the push, so nothing an earlier rehearsal left on this
+    # per-package branch can answer — including its merged pull request, which
+    # this driver would otherwise take the merge latency and lane verdict off.
+    pr="$(poll_pr "$t0")" || fail_proof "no pull request appeared on $ANNOUNCE_BRANCH for tag $tag"
     ocx_step "waiting for PR #$pr to auto-merge — take no action, that is the proof"
     merge_line="$(poll_merge "$pr")" ||
         fail_proof "PR #$pr did not auto-merge within ${POLL_DEADLINE_SECONDS}s — see PLAYBOOKS.md playbook 3"
