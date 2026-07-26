@@ -54,6 +54,23 @@ pub struct RegistryConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
+
+    /// Runtime provenance marker: `index` here came from the compiled-in
+    /// defaults tier (`ConfigLoader::builtin_defaults`), not from a config
+    /// file. Cleared the moment any file tier restates `index` — including
+    /// with the same value.
+    ///
+    /// Read by the CLI's `build_index_sources` to decide whether an explicit
+    /// `[mirrors."<name>"]` entry suppresses the compiled-in index for this
+    /// namespace. An operator who has already declared where this namespace's
+    /// traffic goes must not silently gain a second host they never
+    /// allow-listed; an `index` they wrote themselves still wins, because
+    /// writing it clears this flag.
+    ///
+    /// Never serialized — set by the loader, not read from disk.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub index_is_compiled_default: bool,
 }
 
 impl RegistryConfig {
@@ -73,15 +90,24 @@ impl RegistryConfig {
     ///
     /// A system-locked entry (`self.system_locked`) ignores ALL lower-tier
     /// overrides, since `system_locked` is a per-entry lock, not a per-field
-    /// one. The locked flag stays on `self` (sticky). The loader folds the
-    /// system tier in FIRST as the accumulator base, so `self` is the system
-    /// entry when locked.
+    /// one. The locked flag stays on `self` (sticky) and is ADOPTED from
+    /// `other`: `Config::merge` reaches every `[registries.<name>]` entry
+    /// through `map.entry(name).or_default().merge(..)`, so the system tier is
+    /// never `self` on the fold that first carries it into the accumulator —
+    /// without adopting the flag, the lock `apply_system_locks` set would be
+    /// dropped on that very first fold and the entry would stay overridable by
+    /// the user tier and by the untrusted managed-config payload.
     pub fn merge(&mut self, other: RegistryConfig) {
         if self.system_locked {
             return;
         }
+        self.system_locked = other.system_locked;
         if other.index.is_some() {
             self.index = other.index;
+            // Provenance travels with the value: a file tier restating `index`
+            // takes ownership of it, even when the string is byte-identical to
+            // the compiled-in default.
+            self.index_is_compiled_default = other.index_is_compiled_default;
         }
         if other.trusted_hosts.is_some() {
             self.trusted_hosts = other.trusted_hosts;
@@ -132,6 +158,50 @@ mod tests {
             lower.index.as_deref(),
             Some("https://new.example"),
             "Some in higher should override lower's index"
+        );
+    }
+
+    // ── Compiled-default provenance ──────────────────────────────────────────
+
+    /// Writing `index` in a config file takes ownership of the value, so the
+    /// compiled-default provenance does not survive — even when the string is
+    /// byte-identical to the built-in one. That is what lets an operator who
+    /// wants both a `[mirrors]` entry and the index path keep the index by
+    /// naming it explicitly.
+    #[test]
+    fn a_declared_index_clears_the_compiled_default_provenance() {
+        let mut builtin = RegistryConfig {
+            index: Some("https://index.ocx.sh".to_string()),
+            index_is_compiled_default: true,
+            ..Default::default()
+        };
+        builtin.merge(RegistryConfig {
+            // Byte-identical to the built-in: only provenance distinguishes them.
+            index: Some("https://index.ocx.sh".to_string()),
+            ..Default::default()
+        });
+        assert!(
+            !builtin.index_is_compiled_default,
+            "a file tier restating `index` must clear the compiled-default marker"
+        );
+    }
+
+    /// An entry that declares only `trusted_hosts` leaves `index` — and its
+    /// provenance — alone, so the namespace stays suppressible by a mirror.
+    #[test]
+    fn an_entry_without_index_keeps_the_compiled_default_provenance() {
+        let mut builtin = RegistryConfig {
+            index: Some("https://index.ocx.sh".to_string()),
+            index_is_compiled_default: true,
+            ..Default::default()
+        };
+        builtin.merge(RegistryConfig {
+            trusted_hosts: Some(vec!["registry.corp".to_string()]),
+            ..Default::default()
+        });
+        assert!(
+            builtin.index_is_compiled_default,
+            "an entry that never declares `index` must not claim ownership of it"
         );
     }
 

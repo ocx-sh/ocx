@@ -76,6 +76,13 @@ class OcxRunner:
             "OCX_INSECURE_REGISTRIES": registry,
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
+            # Point `dirs::config_dir()` at an empty per-runner directory so
+            # the host's own `~/.config/ocx/config.toml` (the user config tier)
+            # never merges into a test run. `HOME` stays real — several suites
+            # override it themselves for shell-activation work — and this is
+            # the narrower lever that closes the config-tier leak without
+            # touching them.
+            "XDG_CONFIG_HOME": str(ocx_home / "xdg"),
         }
         # Windows needs these for subprocess spawning and executable resolution
         for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):

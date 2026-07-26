@@ -98,17 +98,16 @@ fn build_scratch_manager(
     // override the rest of this same invocation honours.
     let local_index = context.local_index().clone();
 
-    // Share the running context's remote sources so companions can be pulled
-    // into the scratch CAS. Offline → no source (the scratch manager is offline
-    // too, and required-companion resolution fails closed).
-    let (mode, sources, client): (ChainMode, Vec<Index>, Option<oci::Client>) = match context.oci_index() {
-        Ok(remote) => (
-            ChainMode::Default,
-            vec![Index::from_remote(remote.clone())],
-            context.remote_client().ok().cloned(),
-        ),
-        Err(_) => (ChainMode::Offline, Vec::new(), None),
-    };
+    // Share the running context's resolution chain so companions are pulled
+    // into the scratch CAS through the SAME sources the rest of this
+    // invocation uses — every index-bearing namespace's source ahead of the
+    // registry, not the registry alone. Resolving a companion as plain OCI
+    // while `ocx pull` resolves the same identifier through its index can
+    // reach a different physical repository (or miss it entirely, exit 79).
+    // Offline → no source (the scratch manager is offline too, and
+    // required-companion resolution fails closed).
+    let (mode, sources): (ChainMode, Vec<Index>) = context.chain_sources();
+    let client: Option<oci::Client> = context.remote_client().ok().cloned();
     let index = Index::from_chained_with_content_store(local_index, sources, mode, file_structure.blobs.clone());
 
     ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
