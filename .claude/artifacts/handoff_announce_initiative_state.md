@@ -76,13 +76,26 @@ lock should change.
 Consequence: deciding before Track E publishes is free. Deciding after 42 packages ship
 means re-push + re-announce across the fleet. Everything else in #224 stays deferrable.
 
-### 2.3 ADR OQ2 — `artifactType` strictness
+### 2.3 ADR OQ2 — `artifactType` strictness — **CLOSED, not blocking**
 
-`.claude/artifacts/adr_oci_index_only_dispatch.md` OQ2. Evidence in the ADR argues
-*against* the stricter check: `merge_platform_into_index` carries a pre-existing
-`ImageIndex` through verbatim (`client.rs:299`) without re-stamping `artifact_type`, so a
-strict check would refuse indices ocx itself maintains. `pull.rs:398` already enforces the
-media type at pull time.
+**Closed by owner ruling 2026-07-25, recorded as O-5 in
+`.claude/state/plans/meta-plan_oci_index_alignment.md:1039-1044`, and carried into
+`.claude/artifacts/adr_oci_index_only_dispatch.md` OQ2.** No `artifactType` check — not as a
+refusal and not as a warning. Document **kind** ("is an image index") is the right
+granularity. Listed here only so the closure is visible from this file; nothing is pending.
+
+The decisive ground is checkable in a minute: **nothing in either repo reads an image
+index's `artifactType`.** ocx's enforcement sites are all image *manifests* — `pull.rs:398`
+(the resolved leaf), `client.rs:1290-1299` (`pull_description`), `client.rs:1411-1418`
+(`fetch_single_layer_artifact`) — never a document ocx merges into. The other three grounds
+(single invariant impossible; it refuses indices ocx itself maintains; it stops no
+adversary) are in the ADR in full.
+
+Correction to an earlier reading recorded here: `merge_platform_into_index` does **not**
+leave `artifact_type` unstamped. It fills the field when absent and leaves a *declared*
+foreign value alone (`client.rs:335-341`) — overwriting one would relabel someone else's
+artifact. That is what makes the strict check refuse ocx-maintained indices, so the
+conclusion is unchanged; only the mechanism was stated wrongly.
 
 ---
 
