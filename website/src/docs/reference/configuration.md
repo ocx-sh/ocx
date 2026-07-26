@@ -34,7 +34,7 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 
 | Priority | Source | Notes |
 |----------|--------|-------|
-| 1 (lowest) | Compiled defaults | Built into the OCX binary |
+| 1 (lowest) | Compiled defaults | Built into the OCX binary: [`[registries."ocx.sh"] index`](#keys-registries-index) |
 | 2 | System config — `/etc/ocx/config.toml` | Discovered tier |
 | 3 | User config — [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` (Linux) or `~/Library/Application Support/ocx/config.toml` (macOS) | Discovered tier |
 | 4 | OCX home config — [`$OCX_HOME`][env-ocx-home]`/config.toml` | Discovered tier |
@@ -52,7 +52,7 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 
 ### Kill switch {#precedence-kill-switch}
 
-[`OCX_NO_CONFIG`][env-no-config]`=1` skips the **discovered chain** (tiers 2–4) and the [`[managed]`](#keys-managed) snapshot (tier 5) — hermetic means hermetic, so the [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] env-override read is suppressed along with the candidate itself. Explicit paths ([`--config`][arg-config], [`OCX_CONFIG`][env-config]) still load.
+[`OCX_NO_CONFIG`][env-no-config]`=1` skips the **discovered chain** (tiers 2–4) and the [`[managed]`](#keys-managed) snapshot (tier 5) — hermetic means hermetic, so the [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] env-override read is suppressed along with the candidate itself. Explicit paths ([`--config`][arg-config], [`OCX_CONFIG`][env-config]) still load, and so do the compiled defaults (tier 1) — they are part of the binary, not ambient host state.
 
 | Goal | Invocation |
 |------|-----------|
@@ -104,12 +104,25 @@ Selects the resolution protocol for this namespace. An entry that sets `index` r
 
 An index may **decline** a name outright, which is not a fallback. Its [`config.json`][in-depth-indices-declared-names] can publish a `name_segments` count declaring the shape of names it is able to hold at all; `index.ocx.sh` publishes `2`, because its root schema pins a package name to `<namespace>/<package>`. For a name of a different shape OCX still asks for the root, but reads its absence as "never claimed" rather than "not found here": that name resolves as plain OCI. An index that *does* serve a root for such a name keeps full authority over it — the served root always outranks the declaration. An index that publishes no `name_segments` declares no constraint and stays authoritative for every name in its namespace.
 
+The [compiled-defaults tier](#precedence) ships exactly this entry, so `ocx.sh` is index-bearing out of the box:
+
 ```toml
 [registries."ocx.sh"]
 index = "https://index.ocx.sh"
 ```
 
-`index` needs no `<dialect>+` URL-scheme prefix, because OCX has exactly one index wire dialect — the field's presence is the kind marker, the same convention [Cargo][cargo-registries] uses for its own `[registries.NAME] index = "…"`. An entry with no `index` field still resolves as plain OCI — it can still declare [`trusted_hosts`](#keys-registries-trusted-hosts) for its physical registry, `index` and `trusted_hosts` are independent fields.
+Any tier above it can restate `index` with a different base URL to route `ocx.sh` through a private index. Setting it to the empty string is the off-switch: an empty base URL is not a kind marker, so the namespace resolves as a plain OCI registry.
+
+```toml
+[registries."ocx.sh"]
+index = ""                    # resolve ocx.sh as a plain OCI registry
+```
+
+`index` needs no `<dialect>+` URL-scheme prefix, because OCX has exactly one index wire dialect — the field's presence is the kind marker, the same convention [Cargo][cargo-registries] uses for its own `[registries.NAME] index = "…"`. An entry with no `index` field still resolves as plain OCI — it can still declare [`trusted_hosts`](#keys-registries-trusted-hosts) for its physical registry, `index` and `trusted_hosts` are independent fields. Omitting `index` from an entry does not clear an inherited value: tiers merge field-wise, so a `[registries."ocx.sh"]` entry that declares only `trusted_hosts` keeps the compiled-in `index`. Only an explicit `index = ""` clears it.
+
+::: warning An index-bearing namespace has no registry fallback
+The named index is the sole authority for its namespace — a yanked tag, a tampered index object, or an unreachable endpoint is a hard error, never a silent fall-through to a registry serving the same name (see [index.ocx.sh][in-depth-indices-public]). An `index.ocx.sh` outage therefore blocks `ocx.sh/…` resolution; other namespaces are unaffected.
+:::
 
 ::: info Why the resolved physical pointer uses `oci://`, never `http(s)`
 A [derived index's][in-depth-indices-dispatch] local root document — the file `ocx index update` writes under `$OCX_HOME/index/<source>/p/<ns>/<pkg>.json` — records the package's resolved physical location as `oci://<host>/<repository>`, not `http://` or `https://`. That scheme marks the reference *kind* — "an OCI registry repository" — not a transport to dial. Transport is a host-side decision: it comes from a [`[mirrors]`](#keys-mirrors) entry's own scheme for that host, or the plain-HTTP allowance in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the pointer itself carried `http://` or `https://` instead, a publisher able to write that shared identity data could force every consumer resolving it down to plaintext — a scheme belongs to the operator who configures the host, never to data that travels with a package's identity.

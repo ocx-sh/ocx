@@ -10,6 +10,7 @@
 //! the environment, keeping the loader testable without filesystem
 //! side effects.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use futures::future::join_all;
@@ -81,11 +82,12 @@ impl ConfigLoader {
     /// Top-level entry: build the ordered path list, load, and merge.
     ///
     /// Layering (lowest → highest precedence):
-    /// 1. system / user / `$OCX_HOME` tiers — skipped when `OCX_NO_CONFIG=1`
-    /// 2. managed-config snapshot (identity-gated; also suppressed by
+    /// 1. compiled-in defaults ([`Self::builtin_defaults`])
+    /// 2. system / user / `$OCX_HOME` tiers — skipped when `OCX_NO_CONFIG=1`
+    /// 3. managed-config snapshot (identity-gated; also suppressed by
     ///    `OCX_NO_CONFIG=1`)
-    /// 3. `OCX_CONFIG` — if set and non-empty
-    /// 4. `--config FILE` (via [`ConfigInputs::explicit_path`])
+    /// 4. `OCX_CONFIG` — if set and non-empty
+    /// 5. `--config FILE` (via [`ConfigInputs::explicit_path`])
     ///
     /// Explicit paths (both env-var and CLI) always load if set; they layer
     /// on top of the discovered chain (or on top of nothing, if
@@ -143,7 +145,8 @@ impl ConfigLoader {
         // applied to both views; merging is per-section last-wins, so folding
         // the overlay as one pre-merged `Config` is equivalent to folding its
         // files individually.
-        let base = Self::load_and_merge(&discovered).await?;
+        let mut base = Self::builtin_defaults();
+        base.merge(Self::load_and_merge(&discovered).await?);
         let overlay = Self::load_and_merge(&explicit_paths).await?;
 
         let mut local_only = base.clone();
@@ -165,6 +168,34 @@ impl ConfigLoader {
             managed_config_snapshot,
             resolved_managed_config,
         })
+    }
+
+    /// The compiled-in base tier — the lowest-precedence layer, below every
+    /// file tier.
+    ///
+    /// Carries exactly one setting: `ocx.sh` resolves through
+    /// [`DEFAULT_INDEX_BASE_URL`](crate::oci::index::DEFAULT_INDEX_BASE_URL).
+    /// Seeding the marker as config rather than special-casing the namespace
+    /// downstream keeps `adr_index_indirection.md` Decision H intact — a
+    /// `[registries."<ns>"] index` value stays the SOLE protocol-kind marker,
+    /// and every existing override path applies unchanged: a different index,
+    /// `index = ""` to revert `ocx.sh` to plain OCI, or a system-scope lock.
+    ///
+    /// Deliberately NOT gated on `OCX_NO_CONFIG`: that flag prunes ambient
+    /// host state (discovered files, the managed snapshot) so a run is
+    /// reproducible, and a constant compiled into the binary is exactly the
+    /// reproducible part.
+    fn builtin_defaults() -> Config {
+        Config {
+            registries: Some(HashMap::from([(
+                crate::oci::OCX_SH_REGISTRY.to_string(),
+                crate::config::RegistryConfig {
+                    index: Some(crate::oci::index::DEFAULT_INDEX_BASE_URL.to_string()),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        }
     }
 
     /// 4th discovery candidate (ADR Decision A): the managed-config snapshot,
@@ -1124,6 +1155,162 @@ mod tests {
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("explicit.example"),
             "--config should layer on top of OCX_CONFIG and win on conflict"
+        );
+    }
+
+    // ── Built-in base tier ───────────────────────────────────────────────────
+    //
+    // The compiled-in tier lives below every file tier, so `OCX_NO_CONFIG=1`
+    // (which prunes the discovered chain and the managed snapshot, both
+    // ambient host state) is the sharpest way to observe it alone.
+
+    fn builtin_ocx_sh_index(config: &Config) -> Option<&str> {
+        config
+            .registries
+            .as_ref()?
+            .get(crate::oci::OCX_SH_REGISTRY)?
+            .index
+            .as_deref()
+    }
+
+    #[tokio::test]
+    async fn builtin_tier_makes_ocx_sh_index_bearing() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&config),
+            Some(crate::oci::index::DEFAULT_INDEX_BASE_URL),
+            "the compiled-in tier must make ocx.sh index-bearing with no config file at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_tier_leaves_every_other_namespace_plain_oci() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        let names: Vec<&str> = config
+            .registries
+            .as_ref()
+            .expect("built-in tier seeds a registries table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            names,
+            vec![crate::oci::OCX_SH_REGISTRY],
+            "the built-in tier must seed ocx.sh and nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_index_overrides_the_builtin_ocx_sh_index() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "corp.toml",
+            "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
+        );
+        env.set("OCX_NO_CONFIG", "1");
+        env.set("OCX_CONFIG", path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&config),
+            Some("https://index.corp.example"),
+            "a user-supplied index must beat the compiled-in one"
+        );
+    }
+
+    /// The documented off-switch: an empty `index` is a declared value, so it
+    /// overrides the built-in one, and `build_index_sources` skips an empty
+    /// base URL — `ocx.sh` falls back to plain OCI.
+    #[tokio::test]
+    async fn empty_user_index_disables_the_builtin_ocx_sh_index() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "plain.toml", "[registries.\"ocx.sh\"]\nindex = \"\"\n");
+        env.set("OCX_NO_CONFIG", "1");
+        env.set("OCX_CONFIG", path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&config),
+            Some(""),
+            "index = \"\" must clear the compiled-in index, not be ignored as unset"
+        );
+    }
+
+    /// A `[registries."ocx.sh"]` entry that sets only `trusted_hosts` must not
+    /// erase the built-in `index` — the table merges key-by-key, field-wise.
+    #[tokio::test]
+    async fn user_entry_without_index_keeps_the_builtin_ocx_sh_index() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "trusted.toml",
+            "[registries.\"ocx.sh\"]\ntrusted_hosts = [\"registry.corp\"]\n",
+        );
+        env.set("OCX_NO_CONFIG", "1");
+        env.set("OCX_CONFIG", path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&config),
+            Some(crate::oci::index::DEFAULT_INDEX_BASE_URL)
+        );
+    }
+
+    /// `local_only` is cloned from the same accumulator as `merged`, so the
+    /// built-in tier must show up in both views — the managed-tier fetch
+    /// builds its client from `local_only`.
+    #[tokio::test]
+    async fn builtin_tier_is_present_in_both_loaded_views() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load_with_local_view should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&loaded.merged),
+            Some(crate::oci::index::DEFAULT_INDEX_BASE_URL)
+        );
+        assert_eq!(
+            builtin_ocx_sh_index(&loaded.local_only),
+            Some(crate::oci::index::DEFAULT_INDEX_BASE_URL)
         );
     }
 
