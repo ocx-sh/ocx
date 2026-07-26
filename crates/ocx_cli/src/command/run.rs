@@ -597,4 +597,19 @@ mod tests {
             "the strip mechanism (`--emit-global-path-strip`) must not exist on `Run`; clap must reject it"
         );
     }
+
+    /// `--self` was removed from `ocx run` (a documented breaking change): the
+    /// self view selects a package's own private surface, which by construction
+    /// drops that package's `entrypoints/` from `PATH`, so a toolchain consumer
+    /// asking for it composed a strictly worse toolchain. The flag survives on
+    /// the package tier, where a package's own surface is the thing being asked
+    /// about — this pins only that `Run` no longer accepts it.
+    #[test]
+    fn run_rejects_the_removed_self_flag() {
+        let result = Run::try_parse_from(["run", "--self", "--", "echo", "hi"]);
+        assert!(
+            result.is_err(),
+            "`--self` was removed from `ocx run`; clap must reject it"
+        );
+    }
 }

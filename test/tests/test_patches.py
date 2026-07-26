@@ -12,6 +12,7 @@ Covers the end-to-end lifecycle of the patches feature:
   - `ocx patch freeze` + `OCX_PATCH_SNAPSHOT` for deterministic builds
   - `ocx patch test` for local descriptor dry-run
   - `ocx package env` JSON output verification
+  - `--show-patches` provenance bounded to the companion overlay region
   - `ocx package exec` command receives companion env vars
   - Companion visibility inheritance via dependency surface (sealed/private/public/interface)
 
@@ -770,6 +771,85 @@ def test_no_patches_opt_out_suppresses_overlay_in_direnv_export(
         "sibling project without no-patches must still receive the companion overlay "
         f"(proves the opt-out, not a blanket regression, suppressed it); "
         f"got:\n{baseline_result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7b: `--show-patches` provenance is bounded to the overlay region
+# ---------------------------------------------------------------------------
+
+
+def test_show_patches_attributes_the_overlay_and_not_the_project_env(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--show-patches` annotates the companion overlay region and nothing else.
+
+    The composed entry vector is three regions in one flat list: the packages'
+    own entries, then the companion overlay, then the project's declared
+    stages (`[env]`, group `[env]`, `--env`). Only the middle region has
+    provenance, and it is bounded on BOTH sides — an unbounded upper edge
+    would attribute a project-declared entry to a companion the user never
+    configured, and would index past the provenance vector to do it.
+
+    Asserting the two keys together in ONE report is what discriminates:
+    each alone passes under a mislabelling that the other catches.
+    """
+    companion_repo = _unique_repo("show_patches_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(
+        ocx, companion_repo, "1.0.0", tmp_path, "SHOW_PATCHES_CA", "/etc/ssl/show-patches-ca.pem"
+    )
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    descriptor_path = tmp_path / "show_patches_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    # Install base -> companion auto-discovered and installed, local patch state recorded.
+    ocx.plain("package", "install", base_pkg.short)
+
+    project = tmp_path / "proj_show_patches"
+    project.mkdir()
+    (project / "ocx.toml").write_text(
+        f'[tools]\ntool = "{base_pkg.fq}"\n\n[env]\nSHOW_PATCHES_PROJECT = "project-value"\n'
+    )
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    result = _run_in(ocx, project, "--format", "json", "env", "--show-patches")
+    assert result.returncode == 0, (
+        f"ocx env --show-patches must succeed; rc={result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    entries = json.loads(result.stdout)["entries"]
+
+    companion_entry = _entry_by_key(entries, "SHOW_PATCHES_CA")
+    assert companion_entry is not None, (
+        f"the companion's interface var must reach the project-tier composed env; "
+        f"got keys: {[e['key'] for e in entries]}"
+    )
+    source = companion_entry.get("source")
+    assert source is not None, (
+        f"a companion overlay entry must carry provenance under --show-patches; "
+        f"got: {companion_entry}"
+    )
+    assert source["kind"] == "patch", f"unexpected source kind; got: {source}"
+    assert source["rule"] == "*", (
+        f"provenance must name the descriptor rule that admitted the companion; got: {source}"
+    )
+    assert companion_repo in source["companion"], (
+        f"provenance must name the companion identifier; got: {source}"
+    )
+
+    project_entry = _entry_by_key(entries, "SHOW_PATCHES_PROJECT")
+    assert project_entry is not None, (
+        f"the project's [env] declaration must reach the composed env; "
+        f"got keys: {[e['key'] for e in entries]}"
+    )
+    assert project_entry.get("source") is None, (
+        f"a project-declared entry sits past the overlay region and must render "
+        f"unattributed; got: {project_entry}"
     )
 
 

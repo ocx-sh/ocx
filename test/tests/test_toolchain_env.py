@@ -571,6 +571,41 @@ def test_env_global_no_toml_is_empty_env(ocx: OcxRunner, tmp_path: Path) -> None
     )
 
 
+def test_env_global_flag_override_survives_empty_toolchain(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx --global env --env X=1`` emits ``X=1`` even with no global
+    toolchain at all — the sibling of ``test_env_global_no_toml_is_empty_env``
+    for the one case where "nothing configured" must NOT mean "nothing to say".
+
+    The empty-toolchain short-circuit is what makes this worth pinning: the
+    global path returns early when neither a package nor a declaration
+    contributes, so ``--env`` has to be folded into that decision, not applied
+    after it. An override typed on this invocation is not the global file's to
+    lose — least of all when there is no global file.
+    """
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    assert not (ocx_home / "ocx.toml").exists(), (
+        "precondition: no global ocx.toml (fresh test dir)"
+    )
+
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+    result = _run(
+        ocx, empty, "--global", "--format", "json", "env", "--env", "X=1",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env --env must exit {EXIT_SUCCESS} with no global toolchain; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["entries"]}
+    assert entries.get("X") == "1", (
+        f"--env must survive the empty-toolchain short-circuit on the global "
+        f"tier; entries={entries}"
+    )
+
+
 def test_env_global_no_toolchain_shell_is_silent_noop(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx --global env --shell=NAME`` with no toolchain → exit 0, empty stdout.
 

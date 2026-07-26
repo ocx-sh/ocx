@@ -18,6 +18,7 @@ CLI (``ocx run --env KEY[:TYPE]=VALUE``):
   test_env_flag_splits_on_first_equals_only
   test_env_flag_bare_key_without_equals_exits_64
   test_env_flag_repeated_last_wins
+  test_env_flag_survives_clean
   test_env_flag_rejects_ocx_prefixed_key_exits_64
   test_env_flag_path_type_prepends_instead_of_replacing
   test_env_flag_without_type_replaces_path
@@ -28,11 +29,14 @@ CLI (``ocx run --env KEY[:TYPE]=VALUE``):
   test_env_flag_on_direnv_export_reaches_the_exported_lines
   test_group_flag_on_direnv_export_selects_group_env
   test_direnv_export_rejects_unknown_group_exits_64
+  test_direnv_export_empty_group_segment_exits_64
 
 Precedence:
   test_ambient_value_loses_to_project_env
   test_project_env_constant_overrides_package_constant
+  test_group_env_overrides_project_env_for_same_key
   test_group_env_later_selected_group_wins
+  test_repeated_group_contributes_its_env_once
   test_project_env_path_entry_precedes_package_path_entry
   test_global_env_applies_to_global_tier_resolution
   test_global_env_applies_without_any_global_lock
@@ -45,6 +49,8 @@ Config-shape faults (exit 78):
   test_project_env_ocx_prefixed_key_rejected
   test_group_env_dunder_ocx_prefixed_key_rejected
   test_env_value_bogus_modifier_type_rejected
+  test_env_config_shape_fault_exits_78 (invalid key / non-string value /
+    unknown value field)
 
 Boundary-pinning (guard constraints whose consuming feature has not shipped):
   test_run_package_composed_env_byte_identical_with_and_without_clean  (R3)
@@ -261,6 +267,54 @@ def test_env_flag_repeated_last_wins(ocx: OcxRunner, tmp_path: Path) -> None:
     )
     assert _env_value(result.stdout, "BAR") == "b", (
         f"a different --env key must also apply; stdout:\n{result.stdout}"
+    )
+
+
+def test_env_flag_survives_clean(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``--clean`` strips the AMBIENT environment, never the ``--env``
+    overrides typed on the same invocation.
+
+    ``--clean`` decides what the child inherits from the surrounding shell;
+    ``--env`` is a stage-6 declaration of this invocation. A ``--clean`` that
+    also dropped stage 6 would make the two flags mutually exclusive in
+    practice — the hermetic invocation is exactly the one that needs to name
+    its own variables. Sibling of
+    ``test_run_package_composed_env_byte_identical_with_and_without_clean``,
+    which pins the same independence for the package-composed layer.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    # `--clean` starts from an empty ambient env, so `PATH` carries only what
+    # the toolchain composes — nothing to resolve a bare `env` against.
+    env_binary = shutil.which("env")
+    assert env_binary is not None, "the POSIX `env` binary must be available"
+
+    ambient = "T_PENV_CLEAN_AMBIENT_MUST_NOT_SURVIVE"
+    result = _run(
+        ocx,
+        project,
+        "run",
+        "--clean",
+        "--env",
+        "FOO=1",
+        "--",
+        env_binary,
+        extra_env={ambient: "ambient-value"},
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run --clean --env must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert _env_value(result.stdout, "FOO") == "1", (
+        f"--env must still apply under --clean; stdout:\n{result.stdout}"
+    )
+    # Discriminates "--clean did nothing" from "--clean kept stage 6": the
+    # ambient value has to be gone in the same dump that carries FOO=1.
+    assert _env_value(result.stdout, ambient) is None, (
+        f"--clean must still strip the ambient environment; stdout:\n{result.stdout}"
     )
 
 
@@ -575,6 +629,46 @@ def test_direnv_export_rejects_unknown_group_exits_64(
     )
 
 
+@pytest.mark.parametrize(
+    "group_value",
+    ["ci,,lint", ",ci", "ci,", ",,"],
+    ids=["middle", "leading", "trailing", "degenerate"],
+)
+def test_direnv_export_empty_group_segment_exits_64(
+    ocx: OcxRunner, tmp_path: Path, group_value: str
+) -> None:
+    """A stray comma in ``direnv export -g`` is a typo, exit 64 — the same
+    parse-level rejection ``ocx run`` and ``ocx env`` already give it.
+
+    clap's ``value_delimiter`` turns each of these into a list carrying at
+    least one empty name, which would otherwise select nothing silently. The
+    never-fail-the-prompt contract covers transient toolchain state, not a
+    malformed argument in a hand-edited ``.envrc``; a third export surface
+    that quietly disagreed with the other two would be the worst of both.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        """\
+[tools]
+
+[group.ci.env]
+CI_ONLY = "ci-value"
+
+[group.lint.env]
+LINT_ONLY = "lint-value"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    result = _run(ocx, project, "direnv", "export", "-g", group_value)
+    assert result.returncode == EXIT_USAGE, (
+        f"an empty -g comma segment ({group_value!r}) must exit {EXIT_USAGE}; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+
 # =============================================================================
 # Precedence contract (C2, Q6, S6, Q2)
 # =============================================================================
@@ -651,6 +745,45 @@ def test_project_env_constant_overrides_package_constant(
     )
 
 
+def test_group_env_overrides_project_env_for_same_key(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A selected group's ``[env]`` (stage 5) beats the project's top-level
+    ``[env]`` (stage 4) for the same key (C2).
+
+    ``test_env_flag_is_highest_precedence_constant`` declares both stages on
+    the same key but asserts only that ``--env`` beats them, so it passes
+    whichever of 4 and 5 wins. Dropping the flag is what makes the ordering
+    between the two file-declared stages observable at all: a group is a
+    narrowing of the project scope, so the narrower declaration is the one the
+    user expects to see.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        """\
+[tools]
+
+[env]
+X = "project-value"
+
+[group.g.env]
+X = "group-value"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    result = _run(ocx, project, "run", "-g", "g", "--", "env")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run -g g must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert _env_value(result.stdout, "X") == "group-value", (
+        f"a selected group's [env] (stage 5) must override the project's "
+        f"top-level [env] (stage 4) for the same key; stdout:\n{result.stdout}"
+    )
+
+
 def test_group_env_later_selected_group_wins(ocx: OcxRunner, tmp_path: Path) -> None:
     """Two groups both declare ``X``; with ``-g a,b`` the later group (``b``)
     wins (C2 stage 5 — later ``-g`` selection wins).
@@ -677,6 +810,70 @@ X = "value-b"
     )
     assert _env_value(result.stdout, "X") == "value-b", (
         f"the later-selected group must win for a shared key (C2); stdout:\n{result.stdout}"
+    )
+
+
+def test_repeated_group_contributes_its_env_once(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``-g a -g b -g a`` applies group ``a`` ONCE, at its last position.
+
+    "Later group wins" is implemented by keeping only a repeated group's LAST
+    occurrence, so naming it twice re-orders it rather than re-applying it.
+    The composed entry vector is where that is observable: the JSON report
+    replays the vector verbatim, so a lost dedup emits ``a``'s declaration
+    twice — once ahead of ``b``, once behind it.
+
+    ``PATH`` alone cannot discriminate the two: the applier prepends with
+    move-to-front semantics (``Env::add_path``), so re-applying the same
+    directory never duplicates it. Both surfaces are asserted anyway — the
+    entry-vector count is the guard, and the ``PATH`` assertion pins the
+    user-visible promise that guard exists to protect.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "a_bin").mkdir()
+    _write_ocx_toml(
+        project,
+        """\
+[tools]
+
+[group.a.env]
+PATH = { type = "path", value = "a_bin" }
+
+[group.b.env]
+B_MARKER = "b-value"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    a_bin = str(project / "a_bin")
+
+    reported = _run(ocx, project, "--format", "json", "env", "-g", "a", "-g", "b", "-g", "a")
+    assert reported.returncode == EXIT_SUCCESS, (
+        f"ocx env -g a -g b -g a must succeed; rc={reported.returncode}\n"
+        f"stderr:\n{reported.stderr}"
+    )
+    entries = json.loads(reported.stdout)["entries"]
+    occurrences = [e for e in entries if e["key"] == "PATH" and e["value"] == a_bin]
+    assert len(occurrences) == 1, (
+        f"a group named twice must contribute its [env] once, at its last "
+        f"position; got {len(occurrences)} occurrences of {a_bin!r}; "
+        f"entries={entries}"
+    )
+    assert any(e["key"] == "B_MARKER" for e in entries), (
+        f"the group between the repeats must still contribute; entries={entries}"
+    )
+
+    executed = _run(ocx, project, "run", "-g", "a", "-g", "b", "-g", "a", "--", "env")
+    assert executed.returncode == EXIT_SUCCESS, (
+        f"ocx run -g a -g b -g a must succeed; rc={executed.returncode}\n"
+        f"stderr:\n{executed.stderr}"
+    )
+    path_value = _env_value(executed.stdout, "PATH")
+    assert path_value is not None, f"PATH must be present; stdout:\n{executed.stdout}"
+    segments = path_value.split(":")  # POSIX separator; module is Linux-only
+    assert segments.count(a_bin) == 1, (
+        f"the repeated group's directory must appear exactly once on PATH; "
+        f"full PATH:\n{path_value}"
     )
 
 
@@ -972,6 +1169,51 @@ X = { type = "bogus", value = "v" }
     assert "bogus" in result.stderr, (
         f"stderr must name the bad type 'bogus'; got:\n{result.stderr}"
     )
+
+
+@pytest.mark.parametrize(
+    ("body", "tokens"),
+    [
+        ('[tools]\n\n[env]\n1FOO = "x"\n', ("1FOO",)),
+        ("[tools]\n\n[env]\nX = 42\n", ("X", "integer")),
+        (
+            '[tools]\n\n[env]\nX = { type = "path", value = "bin", required = true }\n',
+            ("X", "required"),
+        ),
+    ],
+    ids=["invalid-key", "non-string-value", "unknown-value-field"],
+)
+def test_env_config_shape_fault_exits_78(
+    ocx: OcxRunner, tmp_path: Path, body: str, tokens: tuple[str, ...]
+) -> None:
+    """Every ``[env]`` shape fault is a config error (78) naming what is wrong.
+
+    The three cases are the remaining fault classes beside the bogus-``type``
+    one above: a key outside the POSIX environment-name grammar (``1FOO``), a
+    value that is neither a string nor a ``{ type, value }`` table (``42``),
+    and a table carrying a field the grammar does not define (``required`` —
+    a deferred feature, so accepting-and-ignoring it would silently discard a
+    fail-if-absent intent).
+
+    Exit 78 is the contract a caller scripts against: 78 says "fix the file",
+    64 would say "fix the command line". All three are faults in a file, so
+    the code must not drift to the flag's 64 — which is what an exit-code
+    assertion at this level pins that a variant-level unit assertion cannot.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, body)
+
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_CONFIG, (
+        f"a malformed [env] declaration must exit {EXIT_CONFIG}; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    for token in tokens:
+        assert token in result.stderr, (
+            f"stderr must name {token!r} so the user knows what to edit; "
+            f"got:\n{result.stderr}"
+        )
 
 
 # =============================================================================

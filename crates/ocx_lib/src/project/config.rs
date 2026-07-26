@@ -871,6 +871,31 @@ CI = "1"
         );
     }
 
+    /// The group-scoped counterpart of the above. `hash.rs` walks `group.tools`
+    /// specifically so a `[group.<name>.env]` edit cannot stale `ocx.lock` — env
+    /// does not change WHICH packages resolve. Pinned separately because the
+    /// top-level `[env]` case would still pass if a refactor wired only the
+    /// group arm into the hash.
+    #[test]
+    fn declaration_hash_unchanged_by_group_env() {
+        let without = r#"[group.ci.tools]
+cmake = "ocx.sh/cmake:3.28"
+"#;
+        let with = r#"[group.ci.tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.env]
+SOURCE_DATE_EPOCH = "0"
+"#;
+        let config_without = ProjectConfig::from_toml_str(without).expect("parse");
+        let config_with = ProjectConfig::from_toml_str(with).expect("parse");
+        assert_eq!(
+            crate::project::declaration_hash(&config_without),
+            crate::project::declaration_hash(&config_with),
+            "declaration hash must be invariant to [group.<name>.env] edits"
+        );
+    }
+
     /// Mutating the config in place after caching MUST invalidate the cache —
     /// otherwise the staleness gate would silently accept a divergent state.
     #[test]
