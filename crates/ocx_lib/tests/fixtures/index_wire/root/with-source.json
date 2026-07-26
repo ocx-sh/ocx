@@ -1,0 +1,30 @@
+{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/ocx-contrib/widget",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-03-02",
+  "desc": null,
+  "upstream": {
+    "org": "Acme Org",
+    "repository_url": "https://github.com/acme/widget",
+    "disclaimer": null
+  },
+  "source": "https://github.com/ocx-contrib/mirror-widget",
+  "tags": {
+    "2.1.0": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-24T00:00:00Z"
+    },
+    "latest": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-24T00:00:00Z"
+    }
+  }
+}

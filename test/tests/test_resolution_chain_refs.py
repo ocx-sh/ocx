@@ -648,6 +648,30 @@ def test_resolution_chain_tag_via_image_index(
         resolved = target if target.is_absolute() else (entry.parent / target).resolve()
         assert resolved.exists(), f"chain ref {entry} must point to an existing blob"
 
+    # The image index itself is a staged chain blob, named by its own digest —
+    # `ChainRole::Index` is fetched and written like `ChainRole::Manifest`, not
+    # skipped (`package_manager::tasks::common::stage_chain_blobs`). Two things
+    # depend on it: `add_index_retention_edges` parses the staged blob to hang
+    # each advertised leaf's retention edge off it, and an `AbsentDispatch`
+    # recovery reads the index back out of the blob store. A skip here is
+    # silent — every count-only assertion above still passes — so the digest is
+    # named explicitly.
+    index_digest = fetch_manifest_digest(ocx.registry, unique_repo, pkg.tag)
+    index_hex = index_digest.split(":", 1)[1]
+    # Ref filenames are `sha256_<hex[:32]>` (the blob store's two-level key
+    # flattened), not the full digest.
+    assert f"sha256_{index_hex[:32]}" in {entry.name for entry in entries}, (
+        f"the image index {index_digest} must be linked as a chain ref; got "
+        f"{[entry.name for entry in entries]}"
+    )
+    staged = list(
+        _blobs_dir(ocx).glob(f"*/sha256/{index_hex[:2]}/{index_hex[2:32]}/data")
+    )
+    assert staged, f"the image index {index_digest} must be staged into the blob store"
+    assert json.loads(staged[0].read_text())["mediaType"] == (
+        "application/vnd.oci.image.index.v1+json"
+    ), "the staged ChainRole::Index blob must be the image index itself"
+
 
 def test_resolution_chain_direct_digest_to_image_index(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path

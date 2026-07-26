@@ -38,7 +38,6 @@ def fetch_manifest_digest(registry: str, repo: str, tag: str) -> str:
     to computing the digest from the manifest body.
     """
     import hashlib
-    import json
     import urllib.request
 
     url = f"http://{registry}/v2/{repo}/manifests/{tag}"
@@ -225,6 +224,36 @@ def fetch_blob(registry: str, repo: str, digest: str) -> bytes:
         return resp.read()
 
 
+def fetch_manifest_raw(registry: str, repo: str, ref: str) -> tuple[bytes, str]:
+    """Fetch a manifest's VERBATIM response bytes and the digest the registry
+    served them under (``Docker-Content-Digest``).
+
+    ``ref`` is a tag or a ``sha256:<hex>`` digest.
+
+    Byte-identity assertions need the bytes the registry actually sent, not a
+    re-encoding of the parsed document: :func:`fetch_manifest_from_registry`
+    goes through oras and hands back a ``dict``, which cannot tell "our writer
+    copied the registry's bytes" apart from "our writer re-serialised an equal
+    document" — the exact distinction the index's verbatim-carry contract
+    rests on.
+    """
+    import requests
+
+    for media_type in (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.manifest.v1+json",
+    ):
+        response = requests.get(
+            f"http://{registry}/v2/{repo}/manifests/{ref}",
+            headers={"Accept": media_type},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            digest = response.headers.get("Docker-Content-Digest") or _sha256_digest(response.content)
+            return response.content, digest
+    raise RuntimeError(f"could not fetch manifest {registry}/{repo}:{ref}")
+
+
 def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) -> None:
     """Copies a manifest chain (image index -> child manifest -> config +
     layer blobs) from ``from_repo`` to ``to_repo`` verbatim, so the
@@ -240,18 +269,19 @@ def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) 
     import requests
 
     def get_manifest(ref_: str) -> tuple[bytes, str]:
-        for media_type in (
-            "application/vnd.oci.image.index.v1+json",
-            "application/vnd.oci.image.manifest.v1+json",
-        ):
-            response = requests.get(
-                f"http://{registry}/v2/{from_repo}/manifests/{ref_}",
-                headers={"Accept": media_type},
-                timeout=10,
-            )
-            if response.status_code == 200:
-                return response.content, response.headers.get("Content-Type", media_type)
-        raise RuntimeError(f"could not fetch manifest {from_repo}:{ref_}")
+        # One fetch helper for the whole module (`fetch_manifest_raw`). The
+        # content type to re-PUT under is the document's own `mediaType` when it
+        # carries one — but a fixture deliberately omitting fields (this suite's
+        # standard way of making byte-identity assertions able to fail) must
+        # still clone, so fall back to the shape the document's own keys imply.
+        body, _digest = fetch_manifest_raw(registry, from_repo, ref_)
+        document = json.loads(body)
+        media_type = document.get("mediaType") or (
+            "application/vnd.oci.image.index.v1+json"
+            if "manifests" in document
+            else "application/vnd.oci.image.manifest.v1+json"
+        )
+        return body, media_type
 
     def put_manifest(ref_: str, body: bytes, content_type: str) -> None:
         response = requests.put(

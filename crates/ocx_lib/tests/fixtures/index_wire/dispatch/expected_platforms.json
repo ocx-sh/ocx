@@ -1,0 +1,81 @@
+{
+  "vectors": [
+    {
+      "name": "single_platform",
+      "digest": "sha256:22af3b607beb45837d335028872801d22e77f10e65f3d68b71c63282c65a7cc3",
+      "file": "sha256/22af3b607beb45837d335028872801d22e77f10e65f3d68b71c63282c65a7cc3.json",
+      "platforms": [
+        {
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          },
+          "digest": "sha256:edc2a8dee0126febc8e96bdc0b88f5a8c64215460afaa34547423044f5cc3ef5"
+        }
+      ]
+    },
+    {
+      "name": "multi_platform",
+      "digest": "sha256:bce4d35fc4fec56efe1ec9b92a36852b2be5cfb81e69164572a33c76e9194f8c",
+      "file": "sha256/bce4d35fc4fec56efe1ec9b92a36852b2be5cfb81e69164572a33c76e9194f8c.json",
+      "platforms": [
+        {
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          },
+          "digest": "sha256:edc2a8dee0126febc8e96bdc0b88f5a8c64215460afaa34547423044f5cc3ef5"
+        },
+        {
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          },
+          "digest": "sha256:f3cb723572ffe070458cccc294d27329ee6fa3b0ccb3c58ac3652ec416da7641"
+        },
+        {
+          "platform": {
+            "architecture": "arm64",
+            "os": "darwin"
+          },
+          "digest": "sha256:b01ad65f990837971a4dd2ba434ee1a58d8fd1bf70ad94d81d8df5ea05f01f52"
+        }
+      ]
+    },
+    {
+      "name": "attestation_descriptor",
+      "digest": "sha256:2f1b78d35e78f24a9654311c66f520c041691bb0e34e2865c8717d436f69d614",
+      "file": "sha256/2f1b78d35e78f24a9654311c66f520c041691bb0e34e2865c8717d436f69d614.json",
+      "platforms": [
+        {
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          },
+          "digest": "sha256:8393d8a4e7bd4fdc1851afcebe1a83baa7c28453bbcabd535fa7731da375f783"
+        }
+      ]
+    },
+    {
+      "name": "annotations_artifacttype",
+      "digest": "sha256:50e02438d1d8e4968ad9a663d29185638931b2771e7e4f68cc9923926ccb5ee1",
+      "file": "sha256/50e02438d1d8e4968ad9a663d29185638931b2771e7e4f68cc9923926ccb5ee1.json",
+      "platforms": [
+        {
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          },
+          "digest": "sha256:edc2a8dee0126febc8e96bdc0b88f5a8c64215460afaa34547423044f5cc3ef5"
+        },
+        {
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          },
+          "digest": "sha256:f3cb723572ffe070458cccc294d27329ee6fa3b0ccb3c58ac3652ec416da7641"
+        }
+      ]
+    }
+  ]
+}

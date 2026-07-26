@@ -36,6 +36,7 @@ from announce_helpers import (
 )
 from fake_forge import FakeForge
 from src.helpers import make_package
+from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner
 
 # ── --out mode: byte-exact root + content-addressed CAS objects ────────────
@@ -44,31 +45,56 @@ from src.runner import OcxRunner
 def test_announce_out_writes_canonical_root_and_content_addressed_cas(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`--out` writes the rebuilt root + CAS objects in the CONTRACTS §14 byte
-    form (root: 2-space indent, trailing newline; CAS: minified, sorted keys,
-    no trailing newline, content-addressed by its own sha256), without any
-    hand-computed digest in the assertions.
+    """`--out` writes the rebuilt root in the CONTRACTS §14 byte form (2-space
+    indent, trailing newline) and every CAS object as the registry's own image
+    index, byte-for-byte.
 
-    Scope, precisely: the round-trip check pins indentation, separators, and
-    the trailing newline, plus — for the CAS objects — key ordering, since
-    `sort_keys=True` is an independent statement of the required order. It does
-    NOT pin the ROOT's field order: `json.loads` preserves document order, so
-    re-dumping reproduces whatever order the serializer chose, alphabetized
-    included. Root field order is pinned by the vendored index fixture parity
-    suite against the Python serializer, which is where that contract lives.
-    The remaining assertions are self-contained: every CAS filename equals
-    sha256(its own bytes), the root's tag `content` pointer names the CAS file
-    it wrote, and a second independent `--out` run reproduces byte-identical
-    files (determinism without predicting any digest).
+    Scope, precisely. The ROOT round-trip pins indentation, separators and the
+    trailing newline; it does NOT pin field order (`json.loads` preserves
+    document order, so re-dumping reproduces whatever order the serializer
+    chose). Root field order is pinned by the vendored index fixture parity
+    suite, which is where that contract lives.
+
+    The CAS objects are pinned against the REGISTRY, not against a re-encoding
+    of themselves (A1/A2, `adr_oci_index_only_dispatch.md` D1): the committed
+    bytes must equal what `GET /v2/<repo>/manifests/<tag>` served, and the
+    tag's `content` pointer must equal the digest that response was served
+    under. A "does it equal its own canonical re-serialization" check cannot
+    fail for a writer that re-encodes — it is built from the code under test —
+    which is exactly why the earlier `json.dumps(..., sort_keys=True,
+    separators=(",", ":"))` assertion is gone rather than adapted.
+
+    Tag `1.0.0` alone cannot carry that claim either, and for the same reason
+    one level down: ocx pushed it, so the registry serves ocx's OWN canonical
+    serde encoding and a writer that re-serialises the parsed manifest lands
+    on byte-identical output. Tag `2.0.0` is therefore PUT by hand as a
+    3-space-indented encoding of the same document — bytes no serializer in
+    the tree produces. It is the tag that makes this test able to fail.
     """
+    import requests
+
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
+    canonical_bytes, _ = fetch_manifest_raw(ocx.registry, unique_repo, "1.0.0")
+    odd_bytes = json.dumps(json.loads(canonical_bytes), indent=3).encode()
+    assert odd_bytes != canonical_bytes, "the odd encoding must actually differ from ocx's own"
+    requests.put(
+        f"http://{ocx.registry}/v2/{unique_repo}/manifests/2.0.0",
+        data=odd_bytes,
+        headers={"Content-Type": "application/vnd.oci.image.index.v1+json"},
+        timeout=10,
+    ).raise_for_status()
+    odd_served_bytes, odd_served_digest = fetch_manifest_raw(ocx.registry, unique_repo, "2.0.0")
+    assert odd_served_bytes == odd_bytes, "precondition: the registry must serve the odd bytes verbatim"
+
     out_dir = tmp_path / "out"
-    report = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+    report = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir)
+    )
 
     assert report["status"] == "updated"
     assert report["pull_request_url"] is None
@@ -85,21 +111,54 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
     assert reproduced == root_bytes, "root bytes must equal their own canonical re-serialization"
 
     cas_files = [relative for relative in written if "/o/sha256/" in relative]
-    assert cas_files, "at least one CAS observation object must be written"
+    assert cas_files, "at least one CAS dispatch object must be written"
     for relative in cas_files:
         cas_bytes = (out_dir / relative).read_bytes()
         expected_hex = Path(relative).stem
         assert hashlib.sha256(cas_bytes).hexdigest() == expected_hex, f"{relative} is not content-addressed"
-        cas_obj = json.loads(cas_bytes)
-        reproduced_cas = json.dumps(cas_obj, sort_keys=True, separators=(",", ":")).encode()
-        assert reproduced_cas == cas_bytes, "CAS bytes must equal their own canonical re-serialization"
 
     tag_content = root_obj["tags"]["1.0.0"]["content"]
     hex_digest = tag_content.split(":", 1)[1]
     assert f"p/{package}/o/sha256/{hex_digest}.json" in written
 
+    # A2 — the tag's `content` is the digest the REGISTRY served the tag under.
+    # Against a writer that mints its own digest for a derived document this
+    # differs, and the fetch below 404s outright.
+    served_bytes, served_digest = fetch_manifest_raw(ocx.registry, unique_repo, "1.0.0")
+    assert tag_content == served_digest, (
+        "the tag's content pointer must be the registry's own image-index digest, "
+        f"got {tag_content} against {served_digest}"
+    )
+
+    # A1 — the committed CAS object IS the registry's image index, verbatim.
+    # Fetched by the pointer the root itself wrote, so a minted digest fails
+    # here at the fetch (404), before any byte comparison.
+    cas_bytes = (out_dir / f"p/{package}/o/sha256/{hex_digest}.json").read_bytes()
+    by_pointer_bytes, by_pointer_digest = fetch_manifest_raw(ocx.registry, unique_repo, tag_content)
+    assert cas_bytes == served_bytes, "the CAS object must be the registry's image-index bytes, verbatim"
+    assert cas_bytes == by_pointer_bytes
+    assert f"sha256:{hex_digest}" == by_pointer_digest, (
+        "the CAS filename hex must equal the Docker-Content-Digest the registry served"
+    )
+
+    # A1, the load-bearing half — `2.0.0` was stored 3-space-indented, so a
+    # writer that re-serialises the parsed image index produces different
+    # bytes, a different digest, and a CAS file under a different name.
+    odd_content = root_obj["tags"]["2.0.0"]["content"]
+    assert odd_content == odd_served_digest, (
+        "the tag's content pointer must be the digest the registry served the ODD bytes under, "
+        f"got {odd_content} against {odd_served_digest}"
+    )
+    odd_relative = f"p/{package}/o/sha256/{odd_served_digest.split(':', 1)[1]}.json"
+    assert odd_relative in written
+    assert (out_dir / odd_relative).read_bytes() == odd_bytes, (
+        "the CAS object must be the registry's stored bytes, not a re-encoding of the same document"
+    )
+
     out_dir_2 = tmp_path / "out2"
-    report_2 = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir_2))
+    report_2 = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir_2)
+    )
     assert sorted(report_2["written_paths"]) == sorted(written)
     for relative in written:
         assert (out_dir_2 / relative).read_bytes() == (out_dir / relative).read_bytes()
@@ -136,6 +195,56 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     )
     for relative in first["written_paths"]:
         assert (second_dir / relative).read_bytes() == (first_dir / relative).read_bytes()
+
+
+# ── D4(a): the index records image indices only ────────────────────────────
+
+
+def test_announce_refuses_a_tag_resolving_to_a_bare_manifest(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A curated tag whose registry target is a bare
+    `application/vnd.oci.image.manifest.v1+json` is refused with `DataError`
+    (65), and the message names BOTH the tag and the physical repository
+    (`adr_oci_index_only_dispatch.md` D4(a), `AnnounceError::
+    TagIsNotAnImageIndex`).
+
+    65 rather than 79: the tag resolved and the artifact exists — its *shape*
+    is wrong, which is the malformed-input category, not an absent one. And
+    rather than exit 1: an unclassified failure is indistinguishable from a
+    crash to a release wrapper.
+
+    The exit code alone is too weak an assertion — several announce failures
+    could be made to exit 65 — so the message content carries the test.
+    """
+    import requests
+
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    # Publish a tag that points DIRECTLY at the leaf platform manifest, the
+    # one shape `ocx package push` never writes under a version tag.
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
+    leaf_bytes, _ = fetch_manifest_raw(ocx.registry, unique_repo, leaf_digest)
+    requests.put(
+        f"http://{ocx.registry}/v2/{unique_repo}/manifests/9.9.9",
+        data=leaf_bytes,
+        headers={"Content-Type": "application/vnd.oci.image.manifest.v1+json"},
+        timeout=10,
+    ).raise_for_status()
+
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(
+        ocx, fake_forge, "--package", package, "--tags", "9.9.9", "--out", str(tmp_path / "out"), check=False
+    )
+
+    assert result.returncode == 65, f"expected DataError (65), got {result.returncode}: {result.stderr}"
+    assert "9.9.9" in result.stderr, f"the refusal must name the offending tag: {result.stderr}"
+    assert physical in result.stderr, f"the refusal must name the physical repository: {result.stderr}"
+    assert not (tmp_path / "out").exists(), "a refused announce must write nothing"
 
 
 # ── fork mode: happy path + C6 unchanged (G-A / G-D gate) ──────────────────
@@ -573,7 +682,7 @@ def test_announce_refresh_reobserves_and_updates_a_moved_digest(
     content_before = committed_root(fake_forge, package)["tags"]["1.0.0"]["content"]
 
     # Move the tag: re-push it with a new build (a fresh random marker, per
-    # `make_package`), so the content-addressed observation must change. A
+    # `make_package`), so the tag's image index — and its digest — must change. A
     # distinct tmp_path subdir avoids colliding with the first build's
     # deterministic `pkg-<repo>-<tag>` bundle directory.
     second_build = tmp_path / "second-build"

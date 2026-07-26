@@ -66,6 +66,59 @@ def test_push_announce_file_feeds_announce_tags_file_union(
     assert final_tags == {"0.9.0", *file_tags}, "--tags-file must union with the committed root, dropping nothing"
 
 
+def test_push_reports_canonical_tags_and_keeps_them_out_of_the_announce_file(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`PushReport.canonical_tags_written` names every `sha256.<hex>` tag the
+    push wrote, and the `--announce-file` it wrote alongside contains none of
+    them.
+
+    Two halves of one rule (D7). A canonical tag is a digest alias, not a
+    version: the push genuinely writes it (so the report must say so — the
+    report states what reached the registry), and announce would drop it (so
+    the file that feeds `announce --tags-file` must not carry it in the first
+    place). Reporting is not publishing.
+
+    Non-vacuity: the report's canonical list must be non-empty. `push` writes
+    one canonical tag per distinct platform manifest unless
+    `--no-canonical-tag` is given, so an empty list here means the push path
+    changed and the file assertion below has nothing to exclude.
+    """
+    announce_file = tmp_path / "announce-tags.txt"
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    bundle = tmp_path / f"bundle-{unique_repo}-1.0.0.tar.xz"
+
+    report = json.loads(
+        ocx.run(
+            "package",
+            "push",
+            "-p",
+            pkg.platform,
+            "-m",
+            str(resolved_metadata_path(bundle)),
+            "--announce-file",
+            str(announce_file),
+            "-i",
+            pkg.fq,
+            str(bundle),
+            format="json",
+        ).stdout
+    )
+
+    canonical = report["canonical_tags_written"]
+    assert canonical, "a default push must write at least one canonical tag, or this test excludes nothing"
+    for tag in canonical:
+        assert tag.startswith("sha256."), f"a canonical tag is a digest alias, got {tag}"
+
+    file_tags = [tag for tag in announce_file.read_text().split(",") if tag]
+    assert "1.0.0" in file_tags, f"the pushed primary tag must be in the announce file: {file_tags}"
+    for tag in canonical:
+        assert tag not in file_tags, (
+            f"the announce file feeds `announce --tags-file`; a canonical tag is not a version "
+            f"and must never enter it: {tag} in {file_tags}"
+        )
+
+
 def test_push_still_reports_when_the_announce_file_cannot_be_written(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

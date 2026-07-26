@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner, PackageInfo, static_index
-from src.registry import fetch_platform_manifest_digest
+from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import registry_dir
 
 IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
@@ -30,25 +30,58 @@ def test_index_update_succeeds(
     assert result.returncode == 0
 
 
-def test_index_update_never_stores_an_image_manifest(
-    ocx: OcxRunner, published_package: PackageInfo, registry: str
-):
-    """No file anywhere in the local index is a leaf platform manifest.
+def _publish_bare_manifest_tag(registry: str, repo: str, source_tag: str, tag: str) -> str:
+    """Publishes `tag` pointing DIRECTLY at `source_tag`'s leaf platform
+    manifest, straight through the registry HTTP API.
 
-    `adr_index_indirection.md` A3: the local index stores dispatch objects
-    only. A tag whose target is a single-platform image manifest records its
-    pointer in the root document and writes NOTHING to `o/` — the absence of
-    an object IS the "this is a leaf manifest" encoding, self-healed on read.
-
-    Such a tag is not hypothetical: `ocx package push` publishes a canonical
-    `sha256.<hex>` tag per platform manifest by default, so a bare
-    `ocx index update <repo>` always walks one. The test pins that tag as the
-    non-vacuity anchor, then sweeps EVERY json file under the index home so a
-    manifest leaking in through any other path fails here too.
+    `ocx package push` never writes this shape under a version tag, and the
+    canonical `sha256.<hex>` tag it does write is *also* reserved — so a tag
+    that is a bare manifest and nothing else is the only way to exercise the
+    bare-manifest rule (D2) in isolation from the reserved-name rule (D7).
+    Returns the leaf manifest's digest.
     """
-    pkg = published_package
-    manifest_digest = fetch_platform_manifest_digest(registry, pkg.repo, pkg.tag)
-    canonical_tag = manifest_digest.replace(":", ".")
+    import requests
+
+    leaf_digest = fetch_platform_manifest_digest(registry, repo, source_tag)
+    leaf_bytes, _ = fetch_manifest_raw(registry, repo, leaf_digest)
+    requests.put(
+        f"http://{registry}/v2/{repo}/manifests/{tag}",
+        data=leaf_bytes,
+        headers={"Content-Type": IMAGE_MANIFEST_MEDIA_TYPE},
+        timeout=10,
+    ).raise_for_status()
+    return leaf_digest
+
+
+def test_index_update_records_only_the_image_index_tag_and_stores_no_manifest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+):
+    """Write path 1 of 2 — `ocx index update <repo>` (`refresh_derived`).
+
+    Against a repository carrying one image-index tag and one bare-manifest
+    tag, the local index records exactly ONE entry and stores exactly ONE
+    dispatch object (`adr_oci_index_only_dispatch.md` D1/D2,
+    `adr_index_indirection.md` A3).
+
+    D2 is a root rule, not just a storage rule: a bare manifest writes nothing
+    to `o/`, so recording its tag would leave the root pointing at an object
+    that is not there — the tag-without-an-object absence D1 abolished. The
+    old contract recorded the pointer and relied on the absence as an
+    encoding; that is what this file now pins the other way.
+
+    Two independent anchors keep it from passing vacuously: the bare-manifest
+    tag must genuinely be on the registry, and the version tag must genuinely
+    be recorded. The sweep over EVERY json file catches a manifest leaking in
+    through any other path.
+    """
+    from src.helpers import make_package
+
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    leaf_digest = _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
+    published = fetch_manifest_raw(registry, pkg.repo, "9.9.9")[0]
+    assert json.loads(published)["mediaType"] == IMAGE_MANIFEST_MEDIA_TYPE, (
+        "precondition: tag 9.9.9 must serve a bare image manifest"
+    )
 
     ocx.plain("index", "update", pkg.repo)
 
@@ -57,7 +90,7 @@ def test_index_update_never_stores_an_image_manifest(
     assert documents, f"index update wrote nothing under {index_home}"
 
     objects = sorted(index_home.rglob("o/*/*.json"))
-    assert objects, "index update wrote no dispatch object — the sweep below would be vacuous"
+    assert len(objects) == 1, f"expected exactly one dispatch object, got {objects}"
 
     for path in documents:
         media_type = json.loads(path.read_text()).get("mediaType")
@@ -72,20 +105,80 @@ def test_index_update_never_stores_an_image_manifest(
             f"expected {IMAGE_INDEX_MEDIA_TYPE}"
         )
 
-    # Anchor: the manifest-pointing tag WAS walked (so the sweep above is
-    # meaningful), it is recorded as a pointer, and it stored no object.
     root_document = index_home / registry_dir(registry) / "p" / f"{pkg.repo}.json"
     tags = json.loads(root_document.read_text())["tags"]
-    assert canonical_tag in tags, (
-        f"canonical tag {canonical_tag} missing from {root_document.name}; "
-        f"got {sorted(tags)} — this test proves nothing without a manifest-pointing tag"
+    assert list(tags) == ["1.0.0"], (
+        f"only the image-index tag may become a root entry; got {sorted(tags)}"
     )
-    assert tags[canonical_tag]["content"] == manifest_digest
-    algorithm, hex_digest = manifest_digest.split(":", 1)
+    algorithm, hex_digest = leaf_digest.split(":", 1)
     manifest_object = root_document.with_suffix("") / "o" / algorithm / f"{hex_digest}.json"
     assert not manifest_object.exists(), (
-        f"{manifest_object.relative_to(index_home)} exists; a tag pointing at a platform "
-        "image manifest must store no dispatch object"
+        f"{manifest_object.relative_to(index_home)} exists; a leaf platform manifest is "
+        "never copied into the local index"
+    )
+
+
+def test_index_update_of_a_bare_manifest_tag_alone_is_no_indexable_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+):
+    """Every candidate tag excluded is `NotFound` (79) with its OWN message —
+    not `DataError` (65) and not an unclassified exit 1.
+
+    Nothing here is malformed: the tag resolved, the artifact exists, it is
+    simply not a version pointer. 79 is the absent-resource category, and the
+    message ("no indexable tag") is what separates "every published tag was
+    excluded" from "package absent" — the two share an exit code, so the
+    message is the only thing that disambiguates them.
+    """
+    from src.helpers import make_package
+
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
+
+    result = ocx.plain("index", "update", f"{pkg.repo}:9.9.9", check=False)
+
+    assert result.returncode == 79, (
+        f"expected NotFound (79), got rc={result.returncode}\n{result.stderr}"
+    )
+    assert "no indexable tag" in result.stderr, result.stderr
+    assert not list((ocx.ocx_home / "index").rglob("o/*/*.json")), (
+        "a refused refresh must persist no dispatch object"
+    )
+
+
+def test_bare_manifest_tag_never_becomes_a_root_entry_through_the_resolve_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+):
+    """Write path 2 of 2 — the resolve-path root-growth branch
+    (`ChainedIndex::walk_chain`, the `SourceKind::Derived` arm).
+
+    `ocx index update` is not the only writer: an install resolves a tag on
+    the fly and grows the local root from it. That branch applies the SAME
+    gate (`local_index::records_root_tag`), and it has to — neither write path
+    consults `list_tags`, so the listing filters cannot catch a bad entry
+    downstream; a committed violation would be *hidden* rather than absent.
+
+    Non-vacuity: the install must succeed (so the grow branch was genuinely
+    reached) and a subsequent install of the version tag must genuinely record
+    an entry (so "no entry" is not just "the root was never written").
+    """
+    from src.helpers import make_package
+
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
+
+    ocx.json("package", "install", f"{pkg.repo}:9.9.9")
+
+    root_document = ocx.ocx_home / "index" / registry_dir(registry) / "p" / f"{pkg.repo}.json"
+    recorded = json.loads(root_document.read_text())["tags"] if root_document.is_file() else {}
+    assert "9.9.9" not in recorded, (
+        f"a tag resolving to a bare manifest must never become a root entry; got {sorted(recorded)}"
+    )
+
+    ocx.json("package", "install", f"{pkg.repo}:1.0.0")
+    grown = json.loads(root_document.read_text())["tags"]
+    assert list(grown) == ["1.0.0"], (
+        f"the resolve path must grow the root for the image-index tag only; got {sorted(grown)}"
     )
 
 
