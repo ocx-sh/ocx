@@ -1,0 +1,22 @@
+[
+  {
+    "id": 9000000001,
+    "event": "labeled",
+    "actor": { "login": "ocx-bot", "id": 198765432, "type": "User" },
+    "label": { "name": "machine-lane" },
+    "created_at": "2026-07-24T10:00:12Z"
+  },
+  {
+    "id": 9000000002,
+    "event": "merged",
+    "actor": { "login": "ocx-bot", "id": 198765432, "type": "User" },
+    "commit_id": "3e6b202b1c9d4f0a7b5e8c2d6f1a0b3c4d5e6f70",
+    "created_at": "2026-07-24T10:01:47Z"
+  },
+  {
+    "id": 9000000003,
+    "event": "closed",
+    "actor": { "login": "ocx-bot", "id": 198765432, "type": "User" },
+    "created_at": "2026-07-24T10:01:47Z"
+  }
+]

@@ -20,9 +20,20 @@ test/manual/
 │   ├── env.sh                ← source to point at localhost:5000
 │   ├── bootstrap.sh          ← idempotent build + push of every package
 │   └── teardown.sh           ← rm -rf $OCX_HOME (with confirm)
+├── announce-e2e/             ← Track D announce gate against the REAL index
+│   ├── README.md             ← runbook, prerequisites, per-driver walkthrough
+│   ├── PLAYBOOKS.md          ← three failure playbooks
+│   ├── scripts/              ← five live drivers + shared env.sh
+│   └── docker/               ← clean-machine image for the install proof
 └── adversarial/
     └── README.md             ← test-implementer vs loophole-searcher process
 ```
+
+`announce-e2e/` is the one rig here that does **not** point at
+`localhost:5000`. It drives the real `ocx-sh/index`, the real publisher repo
+and live DNS, because the exit gate it proves is explicitly not allowed to be
+sandboxed. Every run costs GitHub API budget and CI minutes and leaves real
+pull requests behind — read its README before running anything in it.
 
 ## Prerequisites
 
