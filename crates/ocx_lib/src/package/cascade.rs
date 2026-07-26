@@ -203,6 +203,10 @@ pub async fn resolve_cascade_tags(
 ///
 /// `annotations` land on the primary tag's index and on every cascade tag's
 /// index alike.
+///
+/// Returns the pushed index digest, the cascade tags, and the canonical tag
+/// that was written (`None` when `canonical_tag` is `false`, or when the
+/// merged index carries no entry for this platform).
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
@@ -211,7 +215,7 @@ pub async fn push_with_cascade(
     version: &Version,
     canonical_tag: bool,
     annotations: &BTreeMap<String, String>,
-) -> Result<(oci::Digest, Vec<String>)> {
+) -> Result<(oci::Digest, Vec<String>, Option<String>)> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
         &package_info.identifier,
@@ -225,17 +229,19 @@ pub async fn push_with_cascade(
         .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags, annotations)
         .await?;
 
-    if canonical_tag {
+    let canonical_tag_written = if canonical_tag {
         client
             .push_canonical_tag(
                 &package_info.identifier,
                 &oci::Manifest::ImageIndex(index),
                 &package_info.platform,
             )
-            .await?;
-    }
+            .await?
+    } else {
+        None
+    };
 
-    Ok((manifest_digest, cascade_tags))
+    Ok((manifest_digest, cascade_tags, canonical_tag_written))
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.
@@ -962,9 +968,10 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
-                .await
-                .expect("cascade push succeeds");
+            let (_, _, canonical_tag_written) =
+                push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
+                    .await
+                    .expect("cascade push succeeds");
 
             let inner = data.read();
             let canonical_tags: Vec<&String> = inner.manifests.keys().filter(|key| key.contains(":sha256.")).collect();
@@ -972,6 +979,11 @@ mod tests {
                 canonical_tags.len(),
                 1,
                 "exactly one canonical tag must be pushed, for the platform this call pushed: {canonical_tags:?}"
+            );
+            let reported = canonical_tag_written.expect("the cascade push must report the canonical tag it wrote");
+            assert!(
+                canonical_tags[0].ends_with(&format!(":{reported}")),
+                "the reported tag must be the one on the wire: reported {reported}, wire {canonical_tags:?}"
             );
         }
 
@@ -984,10 +996,12 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
-                .await
-                .expect("cascade push succeeds");
+            let (_, _, canonical_tag_written) =
+                push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
+                    .await
+                    .expect("cascade push succeeds");
 
+            assert_eq!(canonical_tag_written, None, "canonical_tag=false must report no tag");
             let inner = data.read();
             assert!(
                 inner.manifests.keys().all(|key| !key.contains(":sha256.")),

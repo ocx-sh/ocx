@@ -213,6 +213,10 @@ impl PackagePush {
                 .await?
         };
 
+        // The primary version tag plus the rolling cascade tags. Canonical
+        // `sha256.<hex>` tags are deliberately left out: announce drops them
+        // downstream, so recording one in a file named "announce" would state
+        // something that never gets announced.
         let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
 
@@ -220,12 +224,12 @@ impl PackagePush {
         // push itself already succeeded and is not undoable, so an I/O failure
         // writing the scratch file must not swallow the report — the caller
         // still has to learn what landed in the registry. Plain output is a
-        // one-row table (identifier, digest, cascade tags); `--format json`
+        // one-row table (identifier, digest, cascade + canonical tags);
+        // `--format json`
         // serializes the report consumed by `ocx-mirror pipeline push`.
-        context.api().report(&crate::api::data::push::PushReport::new(
+        context.api().report(&crate::api::data::push::PushReport::from_outcome(
             identifier.to_string(),
-            outcome.manifest_digest.to_string(),
-            outcome.cascade_tags,
+            outcome,
         ))?;
 
         // The append still decides the exit code: the caller asked for the file,

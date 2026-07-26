@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
+use ocx_lib::{cli::Cell, publisher::PushOutcome};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -9,11 +9,13 @@ use crate::api::Printable;
 /// Result of a successful `ocx package push`.
 ///
 /// Plain format: a one-row table mirroring the JSON — `Identifier`, `Status`,
-/// `Digest`, and `Tags` (the rolling cascade tags, comma-joined). Keeps a plain
-/// push from being silent; progress still surfaces on stderr via the log layer.
+/// `Digest`, `Tags` (the rolling cascade tags, comma-joined), and `Canonical
+/// Tags`. Keeps a plain push from being silent; progress still surfaces on
+/// stderr via the log layer.
 ///
 /// JSON format:
-/// `{ "identifier", "status", "manifest_digest", "cascade_tags_written" }`.
+/// `{ "identifier", "status", "manifest_digest", "cascade_tags_written",
+/// "canonical_tags_written" }`.
 /// This is the machine-readable contract consumed by `ocx-mirror pipeline
 /// push`, which keys its go/no-go bookkeeping off `status` and records
 /// `cascade_tags_written` in the run summary.
@@ -29,33 +31,52 @@ pub struct PushReport {
     /// Rolling cascade tags written in addition to the primary version tag
     /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push.
     pub cascade_tags_written: Vec<String>,
+    /// Digest-named `sha256.<hex>` tags this push wrote, in push order, one
+    /// per distinct platform manifest — platforms whose manifest is identical
+    /// share a single tag, so this does not zip against the pushed platform
+    /// list. Empty under `--no-canonical-tag`. Reports what reached the
+    /// registry, not what was requested.
+    pub canonical_tags_written: Vec<String>,
 }
 
 impl PushReport {
-    /// Builds a `pushed` report from the identifier, digest, and cascade tags
-    /// returned by the publisher.
-    pub fn new(identifier: String, manifest_digest: String, cascade_tags_written: Vec<String>) -> Self {
+    /// Builds a `pushed` report for `identifier` from the publisher's outcome.
+    ///
+    /// Takes the whole [`PushOutcome`] rather than its fields: the cascade and
+    /// canonical tags are both `Vec<String>`, so as adjacent positionals a
+    /// swapped pair would type-check silently and publish `sha256.<hex>`
+    /// values under `cascade_tags_written`.
+    pub fn from_outcome(identifier: String, outcome: PushOutcome) -> Self {
         Self {
             identifier,
             status: "pushed".to_string(),
-            manifest_digest,
-            cascade_tags_written,
+            manifest_digest: outcome.manifest_digest.to_string(),
+            cascade_tags_written: outcome.cascade_tags,
+            canonical_tags_written: outcome.canonical_tags,
         }
     }
 }
 
 impl Printable for PushReport {
-    /// One-row table mirroring the JSON: identifier, status, digest, and the
-    /// rolling cascade tags (comma-joined). Machine consumers should prefer
-    /// `--format json`; this line keeps a plain push from emitting nothing.
+    /// One-row table mirroring the JSON: identifier, status, digest, the
+    /// rolling cascade tags, and the canonical tags (both comma-joined).
+    /// Machine consumers should prefer `--format json`; this line keeps a
+    /// plain push from emitting nothing.
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
         data.print_table(
-            &["Identifier".into(), "Status".into(), "Digest".into(), "Tags".into()],
+            &[
+                "Identifier".into(),
+                "Status".into(),
+                "Digest".into(),
+                "Tags".into(),
+                "Canonical Tags".into(),
+            ],
             &[
                 vec![Cell::from(self.identifier.clone())],
                 vec![Cell::from(self.status.clone())],
                 vec![Cell::from(self.manifest_digest.clone())],
                 vec![Cell::from(self.cascade_tags_written.join(","))],
+                vec![Cell::from(self.canonical_tags_written.join(","))],
             ],
         );
     }
@@ -63,21 +84,38 @@ impl Printable for PushReport {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::cli::{DataInterface, Printer};
+    use ocx_lib::{
+        cli::{DataInterface, Printer},
+        oci,
+        publisher::PushOutcome,
+    };
 
     use super::PushReport;
     use crate::api::Printable as _;
 
+    fn outcome(digest_hex: &str, cascade_tags: Vec<String>, canonical_tags: Vec<String>) -> PushOutcome {
+        PushOutcome {
+            manifest_digest: oci::Digest::try_from(format!("sha256:{}", digest_hex.repeat(64)).as_str())
+                .expect("digest parses"),
+            cascade_tags,
+            canonical_tags,
+        }
+    }
+
     /// Pins the JSON wire format consumed by `ocx-mirror pipeline push`: the
-    /// four keys (`identifier`, `status`, `manifest_digest`,
-    /// `cascade_tags_written`) and the constant `"pushed"` status. The mirror
-    /// parser keys its go/no-go bookkeeping off these names.
+    /// five keys (`identifier`, `status`, `manifest_digest`,
+    /// `cascade_tags_written`, `canonical_tags_written`) and the constant
+    /// `"pushed"` status. The mirror parser keys its go/no-go bookkeeping off
+    /// these names.
     #[test]
     fn cascade_report_json_shape() {
-        let report = PushReport::new(
+        let report = PushReport::from_outcome(
             "registry.example/tool:3.28.1".to_string(),
-            "sha256:abc".to_string(),
-            vec!["3.28".to_string(), "3".to_string(), "latest".to_string()],
+            outcome(
+                "c",
+                vec!["3.28".to_string(), "3".to_string(), "latest".to_string()],
+                vec![format!("sha256.{}", "a".repeat(64))],
+            ),
         );
         let value = serde_json::to_value(&report).unwrap();
 
@@ -88,23 +126,31 @@ mod tests {
         assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("pushed"));
         assert_eq!(
             value.get("manifest_digest").and_then(|v| v.as_str()),
-            Some("sha256:abc")
+            Some(format!("sha256:{}", "c".repeat(64)).as_str())
         );
         assert_eq!(
             value.get("cascade_tags_written").and_then(|v| v.as_array()),
             Some(&vec!["3.28".into(), "3".into(), "latest".into()])
         );
+        assert_eq!(
+            value.get("canonical_tags_written").and_then(|v| v.as_array()),
+            Some(&vec![format!("sha256.{}", "a".repeat(64)).into()])
+        );
     }
 
-    /// A non-cascade push writes no rolling tags: `cascade_tags_written` must
-    /// serialize as an empty array, not be absent or null.
+    /// A non-cascade push with `--no-canonical-tag` writes neither tag family:
+    /// both arrays must serialize as empty, never absent or null.
     #[test]
     fn non_cascade_report_has_empty_tags() {
-        let report = PushReport::new("tool:1.0.0".to_string(), "sha256:def".to_string(), Vec::new());
+        let report = PushReport::from_outcome("tool:1.0.0".to_string(), outcome("d", Vec::new(), Vec::new()));
         let value = serde_json::to_value(&report).unwrap();
 
         assert_eq!(
             value.get("cascade_tags_written").and_then(|v| v.as_array()),
+            Some(&Vec::new())
+        );
+        assert_eq!(
+            value.get("canonical_tags_written").and_then(|v| v.as_array()),
             Some(&Vec::new())
         );
     }
@@ -113,10 +159,13 @@ mod tests {
     /// disabled — keeps a plain push from being silent.
     #[test]
     fn print_plain_smoke() {
-        let report = PushReport::new(
+        let report = PushReport::from_outcome(
             "tool:1.0.0".to_string(),
-            "sha256:def".to_string(),
-            vec!["1".to_string(), "latest".to_string()],
+            outcome(
+                "d",
+                vec!["1".to_string(), "latest".to_string()],
+                vec![format!("sha256.{}", "b".repeat(64))],
+            ),
         );
         let data = DataInterface::new(Printer::new(false, false));
         report.print_plain(&data);
