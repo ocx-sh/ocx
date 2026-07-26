@@ -442,6 +442,7 @@ mod tests {
 #[cfg(test)]
 mod push_wire_tests {
     use super::*;
+    use crate::oci::client::error::ClientError;
     use crate::oci::client::transport::{OciTransport as _, no_progress};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
@@ -565,6 +566,11 @@ mod push_wire_tests {
                 // Deliberately a *relative* Location — a registry may answer either
                 // way, and the client must resolve it against the request host.
                 "POST" => {
+                    // A POST opens a *fresh* upload session, so what an abandoned
+                    // session stored is forgotten — a real registry behaves this way,
+                    // and it is what makes a restart-style retry safe.
+                    stored = 0;
+                    patch_count = 0;
                     "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nContent-Length: 0\r\n\r\n"
                         .to_string()
                 }
@@ -733,42 +739,63 @@ mod push_wire_tests {
         assert_eq!(stub.puts().len(), 1, "the session must still be committed by one PUT");
     }
 
-    /// A registry that reports storing fewer bytes than it was sent must stop the
-    /// upload, never commit.
+    /// A registry that reports storing fewer bytes than it was sent must stop a
+    /// too-large blob's upload dead — no commit, and no fallback either.
     ///
-    /// Continuing from the client's own offsets would leave a gap in the stored
-    /// blob and then name it with the digest of the bytes that were *sent* — a blob
-    /// whose content does not match its own name. Neither push body can be rewound,
-    /// so the only safe move is to abandon the session; the caller re-pushes from a
-    /// fresh body. Asserted against the fork's `push_blob_stream` directly, because
-    /// the ocx transport wraps it in exactly that retry.
+    /// Continuing from the client's own offsets would leave a gap in the stored blob
+    /// and then name it with the digest of the bytes that were *sent* — a blob whose
+    /// content does not match its own name. The buffered fallback is no escape: it
+    /// ends in a single `PUT` carrying the whole blob, which above the per-request
+    /// cap is the `416` this chunking exists to avoid, reached through another door.
+    /// Asserted on the production transport path, which is what ships.
     #[tokio::test]
-    async fn short_accepting_registry_never_reaches_the_committing_put() {
+    async fn over_cap_blob_short_accepted_never_reaches_a_committing_put() {
         let stub = StubRegistry::start(Some(64)).await;
-        let data: Vec<u8> = (0..PUSH_CHUNK_SIZE + 1024).map(|i| (i % 251) as u8).collect();
-        let digest = sha256_digest(&data).to_string();
-        let total = data.len();
+        let data: Vec<u8> = (0..MAX_UPLOAD_REQUEST_BYTES + 1024).map(|i| (i % 251) as u8).collect();
 
-        let config = ClientBuilder::new()
-            .plain_http_registries(vec![stub.address.clone()])
-            .config;
-        let client = oci::native::Client::new(config);
-        let image = stub_image(&stub);
-        let body = futures::stream::once(async move { Ok(bytes::Bytes::from(data)) });
-
-        let error = client
-            .push_blob_stream(&image, body, digest.as_str(), Some(total))
+        let error = push_through_production_client(&stub, data)
             .await
             .expect_err("a registry that stored 64 of the bytes sent must not yield a successful push");
 
         assert!(
-            matches!(error, oci_client::errors::OciDistributionError::SpecViolationError(_)),
-            "a short accept must surface as a restartable spec violation, got {error:?}"
+            matches!(error, ClientError::Registry(_)),
+            "the spec violation must propagate as a registry failure, got {error:?}"
         );
         assert!(
             stub.puts().is_empty(),
             "no PUT may commit a blob the registry only partially stored, saw {:?}",
             stub.puts()
+        );
+    }
+
+    /// A blob that still fits in one request may fall back after a short accept —
+    /// and the fallback must re-push from the start, so the committing `PUT` carries
+    /// every byte.
+    ///
+    /// That is the whole reason the fallback is safe here: the partial bytes sit
+    /// under an abandoned session, and the `PUT` that finally names the digest
+    /// carries the entire blob rather than resuming on top of bytes nobody can
+    /// account for. A fallback that resumed — or one dropped altogether — breaks
+    /// this.
+    #[tokio::test]
+    async fn under_cap_fallback_commits_the_whole_blob_in_one_request() {
+        let stub = StubRegistry::start(Some(64)).await;
+        let data: Vec<u8> = (0..PUSH_CHUNK_SIZE + 1024).map(|i| (i % 251) as u8).collect();
+        let total = data.len();
+        assert!(
+            total <= MAX_UPLOAD_REQUEST_BYTES,
+            "fixture must stay under the per-request cap for the fallback to be reachable"
+        );
+
+        push_through_production_client(&stub, data)
+            .await
+            .expect("a blob that fits in one request must still publish via the fallback");
+
+        let puts = stub.puts();
+        assert_eq!(puts.len(), 1, "exactly one PUT may commit the blob, saw {puts:?}");
+        assert_eq!(
+            puts[0].body_len, total,
+            "the committing PUT must carry the whole blob — a resuming fallback would commit bytes the registry never stored"
         );
     }
 }
