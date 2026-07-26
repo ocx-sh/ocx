@@ -48,6 +48,15 @@ pub struct PushOutcome {
     /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push. For a
     /// multi-platform fan-out this is the ordered union across platforms.
     pub cascade_tags: Vec<String>,
+    /// Digest-named `sha256.<hex>` tags written by this push, in push order,
+    /// deduped: one per *distinct platform manifest*, not one per `Info`. The
+    /// tag names the platform manifest's digest, and that manifest is the
+    /// metadata config blob plus the layers — the platform field is not part
+    /// of it. Two platforms built from identical metadata over identical
+    /// layers (a noarch bundle, a Rosetta alias) therefore share one manifest,
+    /// hence one tag. Empty under `--no-canonical-tag`, and empty for any
+    /// platform whose entry the merged index did not carry.
+    pub canonical_tags: Vec<String>,
 }
 
 impl Publisher {
@@ -102,6 +111,7 @@ impl Publisher {
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
+        let mut canonical_tags: Vec<String> = Vec::new();
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (platform {})",
@@ -111,16 +121,21 @@ impl Publisher {
             let identifier = info.identifier.clone();
             let platform = info.platform.clone();
             let (digest, manifest) = self.client.push_package(info, layers, annotations).await?;
-            if canonical_tag {
-                self.client
+            if canonical_tag
+                && let Some(tag) = self
+                    .client
                     .push_canonical_tag(&identifier, &manifest, &platform)
-                    .await?;
+                    .await?
+                && !canonical_tags.contains(&tag)
+            {
+                canonical_tags.push(tag);
             }
             manifest_digest = Some(digest);
         }
         Ok(PushOutcome {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags: Vec::new(),
+            canonical_tags,
         })
     }
 
@@ -145,6 +160,7 @@ impl Publisher {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
         let mut cascade_tags: Vec<String> = Vec::new();
+        let mut canonical_tags: Vec<String> = Vec::new();
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (cascade, platform {})",
@@ -154,7 +170,7 @@ impl Publisher {
             let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
                 crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string())
             })?;
-            let (digest, tags) = package::cascade::push_with_cascade(
+            let (digest, tags, canonical) = package::cascade::push_with_cascade(
                 &self.client,
                 info,
                 layers,
@@ -170,10 +186,16 @@ impl Publisher {
                     cascade_tags.push(tag);
                 }
             }
+            if let Some(tag) = canonical
+                && !canonical_tags.contains(&tag)
+            {
+                canonical_tags.push(tag);
+            }
         }
         Ok(PushOutcome {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags,
+            canonical_tags,
         })
     }
 
@@ -380,16 +402,140 @@ mod tests {
         data.write().capture_pushes = true;
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
-        publisher
+        let outcome = publisher
             .push(vec![test_info("1.0.0")], &[], None, true, &BTreeMap::new())
             .await
             .expect("push succeeds");
 
+        assert_eq!(
+            outcome.canonical_tags.len(),
+            1,
+            "canonical_tag=true must report exactly one written tag: {:?}",
+            outcome.canonical_tags
+        );
+        let reported = &outcome.canonical_tags[0];
+        assert!(reported.starts_with("sha256."), "unexpected tag shape: {reported}");
         let inner = data.read();
         assert!(
-            inner.manifests.keys().any(|key| key.contains(":sha256.")),
-            "canonical_tag=true must push a sha256.<hex> tag: {:?}",
+            inner.manifests.keys().any(|key| key.ends_with(&format!(":{reported}"))),
+            "the reported tag must be the one on the wire: reported {reported}, wire {:?}",
             inner.manifests.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fan_out_reports_one_canonical_tag_per_platform_in_push_order() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        let mut mac = test_info("1.0.0");
+        mac.platform = "darwin/arm64".parse().expect("platform parses");
+        // The canonical tag names the *platform manifest* digest, and that
+        // manifest is the metadata config blob plus the layers — neither of
+        // which the platform field touches. Two platforms carrying identical
+        // metadata therefore share one digest and one canonical tag (a Rosetta
+        // alias is the real-world case). Diverge the metadata so this fan-out
+        // produces the two distinct manifests the assertion is about.
+        let Metadata::Bundle(ref mut bundle) = mac.metadata;
+        bundle.strip_components = Some(1);
+
+        let outcome = publisher
+            .push(vec![test_info("1.0.0"), mac], &[], None, true, &BTreeMap::new())
+            .await
+            .expect("fan-out push succeeds");
+
+        assert_eq!(
+            outcome.canonical_tags.len(),
+            2,
+            "a two-platform fan-out writes one canonical tag per distinct platform manifest: {:?}",
+            outcome.canonical_tags
+        );
+        assert_ne!(
+            outcome.canonical_tags[0], outcome.canonical_tags[1],
+            "each platform manifest has its own digest"
+        );
+        let inner = data.read();
+        for tag in &outcome.canonical_tags {
+            assert!(
+                inner.manifests.keys().any(|key| key.ends_with(&format!(":{tag}"))),
+                "reported tag {tag} missing from the wire: {:?}",
+                inner.manifests.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn platforms_sharing_one_manifest_report_a_single_canonical_tag() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        // Identical metadata, identical (empty) layers, two platforms — the
+        // real-world Rosetta-alias / noarch-bundle shape. Both index entries
+        // point at the same leaf manifest, so both platforms yield the same
+        // canonical tag and the report must carry it once.
+        let mut alias = test_info("1.0.0");
+        alias.platform = "darwin/arm64".parse().expect("platform parses");
+
+        let outcome = publisher
+            .push(vec![test_info("1.0.0"), alias], &[], None, true, &BTreeMap::new())
+            .await
+            .expect("fan-out push succeeds");
+
+        assert_eq!(
+            outcome.canonical_tags.len(),
+            1,
+            "platforms sharing one manifest digest share one canonical tag: {:?}",
+            outcome.canonical_tags
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cascade_fan_out_reports_each_tag_once() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        // Both platforms compute the same rolling tags, and (identical
+        // metadata) the same platform-manifest digest — the cascade loop must
+        // report each of them once, not once per `Info`.
+        let mut alias = test_info("1.0.0");
+        alias.platform = "darwin/arm64".parse().expect("platform parses");
+
+        let outcome = publisher
+            .push_cascade(
+                vec![test_info("1.0.0"), alias],
+                &[],
+                BTreeSet::new(),
+                None,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade fan-out push succeeds");
+
+        assert_eq!(
+            outcome.cascade_tags.clone().unique_clone(),
+            outcome.cascade_tags,
+            "cascade tags must not repeat across platforms: {:?}",
+            outcome.cascade_tags
+        );
+        assert!(
+            !outcome.cascade_tags.is_empty(),
+            "a 1.0.0 cascade push writes rolling tags"
+        );
+        assert_eq!(
+            outcome.canonical_tags.len(),
+            1,
+            "platforms sharing one manifest digest share one canonical tag: {:?}",
+            outcome.canonical_tags
         );
     }
 
@@ -401,11 +547,16 @@ mod tests {
         data.write().capture_pushes = true;
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
-        publisher
+        let outcome = publisher
             .push(vec![test_info("1.0.0")], &[], None, false, &BTreeMap::new())
             .await
             .expect("push succeeds");
 
+        assert!(
+            outcome.canonical_tags.is_empty(),
+            "canonical_tag=false must report no tags: {:?}",
+            outcome.canonical_tags
+        );
         let inner = data.read();
         assert!(
             inner.manifests.keys().all(|key| !key.contains(":sha256.")),

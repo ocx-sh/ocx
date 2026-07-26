@@ -20,6 +20,23 @@ use super::{Algorithm, Digest, Identifier, native};
 /// uploading, so unbounded fan-out would OOM on multi-GB layers.
 const LAYER_PUSH_CONCURRENCY: usize = 4;
 
+/// Hard cap on a manifest body accepted from a registry (CWE-400).
+///
+/// Digest verification is not a size check: a hostile registry named by an
+/// index root's `repository` pointer can answer with a multi-gigabyte body
+/// whose digest matches perfectly. `announce` commits exactly those bytes into
+/// a public git repository, so the ceiling belongs on the one function every
+/// raw-bytes caller routes through.
+///
+/// This is also the ceiling the index-role HTTP transport applies to root,
+/// dispatch, config and catalog documents — `oci/index/ocx_index.rs` imports
+/// this constant rather than declaring its own, so the two halves of one store
+/// cannot drift apart. The OCI distribution spec suggests 4 MiB,
+/// but a verbatim image index carrying many platforms plus attestation
+/// descriptors is legitimately larger, and matching the other half of the same
+/// store is what makes the store coherent.
+pub(crate) const MAX_INDEX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+
 mod builder;
 pub mod error;
 pub(super) mod hashing_reader;
@@ -291,12 +308,12 @@ impl Client {
                         oci::ImageIndex {
                             schema_version: oci::INDEX_SCHEMA_VERSION,
                             media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
-                            artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                            artifact_type: None,
                             manifests: vec![entry],
                             annotations: None,
                         }
                     }
-                    oci::Manifest::ImageIndex(idx) => idx,
+                    oci::Manifest::ImageIndex(index) => index,
                 }
             }
             Err(ClientError::ManifestNotFound(_)) => {
@@ -304,13 +321,21 @@ impl Client {
                 oci::ImageIndex {
                     schema_version: oci::INDEX_SCHEMA_VERSION,
                     media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
-                    artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                    artifact_type: None,
                     manifests: vec![],
                     annotations: None,
                 }
             }
             Err(e) => return Err(e.into()),
         };
+
+        // An index ocx has just mutated and re-serialized describes itself as
+        // an ocx package index. A pre-existing foreign type is left alone —
+        // filling an absent field states what we wrote; overwriting a declared
+        // one relabels someone else's artifact.
+        index
+            .artifact_type
+            .get_or_insert_with(|| MEDIA_TYPE_PACKAGE_V1.to_string());
 
         index.manifests.retain(|entry| entry.platform != platform);
         index.manifests.push(oci::ImageIndexEntry {
@@ -351,6 +376,11 @@ impl Client {
     /// hard failure: canonical tagging is a safety net layered on top of an
     /// already-committed push, never load-bearing for the push itself.
     ///
+    /// Returns the tag it wrote (`Some("<algorithm>.<hex>")`), or `None` on
+    /// that no-op. The caller cannot derive either: the tag is named after
+    /// the *platform manifest* digest, which the caller does not hold, and
+    /// the no-op is otherwise invisible to it.
+    ///
     /// Registry-side deletion safety net (`adr_index_indirection.md`
     /// Decision E): a stray delete of a rolling/cascade tag can never orphan
     /// a digest a lock still pins, because the canonical tag names it
@@ -362,9 +392,9 @@ impl Client {
         source_identifier: &Identifier,
         merged_manifest: &oci::Manifest,
         platform: &oci::Platform,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let Some(manifest_digest) = super::manifest::platform_manifest_digest(merged_manifest, platform) else {
-            return Ok(());
+            return Ok(None);
         };
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
@@ -390,14 +420,13 @@ impl Client {
             .await?;
 
         let (algorithm, hex) = manifest_digest.parts();
-        let tag_ref = source_identifier
-            .clone_with_tag(format!("{algorithm}.{hex}"))
-            .canonical_reference();
+        let tag = format!("{algorithm}.{hex}");
+        let tag_ref = source_identifier.clone_with_tag(tag.clone()).canonical_reference();
         self.transport
             .push_manifest_raw(&tag_ref, manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
             .await?;
 
-        Ok(())
+        Ok(Some(tag))
     }
 
     // ── Blob introspection ────────────────────────────────────────────
@@ -1487,9 +1516,24 @@ impl Client {
     /// this method returns (see [`verify_raw_bytes_digest`]) — the trust
     /// anchor for any snapshot store that persists these bytes verbatim
     /// (`adr_index_indirection.md` A3).
+    ///
+    /// The body is capped at [`MAX_INDEX_DOCUMENT_BYTES`]; an over-cap
+    /// response is refused before it is parsed or handed to any caller.
     pub(crate) async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &Identifier,
+    ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
+        self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES)
+            .await
+    }
+
+    /// [`Self::fetch_manifest_raw_bytes`] with an injectable ceiling, so tests
+    /// can exercise the cap boundary without fabricating a 32 MiB body. Same
+    /// seam as [`Self::pull_layer`] / `pull_layer_with_caps`.
+    async fn fetch_manifest_raw_bytes_capped(
+        &self,
+        identifier: &Identifier,
+        max_bytes: usize,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
         let image = self.transport_reference(identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
@@ -1503,6 +1547,16 @@ impl Client {
             Err(ClientError::ManifestNotFound(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
+
+        // Fail closed before parsing or returning: an over-cap body is refused
+        // outright, never truncated (truncation would silently break the
+        // digest the caller persists these bytes under).
+        if raw_bytes.len() > max_bytes {
+            return Err(ClientError::InvalidManifest(format!(
+                "manifest body is {} bytes, exceeding the {max_bytes}-byte cap",
+                raw_bytes.len()
+            )));
+        }
 
         let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
         let digest: Digest =
@@ -1818,6 +1872,62 @@ mod tests {
             }
             other => panic!("expected Err(ClientError::DigestMismatch), got {other:?}"),
         }
+    }
+
+    /// Registers a valid manifest under a tag and returns the byte length the
+    /// registry serves, so a test can put the cap exactly on that boundary.
+    fn stub_manifest_of_known_length(id: &Identifier, data: &StubTransportData) -> usize {
+        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+        let length = manifest_data.len();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        length
+    }
+
+    /// A body one byte over the ceiling is refused (CWE-400). Digest
+    /// verification is not a size check — a hostile registry can serve a
+    /// multi-gigabyte body whose digest matches — and `announce` commits these
+    /// bytes verbatim into a public git repository.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_refuses_over_cap_body() {
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        let length = stub_manifest_of_known_length(&id, &data);
+        let client = stub(&data);
+
+        match client.fetch_manifest_raw_bytes_capped(&id, length - 1).await {
+            Err(ClientError::InvalidManifest(message)) => {
+                assert!(
+                    message.contains(&length.to_string()),
+                    "the refusal must name the actual size: {message}"
+                );
+                assert!(
+                    message.contains(&(length - 1).to_string()),
+                    "the refusal must name the limit: {message}"
+                );
+            }
+            other => panic!("expected Err(ClientError::InvalidManifest), got {other:?}"),
+        }
+    }
+
+    /// A body of exactly the ceiling is accepted — the cap is `>`, not `>=`.
+    /// Pinning the boundary keeps an off-by-one from silently rejecting a
+    /// legitimate maximal image index.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_accepts_body_at_exactly_the_cap() {
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        let length = stub_manifest_of_known_length(&id, &data);
+        let client = stub(&data);
+
+        let (raw_bytes, _digest, _parsed) = client
+            .fetch_manifest_raw_bytes_capped(&id, length)
+            .await
+            .expect("a body of exactly the cap must be accepted")
+            .expect("tag is present in the stub");
+        assert_eq!(raw_bytes.len(), length);
     }
 
     // ── Pagination tests ─────────────────────────────────────────────
@@ -3426,6 +3536,82 @@ mod tests {
             assert_eq!(index.manifests[0].size, 200);
         }
 
+        /// Seeds an existing index carrying `artifact_type` and returns its
+        /// identifier, so the two stamping tests differ only in that value.
+        fn seed_existing_index(data: &StubTransportData, artifact_type: Option<&str>) -> Identifier {
+            let id = test_identifier("3.28");
+            let existing = oci::ImageIndex {
+                schema_version: 2,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: artifact_type.map(str::to_string),
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: "sha256:arm64_digest".to_string(),
+                    size: 50,
+                    platform: Some(platform("linux/arm64").into()),
+                    artifact_type: None,
+                    annotations: None,
+                }],
+                annotations: None,
+            };
+            let existing_bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
+            let existing_digest = oci::Algorithm::Sha256.hash(&existing_bytes).to_string();
+            data.write()
+                .manifests
+                .insert(id.canonical_reference().to_string(), (existing_bytes, existing_digest));
+            id
+        }
+
+        /// Bug 19: the pass-through branch used to leave `artifactType` exactly
+        /// as found, so an index that was never stamped stayed unstamped
+        /// forever — identical pushes emitting different documents on
+        /// repository history alone.
+        #[tokio::test]
+        async fn merge_stamps_artifact_type_on_an_unstamped_existing_index() {
+            let data = StubTransportData::new();
+            let id = seed_existing_index(&data, None);
+
+            let client = stub_with_capture(&data);
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:amd64_new",
+                    200,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(index.artifact_type.as_deref(), Some(MEDIA_TYPE_PACKAGE_V1));
+        }
+
+        /// Filling an absent field states what ocx wrote; overwriting a
+        /// declared one would relabel someone else's document.
+        #[tokio::test]
+        async fn merge_preserves_a_foreign_artifact_type_on_an_existing_index() {
+            let data = StubTransportData::new();
+            let id = seed_existing_index(&data, Some("application/vnd.example.other.v1"));
+
+            let client = stub_with_capture(&data);
+            client
+                .merge_platform_into_index(
+                    &id,
+                    "3.28",
+                    &platform("linux/amd64"),
+                    "sha256:amd64_new",
+                    200,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(index.artifact_type.as_deref(), Some("application/vnd.example.other.v1"));
+        }
+
         #[tokio::test]
         async fn existing_image_manifest_upgrades_to_index() {
             let data = StubTransportData::new();
@@ -3778,6 +3964,54 @@ mod tests {
 
             let result = client.push_canonical_tag(&id, &merged, &platform("linux/amd64")).await;
             assert!(result.is_err(), "must propagate a missing source manifest as an error");
+        }
+
+        #[tokio::test]
+        async fn canonical_tag_push_reports_the_tag_it_wrote() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let hex = "c".repeat(64);
+            let digest = format!("sha256:{hex}");
+
+            let digest_ref = id
+                .without_tag()
+                .clone_with_digest(oci::Digest::Sha256(hex.clone()))
+                .canonical_reference();
+            data.write()
+                .manifests
+                .insert(digest_ref.to_string(), (b"platform manifest".to_vec(), digest.clone()));
+
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&digest, platform("linux/amd64"));
+
+            let written = client
+                .push_canonical_tag(&id, &merged, &platform("linux/amd64"))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                written,
+                Some(format!("sha256.{hex}")),
+                "the report must name the tag that was actually written"
+            );
+        }
+
+        /// N-6 regression guard: the skip branch used to be indistinguishable
+        /// from a successful write, so the push report could claim a canonical
+        /// tag that never reached the registry.
+        #[tokio::test]
+        async fn canonical_tag_push_reports_nothing_on_the_skip_branch() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&format!("sha256:{}", "a".repeat(64)), platform("linux/amd64"));
+
+            let written = client
+                .push_canonical_tag(&id, &merged, &platform("linux/arm64"))
+                .await
+                .unwrap();
+
+            assert_eq!(written, None, "an unmatched platform must report no tag");
         }
     }
 
