@@ -87,11 +87,44 @@ Before writing new code, ask:
 
 ---
 
+## Don't Own Non-Domain Code
+
+Ask **before** the reusability questions above: *should this code exist in this repo at
+all?* Separation of concerns applies across the repo boundary too. Build what the product
+**is**; serialization, compression, hashing, HTTP, TLS, dates, globbing, terminal
+rendering are solved elsewhere. A library is tested by every one of its users — code you
+own is tested only by the fixtures you thought to write.
+
+**Bar for owning it** (fork / vendor / hand-roll) — narrow, and only one of:
+
+1. **No library implements the requirement**, verified by searching, not assumed.
+2. **A library exists but leaks substantial features genuinely needed** — precedent: the
+   `oci-client` fork (`external/rust-oci-client`), forked for missing capability, not a
+   disliked API.
+3. A few lines with no edge cases (YAGNI — no dep for a one-liner).
+
+"Our format is slightly non-standard" does **not** qualify: delegate everything standard,
+own only the deviation as a named, tested seam.
+
+**Warn-tier**, escalating to **Block** for anything parsing/emitting an external wire
+format (serializers, codecs, escaping) — those fail silently, past local fixtures.
+
+> Worked example: a hand-written JSON emitter used escape boundary `> 0x7F` instead of
+> `>= 0x7F`; its unit test *and* doc comment both affirmed the wrong rule, and no golden
+> fixture contained the offending byte.
+
+**Review implication.** Invisible to diff-scoped review — when the file already exists, no
+reviewer of the *change* is prompted to question the *file*. Ask it whenever a diff
+touches a module whose subject is not the product's domain.
+
+---
+
 ## Code Review Checklist (All Languages)
 
 - [ ] Errors propagated with context, not swallowed; logged once at boundary
 - [ ] No god objects — each module/class single responsibility
 - [ ] Follows existing codebase patterns (grep before inventing)
+- [ ] Nothing non-domain is hand-owned — no hand-rolled serializer/codec/escaping where a maintained library fits (see "Don't Own Non-Domain Code"); applies to files the diff merely *touches*, not only files it adds
 - [ ] Generic logic in library layer, command-specific in application layer
 - [ ] No premature abstractions — extraction justified by real duplication
 - [ ] External input validated at system boundaries
