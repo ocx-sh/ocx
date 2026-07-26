@@ -102,26 +102,17 @@ impl Exec {
         config_view: &OcxConfigView,
     ) -> anyhow::Result<ExitCode> {
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
-        process_env.apply_entries(&entries);
-        // Forward the running ocx's resolution-affecting config (binary path,
-        // offline/remote, config file, index) to any child ocx (e.g. through
-        // a generated entrypoint launcher). Runs after `Env::clean()` /
-        // `Env::new()` so the outer ocx's parsed state is the sole authority
-        // for `OCX_*` keys on the child env — no ambient parent-shell export
-        // can override it.
-        process_env.apply_ocx_config(config_view);
-        // Forward the overrides over `OCX_ENV`, AFTER `apply_ocx_config` —
-        // which unconditionally strips any stale inherited value, so the order
-        // is load-bearing, not stylistic.
-        //
-        // A package that declares entrypoints resolves THROUGH its generated
-        // launcher here too: `composer` pushes the synthetic `entrypoints/`
-        // PATH entry last precisely so it shadows `bin/`. That launcher
-        // re-enters `ocx launcher exec`, which builds a fresh `Env` and
-        // re-applies the package's own entries on top — silently reverting the
-        // override unless it is forwarded. Same failure R1 closes for the
-        // project tier, reached by the same path.
-        process_env.set_forwarded_env(env_overrides);
+        // Composed entries + forwarded ocx config + forwarded overrides, in the
+        // one order that is correct — see `Env::apply_child_env`. On this tier
+        // the `--env` overrides are the whole forwarded slice: there is no
+        // project or group `[env]` to carry.
+        process_env.apply_child_env(
+            env::ChildEnv {
+                composed: &entries,
+                forwarded: env_overrides,
+            },
+            config_view,
+        );
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.

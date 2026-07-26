@@ -136,7 +136,7 @@ impl PackageTest {
 
         let manager = context.manager();
         let fs = context.file_structure();
-        let temp_test_root = fs.temp.root().join("test");
+        let temp_test_root = fs.temp.package_test_root();
 
         // Step 3: Decide destination + tempdir lifecycle.
         //
@@ -232,15 +232,28 @@ impl PackageTest {
             .resolve_env(
                 &[Arc::new(info_via_root)],
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
+                // Cloned, not moved: the same overrides are ALSO the forwarded
+                // slice below, and a handful of entries is cheaper than the
+                // machinery to hand them back out of the scope.
+                ocx_lib::package_manager::EnvScope::Package {
+                    env: env_overrides.clone(),
+                },
             )
             .await?;
 
-        // Step 6: Compose env (mirrors exec.rs).
+        // Step 6: Compose env (mirrors exec.rs). Composed entries + forwarded
+        // ocx config + forwarded overrides, in the one order that is correct —
+        // see `Env::apply_child_env`. This command materialises packages that
+        // may declare entrypoints, so the launcher hop is the ordinary path
+        // here, not a corner case.
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
-        process_env.apply_entries(&entries);
-        // Block-tier: forward running ocx's resolution-affecting config to child.
-        process_env.apply_ocx_config(context.config_view());
+        process_env.apply_child_env(
+            env::ChildEnv {
+                composed: &entries,
+                forwarded: &env_overrides,
+            },
+            context.config_view(),
+        );
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim resolved via the default Windows PATHEXT.
 

@@ -54,6 +54,7 @@ def _make_test_package(
     bins: list[str] | None = None,
     env: list[dict] | None = None,
     dependencies: list[dict] | None = None,
+    entrypoints: dict[str, dict] | None = None,
 ) -> tuple[Path, Path, PackageInfo]:
     """Create a local package layout (content dir + metadata file + bundle) for
     use with ``ocx package test``.
@@ -101,6 +102,8 @@ def _make_test_package(
     metadata_obj: dict = {"type": "bundle", "version": 1, "env": metadata_env}
     if dependencies:
         metadata_obj["dependencies"] = dependencies
+    if entrypoints:
+        metadata_obj["entrypoints"] = entrypoints
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{unique_repo}-{tag}.tar.xz"
@@ -135,6 +138,15 @@ def _ocx_home(ocx: OcxRunner) -> Path:
 def _temp_test_dir(ocx: OcxRunner) -> Path:
     """Return the default temp/test/ directory used by ``ocx package test``."""
     return _ocx_home(ocx) / "temp" / "test"
+
+
+def _dumped_value(dump: str, key: str) -> str | None:
+    """Return the value of a ``KEY=value`` line in an ``env``-dumped block."""
+    prefix = f"{key}="
+    for line in dump.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1184,4 +1196,75 @@ def test_runs_entrypoint_with_keep(
     assert kept_path.exists(), (
         f"--keep must preserve tempdir at {kept_path} after entrypoint exit, "
         f"but it does not exist"
+    )
+
+
+def test_env_flag_survives_generated_entrypoint_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A ``--env`` override reaches a tool invoked THROUGH a generated launcher.
+
+    Sibling of
+    ``test_env.py::test_package_exec_env_flag_survives_generated_entrypoint_launcher``
+    — same property, the other command that composes AND spawns. A package
+    declaring entrypoints resolves through its launcher, which re-enters ``ocx
+    launcher exec``: a process with no project context that rebuilds its env
+    from scratch and re-applies the package's own entries on top. Without the
+    override being forwarded across that hop the package-declared value is
+    silently restored.
+
+    The override MUST target a key the package itself declares. A key the
+    package does not declare survives the hop by plain inheritance whether or
+    not it was forwarded, so a test using one passes either way and proves
+    nothing.
+    """
+    home_key = unique_repo.upper().replace("-", "_") + "_HOME"
+    bundle, metadata_path, pkg_info = _make_test_package(
+        ocx,
+        unique_repo,
+        tmp_path,
+        env=[
+            {
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+                "visibility": "public",
+            },
+            {
+                "key": home_key,
+                "type": "constant",
+                "value": "${installPath}",
+                "visibility": "public",
+            },
+            {
+                "key": "LAUNCHER_PROBE",
+                "type": "constant",
+                "value": "package-value",
+                "visibility": "public",
+            },
+        ],
+        entrypoints={"showenv": {"command": "env"}},
+    )
+
+    result = ocx.plain(
+        "package", "test",
+        "-p", _PLATFORM,
+        "-m", str(metadata_path),
+        "--env", "LAUNCHER_PROBE=flag-value",
+        "-i", pkg_info.short,
+        str(bundle),
+        "--",
+        "showenv",  # the generated entrypoint launcher, not the bin/ script
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"expected exit 0 running the generated entrypoint; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert _dumped_value(result.stdout, "LAUNCHER_PROBE") == "flag-value", (
+        f"the override must survive the launcher re-entry — without forwarding "
+        f"the launcher re-applies the package's own 'package-value' on top; "
+        f"stdout:\n{result.stdout}"
     )

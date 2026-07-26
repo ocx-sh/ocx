@@ -41,7 +41,7 @@ use crate::{
 };
 
 use super::super::{PackageManager, error::PackageErrorKind};
-use super::resolve::PatchProvenance;
+use super::resolve::{PatchOverlay, PatchProvenance};
 
 // ── Public result type ─────────────────────────────────────────────────────────
 
@@ -62,10 +62,27 @@ pub struct PatchTestComposition {
     /// `[0..patch_start)` are the base's native interface surface; entries at
     /// `[patch_start..)` are the companion overlay carrying [`PatchProvenance`].
     pub patch_start: usize,
-    /// Per-overlay-entry provenance, aligned one-to-one with `entries[patch_start..]`
-    /// (`provenance.len() == entries.len() - patch_start`). Names the rule glob +
-    /// companion that produced each overlay entry so `ocx patch test` can trace it.
+    /// Per-overlay-entry provenance, aligned one-to-one with the overlay region.
+    /// Names the rule glob + companion that produced each overlay entry so
+    /// `ocx patch test` can trace it.
+    ///
+    /// Shorter than `entries[patch_start..]` whenever the caller contributed
+    /// `--env` overrides — those compose after the overlay and are nobody's
+    /// companion contribution. Read it through [`Self::overlay`], never by
+    /// indexing.
     pub provenance: Vec<PatchProvenance>,
+}
+
+impl PatchTestComposition {
+    /// The companion-overlay region of [`Self::entries`], for attributing a
+    /// composed entry to the rule + companion that produced it.
+    ///
+    /// The one supported way to read [`Self::provenance`]: it bound-checks, so
+    /// an `--env` override sitting past the overlay reports as unattributed
+    /// instead of panicking on an out-of-range index.
+    pub fn overlay(&self) -> PatchOverlay<'_> {
+        PatchOverlay::new(self.patch_start, &self.provenance)
+    }
 }
 
 // ── PackageManager::seed_and_compose_patch_test ────────────────────────────────

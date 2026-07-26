@@ -233,14 +233,6 @@ impl Run {
         // ── Phase G: spawn child ──────────────────────────────────────────
 
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
-        process_env.apply_entries(&entries);
-        // Forward the running ocx's resolution-affecting config (binary path,
-        // offline/remote, config file, index) to any child ocx (e.g. through
-        // a generated entrypoint launcher). Runs after `Env::clean()` /
-        // `Env::new()` so the outer ocx's parsed state is the sole authority
-        // for `OCX_*` keys on the child env — no ambient parent-shell export
-        // can override it.
-        //
         // Inject the project `no-patches` opt-out into the forwarded patch tier:
         // the base `config_view().patches` carries only the config-file tier
         // (empty `no_patches`). Forwarding the opt-out over `OCX_PATCHES` lets a
@@ -263,25 +255,21 @@ impl Run {
                 forwarded_no_patches.insert(info.identifier().digest().to_string());
             }
         }
-        let mut forwarded = context.config_view().clone();
-        if let Some(patches) = forwarded.patches.as_mut() {
+        let mut forwarded_config = context.config_view().clone();
+        if let Some(patches) = forwarded_config.patches.as_mut() {
             patches.no_patches = forwarded_no_patches;
         }
-        process_env.apply_ocx_config(&forwarded);
-        // Forward stages 4-6 over `OCX_ENV`, after `apply_ocx_config` (which
-        // clears any stale inherited value).
-        //
-        // A package that declares entrypoints resolves THROUGH its generated
-        // launcher on the ordinary `ocx run` path — `composer` pushes the
-        // synthetic `entrypoints/` PATH entry last precisely so it shadows
-        // `bin/`. The launcher re-enters `ocx launcher exec`, which has no
-        // `ProjectConfig` by construction: it builds a fresh `Env` from the
-        // inherited environment and re-applies the package's own entries on
-        // top, silently reverting exactly the overrides this project declared.
-        // Forwarding the payload is what lets the launcher re-apply stages 4-6
-        // last and preserve them. Only the package-composed entries are
-        // re-derived on the child side; these are not.
-        process_env.set_forwarded_env(&project_env);
+        // Composed entries + forwarded ocx config + forwarded stages 4-6, in the
+        // one order that is correct — see `Env::apply_child_env`. `project_env`
+        // (stages 4-6) is the forwarded slice, NOT the whole composed set: the
+        // launcher re-derives the package entries itself.
+        process_env.apply_child_env(
+            env::ChildEnv {
+                composed: &entries,
+                forwarded: &project_env,
+            },
+            &forwarded_config,
+        );
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.

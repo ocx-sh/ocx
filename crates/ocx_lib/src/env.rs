@@ -209,6 +209,29 @@ impl OcxConfigView {
     }
 }
 
+/// The two entry slices [`Env::apply_child_env`] needs, as named fields.
+///
+/// They are different slices and confusing them produces a wrong child
+/// environment with no error anywhere:
+///
+/// - `composed` is everything the parent resolved — the package-composed set,
+///   the patch companion overlay, and (project tier) the project / group
+///   `[env]` plus `--env`. This is what the child process itself runs with.
+/// - `forwarded` is ONLY the caller-contributed tail: project `[env]`, group
+///   `[env]`, `--env`. A launcher re-entry re-derives the package-composed part
+///   from the package itself, so forwarding the whole set would make it apply
+///   that part twice and bloat the payload for no gain.
+///
+/// Both are `&[Entry]`, so two positional parameters would transpose silently.
+/// Named fields at every call site are the entire reason this struct exists —
+/// it carries no behaviour of its own.
+pub struct ChildEnv<'a> {
+    /// The full composed environment the child process runs with.
+    pub composed: &'a [crate::package::metadata::env::entry::Entry],
+    /// The caller-contributed entries only, forwarded over [`keys::OCX_ENV`].
+    pub forwarded: &'a [crate::package::metadata::env::entry::Entry],
+}
+
 #[cfg(target_os = "windows")]
 pub const PATH_SEPARATOR: &str = ";";
 
@@ -381,8 +404,8 @@ impl Env {
         // `OcxConfigView`. This half of the contract guarantees a stale
         // `OCX_ENV` — exported by a shell, or inherited from an unrelated
         // parent `ocx run` — can never reach a child. The invocation that
-        // genuinely has a payload writes it afterwards via
-        // [`Self::set_forwarded_env`].
+        // genuinely has a payload writes it afterwards, through
+        // [`Self::apply_child_env`].
         self.remove(keys::OCX_ENV);
         // Resolution-affecting, but a pure env opt-in with no `ContextOptions`
         // / CLI counterpart (unlike the flags above): its authoritative value
@@ -396,15 +419,52 @@ impl Env {
         }
     }
 
+    /// Builds the environment for a child process: the composed entries, the
+    /// running ocx's resolution-affecting config, and the forwarded
+    /// caller-contributed payload — in that order.
+    ///
+    /// **Every command that composes an environment and then spawns must go
+    /// through this seam.** The three steps are one operation, not three
+    /// independent ones, and the order between them is load-bearing:
+    ///
+    /// 1. [`Self::apply_entries`] lays down what the parent composed.
+    /// 2. [`Self::apply_ocx_config`] runs after [`Self::clean`] / [`Self::new`]
+    ///    so the outer ocx's parsed state is the sole authority for `OCX_*` keys
+    ///    on the child env — no ambient parent-shell export can override it. It
+    ///    also unconditionally strips any inherited [`keys::OCX_ENV`].
+    /// 3. The forwarded payload is written *after* that strip. Doing it in the
+    ///    other order would write the payload and then delete it.
+    ///
+    /// Forwarding is what keeps a per-invocation override alive across a
+    /// launcher hop. A package that declares entrypoints resolves THROUGH its
+    /// generated launcher on the ordinary spawn path — `composer` pushes the
+    /// synthetic `entrypoints/` PATH entry last precisely so it shadows `bin/`.
+    /// That launcher re-enters `ocx launcher exec`, a process with no
+    /// `ProjectConfig` by construction: it builds a fresh `Env` from the
+    /// inherited environment and re-applies the package's own entries on top,
+    /// silently reverting exactly the overrides the caller declared. Only the
+    /// package-composed entries are re-derived on the child side; the forwarded
+    /// ones are not, which is why they must travel over [`keys::OCX_ENV`].
+    ///
+    /// Skipping step 3 is not a degraded mode — it is a silent wrong answer, so
+    /// the payload is not optional here and [`keys::OCX_ENV`] cannot be written
+    /// from outside this module.
+    pub fn apply_child_env(&mut self, env: ChildEnv<'_>, config: &OcxConfigView) {
+        self.apply_entries(env.composed);
+        self.apply_ocx_config(config);
+        self.set_forwarded_env(env.forwarded);
+    }
+
     /// Writes the forwarded project/group `[env]` payload onto this env as
     /// [`keys::OCX_ENV`], so a generated entrypoint launcher's re-entry
     /// (`ocx launcher exec`) can re-apply it after the package entries.
     ///
-    /// Call **after** [`Self::apply_ocx_config`], which unconditionally clears
-    /// the key. The two halves are deliberate: `apply_ocx_config` guarantees no
-    /// stale value survives, this method writes the payload of the invocation
-    /// that actually has one. An empty slice leaves the key absent.
-    pub fn set_forwarded_env(&mut self, entries: &[crate::package::metadata::env::entry::Entry]) {
+    /// Private, and called only from [`Self::apply_child_env`], which
+    /// guarantees the mandatory [`Self::apply_ocx_config`] strip runs first.
+    /// The two halves are deliberate: `apply_ocx_config` guarantees no stale
+    /// value survives, this method writes the payload of the invocation that
+    /// actually has one. An empty slice leaves the key absent.
+    fn set_forwarded_env(&mut self, entries: &[crate::package::metadata::env::entry::Entry]) {
         match encode_forwarded_env(entries) {
             Some(json) => self.set(keys::OCX_ENV, json),
             None => self.remove(keys::OCX_ENV),

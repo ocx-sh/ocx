@@ -364,25 +364,24 @@ impl ToolchainEnv {
 
         // Structured report. Format is a context-level concern (root
         // `--format`); this command does not override it.
+        // The companion-overlay region, for `--show-patches` attribution. The
+        // overlay is the MIDDLE region — the project / group `[env]` stages and
+        // `--env` follow it — so the bound-checked accessor is what keeps a
+        // project entry from being mislabelled as a companion (and from indexing
+        // past `provenance`).
+        let overlay = ocx_lib::package_manager::PatchOverlay::new(patch_start, &provenance);
         let env_data: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                // Annotate origin when `--show-patches` is enabled. The overlay
-                // occupies `[patch_start .. patch_start + provenance.len())`;
-                // the project/group `[env]` stages follow it, so the bound
-                // check is what keeps a project entry from being mislabelled as
-                // a companion (and from indexing past `provenance`).
-                let source = if self.show_patches {
-                    i.checked_sub(patch_start)
-                        .and_then(|offset| provenance.get(offset))
-                        .map(|prov| api::data::env::EntrySource::Patch {
-                            rule: prov.rule_match.clone(),
-                            companion: prov.companion.to_string(),
-                        })
-                } else {
-                    None
-                };
+                let source = self
+                    .show_patches
+                    .then(|| overlay.provenance_for(i))
+                    .flatten()
+                    .map(|prov| api::data::env::EntrySource::Patch {
+                        rule: prov.rule_match.clone(),
+                        companion: prov.companion.to_string(),
+                    });
                 api::data::env::EnvEntry {
                     key: e.key,
                     value: e.value,

@@ -281,7 +281,7 @@ pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdate
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{
-    AdmittedBinaries, ChainBlob, ChainRole, EnvScope, PatchProvenance, ResolvedChain, SitePatchRoots,
+    AdmittedBinaries, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, ResolvedChain, SitePatchRoots,
 };
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 

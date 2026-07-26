@@ -36,6 +36,103 @@ pub struct PatchProvenance {
     pub companion: oci::Identifier,
 }
 
+/// The companion-overlay region of a composed entry vector, and the only way to
+/// ask "what produced `entries[i]`?".
+///
+/// The overlay is the MIDDLE region of the vector — it runs from `patch_start`
+/// for `provenance.len()` entries, with the caller's project / group `[env]` and
+/// `--env` appended after it. `index >= patch_start` therefore does NOT imply
+/// the entry is a companion contribution, and indexing
+/// `provenance[index - patch_start]` on that assumption panics the moment a
+/// caller passes any `--env`. Every consumer goes through
+/// [`Self::provenance_for`] so that subtraction and its bound check exist
+/// exactly once.
+///
+/// Borrowing view, constructed at the annotation site — the resolve pipeline
+/// keeps returning the boundary and the vector separately so callers that never
+/// annotate pay nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct PatchOverlay<'a> {
+    patch_start: usize,
+    provenance: &'a [PatchProvenance],
+}
+
+impl<'a> PatchOverlay<'a> {
+    /// Views the overlay region described by a `resolve_env_with_patch_boundary`
+    /// (or `..._with_attribution`) result.
+    pub fn new(patch_start: usize, provenance: &'a [PatchProvenance]) -> Self {
+        Self {
+            patch_start,
+            provenance,
+        }
+    }
+
+    /// The [`PatchProvenance`] for the composed entry at `index`, or `None` when
+    /// that entry is not a companion contribution.
+    ///
+    /// `None` covers both entries before the overlay (the package-composed set)
+    /// and entries after it (project / group `[env]`, `--env`). Both must render
+    /// unattributed — never mislabelled as some companion's doing.
+    pub fn provenance_for(&self, index: usize) -> Option<&'a PatchProvenance> {
+        index
+            .checked_sub(self.patch_start)
+            .and_then(|offset| self.provenance.get(offset))
+    }
+}
+
+#[cfg(test)]
+mod patch_overlay_tests {
+    use super::{PatchOverlay, PatchProvenance};
+    use crate::oci::Identifier;
+
+    fn provenance(rule: &str) -> PatchProvenance {
+        PatchProvenance {
+            rule_match: rule.to_string(),
+            companion: Identifier::new_registry("companion", "ocx.sh"),
+        }
+    }
+
+    /// The three regions of a composed entry vector, in one assertion set:
+    /// package-composed entries before the overlay and caller entries after it
+    /// are both unattributed; only the overlay itself carries provenance.
+    ///
+    /// The trailing region is the regression: `--env` overrides compose after
+    /// the overlay, so `index >= patch_start` alone is not the membership test.
+    #[test]
+    fn provenance_for_covers_only_the_overlay_region() {
+        // entries: [0,1] composed | [2,3] overlay | [4] an `--env` override.
+        let provenances = vec![provenance("first"), provenance("second")];
+        let overlay = PatchOverlay::new(2, &provenances);
+
+        assert!(overlay.provenance_for(0).is_none(), "composed entry has no provenance");
+        assert!(overlay.provenance_for(1).is_none(), "composed entry has no provenance");
+        assert_eq!(
+            overlay.provenance_for(2).map(|p| p.rule_match.as_str()),
+            Some("first"),
+            "the first overlay entry maps to the first provenance slot"
+        );
+        assert_eq!(overlay.provenance_for(3).map(|p| p.rule_match.as_str()), Some("second"));
+        assert!(
+            overlay.provenance_for(4).is_none(),
+            "an `--env` override sits past the overlay and is nobody's companion contribution"
+        );
+    }
+
+    /// No patch tier configured: the overlay is empty and `patch_start` equals
+    /// the compose count, so every index — including the caller's own entries
+    /// past it — must report unattributed rather than panic.
+    #[test]
+    fn provenance_for_empty_overlay_attributes_nothing() {
+        let overlay = PatchOverlay::new(2, &[]);
+        for index in 0..4 {
+            assert!(
+                overlay.provenance_for(index).is_none(),
+                "index {index} must be unattributed with an empty overlay"
+            );
+        }
+    }
+}
+
 /// Map from each admitted identifier to its companion INTERFACE env entries,
 /// each paired with the [`PatchProvenance`] that admitted it.
 ///

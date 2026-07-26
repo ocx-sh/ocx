@@ -42,16 +42,19 @@ impl LauncherExec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let fs = context.file_structure();
         let packages_root = fs.packages.root();
-        // Also allow launchers materialised under the package-test temp root
-        // ($OCX_HOME/temp/test/) — `ocx package test` places packages there and
-        // the launchers bake that path as their pkg-root.
-        let temp_test_root = fs.temp.root().join("test");
+        // Also allow launchers materialised under the two command-scratch roots:
+        // `ocx package test` ($OCX_HOME/temp/test/) and `ocx patch test`
+        // ($OCX_HOME/temp/patch-test/) both place packages there, and the
+        // launchers bake that path as their pkg-root. An explicit two-entry
+        // allow-list on purpose — widening the guard to "anything under temp/"
+        // would defeat it, since temp/ also holds in-progress download dirs.
+        let scratch_roots = [fs.temp.package_test_root(), fs.temp.patch_test_root()];
         let manager = context.manager();
 
-        // Validate: pkg_root must be absolute, under $OCX_HOME/packages/ OR
-        // $OCX_HOME/temp/test/ (package-test materialization path), and contain
-        // metadata.json. Errors surface as UsageError (exit 64).
-        let validated = validate_launcher_pkg_root(&self.pkg_root, packages_root, Some(&temp_test_root)).await?;
+        // Validate: pkg_root must be absolute, under $OCX_HOME/packages/ or one
+        // of the scratch roots above, and contain metadata.json. Errors surface
+        // as UsageError (exit 64).
+        let validated = validate_launcher_pkg_root(&self.pkg_root, packages_root, &scratch_roots).await?;
         // Wrap the validated package root in a PackageDir so every per-package
         // path (`content/`, `metadata.json`, ...) comes from the file-structure
         // layout accessors — the single source of truth for the package layout —
@@ -190,17 +193,19 @@ impl LauncherExec {
         config_view: &OcxConfigView,
     ) -> anyhow::Result<ExitCode> {
         let mut process_env = env::Env::new();
-        process_env.apply_entries(&entries);
-        // Forward resolution-affecting OCX config to any grandchild ocx processes.
-        process_env.apply_ocx_config(config_view);
-        // Re-emit the forwarded payload AFTER `apply_ocx_config`, which cleared
-        // the key. Stripping then re-writing is what makes a stale ambient
-        // `OCX_ENV` harmless while still handing the *current* validated payload
-        // down the chain: an entrypoint that invokes another generated launcher
-        // would otherwise re-apply that package's env with no project payload
-        // present, and the package value would beat the project override that
-        // stage 4-6 precedence promises. `ocx run` does the same pair.
-        process_env.set_forwarded_env(project_env);
+        // Composed entries + forwarded ocx config (for any grandchild ocx) +
+        // the re-emitted payload, in the one order that is correct — see
+        // `Env::apply_child_env`. Re-emitting matters here because an entrypoint
+        // may itself invoke another generated launcher: without the payload at
+        // that second hop the package value would beat the project override
+        // stage 4-6 precedence promises.
+        process_env.apply_child_env(
+            env::ChildEnv {
+                composed: &entries,
+                forwarded: project_env,
+            },
+            config_view,
+        );
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim resolved via the default Windows PATHEXT.
 
@@ -215,13 +220,16 @@ impl LauncherExec {
 ///
 /// The path must:
 /// - Be absolute
-/// - Canonicalize to a location inside `packages_root` OR `extra_root` (when `Some`)
+/// - Canonicalize to a location inside `packages_root` OR one of `extra_roots`
 /// - Contain `metadata.json`
 ///
-/// `extra_root` is supplied for the `package test` materialization path
-/// (`$OCX_HOME/temp/test/`): launchers baked into a test-materialized package
-/// carry the temp path as their pkg-root, which is equally OCX-controlled and
-/// equally safe to allow.
+/// `extra_roots` carries the command-scratch materialization paths
+/// (`$OCX_HOME/temp/test/` for `ocx package test`, `$OCX_HOME/temp/patch-test/`
+/// for `ocx patch test`): launchers baked into a package materialized there
+/// carry the scratch path as their pkg-root, which is equally OCX-controlled and
+/// equally safe to allow. It is a short explicit list, never a rule like
+/// "anything under `temp/`" — the guard's value is exactly that the accepted set
+/// is enumerated.
 ///
 /// This mirrors the former `validate_package_root` from `options/package_ref.rs`,
 /// now inlined here (its only remaining caller) with error messages updated to
@@ -229,7 +237,7 @@ impl LauncherExec {
 async fn validate_launcher_pkg_root(
     dir: &std::path::Path,
     packages_root: &std::path::Path,
-    extra_root: Option<&std::path::Path>,
+    extra_roots: &[PathBuf],
 ) -> Result<PathBuf, UsageError> {
     if !dir.is_absolute() {
         return Err(UsageError::new(format!(
@@ -255,17 +263,20 @@ async fn validate_launcher_pkg_root(
     // nothing.
     let canonical_root = tokio::fs::canonicalize(packages_root).await.ok();
 
-    // Canonicalize extra_root when present; `.ok()` so that a non-existent
-    // extra root (temp/test/ created lazily) simply yields None and cannot
-    // match as a prefix of canonical_dir.
-    let canonical_extra = if let Some(extra) = extra_root {
-        tokio::fs::canonicalize(extra).await.ok()
-    } else {
-        None
-    };
+    // Canonicalize each extra root; `.ok()` so that a non-existent one (the
+    // scratch roots are created lazily by their command) is simply skipped and
+    // cannot match as a prefix of canonical_dir.
+    let mut under_extra = false;
+    for extra in extra_roots {
+        if let Ok(canonical_extra) = tokio::fs::canonicalize(extra).await
+            && canonical_dir.starts_with(&canonical_extra)
+        {
+            under_extra = true;
+            break;
+        }
+    }
 
     let under_packages = canonical_root.as_ref().is_some_and(|r| canonical_dir.starts_with(r));
-    let under_extra = canonical_extra.as_ref().is_some_and(|r| canonical_dir.starts_with(r));
 
     if !under_packages && !under_extra {
         // Build a display path for the error. When packages_root does not
@@ -307,16 +318,22 @@ mod tests {
 
     // ── validate_launcher_pkg_root — key contract rows ───────────────────────
 
+    /// The two command-scratch roots the real call site allow-lists, rooted at
+    /// `tmp`. Mirrors `TempStore::package_test_root` / `patch_test_root`.
+    fn scratch_roots(tmp: &std::path::Path) -> [PathBuf; 2] {
+        [tmp.join("temp/test"), tmp.join("temp/patch-test")]
+    }
+
     /// Pkg root inside packages_root → accepted (normal install path).
     #[tokio::test]
     async fn accepts_path_under_packages_root() {
         let tmp = tempfile::tempdir().unwrap();
         let (packages_root, pkg_dir) = make_pkg_tree(tmp.path(), "packages", "abc123");
-        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, None).await;
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, &[]).await;
         assert!(result.is_ok(), "expected Ok; got {result:?}");
     }
 
-    /// Pkg root inside extra_root (temp/test/) → accepted (package-test path).
+    /// Pkg root inside the package-test scratch root (temp/test/) → accepted.
     #[tokio::test]
     async fn accepts_path_under_extra_root() {
         let tmp = tempfile::tempdir().unwrap();
@@ -324,8 +341,48 @@ mod tests {
         // packages_root is a separate sibling that does NOT contain pkg_dir.
         let packages_root = tmp.path().join("packages");
         std::fs::create_dir_all(&packages_root).unwrap();
-        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, Some(&temp_test_root)).await;
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, std::slice::from_ref(&temp_test_root)).await;
         assert!(result.is_ok(), "expected Ok for temp/test path; got {result:?}");
+    }
+
+    /// Regression: pkg root inside the `ocx patch test` scratch root
+    /// (temp/patch-test/) → accepted. That command composes into its own scratch
+    /// root, so allow-listing only temp/test rejected every `ocx patch test`
+    /// invocation naming a generated entrypoint with exit 64, before `--env` was
+    /// ever consulted. The path here matches what `patch test` actually bakes:
+    /// the scratch `FileStructure` puts packages under `<scratch>/packages/`.
+    #[tokio::test]
+    async fn accepts_path_under_patch_test_scratch_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, pkg_dir) = make_pkg_tree(tmp.path(), "temp/patch-test", "patch-test-XXXXX/packages/pkg");
+        let packages_root = tmp.path().join("packages");
+        std::fs::create_dir_all(&packages_root).unwrap();
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, &scratch_roots(tmp.path())).await;
+        assert!(result.is_ok(), "expected Ok for temp/patch-test path; got {result:?}");
+    }
+
+    /// Security boundary: the allow-list stays an enumeration of the two known
+    /// scratch roots. `temp/` itself and an unrelated `temp/other` are NOT
+    /// accepted — a guard widened to "anything under temp/" would admit the
+    /// in-progress download directories that share that root.
+    #[tokio::test]
+    async fn rejects_temp_root_itself_and_unrelated_temp_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let packages_root = tmp.path().join("packages");
+        std::fs::create_dir_all(&packages_root).unwrap();
+        for root in scratch_roots(tmp.path()) {
+            std::fs::create_dir_all(&root).unwrap();
+        }
+
+        // A package sitting directly in temp/ ...
+        let (_, in_temp_root) = make_pkg_tree(tmp.path(), "temp", "loose-pkg");
+        let result = validate_launcher_pkg_root(&in_temp_root, &packages_root, &scratch_roots(tmp.path())).await;
+        assert!(result.is_err(), "temp/ itself must not be allow-listed; got Ok");
+
+        // ... and one under an unrelated temp sibling.
+        let (_, in_other) = make_pkg_tree(tmp.path(), "temp/other", "pkg");
+        let result = validate_launcher_pkg_root(&in_other, &packages_root, &scratch_roots(tmp.path())).await;
+        assert!(result.is_err(), "temp/other must not be allow-listed; got Ok");
     }
 
     /// Regression: pkg root inside extra_root when packages_root does NOT EXIST
@@ -341,7 +398,7 @@ mod tests {
         // where no `ocx install` has ever been run.
         let packages_root = tmp.path().join("packages");
         assert!(!packages_root.exists(), "test setup: packages_root must be absent");
-        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, Some(&temp_test_root)).await;
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, std::slice::from_ref(&temp_test_root)).await;
         assert!(
             result.is_ok(),
             "expected Ok for temp/test path with absent packages_root; got {result:?}"
@@ -363,7 +420,8 @@ mod tests {
         std::fs::create_dir_all(&outsider_dir).unwrap();
         std::fs::write(outsider_dir.join("metadata.json"), b"{}").unwrap();
 
-        let result = validate_launcher_pkg_root(&outsider_dir, &packages_root, Some(&temp_test_root)).await;
+        let result =
+            validate_launcher_pkg_root(&outsider_dir, &packages_root, std::slice::from_ref(&temp_test_root)).await;
         assert!(
             result.is_err(),
             "expected Err for outsider with absent packages_root; got Ok"
@@ -389,7 +447,8 @@ mod tests {
         std::fs::create_dir_all(&outsider_dir).unwrap();
         std::fs::write(outsider_dir.join("metadata.json"), b"{}").unwrap();
 
-        let result = validate_launcher_pkg_root(&outsider_dir, &packages_root, Some(&temp_test_root)).await;
+        let result =
+            validate_launcher_pkg_root(&outsider_dir, &packages_root, std::slice::from_ref(&temp_test_root)).await;
         assert!(result.is_err(), "expected Err for outsider path; got Ok");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -404,7 +463,7 @@ mod tests {
         let result = validate_launcher_pkg_root(
             std::path::Path::new("relative/path"),
             std::path::Path::new("/packages"),
-            None,
+            &[],
         )
         .await;
         assert!(result.is_err());
@@ -419,7 +478,7 @@ mod tests {
         let pkg_dir = packages_root.join("no-meta");
         std::fs::create_dir_all(&pkg_dir).unwrap();
         // metadata.json intentionally absent.
-        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, None).await;
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, &[]).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("missing metadata.json"),

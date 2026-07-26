@@ -56,6 +56,24 @@ impl TempStore {
         &self.root
     }
 
+    /// Scratch root `ocx package test` materialises packages into.
+    ///
+    /// Named here, not joined at each call site, because the path is shared by
+    /// a writer and a guard: `ocx package test` materialises here, and a
+    /// generated launcher inside such a package bakes this path as its
+    /// `pkg-root`, which `ocx launcher exec` allow-lists. Two spellings of the
+    /// literal would let the two drift, and the drift shows up as a usage error
+    /// on an otherwise valid invocation.
+    pub fn package_test_root(&self) -> PathBuf {
+        self.root.join("test")
+    }
+
+    /// Scratch root `ocx patch test` composes into. Allow-listed as a launcher
+    /// `pkg-root` prefix for the same reason as [`Self::package_test_root`].
+    pub fn patch_test_root(&self) -> PathBuf {
+        self.root.join("patch-test")
+    }
+
     /// Returns the temp directory path for the given identifier.
     ///
     /// Requires the identifier to carry a digest; returns an error otherwise.

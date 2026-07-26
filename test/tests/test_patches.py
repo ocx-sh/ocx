@@ -2308,3 +2308,237 @@ def test_index_update_writes_global_companion_into_the_local_index(
         "with the global companion via the patch-sync piggyback; if this now fails, the piggyback "
         "changed and the surprising cross-repository index writes are gone"
     )
+
+
+# ---------------------------------------------------------------------------
+# `ocx patch test --env` — per-invocation override
+# ---------------------------------------------------------------------------
+
+
+def _dumped_value(dump: str, key: str) -> str | None:
+    """Return the value of a ``KEY=value`` line in an ``env``-dumped block."""
+    prefix = f"{key}="
+    for line in dump.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
+
+
+def _entrypoint_base_declaring_probe(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> PackageInfo:
+    """Publish a base that declares an entrypoint AND its own ``LAUNCHER_PROBE``.
+
+    The entrypoint makes the base resolve through a generated launcher; the
+    declared constant is what the launcher re-applies at that hop.
+    """
+    return make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"showenv": {"command": "env"}},
+        env=[
+            {
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+            },
+            {
+                "key": "LAUNCHER_PROBE",
+                "type": "constant",
+                "value": "package-value",
+            },
+        ],
+    )
+
+
+def test_patch_test_runs_generated_entrypoint(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A trailing command that names a base's entrypoint runs.
+
+    The composed env puts the base's ``entrypoints/`` on ``PATH``, so naming an
+    entrypoint as the trailing command is the ordinary way to preview a patched
+    tool. The entrypoint resolves to a generated launcher that re-enters ``ocx
+    launcher exec`` with the materialized package root — which for this command
+    lives in the scratch store under ``$OCX_HOME/temp/patch-test/``, not under
+    ``$OCX_HOME/packages/`` and not under the ``$OCX_HOME/temp/test/`` root
+    ``ocx package test`` is allowed. No ``--env`` here: this pins the launcher
+    hop itself, so a failure separates from the forwarding assertion in the
+    sibling test below.
+    """
+    base_pkg = _entrypoint_base_declaring_probe(ocx, unique_repo, tmp_path)
+
+    descriptor_path = tmp_path / "entrypoint_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+    _write_config(ocx, registry)
+
+    result = ocx.plain(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        "--",
+        "showenv",  # the generated entrypoint launcher, not a bin/ script
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"expected exit 0 running the generated entrypoint; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert _dumped_value(result.stdout, "LAUNCHER_PROBE") == "package-value", (
+        f"the base's own declared value must reach the entrypoint; "
+        f"stdout:\n{result.stdout}"
+    )
+
+
+def test_patch_test_env_flag_survives_generated_entrypoint_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A ``--env`` override reaches a tool invoked THROUGH a generated launcher.
+
+    Sibling of
+    ``test_env.py::test_package_exec_env_flag_survives_generated_entrypoint_launcher``
+    — same property, the other command that composes AND spawns. A base that
+    declares entrypoints resolves through its launcher, which re-enters ``ocx
+    launcher exec``: a process with no project context that rebuilds its env
+    from scratch and re-applies the package's own entries on top. Without the
+    override being forwarded across that hop the package-declared value is
+    silently restored.
+
+    The override MUST target a key the base itself declares. A key the base
+    does not declare survives the hop by plain inheritance whether or not it
+    was forwarded, so a test using one passes either way and proves nothing.
+
+    Depends on ``test_patch_test_runs_generated_entrypoint`` above: while the
+    launcher hop is rejected outright, this test cannot reach the forwarding
+    assertion at all. Forwarding the override is necessary here but not
+    sufficient on its own.
+    """
+    base_pkg = _entrypoint_base_declaring_probe(ocx, unique_repo, tmp_path)
+
+    # A zero-rule descriptor keeps the composition to base entries + the
+    # override: the launcher hop is what is under test, not the overlay.
+    descriptor_path = tmp_path / "launcher_probe_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+    _write_config(ocx, registry)
+
+    result = ocx.plain(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--env", "LAUNCHER_PROBE=flag-value",
+        base_pkg.short,
+        "--",
+        "showenv",  # the generated entrypoint launcher, not a bin/ script
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"expected exit 0 running the generated entrypoint; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert _dumped_value(result.stdout, "LAUNCHER_PROBE") == "flag-value", (
+        f"the override must survive the launcher re-entry — without forwarding "
+        f"the launcher re-applies the base's own 'package-value' on top; "
+        f"stdout:\n{result.stdout}"
+    )
+
+
+def test_patch_test_report_lists_env_override_without_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Report mode (no trailing command) survives ``--env`` when no companion
+    contributes anything.
+
+    ``--env`` entries compose AFTER the companion overlay, so an override sits
+    at an index past the overlay region and carries no provenance. With an
+    empty overlay every override index is out of range for the provenance
+    vector — the report must attribute the entry to nothing, not index past
+    the end of the vector.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    descriptor_path = tmp_path / "no_companion_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--env", "REPORT_PROBE=from-flag",
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"`ocx patch test --env` in report mode must exit 0; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    override = _entry_by_key(report["entries"], "REPORT_PROBE")
+    assert override is not None, (
+        f"the override must appear in the report; got: {[e['key'] for e in report['entries']]}"
+    )
+    assert override["value"] == "from-flag", override
+    assert override.get("source") is None, (
+        f"an `--env` override is nobody's companion contribution — it must be "
+        f"reported unattributed; got: {override}"
+    )
+
+
+def test_patch_test_report_lists_env_override_alongside_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Report mode (no trailing command) survives ``--env`` when a companion
+    DOES contribute entries.
+
+    The overlay region is non-empty here, so the override lands past its end.
+    Both attributions must be right in the same report: the companion entry
+    names its rule + companion, the override names nothing.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("report_probe_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "COMPANION_PROBE", "companion-value")
+
+    descriptor_path = tmp_path / "companion_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--env", "REPORT_PROBE=from-flag",
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"`ocx patch test --env` in report mode must exit 0; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    companion_entry = _entry_by_key(report["entries"], "COMPANION_PROBE")
+    assert companion_entry is not None, (
+        f"the companion var must appear in the report; "
+        f"got: {[e['key'] for e in report['entries']]}"
+    )
+    assert companion_entry.get("source") is not None, (
+        f"a companion overlay entry must keep its provenance; got: {companion_entry}"
+    )
+
+    override = _entry_by_key(report["entries"], "REPORT_PROBE")
+    assert override is not None, (
+        f"the override must appear in the report; got: {[e['key'] for e in report['entries']]}"
+    )
+    assert override["value"] == "from-flag", override
+    assert override.get("source") is None, (
+        f"an `--env` override is nobody's companion contribution — it must be "
+        f"reported unattributed; got: {override}"
+    )

@@ -156,22 +156,23 @@ impl Env {
             return Ok(ExitCode::SUCCESS);
         }
 
+        // The companion-overlay region, for `--show-patches` attribution. The
+        // overlay is the MIDDLE region — the `--env` overrides compose after it —
+        // so the bound-checked accessor is what keeps an override from being
+        // mislabelled as a companion's doing (and from indexing past the vector).
+        let overlay = ocx_lib::package_manager::PatchOverlay::new(patch_start, &provenance);
         let all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                // Annotate origin when `--show-patches` is enabled. Entries at index
-                // `>= patch_start` came from companion overlay projections; the aligned
-                // `provenance` vec names the rule glob + companion for each.
-                let source = if self.show_patches && i >= patch_start {
-                    let prov = &provenance[i - patch_start];
-                    Some(api::data::env::EntrySource::Patch {
+                let source = self
+                    .show_patches
+                    .then(|| overlay.provenance_for(i))
+                    .flatten()
+                    .map(|prov| api::data::env::EntrySource::Patch {
                         rule: prov.rule_match.clone(),
                         companion: prov.companion.to_string(),
-                    })
-                } else {
-                    None
-                };
+                    });
                 api::data::env::EnvEntry {
                     key: e.key,
                     value: e.value,

@@ -154,7 +154,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         .with_context(|| format!("validating patch descriptor file {}", args.descriptor.display()))?;
 
     // ── Step 2: Provision a scratch FileStructure (tempdir). ──
-    let temp_root = context.file_structure().temp.root().join("patch-test");
+    let temp_root = context.file_structure().temp.patch_test_root();
     tokio::fs::create_dir_all(&temp_root)
         .await
         .map_err(|e| ocx_lib::error::file_error(&temp_root, e))?;
@@ -187,15 +187,29 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     materialize_companions(&context, &manager, &companions, &args.companion_archives, &platform).await?;
 
     // ── Step 5: Seed the local descriptor and compose the overlay onto the base. ──
+    //
+    // The overrides are cloned rather than moved: they are ALSO the forwarded
+    // slice in step 6, and a handful of entries is cheaper than the machinery to
+    // hand them back out of the composition.
     let composition = manager
-        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides)
+        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone())
         .await
         .map_err(ocx_lib::Error::from)?;
 
     // ── Step 6: Build the composed process env (mirrors package_test.rs). ──
+    //
+    // Composed entries + forwarded ocx config + forwarded overrides, in the one
+    // order that is correct — see `Env::apply_child_env`. A base that declares
+    // entrypoints resolves through its generated launcher here too, so an
+    // unforwarded override would be silently reverted at that hop.
     let mut process_env = env::Env::new();
-    process_env.apply_entries(&composition.entries);
-    process_env.apply_ocx_config(context.config_view());
+    process_env.apply_child_env(
+        env::ChildEnv {
+            composed: &composition.entries,
+            forwarded: &env_overrides,
+        },
+        context.config_view(),
+    );
 
     // ── Step 7: Dispatch on --script / trailing command / print env. ──
     if let Some(script_path) = &args.script {
@@ -236,24 +250,23 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         Ok(child_process::propagate_exit_code(status))
     } else {
         // Print the composed companion env entries, annotating each overlay entry
-        // (index `>= patch_start`) with its provenance — the rule glob + companion
-        // that produced it — so the maintainer can trace every patched var.
+        // with its provenance — the rule glob + companion that produced it — so
+        // the maintainer can trace every patched var. An `--env` override sits
+        // PAST the overlay and is nobody's companion contribution, so the
+        // bound-checked accessor reports it unattributed.
         let companion_strings: Vec<String> = composition.matched_companions.iter().map(ToString::to_string).collect();
-        let patch_start = composition.patch_start;
+        let overlay = composition.overlay();
         let entries: Vec<crate::api::data::patch_test::PatchTestEntry> = composition
             .entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let source = if i >= patch_start {
-                    let provenance = &composition.provenance[i - patch_start];
-                    Some(crate::api::data::env::EntrySource::Patch {
+                let source = overlay
+                    .provenance_for(i)
+                    .map(|provenance| crate::api::data::env::EntrySource::Patch {
                         rule: provenance.rule_match.clone(),
                         companion: provenance.companion.to_string(),
-                    })
-                } else {
-                    None
-                };
+                    });
                 crate::api::data::patch_test::PatchTestEntry {
                     key: entry.key.clone(),
                     value: entry.value.clone(),
