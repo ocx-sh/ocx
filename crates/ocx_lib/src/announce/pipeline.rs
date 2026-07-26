@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Pure decision logic + registry observation for the announce pipeline.
+//! Pure decision logic + the registry observe loop for the announce pipeline.
 //!
 //! Everything a forge is *not* needed for lives here so it can be unit-tested
-//! without a network: curated-tag resolution (C3/C5), the regenerate step that
-//! preserves `observed` timestamps for unmoved digests (C6), the yank/unyank
-//! rules (C7), physical-repository extraction, and the SSRF-before-observe
-//! ordering (X3). The forge-touching orchestration (root read, fork/commit/PR
-//! dispatch) lives in the parent [`super`] module.
+//! without a network: curated-tag resolution (C3/C5/D7), the regenerate step
+//! that preserves `observed` timestamps for unmoved digests (C6), the
+//! yank/unyank rules (C7), physical-repository extraction, and the
+//! SSRF-before-observe ordering (X3). The forge-touching orchestration (root
+//! read, fork/commit/PR dispatch) lives in the parent [`super`] module.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -18,19 +18,31 @@ use serde_json::{Map, Value, json};
 use super::error::AnnounceError;
 use super::request::TagSelection;
 use crate::oci;
-use crate::oci::index::{Observation, ObservationPlatform, serialize_observation};
+use crate::package::tag::Tag;
 use crate::publisher::Publisher;
 
-/// One curated tag's freshly observed state — the serialized observation-object
-/// bytes plus the `sha256:<hex>` digest of exactly those bytes (its `content`
-/// pointer and CAS filename).
+/// One curated tag's freshly observed state — the registry's own image-index
+/// bytes and the digest the registry served them under (the tag's `content`
+/// pointer and its CAS filename).
+///
+/// Both fields are verbatim registry output: announce stores what it fetched
+/// and never re-encodes it, so the CAS payload is byte-identical to the
+/// artifact the publisher pushed.
 pub struct Observed {
     /// The curated tag name.
     pub tag: String,
-    /// The observation-object digest `sha256:<hex>` (the tag's new `content`).
-    pub content: String,
-    /// The canonical observation-object bytes (CONTRACTS §14, the CAS payload).
+    /// The image-index digest the registry served (the tag's new `content`).
+    pub content: oci::Digest,
+    /// The registry's image-index bytes, unmodified (the CAS payload).
     pub bytes: Vec<u8>,
+}
+
+/// The outcome of collapsing a [`TagSelection`] against the committed tags.
+pub struct ResolvedTags {
+    /// The curated tags to observe, in resolution order.
+    pub tags: Vec<String>,
+    /// Reserved tags dropped from the selection (D7), in resolution order.
+    pub reserved_dropped: Vec<String>,
 }
 
 /// The physical registry target dereferenced from a root's `repository` pointer.
@@ -94,7 +106,23 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 /// (design register C3/C5). `Replace` is the universe as given; `UnionFile`
 /// unions the committed set (order-preserving) with file additions; `Refresh`
 /// re-observes the committed set. Duplicates are dropped, first occurrence wins.
-pub fn resolve_curated_tags(selection: &TagSelection, committed: &[String]) -> Result<Vec<String>, AnnounceError> {
+///
+/// This is where the reserved-tag rule applies (D7), and it applies **here**
+/// rather than at any of the three selection sources: only after the collapse
+/// is the tag universe concrete. `--refresh` and `--tags-file` start from the
+/// committed root, so they are carriers — neither can introduce a reserved tag,
+/// but either would re-announce one forever once it landed. A reserved tag is
+/// not a version, so it is dropped and reported, never refused: refusing would
+/// make announce police how a publisher tags their own repository. A selection
+/// that is *entirely* reserved collapses into the existing
+/// [`AnnounceError::NoCuratedTags`] — the empty-set case, no separate variant —
+/// carrying the dropped names, because that path returns no outcome for the
+/// CLI's drop notice to read and the names would otherwise vanish.
+///
+/// # Errors
+///
+/// [`AnnounceError::NoCuratedTags`] when nothing survives resolution.
+pub fn resolve_curated_tags(selection: &TagSelection, committed: &[String]) -> Result<ResolvedTags, AnnounceError> {
     let resolved = match selection {
         TagSelection::Replace(tags) => dedup_in_order(tags),
         TagSelection::UnionFile(file_tags) => {
@@ -108,10 +136,12 @@ pub fn resolve_curated_tags(selection: &TagSelection, committed: &[String]) -> R
         }
         TagSelection::Refresh => dedup_in_order(committed),
     };
-    if resolved.is_empty() {
-        return Err(AnnounceError::NoCuratedTags);
+    let (reserved_dropped, tags): (Vec<String>, Vec<String>) =
+        resolved.into_iter().partition(|tag| Tag::is_reserved_str(tag));
+    if tags.is_empty() {
+        return Err(AnnounceError::NoCuratedTags { reserved_dropped });
     }
-    Ok(resolved)
+    Ok(ResolvedTags { tags, reserved_dropped })
 }
 
 fn dedup_in_order(tags: &[String]) -> Vec<String> {
@@ -165,8 +195,12 @@ pub async fn observe_curated(
     Ok(observed)
 }
 
-/// Observe a single curated tag: fetch its manifest, project it into an
-/// observation object, and hash the canonical bytes into its `content` pointer.
+/// Observe a single curated tag: fetch what the registry serves and keep it.
+///
+/// The bytes and the digest ride out of here untouched — the index stores the
+/// publisher's own image index, it does not derive a second document from it.
+/// The one judgement made here is document kind: the index records image
+/// indices only, so a bare image manifest is refused (D4(a)).
 async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) -> Result<Observed, AnnounceError> {
     let tagged = physical.identifier.clone_with_tag(tag);
     let fetched = publisher
@@ -178,7 +212,7 @@ async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) 
             repository: physical.display.clone(),
             source: Box::new(source),
         })?;
-    let Some((_bytes, _digest, manifest)) = fetched else {
+    let Some((bytes, content, manifest)) = fetched else {
         // A curated tag that does not resolve is a publisher typo — hard error,
         // never a silent drop (reference parity).
         return Err(AnnounceError::UnresolvedTag {
@@ -186,55 +220,17 @@ async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) 
             repository: physical.display.clone(),
         });
     };
-    let observation = manifest_to_observation(&manifest, tag, &physical.display)?;
-    let bytes = serialize_observation(&observation);
-    let content = oci::Algorithm::Sha256.hash(&bytes).to_string();
+    if !matches!(manifest, oci::Manifest::ImageIndex(_)) {
+        return Err(AnnounceError::TagIsNotAnImageIndex {
+            tag: tag.to_string(),
+            repository: physical.display.clone(),
+        });
+    }
     Ok(Observed {
         tag: tag.to_string(),
         content,
         bytes,
     })
-}
-
-/// Project a fetched manifest into an observation object (its `platforms[]`).
-///
-/// ocx packages always publish an image index (even single-platform pushes are
-/// wrapped in one), so a bare image manifest is out of the v1 observe scope.
-/// Platform-less index entries (attestation manifests) are skipped.
-fn manifest_to_observation(
-    manifest: &oci::Manifest,
-    tag: &str,
-    repository: &str,
-) -> Result<Observation, AnnounceError> {
-    let index = match manifest {
-        oci::Manifest::ImageIndex(index) => index,
-        oci::Manifest::Image(_) => {
-            return Err(AnnounceError::SinglePlatformManifest {
-                tag: tag.to_string(),
-                repository: repository.to_string(),
-            });
-        }
-    };
-    let mut platforms = Vec::with_capacity(index.manifests.len());
-    for entry in &index.manifests {
-        let Some(platform) = entry.platform.clone() else {
-            continue;
-        };
-        let digest =
-            oci::Digest::try_from(entry.digest.as_str()).map_err(|_| AnnounceError::MalformedPlatformDigest {
-                tag: tag.to_string(),
-                repository: repository.to_string(),
-                digest: entry.digest.clone(),
-            })?;
-        platforms.push(ObservationPlatform { platform, digest });
-    }
-    if platforms.is_empty() {
-        return Err(AnnounceError::EmptyObservation {
-            tag: tag.to_string(),
-            repository: repository.to_string(),
-        });
-    }
-    Ok(Observation { platforms })
 }
 
 /// Rebuild the root's `tags` map from the observed curated set (design register
@@ -249,19 +245,20 @@ pub fn regenerate(committed: &Value, observed: &[Observed], now: &str) -> Value 
     let committed_tags = committed.get("tags").and_then(Value::as_object);
     let mut new_tags = Map::new();
     for entry in observed {
+        let content = entry.content.to_string();
         let committed_entry = committed_tags.and_then(|tags| tags.get(&entry.tag));
         let committed_content = committed_entry
             .and_then(|committed| committed.get("content"))
             .and_then(Value::as_str);
-        let regenerated = if committed_content == Some(entry.content.as_str()) {
+        let regenerated = if committed_content == Some(content.as_str()) {
             // Unmoved digest — carry the committed entry verbatim (no churn).
             committed_entry
                 .cloned()
-                .unwrap_or_else(|| new_tag_entry(&entry.content, now, None))
+                .unwrap_or_else(|| new_tag_entry(&content, now, None))
         } else {
             // New or changed digest — fresh timestamp, keep any yank marker.
             let yanked = committed_entry.and_then(|committed| committed.get("yanked")).cloned();
-            new_tag_entry(&entry.content, now, yanked)
+            new_tag_entry(&content, now, yanked)
         };
         new_tags.insert(entry.tag.clone(), regenerated);
     }
@@ -350,7 +347,7 @@ pub fn new_cas_count(committed: &Value, observed: &[Observed]) -> usize {
         .unwrap_or_default();
     observed
         .iter()
-        .filter(|entry| !committed_contents.contains(entry.content.as_str()))
+        .filter(|entry| !committed_contents.contains(entry.content.to_string().as_str()))
         .count()
 }
 
@@ -365,8 +362,11 @@ pub fn build_files(
     let mut files = BTreeMap::new();
     files.insert(root_path.to_string(), root_bytes.to_vec());
     for entry in observed {
-        let hex = entry.content.strip_prefix("sha256:").unwrap_or(&entry.content);
-        files.insert(format!("p/{package_repo}/o/sha256/{hex}.json"), entry.bytes.clone());
+        let (algorithm, hex) = entry.content.parts();
+        files.insert(
+            format!("p/{package_repo}/o/{algorithm}/{hex}.json"),
+            entry.bytes.clone(),
+        );
     }
     files
 }
@@ -404,12 +404,18 @@ pub async fn write_out(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<
 mod tests {
     use super::*;
     use crate::oci::client::test_transport::{StubTransport, StubTransportData};
-    use crate::oci::index::{serialize_observation, serialize_root};
+    use crate::oci::index::serialize_root;
 
     // ── fixtures ─────────────────────────────────────────────────────────────
 
     fn digest_string(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))
+    }
+
+    /// A 64-hex `sha256.<hex>` canonical tag — reserved, and the D7 case a
+    /// default `ocx package push` writes into every repository.
+    fn canonical_tag() -> String {
+        format!("sha256.{}", "a".repeat(64))
     }
 
     /// A committed root Value with one already-observed tag, in canonical form.
@@ -427,25 +433,13 @@ mod tests {
         })
     }
 
-    /// Build an `Observed` for `tag` whose observation carries a single platform
-    /// leaf `digest`. The `content`/`bytes` are the real canonical serialization
-    /// so digest comparisons behave exactly as in production.
+    /// Build an `Observed` for `tag` from an image index carrying a single
+    /// platform leaf `digest`, exactly as a registry would serve it: the bytes
+    /// are the serialized index and `content` is their real digest, so digest
+    /// comparisons behave as in production.
     fn observed(tag: &str, leaf: char) -> Observed {
-        let observation = Observation {
-            platforms: vec![ObservationPlatform {
-                platform: oci::native::Platform {
-                    architecture: "amd64".into(),
-                    os: "linux".into(),
-                    os_version: None,
-                    os_features: None,
-                    variant: None,
-                    features: None,
-                },
-                digest: oci::Digest::Sha256(leaf.to_string().repeat(64)),
-            }],
-        };
-        let bytes = serialize_observation(&observation);
-        let content = oci::Algorithm::Sha256.hash(&bytes).to_string();
+        let bytes = serde_json::to_vec(&image_index(vec![index_entry("amd64", leaf)])).expect("index serializes");
+        let content = oci::Algorithm::Sha256.hash(&bytes);
         Observed {
             tag: tag.to_string(),
             content,
@@ -460,7 +454,7 @@ mod tests {
         let committed = vec!["1.0.0".to_string(), "2.0.0".to_string()];
         let curated = resolve_curated_tags(&TagSelection::Replace(vec!["2.0.0".into()]), &committed).unwrap();
         assert_eq!(
-            curated,
+            curated.tags,
             vec!["2.0.0".to_string()],
             "a committed tag absent from --tags is dropped"
         );
@@ -477,7 +471,7 @@ mod tests {
         // Committed order first, then the genuinely new file tag; the duplicate
         // `1.0.0` is not re-added.
         assert_eq!(
-            curated,
+            curated.tags,
             vec!["1.0.0".to_string(), "2.0.0".to_string(), "3.0.0".to_string()]
         );
     }
@@ -486,19 +480,106 @@ mod tests {
     fn refresh_re_observes_the_committed_set_in_order() {
         let committed = vec!["1.0.0".to_string(), "latest".to_string()];
         let curated = resolve_curated_tags(&TagSelection::Refresh, &committed).unwrap();
-        assert_eq!(curated, committed);
+        assert_eq!(curated.tags, committed);
     }
 
     #[test]
     fn empty_curated_set_is_an_error() {
         assert!(matches!(
             resolve_curated_tags(&TagSelection::Replace(vec![]), &[]),
-            Err(AnnounceError::NoCuratedTags)
+            Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
         assert!(matches!(
             resolve_curated_tags(&TagSelection::Refresh, &[]),
-            Err(AnnounceError::NoCuratedTags)
+            Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
+    }
+
+    // ── the D7 reserved-tag filter, one site, all three selections ───────────
+
+    /// Explicit curation of a reserved tag is a drop, not a refusal: a reserved
+    /// tag is not a version, so there is nothing to refuse, and refusing would
+    /// make announce police how a publisher tags their own repository.
+    #[test]
+    fn resolve_curated_tags_drops_reserved_from_replace() {
+        let canonical = canonical_tag();
+        let curated = resolve_curated_tags(
+            &TagSelection::Replace(vec![
+                "__ocx.desc".into(),
+                "__ocx".into(),
+                "__ocxfoo".into(),
+                "__OCX.desc".into(),
+                canonical.clone(),
+                "1.2.3".into(),
+            ]),
+            &[],
+        )
+        .expect("one real version survives");
+        assert_eq!(curated.tags, vec!["1.2.3".to_string()]);
+        assert_eq!(
+            curated.reserved_dropped,
+            vec![
+                "__ocx.desc".to_string(),
+                "__ocx".to_string(),
+                "__ocxfoo".to_string(),
+                "__OCX.desc".to_string(),
+                canonical,
+            ],
+            "every reserved form is reported, in selection order"
+        );
+    }
+
+    /// The carrier case: `--refresh` carries no tags of its own, so a reserved
+    /// tag already sitting in the committed root would be re-announced forever
+    /// if the filter lived at the selection sources instead of here.
+    #[test]
+    fn resolve_curated_tags_drops_reserved_from_refresh_carrier() {
+        let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string(), canonical_tag()];
+        let curated = resolve_curated_tags(&TagSelection::Refresh, &committed).unwrap();
+        assert_eq!(curated.tags, vec!["1.0.0".to_string()]);
+        assert_eq!(
+            curated.reserved_dropped,
+            vec!["__ocx.desc".to_string(), canonical_tag()]
+        );
+    }
+
+    /// `--tags-file` contributes additions only; the committed base arrives
+    /// separately. Both halves pass through the one filter.
+    #[test]
+    fn resolve_curated_tags_drops_reserved_from_union_file() {
+        let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string()];
+        let curated = resolve_curated_tags(
+            &TagSelection::UnionFile(vec![canonical_tag(), "2.0.0".into()]),
+            &committed,
+        )
+        .unwrap();
+        assert_eq!(curated.tags, vec!["1.0.0".to_string(), "2.0.0".to_string()]);
+        assert_eq!(
+            curated.reserved_dropped,
+            vec!["__ocx.desc".to_string(), canonical_tag()],
+            "a reserved tag is dropped whether it came from the root or the file"
+        );
+    }
+
+    /// An entirely reserved selection is the empty-set case — it collapses into
+    /// the existing `NoCuratedTags`, so no new error variant exists to add.
+    /// The dropped names ride out on the variant: this is the one D7 path with
+    /// no outcome for the CLI's drop notice to read.
+    #[test]
+    fn resolve_curated_tags_all_reserved_is_no_curated_tags() {
+        let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
+            resolve_curated_tags(&TagSelection::Replace(vec!["__ocx.desc".into(), canonical_tag()]), &[])
+        else {
+            panic!("an entirely reserved selection resolves to nothing");
+        };
+        assert_eq!(reserved_dropped, vec!["__ocx.desc".to_string(), canonical_tag()]);
+
+        let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
+            resolve_curated_tags(&TagSelection::Refresh, &["__ocx.patch".to_string()])
+        else {
+            panic!("an entirely reserved committed set resolves to nothing");
+        };
+        assert_eq!(reserved_dropped, vec!["__ocx.patch".to_string()]);
     }
 
     // ── require_root (unclaimed namespace, C10) ──────────────────────────────
@@ -553,7 +634,7 @@ mod tests {
         ));
     }
 
-    // ── manifest_to_observation ──────────────────────────────────────────────
+    // ── observe_one_tag — verbatim bytes, and the D4(a) refusal ──────────────
 
     fn image_index(entries: Vec<oci::ImageIndexEntry>) -> oci::Manifest {
         oci::Manifest::ImageIndex(oci::ImageIndex {
@@ -583,39 +664,82 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_to_observation_projects_index_platform_entries() {
-        let manifest = image_index(vec![index_entry("amd64", 'a'), index_entry("arm64", 'b')]);
-        let observation = manifest_to_observation(&manifest, "1.0.0", "oci://ghcr.io/x/y").unwrap();
-        assert_eq!(observation.platforms.len(), 2);
-        assert_eq!(observation.platforms[0].digest, oci::Digest::Sha256("a".repeat(64)));
+    /// Seed the stub with `manifest` served at `127.0.0.1/x:<tag>` and hand
+    /// back the exact bytes and digest the registry would answer with.
+    ///
+    /// Deliberately pretty-printed: a registry serves whatever encoding the
+    /// publisher pushed, not serde's canonical one. Compact bytes here would
+    /// make a re-serializing implementation byte-indistinguishable from one
+    /// that carries the served bytes through, and the verbatim assertions
+    /// below would pass vacuously.
+    fn seed_manifest(data: &StubTransportData, tag: &str, manifest: &oci::Manifest) -> (Vec<u8>, oci::Digest) {
+        let bytes = serde_json::to_vec_pretty(manifest).expect("manifest serializes");
+        let digest = oci::Algorithm::Sha256.hash(&bytes);
+        data.write()
+            .manifests
+            .insert(format!("127.0.0.1/x:{tag}"), (bytes.clone(), digest.to_string()));
+        (bytes, digest)
     }
 
-    #[test]
-    fn manifest_to_observation_skips_platform_less_entries() {
+    /// The two-anchor property: the CAS payload is the registry's own bytes and
+    /// the `content` pointer is the digest the registry served them under. A
+    /// re-serialization creeping back into the announce path breaks both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_one_tag_keeps_the_registry_bytes_and_digest_verbatim() {
+        let data = StubTransportData::new();
+        let manifest = image_index(vec![index_entry("amd64", 'a'), index_entry("arm64", 'b')]);
+        let (served_bytes, served_digest) = seed_manifest(&data, "1.0.0", &manifest);
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
+
+        let observed = observe_one_tag(&publisher, &physical, "1.0.0").await.unwrap();
+
+        assert_eq!(observed.bytes, served_bytes, "the CAS payload must be the served bytes");
+        assert_eq!(observed.content, served_digest, "the pointer must be the served digest");
+        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed));
+        let (algorithm, hex) = served_digest.parts();
+        assert_eq!(
+            files.get(&format!("p/x/o/{algorithm}/{hex}.json")).map(Vec::as_slice),
+            Some(served_bytes.as_slice()),
+            "the CAS filename is the served digest and the file is the served bytes"
+        );
+    }
+
+    /// D4(a): the index records image indices only. `ocx package push` always
+    /// publishes one, so a bare image manifest was not published by ocx — a
+    /// refusal, never a silent skip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn announce_refuses_a_bare_image_manifest_tag() {
+        let data = StubTransportData::new();
+        seed_manifest(&data, "1.0.0", &oci::Manifest::Image(oci::ImageManifest::default()));
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
+
+        let result = observe_one_tag(&publisher, &physical, "1.0.0").await;
+
+        let Err(AnnounceError::TagIsNotAnImageIndex { tag, repository }) = result else {
+            panic!("a bare image manifest must be refused");
+        };
+        assert_eq!(tag, "1.0.0");
+        assert_eq!(repository, "oci://127.0.0.1/x");
+    }
+
+    /// A platform-less descriptor (an attestation) no longer costs the whole
+    /// index its entry: the pipeline carries the index verbatim and filters
+    /// nothing. Candidate selection is the index reader's concern.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_one_tag_carries_platform_less_descriptors_through() {
+        let data = StubTransportData::new();
         let mut attestation = index_entry("amd64", 'a');
         attestation.platform = None;
         let manifest = image_index(vec![index_entry("arm64", 'b'), attestation]);
-        let observation = manifest_to_observation(&manifest, "1.0.0", "oci://ghcr.io/x/y").unwrap();
-        assert_eq!(observation.platforms.len(), 1, "the platform-less entry is skipped");
-    }
+        let (served_bytes, _) = seed_manifest(&data, "1.0.0", &manifest);
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
 
-    #[test]
-    fn manifest_to_observation_rejects_a_single_platform_manifest() {
-        let manifest = oci::Manifest::Image(oci::ImageManifest::default());
-        assert!(matches!(
-            manifest_to_observation(&manifest, "1.0.0", "oci://ghcr.io/x/y"),
-            Err(AnnounceError::SinglePlatformManifest { .. })
-        ));
-    }
+        let observed = observe_one_tag(&publisher, &physical, "1.0.0").await.unwrap();
 
-    #[test]
-    fn manifest_to_observation_errors_on_no_platform_entries() {
-        let manifest = image_index(vec![]);
-        assert!(matches!(
-            manifest_to_observation(&manifest, "1.0.0", "oci://ghcr.io/x/y"),
-            Err(AnnounceError::EmptyObservation { .. })
-        ));
+        assert_eq!(observed.bytes, served_bytes, "no descriptor is dropped on the way in");
     }
 
     // ── regenerate (C6 no-churn) ─────────────────────────────────────────────
@@ -623,11 +747,11 @@ mod tests {
     #[test]
     fn regenerate_keeps_the_observed_timestamp_for_an_unmoved_digest() {
         let root = committed_root("oci://ghcr.io/x/y");
-        // Splice the committed tag's content to match the observation so the
+        // Splice the committed tag's content to match what was observed so the
         // "unchanged" path fires.
         let entry = observed("1.0.0", 'z');
         let mut committed = root;
-        committed["tags"]["1.0.0"]["content"] = Value::String(entry.content.clone());
+        committed["tags"]["1.0.0"]["content"] = Value::String(entry.content.to_string());
         let regenerated = regenerate(&committed, &[entry], "2099-12-31T00:00:00Z");
         assert_eq!(
             regenerated["tags"]["1.0.0"]["observed"].as_str(),
@@ -639,8 +763,8 @@ mod tests {
     #[test]
     fn regenerate_stamps_now_for_a_new_or_changed_digest() {
         let committed = committed_root("oci://ghcr.io/x/y");
-        // The committed `1.0.0` content is `sha256:aaaa…`; the observation's real
-        // content differs, so the tag is treated as changed.
+        // The committed `1.0.0` content is `sha256:aaaa…`; the observed digest
+        // differs, so the tag is treated as changed.
         let regenerated = regenerate(&committed, &[observed("1.0.0", 'c')], "2099-12-31T00:00:00Z");
         assert_eq!(
             regenerated["tags"]["1.0.0"]["observed"].as_str(),
@@ -682,7 +806,7 @@ mod tests {
             "created": "2026-07-24",
             "desc": null,
             "tags": {
-                "1.0.0": { "content": entry.content.clone(), "observed": "2026-01-01T00:00:00Z" }
+                "1.0.0": { "content": entry.content.to_string(), "observed": "2026-01-01T00:00:00Z" }
             }
         });
         let committed_bytes = serialize_root(&committed);
@@ -761,7 +885,7 @@ mod tests {
     #[test]
     fn build_files_keys_root_and_cas_by_wire_path() {
         let entry = observed("1.0.0", 'a');
-        let hex = entry.content.strip_prefix("sha256:").unwrap().to_string();
+        let hex = entry.content.hex().to_string();
         let files = build_files(
             "p/acme/widget.json",
             b"root-bytes",

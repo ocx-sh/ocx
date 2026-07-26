@@ -43,8 +43,14 @@ pub enum AnnounceError {
     ForgeRequired,
 
     /// The resolved curated tag set was empty (design register C3/C5).
-    #[error("no curated tags given")]
-    NoCuratedTags,
+    ///
+    /// `reserved_dropped` carries the reserved names the D7 filter removed on
+    /// the way to empty. Without them the message would claim nothing was
+    /// given for a selection that named only reserved tags — and this is the
+    /// one D7 path with no [`AnnounceOutcome`](super::AnnounceOutcome) to
+    /// carry the drop notice, so the error message is where the names surface.
+    #[error("{}", no_curated_tags_message(reserved_dropped))]
+    NoCuratedTags { reserved_dropped: Vec<String> },
 
     /// No committed root exists for the package at `base_ref` — a new package
     /// goes through the human namespace-claim lane, never announce.
@@ -100,25 +106,11 @@ pub enum AnnounceError {
         source: Box<crate::oci::client::error::ClientError>,
     },
 
-    /// A curated tag resolves to a single-platform image manifest; announce v1
-    /// observes multi-platform image indexes only (ocx packages always publish
-    /// an image index).
-    #[error(
-        "tag {tag} on {repository} resolves to a single-platform image manifest, expected a multi-platform image index"
-    )]
-    SinglePlatformManifest { tag: String, repository: String },
-
-    /// A curated tag's image index carries no platform entries to observe.
-    #[error("tag {tag} on {repository} resolves to an image index with no platform entries")]
-    EmptyObservation { tag: String, repository: String },
-
-    /// A curated tag's image index carries a malformed platform-manifest digest.
-    #[error("tag {tag} on {repository} carries a malformed platform digest {digest}")]
-    MalformedPlatformDigest {
-        tag: String,
-        repository: String,
-        digest: String,
-    },
+    /// A curated tag resolves to a bare OCI image manifest. The index records
+    /// image indices only, and `ocx package push` always publishes one — so the
+    /// artifact behind this tag was not published by ocx.
+    #[error("tag {tag} on {repository} resolves to an OCI image manifest; the index records image indices only")]
+    TagIsNotAnImageIndex { tag: String, repository: String },
 
     /// A tag was named to both `--yank` and `--unyank` (design register C7).
     #[error("tag(s) {tags:?} given to both yank and unyank")]
@@ -156,6 +148,18 @@ pub enum AnnounceError {
     },
 }
 
+/// `Display` body for [`AnnounceError::NoCuratedTags`] — thiserror's format
+/// string cannot branch, and the two cases are genuinely different failures.
+fn no_curated_tags_message(reserved_dropped: &[String]) -> String {
+    if reserved_dropped.is_empty() {
+        return "no curated tags given".to_string();
+    }
+    format!(
+        "no curated tags left: every tag given is reserved and is not a version ({})",
+        reserved_dropped.join(", ")
+    )
+}
+
 impl crate::cli::ClassifyExitCode for AnnounceError {
     fn classify(&self) -> Option<crate::cli::ExitCode> {
         match self {
@@ -174,6 +178,17 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             // cannot tell "claim your namespace first" (a one-time human
             // action, register R3) from an unclassified failure.
             Self::UnclaimedNamespace { .. } => Some(crate::cli::ExitCode::NotFound),
+            // The tag resolved and the artifact exists — its *shape* is wrong.
+            // `NotFound` (79) would be a lie (nothing is absent) and leaving it
+            // unclassified exits 1, which a release wrapper cannot tell apart
+            // from a crash. `EX_DATAERR` is the malformed-input category.
+            Self::TagIsNotAnImageIndex { .. } => Some(crate::cli::ExitCode::DataError),
+            // The tag selection is operator input — a `--tags` list, a tags
+            // file, or a committed root the publisher curated. Nothing is
+            // absent and nothing is malformed on the wire: the invocation
+            // named no version. `EX_USAGE` is that category, and it keeps the
+            // all-reserved collapse discriminable from an unclassified crash.
+            Self::NoCuratedTags { .. } => Some(crate::cli::ExitCode::UsageError),
             // Every other variant falls through to `ExitCode::Failure`.
             _ => None,
         }
@@ -218,8 +233,61 @@ mod tests {
         assert_eq!(error.classify(), Some(ExitCode::NotFound));
     }
 
+    /// The D4(a) refusal is a verdict a release wrapper must be able to act on.
+    /// Left unclassified it exits 1 — indistinguishable from a crash, the same
+    /// defect the `UnclaimedNamespace` comment above records.
+    #[test]
+    fn tag_is_not_an_image_index_classifies_as_data_error() {
+        let error = AnnounceError::TagIsNotAnImageIndex {
+            tag: "1.2.3".to_string(),
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        assert!(message.contains("1.2.3"), "the message must name the tag: {message}");
+        assert!(
+            message.contains("oci://ghcr.io/acme/widget"),
+            "the message must name the repository: {message}"
+        );
+    }
+
+    /// The D7 filter routed a new failure class into this variant: a selection
+    /// made *entirely* of reserved tags. Left as it was, stderr claimed "no
+    /// curated tags given" for an invocation that gave several, and the exit
+    /// was an unclassified 1. Both halves are pinned here.
+    #[test]
+    fn all_reserved_selection_names_the_dropped_tags_and_exits_usage_error() {
+        let error = AnnounceError::NoCuratedTags {
+            reserved_dropped: vec!["__ocx.desc".to_string(), format!("sha256.{}", "a".repeat(64))],
+        };
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        let message = error.to_string();
+        assert!(
+            message.contains("__ocx.desc"),
+            "the message must name the tags: {message}"
+        );
+        assert!(
+            message.contains(&format!("sha256.{}", "a".repeat(64))),
+            "the message must name the tags: {message}"
+        );
+        assert!(
+            !message.contains("no curated tags given"),
+            "claiming none were given is the defect: {message}"
+        );
+    }
+
+    /// The genuinely-empty selection keeps the original wording.
+    #[test]
+    fn an_empty_selection_still_reports_that_none_were_given() {
+        let error = AnnounceError::NoCuratedTags {
+            reserved_dropped: Vec::new(),
+        };
+        assert_eq!(error.to_string(), "no curated tags given");
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+    }
+
     #[test]
     fn unclassified_variant_defers_to_the_chain_walker() {
-        assert_eq!(AnnounceError::NoCuratedTags.classify(), None);
+        assert_eq!(AnnounceError::ForgeRequired.classify(), None);
     }
 }

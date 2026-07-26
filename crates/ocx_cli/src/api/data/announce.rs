@@ -10,15 +10,18 @@ use crate::api::Printable;
 /// Result of a successful `ocx package announce`.
 ///
 /// Plain format: a one-row table (`Package`, `Status`, `Pull Request`,
-/// `Fork`, `Written Paths`) — a dash marks a field the mode did not produce.
+/// `Fork`, `Written Paths`, `Dropped Tags`) — a dash marks a field the mode did
+/// not produce.
 ///
 /// JSON format:
-/// `{ "package", "status", "pull_request_url", "pull_request_number", "fork", "written_paths" }`.
+/// `{ "package", "status", "pull_request_url", "pull_request_number", "fork",
+/// "written_paths", "reserved_tags_dropped" }`.
 /// `status` is exactly `"unchanged"` or `"updated"`. `pull_request_url` /
 /// `pull_request_number` / `fork` are always `null` for `--out`; in `--fork`
 /// mode they are `null` only when the run made no pull request — an unchanged
 /// run whose announce branch is ahead of the index base still ensures, and
 /// therefore reports, one. `written_paths` is empty outside `--out`.
+/// `reserved_tags_dropped` is an array, empty rather than absent.
 #[derive(Serialize)]
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
@@ -36,6 +39,11 @@ pub struct AnnounceReport {
     pub fork: Option<String>,
     /// The relative paths written under the `--out` directory.
     pub written_paths: Vec<String>,
+    /// Tags dropped from the curated set because they are reserved: the
+    /// OCX-internal `__ocx` namespace and `<algorithm>.<hex>` canonical tags.
+    /// Neither names a version, so announce drops them and reports them here
+    /// rather than failing the run.
+    pub reserved_tags_dropped: Vec<String>,
 }
 
 impl AnnounceReport {
@@ -52,6 +60,7 @@ impl AnnounceReport {
             pull_request_number: outcome.pull_request.as_ref().map(|pr| pr.number),
             fork: outcome.fork.as_ref().map(|fork| fork.full_name.clone()),
             written_paths: outcome.written_paths,
+            reserved_tags_dropped: outcome.reserved_tags_dropped,
         }
     }
 }
@@ -65,6 +74,7 @@ impl Printable for AnnounceReport {
                 "Pull Request".into(),
                 "Fork".into(),
                 "Written Paths".into(),
+                "Dropped Tags".into(),
             ],
             &[
                 vec![Cell::from(self.package.clone())],
@@ -77,6 +87,11 @@ impl Printable for AnnounceReport {
                     "-".to_string()
                 } else {
                     self.written_paths.join(",")
+                })],
+                vec![Cell::from(if self.reserved_tags_dropped.is_empty() {
+                    "-".to_string()
+                } else {
+                    self.reserved_tags_dropped.join(",")
                 })],
             ],
         );
@@ -107,6 +122,7 @@ mod tests {
                 repo: "index".to_string(),
             }),
             written_paths: Vec::new(),
+            reserved_tags_dropped: Vec::new(),
         }
     }
 
@@ -117,6 +133,7 @@ mod tests {
             pull_request: None,
             fork: None,
             written_paths: Vec::new(),
+            reserved_tags_dropped: Vec::new(),
         }
     }
 
@@ -133,6 +150,31 @@ mod tests {
         assert_eq!(value.get("pull_request_number").and_then(|v| v.as_u64()), Some(42));
         assert_eq!(value.get("fork").and_then(|v| v.as_str()), Some("forkuser/index"));
         assert_eq!(value.get("written_paths").and_then(|v| v.as_array()), Some(&vec![]));
+        assert_eq!(
+            value.get("reserved_tags_dropped").and_then(|v| v.as_array()),
+            Some(&vec![]),
+            "an empty drop list is an empty array, never absent"
+        );
+    }
+
+    /// D7 drops are a reported fact of a successful run, not a failure: the
+    /// report carries them alongside an ordinary `updated` status.
+    #[test]
+    fn dropped_reserved_tags_are_reported_on_a_successful_run() {
+        let outcome = AnnounceOutcome {
+            reserved_tags_dropped: vec!["__ocx.desc".to_string(), format!("sha256.{}", "a".repeat(64))],
+            ..outcome_updated()
+        };
+        let report = AnnounceReport::from_outcome(outcome);
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("updated"));
+        assert_eq!(
+            value
+                .get("reserved_tags_dropped")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]
@@ -173,6 +215,7 @@ mod tests {
             pull_request: None,
             fork: None,
             written_paths: vec!["p/acme/widget.json".to_string()],
+            reserved_tags_dropped: Vec::new(),
         };
         let report = AnnounceReport::from_outcome(outcome);
         let value = serde_json::to_value(&report).unwrap();
