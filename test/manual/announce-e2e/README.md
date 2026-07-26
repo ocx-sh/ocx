@@ -239,10 +239,11 @@ prove that.
 `_run_concluded` and `pr_number` against recorded `gh` JSON: how the floor is
 read, the floor on both matchers, newest-wins when several observations survive
 it, the polling gate that keeps an unconcluded run from reading as a verdict,
-and the head-repository and branch guards. Two cases give a stale artifact a
-creation time *after* the driver's own `date -u` — what a backward-skewed local
-clock produces — and require it to stay excluded, which is why the floor is a
-counter and not a timestamp. Both matchers used to be able to answer with an
+and the head-repository and branch guards. Two cases give a stale artifact the
+fresh-looking creation time a backward-skewed local clock would have accepted
+and require it to stay excluded — they pin that the matchers read the counter
+and nothing else; they do not replay the old timestamp comparison, which the
+counter signature no longer admits. Both matchers used to be able to answer with an
 earlier rehearsal's run or pull request, which is how a driver reports green off
 stale data — run this after any edit to either. It needs `jq` (test-only: it
 replays the drivers' own `--jq` programs offline, and `gh` embeds its own engine

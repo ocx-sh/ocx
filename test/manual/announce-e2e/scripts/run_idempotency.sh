@@ -18,11 +18,12 @@ IFS=$'\n\t'
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
 # Pull request count on the announce branch: 0 or 1 by construction, but a
-# second PR is precisely the C4/C6 failure this counts.
+# second PR is precisely the C4/C6 failure this counts. Counts exactly what
+# pr_floor and pr_number select — E2E_PR_SELECT over pr_list's window — so a
+# foreign fork's pull request can never read as movement here while being
+# invisible to the matchers.
 pr_count() {
-    gh pr list --repo "$GH_REPO_INDEX" --state all --limit 20 \
-        --json headRefName,headRepositoryOwner \
-        --jq "[.[] | select(.headRefName == \"$ANNOUNCE_BRANCH\" and .headRepositoryOwner.login == \"${INDEX_FORK%%/*}\")] | length"
+    pr_list "[.[] | select($E2E_PR_SELECT)] | length"
 }
 
 # Head commit of the announce branch on the fork, or "absent".
