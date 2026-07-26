@@ -118,14 +118,26 @@ Any tier above it can restate `index` with a different base URL to route `ocx.sh
 index = ""                    # resolve ocx.sh as a plain OCI registry
 ```
 
-Declaring a [`[mirrors]`](#keys-mirrors) entry for the namespace is the second off-switch, and it is implicit. A `[mirrors."ocx.sh"]` entry in either traffic role suppresses the compiled-in `index` for `ocx.sh`, which then resolves as a plain OCI registry through the mirror:
+Pinning the namespace at a [`[mirrors]`](#keys-mirrors) **registry** endpoint is the second off-switch, and it is implicit. Such an entry suppresses the compiled-in `index` for `ocx.sh`, which then resolves as a plain OCI registry through the mirror:
 
 ```toml
 [mirrors]
 "ocx.sh" = "https://artifactory.corp/ocx-remote"   # compiled-in index suppressed
 ```
 
-`[mirrors]` is keyed by *traffic host* and rewrites the physical location a name resolves to, so it does not follow a namespace through the index protocol — an air-gapped site that routes `ocx.sh` to its own registry would otherwise start dialling `index.ocx.sh`, a host it never allow-listed. Declaring where a namespace's traffic goes answers the question. To keep the index path *and* mirror the physical registry, name the index explicitly — a written `index` outranks the compiled-in one and is never suppressed:
+`[mirrors]` is keyed by *traffic host* and rewrites the physical location a name resolves to, so it does not follow a namespace through the index protocol — an air-gapped site that routes `ocx.sh` to its own registry would otherwise start dialling `index.ocx.sh`, a host it never allow-listed. Declaring where a namespace's traffic goes answers the question.
+
+Two limits keep the switch from firing where it was not meant to:
+
+- **Only a config file you control** — the compiled defaults, the discovered chain, and [`--config`][arg-config]/[`OCX_CONFIG`][env-config]. A `[mirrors]` entry arriving through the [`[managed]`](#keys-managed) tier redirects traffic like any other, but cannot suppress the index: a remotely-published payload must not be able to drop a namespace off the verified resolution path and its yank gate.
+- **Only the `registry` role.** The `index` role is applied keyed on the *index endpoint's* own host, so `"ocx.sh" = { index = … }` cannot redirect anything for the `ocx.sh` namespace and does not suppress. Redirecting the index endpoint itself keeps the index path, pointed at your host:
+
+```toml
+[mirrors]
+"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }   # index kept, served by corp
+```
+
+To keep the index path *and* pin the physical registry, name the index explicitly — a written `index` outranks the compiled-in one and is never suppressed:
 
 ```toml
 [registries."ocx.sh"]
@@ -136,7 +148,7 @@ index = "https://index.ocx.sh"                     # explicit: survives the mirr
 "index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }
 ```
 
-The suppression applies only to the compiled-in tier and is logged at `debug` level. Run with [`OCX_LOG`][env-log]`=debug` to confirm which branch a host took.
+The suppression applies only to the compiled-in tier and is logged at `warn` level, naming the namespace it dropped.
 
 `index` needs no `<dialect>+` URL-scheme prefix, because OCX has exactly one index wire dialect — the field's presence is the kind marker, the same convention [Cargo][cargo-registries] uses for its own `[registries.NAME] index = "…"`. An entry with no `index` field still resolves as plain OCI — it can still declare [`trusted_hosts`](#keys-registries-trusted-hosts) for its physical registry, `index` and `trusted_hosts` are independent fields. Omitting `index` from an entry does not clear an inherited value: tiers merge field-wise, so a `[registries."ocx.sh"]` entry that declares only `trusted_hosts` keeps the compiled-in `index`. Only an explicit `index = ""` clears it.
 
