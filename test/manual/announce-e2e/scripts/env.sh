@@ -144,16 +144,39 @@ publisher_checkout() {
     ocx_fail "no publisher checkout found — set PUBLISHER_WORKTREE to a clone of $GH_REPO_PUBLISHER"
 }
 
-# Echo the number of the pull request *this run's* announce put on the fork's
-# announce branch, or return 1. Args: <since> — an RFC3339 UTC timestamp taken
-# before the announce was triggered.
+# The pull requests that are candidates at all: head repository owner and
+# branch. A same-named branch on another fork is a different pull request.
+# Shared by pr_floor and pr_number so the two cannot drift — a floor computed
+# over a wider set than it filters would sit too high and hang the driver.
+E2E_PR_SELECT=".headRefName == \"$ANNOUNCE_BRANCH\"
+           and .headRepositoryOwner.login == \"${INDEX_FORK%%/*}\""
+
+# The highest pull-request number the announce branch already carries, or 0.
+# Call it BEFORE triggering the announce: it is the freshness floor pr_number
+# filters on.
 #
-# Identity is head repository owner (a same-named branch on another fork is a
-# different pull request), branch, and creation time. The branch is per-package
-# and not per-tag, so every rehearsal of every tag reuses it: without the
-# <since> floor an earlier rehearsal's pull request — closed *or* merged, both
-# of which the branch match returns — wins, and the driver then measures that
-# run's timeline instead of its own.
+# GitHub's own monotonic counter, not a timestamp. A timestamp comparison would
+# be a local clock read against a server-assigned `createdAt`, which is only
+# sound while the local clock runs ahead — a backward-skewed clock (routine on
+# WSL after a resume) makes an earlier rehearsal's pull request look fresh, and
+# the driver certifies against it. Numbers issued by the same server that
+# issues the ones being filtered involve no clock on either side.
+pr_floor() {
+    gh pr list --repo "$GH_REPO_INDEX" --state all --limit 20 \
+        --json number,headRefName,headRepositoryOwner \
+        --jq "[.[] | select($E2E_PR_SELECT)] | max_by(.number).number // 0"
+}
+
+# Echo the number of the pull request *this run's* announce put on the fork's
+# announce branch, or return 1. Args: <floor> — a pr_floor reading taken before
+# the announce was triggered.
+#
+# The branch is per-package and not per-tag, so every rehearsal of every tag
+# reuses it: without the floor an earlier rehearsal's pull request — closed
+# *or* merged, both of which the branch match returns — wins, and the driver
+# then measures that run's timeline instead of its own. A *baseline* is what
+# makes this sound; a bare `max_by(.number)` is not, because in the window
+# before the new pull request exists the stale one is still the maximum.
 #
 # `--state all` stays. Restricting to open would hang the very lane it is meant
 # to prove: run_machine_lane's pull request can auto-merge before the first
@@ -161,24 +184,19 @@ publisher_checkout() {
 # caller that genuinely needs the pull request still open (run_update_union)
 # asserts that itself, at the point where it matters.
 #
-# Newest by number rather than by list position: `gh` documents no ordering,
-# and pull request numbers are monotonic per repository.
-#
-# A local clock running ahead of GitHub's makes this time out. That is the
-# right direction to fail: a red run, never a green one off stale data.
+# A floor read that raced a foreign pull request makes this time out. That is
+# the right direction to fail: a red run, never a green one off stale data.
 pr_number() {
-    local since="$1" number
+    local floor="$1" number
     number="$(gh pr list --repo "$GH_REPO_INDEX" --state all --limit 20 \
-        --json number,createdAt,headRefName,headRepositoryOwner \
-        --jq "[.[] | select(.headRefName == \"$ANNOUNCE_BRANCH\"
-                        and .headRepositoryOwner.login == \"${INDEX_FORK%%/*}\"
-                        and .createdAt > \"$since\")] |
+        --json number,headRefName,headRepositoryOwner \
+        --jq "[.[] | select($E2E_PR_SELECT and .number > $floor)] |
               max_by(.number) | .number // empty")"
     [[ -n $number ]] || return 1
     printf '%s\n' "$number"
 }
 
-# Wait for the announce branch's pull request to exist. Args: <since>, as
+# Wait for the announce branch's pull request to exist. Args: <floor>, as
 # pr_number. Echoes its number.
 poll_pr() {
     poll_until "$POLL_DEADLINE_SECONDS" "a pull request on $ANNOUNCE_BRANCH" \
@@ -205,28 +223,42 @@ _checks_settled() {
         grep -qx 'PENDING'
 }
 
+# The highest workflow-run id this repo+workflow+ref already carries, or 0.
+# Args: <repo> <workflow> <ref>. Call it BEFORE the push: it is the freshness
+# floor poll_run filters on, and for the same reason pr_floor exists — a server
+# counter, so no clock on either side can skew the comparison.
+#
+# The same --limit as _run_concluded: a floor read over a narrower window than
+# the one being filtered could sit below a stale run and let it through.
+run_floor() {
+    gh run list --repo "$1" --workflow "$2" --branch "$3" --limit 50 \
+        --json databaseId --jq 'max_by(.databaseId).databaseId // 0'
+}
+
 # Wait for one workflow run to conclude. Args: <repo> <workflow> <ref> <sha>
-# <since>. Echoes the run URL, and only on success; returns 1 otherwise.
+# <floor>. Echoes the run URL, and only on success; returns 1 otherwise.
 #
 # <workflow> and <ref> are part of a run's identity because a commit sha alone
 # is not: a tag push and a branch push at one sha are two runs, and a merge on
 # the index's main is one run per workflow. <ref> is the run's headBranch,
 # which for a tag push is the tag name.
 #
-# <since> — an RFC3339 UTC timestamp taken before the push — completes the
-# identity, because workflow + ref + sha still does not name one run: a
+# <floor> — a run_floor reading taken before the push — completes the identity,
+# because workflow + ref + sha still does not name one run: a
 # retracted-and-repushed tag puts two runs at all three, and the older one is
 # already concluded. Without the floor the driver reads that stale verdict in
-# the seconds before its own run is created, and certifies against it. A local
-# clock ahead of GitHub's makes this time out — red, never a false green.
+# the seconds before its own run is created, and certifies against it. A bare
+# `max_by(.databaseId)` would not do: during that same window the stale run is
+# still the maximum. A floor that raced a foreign run makes this time out —
+# red, never a false green.
 #
 # Every field comes from one observation, because two `gh` calls can select
 # different runs.
 poll_run() {
-    local repo="$1" workflow="$2" ref="$3" sha="$4" since="$5" conclusion url
+    local repo="$1" workflow="$2" ref="$3" sha="$4" floor="$5" conclusion url
     E2E_RUN_RECORD=""
     poll_until "$POLL_DEADLINE_SECONDS" "$workflow to conclude at ${sha:0:7} ($ref) in $repo" \
-        _run_concluded "$repo" "$workflow" "$ref" "$sha" "$since" || return 1
+        _run_concluded "$repo" "$workflow" "$ref" "$sha" "$floor" || return 1
     IFS='|' read -r conclusion url <<<"$E2E_RUN_RECORD"
     if [[ $conclusion != "success" ]]; then
         ocx_warn "$workflow at ${sha:0:7} ($ref) in $repo concluded $conclusion — $url"
@@ -245,12 +277,12 @@ poll_run() {
 # rather than a jq error; it, the in-progress case, and a failed `gh` all leave
 # the conclusion empty and are all polled on.
 #
-# Newest by databaseId among the runs created after <since>, because `gh`
-# documents no ordering and run ids are monotonic per repository.
+# Newest by databaseId among the runs above the floor, because `gh` documents
+# no ordering and run ids are monotonic per repository.
 _run_concluded() {
     E2E_RUN_RECORD="$(gh run list --repo "$1" --workflow "$2" --branch "$3" --limit 50 \
-        --json databaseId,headSha,createdAt,conclusion,url \
-        --jq "[.[] | select(.headSha == \"$4\" and .createdAt > \"$5\")] |
+        --json databaseId,headSha,conclusion,url \
+        --jq "[.[] | select(.headSha == \"$4\" and .databaseId > $5)] |
               max_by(.databaseId) // {} |
               [.conclusion // \"\", .url // \"\"] | join(\"|\")")"
     [[ $E2E_RUN_RECORD == ?*"|"* ]]
