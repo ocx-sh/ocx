@@ -527,6 +527,20 @@ impl Context {
         &self.default_index
     }
 
+    /// The default-mode resolution chain — every index source ahead of the
+    /// plain-OCI registry — for callers that must build their own [`Index`]
+    /// over a different content store than [`Self::default_index`]'s
+    /// (`ocx patch test`'s scratch root).
+    ///
+    /// Sharing the wiring is the point: a scratch chain assembled from the
+    /// registry alone would resolve an index-bearing namespace as plain OCI
+    /// while every other resolution in the same invocation goes through its
+    /// index, so one identifier could name two different artifacts.
+    /// `Offline` with no sources when there is no remote index.
+    pub fn chain_sources(&self) -> (index::ChainMode, Vec<index::Index>) {
+        Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, index::ChainMode::Default)
+    }
+
     /// Verb-intent index for the update family (`ocx update`): resolves tags
     /// live against the registry by default (`Remote`), capped by the policy
     /// ceilings (`--offline` wins over `--frozen`, same ladder as
@@ -597,6 +611,25 @@ impl Context {
     /// place the index clients are minted. A plain-`http://` final target is
     /// refused unless its host is in `insecure_hosts`
     /// (`OCX_INSECURE_REGISTRIES`), the same gate the registry role applies.
+    ///
+    /// **Mirror suppression.** A namespace whose `index` came from the
+    /// compiled-in defaults tier (`index_is_compiled_default`) is dropped when
+    /// an explicit `[mirrors."<ns>"]` entry exists for it — either role, from
+    /// `[mirrors]` config or the forwarded `OCX_MIRRORS` env. `[mirrors]` is
+    /// keyed by TRAFFIC HOST and applied against the PHYSICAL identifier the
+    /// index mints, so it does not follow a namespace through the index path:
+    /// a firewalled site that pinned `ocx.sh` at its own registry would
+    /// otherwise start dialling `index.ocx.sh` — a host it never allow-listed
+    /// — with no config change of its own. An operator who declared where a
+    /// namespace's traffic goes has answered the question; one who wants both
+    /// writes `[registries."<ns>"] index` explicitly, which clears the
+    /// compiled-default provenance and so wins here.
+    ///
+    /// This is the only seam that can see both halves: the compiled-in tier is
+    /// folded in `ConfigLoader`, but `[mirrors]` is not fully resolved until
+    /// `try_init` merges config with `OCX_MIRRORS` — which the loader never
+    /// reads, and which is exactly the channel a parent ocx uses to forward
+    /// the site's mirror map into a child process.
     fn build_index_sources(
         online: bool,
         config: &ocx_lib::Config,
@@ -613,11 +646,31 @@ impl Context {
             return Ok(Vec::new());
         };
 
+        // An explicit `[mirrors."<ns>"]` entry for the namespace itself, in
+        // either traffic role, from config or forwarded `OCX_MIRRORS`.
+        let is_mirrored =
+            |namespace: &str| mirrors_index.contains_key(namespace) || registry_mirrors.get(namespace).is_some();
+
         // Deterministic chain order: sort namespaces so the built sources — and
         // therefore the resolution chain — are stable across runs.
         let mut namespaces: Vec<&String> = registries
             .iter()
-            .filter(|(_, entry)| entry.index.as_deref().is_some_and(|url| !url.is_empty()))
+            .filter(|(namespace, entry)| {
+                // `index = ""` is the documented kill switch: an empty base URL
+                // is not a kind marker, so the namespace resolves as plain OCI.
+                if entry.index.as_deref().is_none_or(str::is_empty) {
+                    return false;
+                }
+                if entry.index_is_compiled_default && is_mirrored(namespace) {
+                    log::debug!(
+                        "[mirrors.\"{namespace}\"] is declared, so the compiled-in index default for that \
+                         namespace is suppressed; it resolves as a plain OCI registry through the mirror. \
+                         Declare [registries.\"{namespace}\"] index explicitly to keep the index path."
+                    );
+                    return false;
+                }
+                true
+            })
             .map(|(namespace, _)| namespace)
             .collect();
         namespaces.sort();
@@ -1148,6 +1201,124 @@ mod tests {
             direct.to_string(),
             wired.to_string(),
             "build_index_sources's error must match the direct resolve_base_url call"
+        );
+    }
+
+    // ── The two off-switches for an index-bearing namespace ──────────────────
+
+    /// `index = ""` is the documented kill switch, and THIS filter is what
+    /// implements it — the loader only carries the empty string through as a
+    /// declared value. Without this test, simplifying the filter to
+    /// `entry.index.is_some()` leaves the whole Rust suite green while every
+    /// `ocx.sh` resolution silently goes back through `index.ocx.sh`.
+    #[test]
+    fn build_index_sources_skips_an_empty_index_value() {
+        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some(""))]);
+        let built = build_test_sources(true, &config, &std::collections::BTreeMap::new()).unwrap();
+        assert!(
+            built.is_empty(),
+            "index = \"\" must build no index source — an empty base URL is not a kind marker"
+        );
+    }
+
+    /// Builds a `Config` whose single `ocx.sh` entry carries the compiled-in
+    /// index exactly as `ConfigLoader::builtin_defaults` stamps it.
+    fn config_with_compiled_default() -> ocx_lib::Config {
+        let mut registries = std::collections::HashMap::new();
+        registries.insert(
+            oci::OCX_SH_REGISTRY.to_string(),
+            ocx_lib::RegistryConfig {
+                index: Some("https://index.ocx.sh".to_string()),
+                index_is_compiled_default: true,
+                ..Default::default()
+            },
+        );
+        ocx_lib::Config {
+            registries: Some(registries),
+            ..Default::default()
+        }
+    }
+
+    fn mirror_map_for(host: &str, url: &str) -> oci::MirrorMap {
+        oci::MirrorMap::new([(host.to_string(), ocx_lib::parse_url(url).unwrap())])
+    }
+
+    /// A `[mirrors."ocx.sh"]` registry-role entry suppresses the compiled-in
+    /// index for that namespace. The scenario: a firewalled site pins `ocx.sh`
+    /// at its own artifact server. `[mirrors]` is applied against the PHYSICAL
+    /// identifier the index mints, so it does not cover `index.ocx.sh` — and
+    /// silently adding a host the operator never allow-listed is exactly the
+    /// egress they configured `[mirrors]` to prevent.
+    #[test]
+    fn a_registry_role_mirror_suppresses_the_compiled_in_index() {
+        let built = Context::build_index_sources(
+            true,
+            &config_with_compiled_default(),
+            &std::collections::BTreeMap::new(),
+            &mirror_map_for(oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote"),
+            &[],
+            &ocx_lib::cli::progress::ProgressManager::disabled(),
+        )
+        .unwrap();
+        assert!(
+            built.is_empty(),
+            "an explicit [mirrors.\"ocx.sh\"] entry must suppress the compiled-in index for that namespace"
+        );
+    }
+
+    /// Same suppression via the `index` role — "either role, any form".
+    #[test]
+    fn an_index_role_mirror_suppresses_the_compiled_in_index() {
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        mirrors_index.insert(
+            oci::OCX_SH_REGISTRY.to_string(),
+            ocx_lib::parse_url("https://artifactory.corp/ocx-index").unwrap(),
+        );
+        let built = build_test_sources(true, &config_with_compiled_default(), &mirrors_index).unwrap();
+        assert!(
+            built.is_empty(),
+            "an index-role [mirrors.\"ocx.sh\"] entry must suppress the compiled-in index too"
+        );
+    }
+
+    /// An `index` a config file wrote is NOT compiled-default provenance, so
+    /// the mirror entry does not suppress it — the documented way to keep both
+    /// a mirror and the index path. Same mirror map as the suppression test
+    /// above; only the provenance flag differs.
+    #[test]
+    fn an_explicit_index_survives_a_mirror_entry_for_the_same_namespace() {
+        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh"))]);
+        let built = Context::build_index_sources(
+            true,
+            &config,
+            &std::collections::BTreeMap::new(),
+            &mirror_map_for(oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote"),
+            &[],
+            &ocx_lib::cli::progress::ProgressManager::disabled(),
+        )
+        .unwrap();
+        assert_eq!(
+            source_namespaces(&built),
+            vec![oci::OCX_SH_REGISTRY.to_string()],
+            "a written [registries.\"ocx.sh\"] index outranks the mirror suppression"
+        );
+    }
+
+    /// Host-keyed precision: the mirror entry that routes the INDEX's own
+    /// traffic host (`index.ocx.sh`, the F5c override) is not a declaration
+    /// about the `ocx.sh` NAMESPACE, so it must not suppress anything.
+    #[test]
+    fn a_mirror_keyed_by_the_index_host_does_not_suppress_the_compiled_in_index() {
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        mirrors_index.insert(
+            "index.ocx.sh".to_string(),
+            ocx_lib::parse_url("https://artifactory.corp/ocx-index").unwrap(),
+        );
+        let built = build_test_sources(true, &config_with_compiled_default(), &mirrors_index).unwrap();
+        assert_eq!(
+            source_namespaces(&built),
+            vec![oci::OCX_SH_REGISTRY.to_string()],
+            "a [mirrors.\"index.ocx.sh\"] entry redirects the index, it does not suppress it"
         );
     }
 

@@ -295,12 +295,25 @@ impl MirrorConfig {
     /// merges under [`Self::registry_system_locked`], `index` merges under
     /// [`Self::index_system_locked`] — a system entry locking only one role
     /// still lets a lower tier set the other (F5b).
+    /// Each role also ADOPTS its lock from `other` while still unlocked:
+    /// `Config::merge` reaches every `[mirrors."<host>"]` entry through
+    /// `map.entry(host).or_default().merge(..)`, so the system tier is never
+    /// `self` on the fold that first carries it into the accumulator. Without
+    /// adopting, the flag `apply_system_locks` set is dropped on that very
+    /// fold and a system-scope mirror lock — the egress-containment surface an
+    /// operator reaches for first — silently does nothing.
     pub fn merge(&mut self, other: MirrorConfig) {
-        if !self.registry_system_locked && other.registry.is_some() {
-            self.registry = other.registry;
+        if !self.registry_system_locked {
+            if other.registry.is_some() {
+                self.registry = other.registry;
+            }
+            self.registry_system_locked = other.registry_system_locked;
         }
-        if !self.index_system_locked && other.index.is_some() {
-            self.index = other.index;
+        if !self.index_system_locked {
+            if other.index.is_some() {
+                self.index = other.index;
+            }
+            self.index_system_locked = other.index_system_locked;
         }
     }
 }
@@ -752,6 +765,51 @@ mod tests {
         lower.merge(higher);
         assert_eq!(lower.registry.as_deref(), Some("https://old.corp/registry-only"));
         assert_eq!(lower.index.as_deref(), Some("https://new.corp/index-only"));
+    }
+
+    /// The lock has to survive the fold that carries the system tier into the
+    /// accumulator, not just a merge where the system entry happens to be
+    /// `self`. `Config::merge` reaches `[mirrors]` entries through
+    /// `map.entry(host).or_default().merge(entry)`, so the accumulator's
+    /// DEFAULT (unlocked) entry is `self` and the locked system entry is
+    /// `other` — the orientation every other lock test here inverts. Deleting
+    /// the `self.registry_system_locked = other.registry_system_locked` line
+    /// in `merge` makes a system-scope mirror lock a silent no-op, and this is
+    /// the only test that notices.
+    #[test]
+    fn mirror_config_lock_survives_the_accumulator_fold() {
+        let mut system = MirrorConfig {
+            registry: Some("https://system-mirror.corp/ghcr-remote".to_string()),
+            index: None,
+            registry_system_locked: false,
+            index_system_locked: false,
+        };
+        system.lock_as_system();
+
+        // Exactly what `Config::merge` does: an unlocked accumulator entry
+        // takes the system tier first, then a lower tier tries to override.
+        let mut accumulator = MirrorConfig::default();
+        accumulator.merge(system);
+        accumulator.merge(MirrorConfig {
+            registry: Some("https://attacker.example/ghcr-remote".to_string()),
+            index: None,
+            registry_system_locked: false,
+            index_system_locked: false,
+        });
+
+        assert!(
+            accumulator.registry_system_locked,
+            "the accumulator must adopt the system tier's registry-role lock"
+        );
+        assert_eq!(
+            accumulator.registry.as_deref(),
+            Some("https://system-mirror.corp/ghcr-remote"),
+            "a system-locked mirror role must not be overridable by a lower tier"
+        );
+        assert!(
+            !accumulator.index_system_locked,
+            "the system entry declared no index role, so that role must stay open (F5b)"
+        );
     }
 
     /// System-lock orientation 1: a system entry declaring (and thus locking)

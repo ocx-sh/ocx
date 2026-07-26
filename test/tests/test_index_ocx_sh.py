@@ -1065,18 +1065,28 @@ def test_builtin_base_tier_makes_ocx_sh_index_bearing(
     no root request. The `[registries."ocx.sh"]` entry present here declares
     only `trusted_hosts` (the loopback test registry the root points at); the
     built-in `index` survives it because the table merges field-wise.
+
+    Runs hermetically (`OCX_NO_CONFIG=1` plus the fixture config as an explicit
+    `OCX_CONFIG` tier, which survives it) so no discovered tier on the host can
+    supply the `index` this test claims the binary ships. Without that, a
+    developer whose `/etc/ocx/config.toml` or `~/.config/ocx/config.toml`
+    already names `index.ocx.sh` — the config the pre-change docs told users to
+    write — would see this pass with the compiled-in tier deleted. It doubles
+    as the proof that the compiled-in tier is NOT gated on `OCX_NO_CONFIG`.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
     registry_host = ocx.registry.split(":", 1)[0]
-    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path = tmp_path / "hermetic-config.toml"
     config_path.write_text(
         f'[registries."ocx.sh"]\ntrusted_hosts = ["{registry_host}"]\n'
         "\n[mirrors]\n"
         f'"index.ocx.sh" = {{ index = "{index_server.base_url}" }}\n'
     )
+    ocx.env["OCX_NO_CONFIG"] = "1"
+    ocx.env["OCX_CONFIG"] = str(config_path)
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
     static_index.write_config(index_server.root)
@@ -1103,22 +1113,34 @@ def test_builtin_base_tier_makes_ocx_sh_index_bearing(
     ), "the index fixture must have served the root document"
 
 
-def test_empty_index_field_reverts_ocx_sh_to_plain_oci(
+def test_mirror_entry_for_ocx_sh_suppresses_the_builtin_index(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`index = ""` is the documented off-switch for the compiled-in default:
-    an empty base URL is not index-kind, so `ocx.sh` falls back to plain OCI.
+    """A `[mirrors]."ocx.sh"` entry suppresses the compiled-in index for that
+    namespace, which then resolves as a plain OCI registry through the mirror.
+
+    The firewalled-site scenario: an operator pins `ocx.sh` at their own
+    artifact server. `[mirrors]` is keyed by traffic host and applied to the
+    PHYSICAL identifier an index mints, so it does not follow the namespace
+    through the index protocol — without the suppression this resolve would
+    start dialling `index.ocx.sh`, a host the operator never allow-listed.
 
     Same dead-endpoint trick as
-    `test_absent_index_field_never_touches_a_dead_index_endpoint` — if the
-    off-switch did not take, the resolve would dial `127.0.0.1:1` and fail.
+    `test_absent_index_field_never_touches_a_dead_index_endpoint`: the
+    index-role mirror aims `index.ocx.sh` at an unreachable port, so if the
+    compiled-in index were still built the resolve would dial `127.0.0.1:1`
+    and fail. No `index` is declared for `ocx.sh` anywhere here — the
+    suppression is the only thing under test. (`index = ""`, the explicit
+    off-switch, is covered at the unit layer: `ConfigLoader`'s
+    `empty_user_index_disables_the_builtin_ocx_sh_index` for the config value
+    and `build_index_sources_skips_an_empty_index_value` for the filter that
+    acts on it.)
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
-        '[registries."ocx.sh"]\nindex = ""\n'
-        "\n[mirrors]\n"
+        "[mirrors]\n"
         f'"ocx.sh" = "http://{ocx.registry}"\n'
         '"index.ocx.sh" = { index = "http://127.0.0.1:1" }\n'
     )
@@ -1129,8 +1151,8 @@ def test_empty_index_field_reverts_ocx_sh_to_plain_oci(
     index_dir.mkdir()
     result = ocx.plain("--index", str(index_dir), "index", "update", fq)
     assert result.returncode == 0, (
-        'index = "" must revert ocx.sh to plain OCI, never touching the dead '
-        f"default-index mirror target: {result.stderr}"
+        'a [mirrors]."ocx.sh" entry must suppress the compiled-in index and '
+        f"resolve as plain OCI, never touching the dead index endpoint: {result.stderr}"
     )
 
 

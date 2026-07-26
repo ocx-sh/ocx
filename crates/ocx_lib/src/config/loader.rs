@@ -185,12 +185,20 @@ impl ConfigLoader {
     /// host state (discovered files, the managed snapshot) so a run is
     /// reproducible, and a constant compiled into the binary is exactly the
     /// reproducible part.
+    ///
+    /// The entry is stamped `index_is_compiled_default` so a consumer can tell
+    /// this value apart from an identical one a config file wrote. The CLI's
+    /// `build_index_sources` uses that to let an explicit `[mirrors."ocx.sh"]`
+    /// entry suppress this default — the one policy question this tier cannot
+    /// answer itself, because `[mirrors]` is only fully resolved (config plus
+    /// the forwarded `OCX_MIRRORS` env) after the loader has run.
     fn builtin_defaults() -> Config {
         Config {
             registries: Some(HashMap::from([(
                 crate::oci::OCX_SH_REGISTRY.to_string(),
                 crate::config::RegistryConfig {
                     index: Some(crate::oci::index::DEFAULT_INDEX_BASE_URL.to_string()),
+                    index_is_compiled_default: true,
                     ..Default::default()
                 },
             )])),
@@ -1285,6 +1293,72 @@ mod tests {
         assert_eq!(
             builtin_ocx_sh_index(&config),
             Some(crate::oci::index::DEFAULT_INDEX_BASE_URL)
+        );
+    }
+
+    /// The tier the feature is actually layered under. Every other test here
+    /// sets `OCX_NO_CONFIG=1` and overrides through `OCX_CONFIG` — the
+    /// HIGHEST-precedence tier — which leaves position 2 of the documented
+    /// order (built-in ▸ discovered ▸ managed ▸ `OCX_CONFIG` ▸ `--config`)
+    /// unproven. Inverting the splice in `load_with_local_view` so the
+    /// built-in folds ON TOP of the discovered chain passes every one of
+    /// them; it fails here, which is the point: a user with an
+    /// `[registries."ocx.sh"] index` in a discovered config file would
+    /// otherwise be silently routed back to the public index.
+    #[tokio::test]
+    async fn a_discovered_tier_index_overrides_the_builtin_ocx_sh_index() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        // `$OCX_HOME/config.toml` is the one discovered tier a test can plant
+        // (system and user paths are host-absolute).
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
+        )
+        .unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs).await.expect("load should succeed");
+        assert_eq!(
+            builtin_ocx_sh_index(&config),
+            Some("https://index.corp.example"),
+            "a discovered-tier index must beat the compiled-in one — the built-in is the LOWEST tier"
+        );
+    }
+
+    /// A system-scope `[registries."<ns>"]` entry claims to be
+    /// non-overridable, and the compiled-in tier's doc comment now advertises
+    /// that as one of its override paths. `Config::merge` reaches every entry
+    /// through `map.entry(name).or_default().merge(..)`, so the system tier is
+    /// never `self` on the fold that carries it in — the lock only survives
+    /// because `RegistryConfig::merge` ADOPTS it from `other`. Without that,
+    /// the flag `apply_system_locks` sets is dropped on the first fold and the
+    /// user tier (and the untrusted managed payload) can redirect the index.
+    #[test]
+    fn a_system_locked_registries_entry_survives_the_accumulator_fold() {
+        let mut system: Config = toml::from_str("[registries.\"ocx.sh\"]\nindex = \"https://index.corp\"\n")
+            .expect("system tier must parse");
+        ConfigLoader::apply_system_locks(&mut system);
+
+        // The real fold order: an empty accumulator (or the built-in tier)
+        // takes the system tier first, then a lower tier tries to override.
+        let mut accumulator = ConfigLoader::builtin_defaults();
+        accumulator.merge(system);
+        let user: Config = toml::from_str("[registries.\"ocx.sh\"]\nindex = \"https://attacker.example\"\n")
+            .expect("user tier must parse");
+        accumulator.merge(user);
+
+        assert_eq!(
+            builtin_ocx_sh_index(&accumulator),
+            Some("https://index.corp"),
+            "a system-locked [registries.\"ocx.sh\"] entry must not be overridable by a lower tier"
         );
     }
 
