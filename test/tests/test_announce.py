@@ -25,6 +25,8 @@ from pathlib import Path
 from announce_helpers import (
     FIXED_CLOCK,
     INDEX_FULL,
+    INDEX_OWNER,
+    INDEX_REPO,
     TOKEN,
     announce,
     announce_json,
@@ -665,6 +667,89 @@ def test_announce_tags_file_union_adds_without_dropping(
     tags_file.write_text("2.0.0")
     announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
+    assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+
+def _squash_merge_the_announce(fake_forge: FakeForge, package: str) -> None:
+    """Land the fork branch's root on the index base the way `ocx-sh/index`
+    actually merges — a **squash**: the content arrives under a brand-new commit
+    and none of the branch's own commits become ancestors of `main`. Then close
+    the pull request, leaving the per-package branch behind, because that is what
+    GitHub does."""
+    root_path = f"p/{package}.json"
+    merged = committed_root(fake_forge, package)
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, root_path, merged)
+    fake_forge.close_pull_request(INDEX_OWNER, INDEX_REPO, f"forkuser:{branch_name(package)}")
+
+
+def test_announce_after_its_pull_request_squash_merges_rebuilds_from_the_base(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """The second announce for a package must not stack on the spent branch.
+
+    Regression for ocx-sh/ocx#228. The announce branch is named from the package
+    alone, so it outlives every pull request opened from it. `ocx-sh/index`
+    squash-merges, which puts the branch's content on `main` under a new commit
+    while leaving none of the branch's own commits in `main`'s history. Basing
+    the next announce on that branch re-proposed the already-merged commits and
+    the pull request conflicted on the one file every announce edits — measured
+    live as 6 commits / 2 changed files / `mergeable_state: dirty`, against
+    1 commit / 1 file / clean once the branch was rebuilt from the base.
+
+    The parent assertion is what discriminates: the tag set alone passes either
+    way, because the merged root is read back in both worlds."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    _squash_merge_the_announce(fake_forge, package)
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+
+    branch = branch_name(package)
+    assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    ), "the announce must sit directly on the index base, not on the spent branch"
+    assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+
+def test_announce_keeps_accumulating_while_its_pull_request_is_open(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C4 survives the #228 fix: an OPEN pull request still accumulates.
+
+    The guard against over-correcting. Resetting the branch whenever it does not
+    fast-forward would silently drop announce #1's still-unmerged tag the moment
+    anything else landed on the index base — the exact failure C4's
+    "update, don't overwrite" rule exists to prevent. Here nothing merged, the
+    pull request is still open, and the second announce must build ON the first."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first_head = fake_forge.branch_head("forkuser", "index", branch_name(package))
+
+    # An unrelated commit lands on the index base, so the branch is now
+    # `diverged` from it — with its pull request still open.
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, "p/other/package.json", {"tags": {}})
+
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+
+    assert (
+        fake_forge.commit_parent("forkuser", "index", branch_name(package)) == first_head
+    ), "an open pull request must keep accumulating onto its own branch"
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
 
 

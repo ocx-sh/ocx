@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::forge::{ForkIdentity, GitHubForge, RepoCoordinate};
+use crate::forge::{BranchComparison, ForkIdentity, GitHubForge, RefUpdate, RepoCoordinate};
 use crate::oci::index::serialize_root;
 use crate::publisher::Publisher;
 
@@ -78,12 +78,20 @@ pub async fn announce(
     };
     let fork_coordinate = existing_fork.as_ref().map(ForkIdentity::coordinate);
 
-    // 1. Read the committed root (C10), from the fork branch head when it exists
-    //    (C4) so sequential announces accumulate, else from the index main.
+    // 0b. Is the announce branch still carrying work, or is it residue?
+    //     The branch is per package (C4) and outlives every pull request opened
+    //     from it, so its mere existence says nothing. Accumulating onto a spent
+    //     branch re-proposes already-merged commits and the pull request
+    //     conflicts on the root file every announce edits (#228).
+    let branch_state = resolve_branch_state(forge, &request.index_repo, fork_coordinate.as_ref(), &branch).await?;
+
+    // 1. Read the committed root (C10), from the fork branch head while the
+    //    branch is live (C4) so sequential announces accumulate, else from the
+    //    index main.
     let root_read = read_committed_root(
         forge,
         &request.index_repo,
-        fork_coordinate.as_ref(),
+        fork_coordinate.as_ref().filter(|_| branch_state.is_live()),
         &root_path,
         &branch,
     )
@@ -145,16 +153,14 @@ pub async fn announce(
                 // on the branch that the index base does not have. Such a run
                 // may have committed content whose pull request then failed to
                 // open, stranding the update; ensure an open PR exists so it is
-                // never lost (design register C6 amendment). The predicate is
-                // genuine ancestry, not mere branch existence: a branch sitting
-                // at (or already merged into) the base carries nothing
-                // unmerged, and ensuring a PR for it would open a spurious
-                // empty one on every unchanged run.
+                // never lost (design register C6 amendment). `branch_sha` is
+                // `Some` only for a LIVE branch, which is the whole predicate:
+                // a branch sitting at, already merged into, or squash-merged
+                // away from the base carries nothing unmerged, and opening a
+                // pull request for it produces the unmergeable one #228 is
+                // about.
                 if let Some(fork) = &existing_fork
                     && root_read.branch_sha.is_some()
-                    && forge
-                        .branch_is_ahead(&request.index_repo, INDEX_BASE_REF, &fork.owner, &branch)
-                        .await?
                 {
                     let pull_request = forge
                         .open_or_update_pull_request(
@@ -186,8 +192,10 @@ pub async fn announce(
             }
             // C8: reuse the already-resolved fork, else create one under the
             // requested owner (S12 shared fork), then commit onto the
-            // accumulating branch head (C4) or the upstream base SHA (C8, first
-            // announce) — one atomic multi-file commit (C15).
+            // accumulating branch head (C4, live branch) or the upstream base
+            // SHA (C8 — first announce, and equally a spent branch, whose head
+            // `read_committed_root` was told to ignore) — one atomic multi-file
+            // commit (C15).
             let fork = match existing_fork {
                 Some(fork) => fork,
                 None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
@@ -207,7 +215,14 @@ pub async fn announce(
             // and retry exactly once so the concurrent change is preserved,
             // never overwritten.
             match forge
-                .commit_files(&fork.coordinate(), &branch, &base_sha, &message, &files)
+                .commit_files(
+                    &fork.coordinate(),
+                    &branch,
+                    &base_sha,
+                    &message,
+                    &files,
+                    branch_state.ref_update(),
+                )
                 .await
             {
                 Ok(_) => {}
@@ -250,7 +265,18 @@ pub async fn announce(
                         status = AnnounceStatus::Unchanged;
                     } else {
                         forge
-                            .commit_files(&fork.coordinate(), &branch, &head_sha, &message, &merged.files)
+                            // The winning head IS our base now, so this is a
+                            // fast-forward by construction — and it must stay
+                            // CAS-checked, since a third announce could have
+                            // advanced the branch again while we regenerated.
+                            .commit_files(
+                                &fork.coordinate(),
+                                &branch,
+                                &head_sha,
+                                &message,
+                                &merged.files,
+                                RefUpdate::FastForward,
+                            )
                             .await?;
                     }
                 }
@@ -358,6 +384,89 @@ struct RootRead {
 /// Reading the branch through the verified coordinate rather than the raw
 /// `--fork` value is what makes C4 accumulation work for a fork renamed away
 /// from the upstream's repository name.
+/// What the per-package announce branch on the fork is currently worth.
+///
+/// The branch name is derived from the package alone, so it outlives every pull
+/// request opened from it. "The ref exists" therefore answers nothing on its own,
+/// and reading it that way is what made a second announce for a package
+/// unmergeable once the first one's pull request had been squash-merged
+/// (ocx-sh/ocx#228).
+enum BranchState {
+    /// No announce branch on the fork — the first announce for this package.
+    Absent,
+    /// The branch is still carrying work: an open pull request holds it, or its
+    /// commits fast-forward onto the index base. Accumulate onto it (C4), so two
+    /// announces before a merge land in one pull request with both tag sets.
+    Live,
+    /// The branch exists and carries nothing the base needs — its pull request
+    /// merged (leaving it `Diverged` under a squash merge, `Behind` under a merge
+    /// commit) or was closed unmerged. Residue: rebuild from the base and repoint
+    /// the ref at the result.
+    Spent,
+}
+
+impl BranchState {
+    /// Whether the branch may serve as the base for this announce.
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    /// How the ref update must behave. Repointing a spent branch at a commit
+    /// built on the upstream base is deliberately not a fast-forward — refusing
+    /// the rewrite would preserve the already-merged commits that make the branch
+    /// unusable in the first place.
+    fn ref_update(&self) -> RefUpdate {
+        match self {
+            Self::Spent => RefUpdate::Reset,
+            Self::Absent | Self::Live => RefUpdate::FastForward,
+        }
+    }
+}
+
+/// Classify the announce branch (see [`BranchState`]).
+///
+/// Ancestry is asked first and unconditionally, so an indeterminate or
+/// unmodelled compare fails closed on **every** run rather than only on the runs
+/// that happen to reach it. Three of the four answers are decisive on their own;
+/// only [`BranchComparison::Diverged`] needs a second question, because git
+/// cannot tell "my commits were squash-merged and the base now carries them"
+/// from "my commits are unmerged and the base moved on underneath me". An open
+/// pull request means the latter.
+async fn resolve_branch_state(
+    forge: &GitHubForge,
+    index_repo: &RepoCoordinate,
+    fork: Option<&RepoCoordinate>,
+    branch: &str,
+) -> Result<BranchState, AnnounceError> {
+    let Some(fork) = fork else {
+        return Ok(BranchState::Absent);
+    };
+    if forge.get_ref_sha(fork, &format!("heads/{branch}")).await?.is_none() {
+        return Ok(BranchState::Absent);
+    }
+    match forge
+        .compare_branch(index_repo, INDEX_BASE_REF, &fork.owner, branch)
+        .await?
+    {
+        // Strictly ahead: the commits are unmerged and they fast-forward, so
+        // keep them whether or not a pull request is open — when none is, the
+        // C6 amendment opens the one they never got.
+        BranchComparison::Ahead => Ok(BranchState::Live),
+        BranchComparison::Identical | BranchComparison::Behind => Ok(BranchState::Spent),
+        BranchComparison::Diverged => {
+            if forge
+                .find_open_pull_request(index_repo, &fork.owner, branch)
+                .await?
+                .is_some()
+            {
+                Ok(BranchState::Live)
+            } else {
+                Ok(BranchState::Spent)
+            }
+        }
+    }
+}
+
 async fn read_committed_root(
     forge: &GitHubForge,
     index_repo: &RepoCoordinate,
