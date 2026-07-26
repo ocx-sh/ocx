@@ -139,45 +139,6 @@ def _published_tool(
     return repo, tag
 
 
-def _published_tool_with_private_env(
-    ocx: OcxRunner, tmp_path: Path, label: str
-) -> tuple[str, str, str]:
-    """Publish a package with a private env entry and return ``(repo, tag, private_key)``.
-
-    The package exposes ``{LABEL}_HOME`` (public) and ``{LABEL}_SECRET`` (private).
-    Tests for ``--self`` flag can assert that ``{LABEL}_SECRET`` appears only
-    with ``--self``.
-    """
-    short = uuid4().hex[:8]
-    repo = f"t_{short}_run_{label}"
-    tag = "1.0.0"
-    home_key = label.upper() + "_HOME"
-    secret_key = label.upper() + "_SECRET"
-    env = [
-        {
-            "key": "PATH",
-            "type": "path",
-            "required": True,
-            "value": "${installPath}/bin",
-            "visibility": "public",
-        },
-        {
-            "key": home_key,
-            "type": "constant",
-            "value": "${installPath}",
-            "visibility": "public",
-        },
-        {
-            "key": secret_key,
-            "type": "constant",
-            "value": "s3cr3t",
-            "visibility": "private",
-        },
-    ]
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, env=env)
-    return repo, tag, secret_key
-
-
 # ---------------------------------------------------------------------------
 # 1. Golden path — minimal project, lock present, run succeeds
 # ---------------------------------------------------------------------------
@@ -833,54 +794,6 @@ def test_run_clean_strips_inherited_env(ocx: OcxRunner, tmp_path: Path) -> None:
     assert external_var not in result_clean.stdout, (
         f"with --clean, {external_var!r} must be stripped; "
         f"stdout excerpt:\n{result_clean.stdout[:500]}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 20. --self exposes private env entries
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skip(
-    reason=(
-        "Test infrastructure: requires a fixture package that explicitly declares "
-        "a 'private' visibility env entry. The default make_package() uses 'public' "
-        "for all env entries. This test is wired to _published_tool_with_private_env "
-        "which sets up the correct package shape, but the skip is conservative until "
-        "we confirm the private entry correctly surfaces only under --self."
-    )
-)
-def test_run_self_view_exposes_private_entries(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx run --self -- env`` shows private-visibility entries.
-
-    Plan §3.2 test 20: ``--self`` selects the private surface (vars where
-    ``has_private()`` is true). Without ``--self``, private vars are hidden.
-    Mirrors ``test_exec_modes.py`` pattern.
-    """
-    repo, tag, secret_key = _published_tool_with_private_env(ocx, tmp_path, "selfview")
-
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(project, f"""\
-[tools]
-{repo} = "{ocx.registry}/{repo}:{tag}"
-""")
-
-    lock = _run_lock(ocx, project)
-    assert lock.returncode == EXIT_SUCCESS, lock.stderr
-
-    # Without --self: private key absent.
-    result_consumer = _run_run(ocx, project, "--", "env")
-    assert result_consumer.returncode == EXIT_SUCCESS, result_consumer.stderr
-    assert secret_key not in result_consumer.stdout, (
-        f"without --self, {secret_key!r} must be hidden; stdout:\n{result_consumer.stdout[:500]}"
-    )
-
-    # With --self: private key present.
-    result_self = _run_run(ocx, project, "--self", "--", "env")
-    assert result_self.returncode == EXIT_SUCCESS, result_self.stderr
-    assert secret_key in result_self.stdout, (
-        f"with --self, {secret_key!r} must be visible; stdout:\n{result_self.stdout[:500]}"
     )
 
 

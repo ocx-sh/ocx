@@ -60,11 +60,6 @@ pub struct Run {
     #[arg(long = "clean", default_value_t = false)]
     pub clean: bool,
 
-    /// Expose each package's full env, including its private (self-only)
-    /// entries. See `ocx exec --self` for the cross-cutting flag contract.
-    #[arg(long = "self", default_value_t = false)]
-    pub self_view: bool,
-
     #[clap(flatten)]
     pub env: options::EnvOverride,
 
@@ -223,8 +218,15 @@ impl Run {
             no_patches: no_patches.clone(),
             env: project_env.clone(),
         };
+        // Always the consumer surface. `--self` is package vocabulary: it
+        // selects a package's own private surface, which by construction
+        // DROPS that package's `entrypoints/` from PATH — the launchers exist
+        // for consumers, and a package running itself calls `bin/` directly.
+        // A toolchain consumer is a consumer of every tool it declares, so the
+        // self view would compose a strictly worse toolchain. The flag belongs
+        // on `ocx package exec` / `ocx package env`, and only there.
         let entries = manager
-            .resolve_env_with_patch_boundary(&install_infos, self.self_view, scope)
+            .resolve_env_with_patch_boundary(&install_infos, false, scope)
             .await?
             .0;
 

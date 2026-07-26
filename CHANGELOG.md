@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Restructure `[group.<name>]` to hold only `[group.<name>.tools]` and `[group.<name>.env]` sub-tables — see [`[group.<name>]`](website/src/docs/reference/configuration.md#project-config-groups) *(cli)* **BREAKING**: a tool binding declared directly under `[group.<name>]` (the previous flat form) is now a parse error naming the group and pointing at `[group.<name>.tools]`. `[group.default]` and `[group.all]` remain reserved. `ocx.lock`'s `declaration_hash` is unaffected, so a hand-edited `ocx.toml` triggers no re-lock.
 
+### Removed
+
+- Drop `--self` from `ocx run` *(cli)* **BREAKING**: the self view is package vocabulary — it selects a package's own private surface, which by construction drops that package's `entrypoints/` from `PATH` because launchers exist for consumers. A toolchain consumer is a consumer of every tool it declares, so `ocx run --self` composed a strictly worse toolchain than the default. The flag stays on [`ocx package exec`](website/src/docs/reference/command-line.md#ocx-package-exec) and [`ocx package env`](website/src/docs/reference/command-line.md#ocx-package-env), where a package's own surface is the thing being asked about.
+
 ## [0.4.3] - 2026-07-10
 
 ### Added

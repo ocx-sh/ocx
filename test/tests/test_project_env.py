@@ -32,7 +32,6 @@ Precedence:
   test_project_env_constant_overrides_package_constant
   test_group_env_later_selected_group_wins
   test_project_env_path_entry_precedes_package_path_entry
-  test_self_flag_does_not_affect_project_env
   test_global_env_applies_to_global_tier_resolution
   test_global_env_applies_without_any_global_lock
   test_global_env_applies_when_locked_tool_not_materialised
@@ -587,38 +586,6 @@ PATH = {{ type = "path", value = "local_bin" }}
         f"the project's [env] path entry must be the FRONT of PATH, ahead of "
         f"the package's own path entry; got first segment {first_segment!r}, "
         f"expected {expected!r}; full PATH:\n{path_value}"
-    )
-
-
-def test_self_flag_does_not_affect_project_env(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``--self`` on and off produce identical output for a project
-    ``[env]`` entry (S6 — project env has no visibility axis; a project is
-    never a dependency of anything, so there is no edge to gate).
-    """
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        """\
-[tools]
-
-[env]
-PROJECT_ONLY_VAR = "same-either-way"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-
-    consumer = _run(ocx, project, "run", "--", "env")
-    assert consumer.returncode == EXIT_SUCCESS, consumer.stderr
-    self_view = _run(ocx, project, "run", "--self", "--", "env")
-    assert self_view.returncode == EXIT_SUCCESS, self_view.stderr
-
-    assert _env_value(consumer.stdout, "PROJECT_ONLY_VAR") == "same-either-way", (
-        f"project [env] must be visible without --self; stdout:\n{consumer.stdout}"
-    )
-    assert _env_value(self_view.stdout, "PROJECT_ONLY_VAR") == "same-either-way", (
-        f"project [env] must be visible identically with --self (S6 — no "
-        f"visibility axis); stdout:\n{self_view.stdout}"
     )
 
 
