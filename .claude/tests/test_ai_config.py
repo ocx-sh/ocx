@@ -1198,6 +1198,11 @@ class TestAiConfigOverhaulPhase2:
         "meta-validate-context": False,
         "next": True,
         "qa-engineer": False,
+        # Writes only a gitignored `out/*.html` and opens it in the local
+        # browser — no repo mutation, no network write, nothing published. The
+        # page is a reading order over a diff, so auto-invocation is safe and
+        # useful the moment a diff is too large to eyeball.
+        "review-surface": False,
         "security-auditor": False,
         "swarm-review": False,
     }

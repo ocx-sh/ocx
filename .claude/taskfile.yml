@@ -50,6 +50,20 @@ tasks:
     cmds:
       - python3 scripts/sync-canonical-blocks.py
 
+  review-surface:
+    desc: >-
+      Sort a diff into wire/CLI/API/logic/test/doc tiers and open a clickable local page.
+      Usage: task claude:review-surface -- 227 | -- --base main
+    # ROOT_DIR, not TASKFILE_DIR: the #[cfg(test)] region map reads changed files
+    # by relative path, and from .claude/ every read fails silently, reclassifying
+    # all test code as production. The script refuses to run outside the root.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # PEP 723 inline metadata declares pygments; `uv run --script` resolves it
+      # into a cached ephemeral env. (`uvx` is `uv tool run` — for PyPI tools —
+      # and refuses a local script path, pointing here instead.)
+      - uv run --script .claude/scripts/review_surface.py {{.CLI_ARGS}}
+
   lint:links:
     desc: Check markdown cross-references in .claude/, CLAUDE.md, and AGENTS.md (offline)
     dir: '{{.TASKFILE_DIR}}'
