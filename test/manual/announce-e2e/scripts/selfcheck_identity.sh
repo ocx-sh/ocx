@@ -15,10 +15,19 @@
 # the pull-request side.
 #
 # The floor is a GitHub-issued counter, never a timestamp, so every fixture
-# below carries a `createdAt` the matchers must ignore: the cases marked
-# "backward-skewed clock" hand a stale artifact a *fresh-looking* creation time
-# — what a WSL clock running behind GitHub's produces after a resume — and
-# require it to stay excluded anyway.
+# below carries a `createdAt` the matchers must ignore. The two cases named
+# "createdAt is never consulted" hand a stale artifact the fresh-looking
+# creation time a backward-skewed local clock would have made look valid, and
+# require it to stay excluded.
+#
+# Be precise about what those two discriminate: that the current matchers key on
+# `.databaseId` / `.number` and read no other field. They do NOT reproduce clock
+# skew, and cannot — the matchers take a counter, so there is no timestamp left
+# to skew, and replaying these fixtures against the old timestamp comparison
+# hands it a number where it expects an RFC3339 string, which is a type
+# mismatch and not a faithful repro. The skew defect was proven separately,
+# against the old code with a real timestamp floor; this file only pins that the
+# replacement is clock-free.
 #
 # NOT covered — deliberately: whether `gh` really returns these fields, and
 # whether announce opens a pull request at all. Only the selection logic is
@@ -187,7 +196,7 @@ main_selfcheck() {
         run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 100 "$SHA" "$AFTER" success https://run/STALE)"
-    expect "run — backward-skewed clock: a stale run dated after t0 is still stale" "" \
+    expect "run — createdAt is never consulted: a fresh-dated stale run stays stale" "" \
         run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 100 "$SHA" "$BEFORE" success https://run/old)" \
@@ -229,7 +238,7 @@ main_selfcheck() {
         pr_number "$PR_FLOOR"
 
     fixture "$(pr_obj 141 "$AFTER" MERGED "$ANNOUNCE_BRANCH" stub)"
-    expect "pr — backward-skewed clock: a stale pull request dated after t0 is still stale" "" \
+    expect "pr — createdAt is never consulted: a fresh-dated stale pull request stays stale" "" \
         pr_number "$PR_FLOOR"
 
     fixture "$(pr_obj 141 "$BEFORE" MERGED "$ANNOUNCE_BRANCH" stub)" \
