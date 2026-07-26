@@ -1,0 +1,85 @@
+{
+  "empty_object": {},
+  "empty_array": [],
+  "nested_empties": {
+    "a": {},
+    "b": [],
+    "c": [
+      {},
+      []
+    ]
+  },
+  "deep": {
+    "a": [
+      {
+        "b": [
+          {
+            "c": [
+              "d\u00e9",
+              []
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "insertion_order": {
+    "zebra": 1,
+    "apple": 2,
+    "mango": 3,
+    "aardvark": 4
+  },
+  "numbers": {
+    "int": 42,
+    "negative": -17,
+    "zero": 0,
+    "beyond_f64": 9007199254740993,
+    "u64_max": 18446744073709551615,
+    "i64_min": -9223372036854775808,
+    "yes": true,
+    "no": false,
+    "nothing": null
+  },
+  "escaped_keys": {
+    "caf\u00e9": 1,
+    "a\nb": 2,
+    "\ud83d\ude00": 3,
+    "a/b": 4,
+    "\u007f": 5,
+    "\u0000": 6,
+    "": 7
+  },
+  "del_boundary": {
+    "del": "\u007f",
+    "mid": "a\u007fb",
+    "tilde": "~",
+    "pair": "~\u007f"
+  },
+  "slash": {
+    "path": "a/b/c",
+    "url": "https://ocx.sh/p/x",
+    "escaped": "a\\/b"
+  },
+  "c0_controls": {
+    "all": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f",
+    "shorts": "\b\f\n\r\t\"\\"
+  },
+  "non_ascii": {
+    "latin": "caf\u00e9",
+    "cjk": "\u4e2d\u6587",
+    "greek": "\u03b1\u03b2"
+  },
+  "astral": {
+    "first": "\ud800\udc00",
+    "last": "\udbff\udfff",
+    "emoji": "a\ud83d\ude00b\u00e9c",
+    "last_bmp": "\uffff",
+    "below_surrogates": "\ud7ff",
+    "above_surrogates": "\ue000"
+  },
+  "whitespace": {
+    "spaces": "  a  ",
+    "tabs": "\ta\t",
+    "nbsp": "\u00a0"
+  }
+}

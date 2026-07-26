@@ -19,6 +19,18 @@ certify whatever ocx does, which is the failure mode the corpus exists to preven
   `oci::Algorithm::ALL` = {sha256, sha384, sha512}, deliberately wider than
   D7:319's sha256-only text — reservation and addressability are different
   questions, and only reservation widens. `why` is documentation, never asserted.
+- `cpython/*` — **not** vendored from `ocx-sh/index`: generated locally from
+  CPython's `json` module, which is itself the §14 byte authority the bot repo
+  implements. They exist because the vendored corpus is a sample of real index
+  documents, so it certifies only the bytes the index happens to ship today — a
+  wrong escape boundary (DEL emitted raw) once survived it because no fixture
+  contains a `0x7F` byte. `codepoint_escapes.txt` asks CPython scalar by scalar;
+  `layout.json` / `top_level_array.json` cover the structural shapes the sample
+  lacks (empty containers, array root, u64/i64 extremes, escape-bearing keys).
+  Regenerate with `python3 cpython/generate.py`, which documents the selection;
+  never hand-edit. Asserted by `index_wire_conformance.rs`'s
+  `codepoint_escapes_match_the_cpython_truth_table` and
+  `cpython_structural_vectors_round_trip_byte_exact`.
 - `dispatch/sha256/<hex>.json` — real OCI image indices, one per file, each named
   by the sha256 of its own bytes (the CAS convention of `p/<ns>/<pkg>/o/<algo>/`,
   D1). `dispatch/expected_platforms.json` records, per vector, the exact
