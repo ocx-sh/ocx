@@ -223,16 +223,11 @@ impl Context {
         // Precedence (offline wins by producing no oci_index): frozen ▸
         // remote ▸ default. Frozen keeps the remote source so digest-pinned
         // content still fetches; only unpinned-tag resolution is refused.
-        let online_mode = if options.frozen {
-            index::ChainMode::Frozen
-        } else if options.remote {
-            index::ChainMode::Remote
-        } else {
-            index::ChainMode::Default
-        };
+        let online_mode = Self::online_chain_mode(options.frozen, options.remote);
         let index_sources = Self::build_index_sources(
             remote_client.is_some(),
             &config,
+            local_only_config.mirrors.as_ref(),
             &resolved_mirrors.index,
             &mirror_map,
             &env::insecure_registries(),
@@ -537,8 +532,30 @@ impl Context {
     /// while every other resolution in the same invocation goes through its
     /// index, so one identifier could name two different artifacts.
     /// `Offline` with no sources when there is no remote index.
+    ///
+    /// Carries the invocation's own policy ceiling rather than assuming
+    /// `Default`: now that this chain reaches every index-bearing namespace's
+    /// source, a hardcoded `Default` would let `ocx --frozen patch test` with
+    /// an unpinned companion resolve live — dialling the index and then the
+    /// physical host — which is exactly what `--frozen` refuses everywhere
+    /// else (`ocx --frozen pull` on the same identifier exits 81).
     pub fn chain_sources(&self) -> (index::ChainMode, Vec<index::Index>) {
-        Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, index::ChainMode::Default)
+        let online_mode = Self::online_chain_mode(self.config_view.frozen, self.config_view.remote);
+        Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode)
+    }
+
+    /// The policy ceiling for an online chain: `--frozen` ▸ `--remote` ▸
+    /// default. `--offline` is not an arm — it is applied upstream by leaving
+    /// the remote index unbuilt, which [`Self::chain_mode_and_sources`] turns
+    /// into `Offline` with no sources at all.
+    fn online_chain_mode(frozen: bool, remote: bool) -> index::ChainMode {
+        if frozen {
+            index::ChainMode::Frozen
+        } else if remote {
+            index::ChainMode::Remote
+        } else {
+            index::ChainMode::Default
+        }
     }
 
     /// Verb-intent index for the update family (`ocx update`): resolves tags
@@ -614,25 +631,46 @@ impl Context {
     ///
     /// **Mirror suppression.** A namespace whose `index` came from the
     /// compiled-in defaults tier (`index_is_compiled_default`) is dropped when
-    /// an explicit `[mirrors."<ns>"]` entry exists for it — either role, from
-    /// `[mirrors]` config or the forwarded `OCX_MIRRORS` env. `[mirrors]` is
-    /// keyed by TRAFFIC HOST and applied against the PHYSICAL identifier the
-    /// index mints, so it does not follow a namespace through the index path:
-    /// a firewalled site that pinned `ocx.sh` at its own registry would
-    /// otherwise start dialling `index.ocx.sh` — a host it never allow-listed
-    /// — with no config change of its own. An operator who declared where a
-    /// namespace's traffic goes has answered the question; one who wants both
-    /// writes `[registries."<ns>"] index` explicitly, which clears the
-    /// compiled-default provenance and so wins here.
+    /// a **locally-authored** `[mirrors."<ns>"]` entry pins its REGISTRY role.
+    /// `[mirrors]` is keyed by traffic host and applied against the PHYSICAL
+    /// identifier the index mints, so it does not follow a namespace through
+    /// the index path: a firewalled site that pinned `ocx.sh` at its own
+    /// registry would otherwise start dialling `index.ocx.sh` — a host it
+    /// never allow-listed — with no config change of its own. An operator who
+    /// declared where a namespace's traffic goes has answered the question;
+    /// one who wants both writes `[registries."<ns>"] index` explicitly, which
+    /// clears the compiled-default provenance and so wins here.
+    ///
+    /// Two scoping rules keep the trigger honest, and both are load-bearing:
+    ///
+    /// - **Locally-authored only** (`local_mirrors`, the loader's `local_only`
+    ///   view: compiled-in ▸ discovered ▸ `OCX_CONFIG`/`--config`). The merged
+    ///   config also carries the managed tier — a remote, operator-published
+    ///   payload the loader itself calls untrusted. Honouring a `[mirrors]`
+    ///   entry from there would let whoever controls that package revoke the
+    ///   sha256-verified two-hop path AND the yank gate fleet-wide, then take
+    ///   every `ocx.sh` request. A remote payload may redirect traffic (that is
+    ///   its job); it may not revoke the verified path. `OCX_MIRRORS` is
+    ///   excluded for the same reason — a parent ocx folds the managed tier
+    ///   into the map it forwards, so trusting the env would re-open the same
+    ///   hole one process hop later. Site-wide mirror policy lives in
+    ///   `/etc/ocx/config.toml`, which every process reads directly.
+    /// - **Registry role only.** The index role is applied keyed on the index
+    ///   base's OWN host (`OcxIndex::resolve_base_url`, e.g. `index.ocx.sh`),
+    ///   never on the namespace, so `[mirrors."<ns>"] index` cannot redirect
+    ///   anything for `<ns>` — suppressing on it would leave the operator with
+    ///   neither the index nor their mirror. A `[mirrors."index.ocx.sh"]`
+    ///   entry does not suppress either: that operator redirected the index
+    ///   rather than replacing it, and gets the verified path against their
+    ///   own host (F5c).
     ///
     /// This is the only seam that can see both halves: the compiled-in tier is
-    /// folded in `ConfigLoader`, but `[mirrors]` is not fully resolved until
-    /// `try_init` merges config with `OCX_MIRRORS` — which the loader never
-    /// reads, and which is exactly the channel a parent ocx uses to forward
-    /// the site's mirror map into a child process.
+    /// folded in `ConfigLoader`, but the mirror map is not resolved until
+    /// `try_init`.
     fn build_index_sources(
         online: bool,
         config: &ocx_lib::Config,
+        local_mirrors: Option<&std::collections::HashMap<String, ocx_lib::MirrorConfig>>,
         mirrors_index: &std::collections::BTreeMap<String, ocx_lib::ParsedMirror>,
         registry_mirrors: &oci::MirrorMap,
         insecure_hosts: &[String],
@@ -646,10 +684,13 @@ impl Context {
             return Ok(Vec::new());
         };
 
-        // An explicit `[mirrors."<ns>"]` entry for the namespace itself, in
-        // either traffic role, from config or forwarded `OCX_MIRRORS`.
-        let is_mirrored =
-            |namespace: &str| mirrors_index.contains_key(namespace) || registry_mirrors.get(namespace).is_some();
+        // A locally-authored `[mirrors."<ns>"]` entry pinning the namespace's
+        // REGISTRY role — the one declaration that both redirects the
+        // namespace's traffic and leaves the compiled-in index host unnamed.
+        // A bare-string entry sets `registry`, so it counts too.
+        let locally_pinned_at_a_mirror = |namespace: &str| {
+            local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()))
+        };
 
         // Deterministic chain order: sort namespaces so the built sources — and
         // therefore the resolution chain — are stable across runs.
@@ -661,11 +702,12 @@ impl Context {
                 if entry.index.as_deref().is_none_or(str::is_empty) {
                     return false;
                 }
-                if entry.index_is_compiled_default && is_mirrored(namespace) {
-                    log::debug!(
-                        "[mirrors.\"{namespace}\"] is declared, so the compiled-in index default for that \
-                         namespace is suppressed; it resolves as a plain OCI registry through the mirror. \
-                         Declare [registries.\"{namespace}\"] index explicitly to keep the index path."
+                if entry.index_is_compiled_default && locally_pinned_at_a_mirror(namespace) {
+                    log::warn!(
+                        "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
+                         default for it is suppressed; it resolves as a plain OCI registry through the mirror, \
+                         without the index's digest verification or yank gate. Declare \
+                         [registries.\"{namespace}\"] index explicitly to keep the index path."
                     );
                     return false;
                 }
@@ -974,6 +1016,7 @@ mod tests {
         Context::build_index_sources(
             online,
             config,
+            None,
             mirrors_index,
             &oci::MirrorMap::default(),
             &[],
@@ -1239,64 +1282,144 @@ mod tests {
         }
     }
 
-    fn mirror_map_for(host: &str, url: &str) -> oci::MirrorMap {
-        oci::MirrorMap::new([(host.to_string(), ocx_lib::parse_url(url).unwrap())])
+    /// A `[mirrors]` table as a local config file would parse it. `registry`
+    /// carries the role a bare-string entry sets; `index` the table-form role.
+    fn local_mirror_table(
+        host: &str,
+        registry: Option<&str>,
+        index: Option<&str>,
+    ) -> std::collections::HashMap<String, ocx_lib::MirrorConfig> {
+        let mut table = std::collections::HashMap::new();
+        table.insert(
+            host.to_string(),
+            ocx_lib::MirrorConfig {
+                registry: registry.map(str::to_string),
+                index: index.map(str::to_string),
+                ..Default::default()
+            },
+        );
+        table
     }
 
-    /// A `[mirrors."ocx.sh"]` registry-role entry suppresses the compiled-in
-    /// index for that namespace. The scenario: a firewalled site pins `ocx.sh`
-    /// at its own artifact server. `[mirrors]` is applied against the PHYSICAL
+    /// Builds sources with a mirror map that is present in the MERGED views
+    /// (what the OCI client and index-role resolver see) but attributed to a
+    /// caller-chosen local view — the seam N1 turns on.
+    fn build_with_views(
+        config: &ocx_lib::Config,
+        local_mirrors: Option<&std::collections::HashMap<String, ocx_lib::MirrorConfig>>,
+        merged_registry_mirror: Option<(&str, &str)>,
+        merged_index_mirror: Option<(&str, &str)>,
+    ) -> Vec<index::OcxIndex> {
+        let registry_mirrors = merged_registry_mirror.map_or_else(oci::MirrorMap::default, |(host, url)| {
+            oci::MirrorMap::new([(host.to_string(), ocx_lib::parse_url(url).unwrap())])
+        });
+        let mut mirrors_index = std::collections::BTreeMap::new();
+        if let Some((host, url)) = merged_index_mirror {
+            mirrors_index.insert(host.to_string(), ocx_lib::parse_url(url).unwrap());
+        }
+        Context::build_index_sources(
+            true,
+            config,
+            local_mirrors,
+            &mirrors_index,
+            &registry_mirrors,
+            &[],
+            &ocx_lib::cli::progress::ProgressManager::disabled(),
+        )
+        .unwrap()
+    }
+
+    /// A locally-authored registry-role `[mirrors."ocx.sh"]` entry suppresses
+    /// the compiled-in index. The scenario: a firewalled site pins `ocx.sh` at
+    /// its own artifact server. `[mirrors]` is applied against the PHYSICAL
     /// identifier the index mints, so it does not cover `index.ocx.sh` — and
     /// silently adding a host the operator never allow-listed is exactly the
     /// egress they configured `[mirrors]` to prevent.
     #[test]
-    fn a_registry_role_mirror_suppresses_the_compiled_in_index() {
-        let built = Context::build_index_sources(
-            true,
+    fn a_local_registry_role_mirror_suppresses_the_compiled_in_index() {
+        let built = build_with_views(
             &config_with_compiled_default(),
-            &std::collections::BTreeMap::new(),
-            &mirror_map_for(oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote"),
-            &[],
-            &ocx_lib::cli::progress::ProgressManager::disabled(),
-        )
-        .unwrap();
+            Some(&local_mirror_table(
+                oci::OCX_SH_REGISTRY,
+                Some("https://artifactory.corp/ocx-remote"),
+                None,
+            )),
+            Some((oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote")),
+            None,
+        );
         assert!(
             built.is_empty(),
-            "an explicit [mirrors.\"ocx.sh\"] entry must suppress the compiled-in index for that namespace"
+            "a local [mirrors.\"ocx.sh\"] registry-role entry must suppress the compiled-in index"
         );
     }
 
-    /// Same suppression via the `index` role — "either role, any form".
+    /// **N1, the attack.** The managed tier is a remote, operator-published
+    /// payload the loader itself calls untrusted; it merges as a full `Config`,
+    /// `[mirrors]` included. Whoever controls that package must not be able to
+    /// revoke the sha256-verified two-hop path and the yank gate fleet-wide and
+    /// take every `ocx.sh` request.
+    ///
+    /// This models the tier, not just "an entry exists": the mirror is present
+    /// in BOTH merged views — exactly as a managed `[mirrors]` entry arrives —
+    /// and absent only from the local-only view. A trigger keyed on the merged
+    /// maps passes every other test here and fails this one.
     #[test]
-    fn an_index_role_mirror_suppresses_the_compiled_in_index() {
-        let mut mirrors_index = std::collections::BTreeMap::new();
-        mirrors_index.insert(
-            oci::OCX_SH_REGISTRY.to_string(),
-            ocx_lib::parse_url("https://artifactory.corp/ocx-index").unwrap(),
+    fn a_managed_tier_mirror_cannot_suppress_the_compiled_in_index() {
+        let built = build_with_views(
+            &config_with_compiled_default(),
+            // The operator shipped no config of their own — the whole point.
+            None,
+            Some((oci::OCX_SH_REGISTRY, "https://attacker.example/ocx")),
+            Some((oci::OCX_SH_REGISTRY, "https://attacker.example/ocx")),
         );
-        let built = build_test_sources(true, &config_with_compiled_default(), &mirrors_index).unwrap();
-        assert!(
-            built.is_empty(),
-            "an index-role [mirrors.\"ocx.sh\"] entry must suppress the compiled-in index too"
+        assert_eq!(
+            source_namespaces(&built),
+            vec![oci::OCX_SH_REGISTRY.to_string()],
+            "a mirror from the untrusted managed tier must not revoke the verified index path"
+        );
+    }
+
+    /// **N2.** The index role is only ever applied keyed on the index base's
+    /// OWN host (`OcxIndex::resolve_base_url`), never on the namespace, so
+    /// `[mirrors."ocx.sh"] index` cannot redirect anything for `ocx.sh`.
+    /// Suppressing on it would strand the operator with neither the index nor
+    /// their corp endpoint — `ocx.sh` would egress direct as plain OCI with no
+    /// registry-role mirror to catch it.
+    #[test]
+    fn a_namespace_keyed_index_role_mirror_does_not_suppress() {
+        let built = build_with_views(
+            &config_with_compiled_default(),
+            Some(&local_mirror_table(
+                oci::OCX_SH_REGISTRY,
+                None,
+                Some("https://corp-index.example"),
+            )),
+            None,
+            Some((oci::OCX_SH_REGISTRY, "https://corp-index.example")),
+        );
+        assert_eq!(
+            source_namespaces(&built),
+            vec![oci::OCX_SH_REGISTRY.to_string()],
+            "an entry that can never redirect the namespace must not suppress its index"
         );
     }
 
     /// An `index` a config file wrote is NOT compiled-default provenance, so
     /// the mirror entry does not suppress it — the documented way to keep both
-    /// a mirror and the index path. Same mirror map as the suppression test
+    /// a mirror and the index path. Same local mirror as the suppression test
     /// above; only the provenance flag differs.
     #[test]
     fn an_explicit_index_survives_a_mirror_entry_for_the_same_namespace() {
-        let config = config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh"))]);
-        let built = Context::build_index_sources(
-            true,
-            &config,
-            &std::collections::BTreeMap::new(),
-            &mirror_map_for(oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote"),
-            &[],
-            &ocx_lib::cli::progress::ProgressManager::disabled(),
-        )
-        .unwrap();
+        let built = build_with_views(
+            &config_with_registries(&[(oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh"))]),
+            Some(&local_mirror_table(
+                oci::OCX_SH_REGISTRY,
+                Some("https://artifactory.corp/ocx-remote"),
+                None,
+            )),
+            Some((oci::OCX_SH_REGISTRY, "https://artifactory.corp/ocx-remote")),
+            None,
+        );
         assert_eq!(
             source_namespaces(&built),
             vec![oci::OCX_SH_REGISTRY.to_string()],
@@ -1305,16 +1428,21 @@ mod tests {
     }
 
     /// Host-keyed precision: the mirror entry that routes the INDEX's own
-    /// traffic host (`index.ocx.sh`, the F5c override) is not a declaration
-    /// about the `ocx.sh` NAMESPACE, so it must not suppress anything.
+    /// traffic host (`index.ocx.sh`, the F5c override) redirects the index
+    /// rather than replacing it — that operator gets the verified path against
+    /// their own host, so suppressing would delete what they asked for.
     #[test]
     fn a_mirror_keyed_by_the_index_host_does_not_suppress_the_compiled_in_index() {
-        let mut mirrors_index = std::collections::BTreeMap::new();
-        mirrors_index.insert(
-            "index.ocx.sh".to_string(),
-            ocx_lib::parse_url("https://artifactory.corp/ocx-index").unwrap(),
+        let built = build_with_views(
+            &config_with_compiled_default(),
+            Some(&local_mirror_table(
+                "index.ocx.sh",
+                None,
+                Some("https://artifactory.corp/ocx-index"),
+            )),
+            None,
+            Some(("index.ocx.sh", "https://artifactory.corp/ocx-index")),
         );
-        let built = build_test_sources(true, &config_with_compiled_default(), &mirrors_index).unwrap();
         assert_eq!(
             source_namespaces(&built),
             vec![oci::OCX_SH_REGISTRY.to_string()],
