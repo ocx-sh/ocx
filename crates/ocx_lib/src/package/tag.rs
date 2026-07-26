@@ -3,16 +3,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{oci::Digest, package::version};
+use crate::{oci::Algorithm, package::version};
 
-/// Prefix for OCX-internal tags that should be hidden from user-facing listings.
-const INTERNAL_TAG_PREFIX: &str = "__ocx.";
+/// The OCX-internal tag namespace. The prefix *is* the namespace, so the whole
+/// of it is reserved: no separator is required after it and the match is
+/// case-insensitive.
+const RESERVED_INTERNAL_PREFIX: &str = "__ocx";
 
 /// Known OCX-internal tag types.
 ///
-/// Internal tags are prefixed with `__ocx.` and used for metadata artifacts.
-/// Unknown internal tags (from newer OCX versions) are preserved as
-/// [`Unknown`](InternalTag::Unknown) rather than causing errors.
+/// Internal tags live in the `__ocx` namespace and name
+/// metadata artifacts. Unknown internal tags (from newer OCX versions) are
+/// preserved as [`Unknown`](InternalTag::Unknown) rather than causing errors.
 #[derive(Debug, Clone)]
 pub enum InternalTag {
     /// Package description artifact (`__ocx.desc`).
@@ -29,9 +31,9 @@ impl InternalTag {
 
     /// The OCI tag string for patch descriptor artifacts.
     ///
-    /// The `__ocx.` prefix causes [`Tag::is_internal_str`] to return `true`,
-    /// which automatically hides this tag from user-facing tag listings — no
-    /// additional filtering is required.
+    /// It sits in the `__ocx` namespace, so [`Tag::is_reserved`] returns `true`
+    /// for it and it is excluded from user-facing tag listings without any
+    /// additional filtering.
     pub const PATCH_TAG: &str = "__ocx.patch";
 
     fn from_tag(value: &str) -> Self {
@@ -57,9 +59,9 @@ impl std::fmt::Display for InternalTag {
 ///
 /// Parsed from a raw tag string via `Tag::from(String)`. The parse order is:
 /// 1. `"latest"` → [`Latest`](Tag::Latest)
-/// 2. Internal OCX tag (`__ocx.*`) → [`Internal`](Tag::Internal)
+/// 2. The `__ocx` namespace → [`Internal`](Tag::Internal)
 /// 3. Version-parseable (digit-first or variant-prefixed) → [`Version`](Tag::Version)
-/// 4. Canonical digest (`sha256:...`) → [`Canonical`](Tag::Canonical)
+/// 4. Digest-alias tag (`sha256.<hex>`) → [`Canonical`](Tag::Canonical)
 /// 5. Anything else → [`Other`](Tag::Other)
 ///
 /// Bare variant names (e.g., `"debug"`, `"canary"`) fall into [`Other`](Tag::Other).
@@ -70,14 +72,24 @@ impl std::fmt::Display for InternalTag {
 pub enum Tag {
     /// The literal `"latest"` tag — latest version of the default variant.
     Latest,
-    /// An OCX-internal tag (prefixed with `__ocx.`). Used for metadata artifacts
-    /// like package descriptions. Filtered from user-facing tag listings.
+    /// An OCX-internal tag in the `__ocx` namespace. Used for metadata artifacts
+    /// like package descriptions. Excluded from user-facing tag listings.
     Internal(InternalTag),
     /// A semantic version, optionally with a variant prefix.
     /// Examples: `"3.28.1"`, `"3.28.1-alpha_b1"`, `"debug-3.12.5"`.
     Version(version::Version),
-    /// A content-addressable digest tag (e.g., `"sha256:abcdef..."`).
-    Canonical(Digest),
+    /// A digest-alias tag naming a platform manifest by its own digest, e.g.
+    /// `"sha256.abcdef…"`.
+    ///
+    /// The parts are carried separately rather than as an [`crate::oci::Digest`]
+    /// because a tag spells them `<algorithm>.<hex>` — OCI forbids `:` in a tag,
+    /// which is the separator `Digest`'s `Display` emits.
+    Canonical {
+        /// The digest algorithm the tag names.
+        algorithm: Algorithm,
+        /// The lower- or upper-case hex digest body, verbatim as tagged.
+        hex: String,
+    },
     /// Any tag that doesn't match the above patterns.
     /// Includes bare variant names (`"debug"`) and arbitrary user-chosen tags (`"custom-tag"`).
     Other(String),
@@ -85,31 +97,58 @@ pub enum Tag {
 
 const LATEST_STR: &str = "latest";
 
+/// Matches the digest-alias tag form `<algorithm>.<hex>` over every supported
+/// algorithm. Deliberately wider than the `sha256` tags `push_canonical_tag`
+/// writes today: reserving a name costs nothing, and a `sha384.…` tag would be
+/// no more a version than a `sha256.…` one.
+fn parse_canonical(value: &str) -> Option<(Algorithm, &str)> {
+    Algorithm::ALL.iter().find_map(|algorithm| {
+        let hex = value.strip_prefix(algorithm.prefix())?.strip_prefix('.')?;
+        (hex.len() == algorithm.hex_len() && hex.chars().all(|c| c.is_ascii_hexdigit())).then_some((*algorithm, hex))
+    })
+}
+
 impl Tag {
-    /// Returns `true` if this is an OCX-internal tag (prefixed with `__ocx.`).
-    pub fn is_internal(&self) -> bool {
-        matches!(self, Tag::Internal(_))
+    /// Returns `true` if this tag is not a version pointer: the OCX-internal
+    /// namespace, or a digest-alias tag naming a platform manifest by its own
+    /// digest. Neither may appear as a version in the index.
+    pub fn is_reserved(&self) -> bool {
+        matches!(self, Tag::Internal(_) | Tag::Canonical { .. })
     }
 
-    /// Returns `true` if the raw tag string is an OCX-internal tag.
+    /// `&str` convenience wrapper over [`Tag::is_reserved`] for listing filters.
     ///
-    /// Cheap `&str` check for use in filter pipelines where constructing
-    /// a full `Tag` would be wasteful.
-    pub fn is_internal_str(tag: &str) -> bool {
-        tag.starts_with(INTERNAL_TAG_PREFIX)
+    /// One allocation and one full classification per listed tag, deliberately:
+    /// there is exactly one implementation of the rule, and it is [`Tag::from`].
+    /// Filtering a listing while also needing the parsed tag should build one
+    /// [`Tag`] and reuse it instead.
+    pub fn is_reserved_str(tag: &str) -> bool {
+        Tag::from(tag.to_string()).is_reserved()
     }
+}
+
+/// Whether `tag` names the OCX-internal `__ocx` namespace. Case-insensitive and
+/// prefix-based, so `__ocx`, `__ocxfoo` and `__OCX.desc` all match. Private:
+/// [`Tag::from`] is the one classifier, and [`Tag::is_reserved`] is the one
+/// verdict callers ask for.
+fn is_internal_namespace(tag: &str) -> bool {
+    tag.get(..RESERVED_INTERNAL_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_INTERNAL_PREFIX))
 }
 
 impl From<String> for Tag {
     fn from(value: String) -> Self {
         if value == LATEST_STR {
             Tag::Latest
-        } else if value.starts_with(INTERNAL_TAG_PREFIX) {
+        } else if is_internal_namespace(&value) {
             Tag::Internal(InternalTag::from_tag(&value))
         } else if let Some(version) = version::Version::parse(value.as_ref()) {
             Tag::Version(version)
-        } else if let Ok(digest) = Digest::try_from(&value) {
-            Tag::Canonical(digest)
+        } else if let Some((algorithm, hex)) = parse_canonical(&value) {
+            Tag::Canonical {
+                algorithm,
+                hex: hex.to_string(),
+            }
         } else {
             Tag::Other(value)
         }
@@ -129,7 +168,7 @@ impl From<Tag> for String {
             Tag::Latest => LATEST_STR.to_string(),
             Tag::Internal(internal) => internal.to_string(),
             Tag::Version(version) => version.to_string(),
-            Tag::Canonical(canonical) => canonical.to_string(),
+            Tag::Canonical { algorithm, hex } => format!("{}.{}", algorithm.prefix(), hex),
             Tag::Other(other) => other,
         }
     }
@@ -159,6 +198,10 @@ impl<'de> Deserialize<'de> for Tag {
 mod tests {
     use super::*;
 
+    fn hex(len: usize) -> String {
+        "a".repeat(len)
+    }
+
     #[test]
     fn test_tag_parsing() {
         let latest_tag = Tag::from("latest".to_string());
@@ -169,23 +212,165 @@ mod tests {
         assert!(matches!(version_tag, Tag::Version(_)));
         assert_eq!(version_tag.to_string(), "1.2.3-alpha");
 
-        let canonical_tag =
-            Tag::from("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
-        assert!(matches!(canonical_tag, Tag::Canonical(_)));
-        assert_eq!(
-            canonical_tag.to_string(),
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
+        let canonical_tag = Tag::from(format!("sha256.{}", hex(64)));
+        assert!(matches!(canonical_tag, Tag::Canonical { .. }));
+        assert_eq!(canonical_tag.to_string(), format!("sha256.{}", hex(64)));
 
         let other_tag = Tag::from("custom-tag".to_string());
         assert!(matches!(other_tag, Tag::Other(_)));
         assert_eq!(other_tag.to_string(), "custom-tag");
     }
 
+    // ── Reserved-tag verdict (ADR D7) ─────────────────────────────
+
+    #[test]
+    fn tag_classifies_the_sha256_dot_form_as_canonical() {
+        let tag = Tag::from(format!("sha256.{}", hex(64)));
+        assert!(
+            matches!(&tag, Tag::Canonical { algorithm, hex: body }
+                if *algorithm == Algorithm::Sha256 && body.len() == 64),
+            "got {tag:?}"
+        );
+        assert!(tag.is_reserved());
+    }
+
+    /// The retarget is over `Algorithm::ALL`, not `sha256` alone — and the hex
+    /// length is per-algorithm, so a 64-hex `sha384.` tag is not canonical.
+    #[test]
+    fn tag_classifies_every_algorithm_dot_form_as_canonical() {
+        for (algorithm, len) in [
+            (Algorithm::Sha256, 64usize),
+            (Algorithm::Sha384, 96),
+            (Algorithm::Sha512, 128),
+        ] {
+            let raw = format!("{}.{}", algorithm.prefix(), hex(len));
+            let tag = Tag::from(raw.clone());
+            assert!(
+                matches!(&tag, Tag::Canonical { algorithm: a, .. } if *a == algorithm),
+                "{raw}: {tag:?}"
+            );
+            assert_eq!(tag.to_string(), raw);
+        }
+
+        let wrong_length = Tag::from(format!("sha384.{}", hex(64)));
+        assert!(matches!(wrong_length, Tag::Other(_)), "got {wrong_length:?}");
+        assert!(!wrong_length.is_reserved());
+    }
+
+    #[test]
+    fn tag_round_trips_the_dot_form_verbatim() {
+        for raw in [
+            format!("sha256.{}", hex(64)),
+            format!("sha384.{}", hex(96)),
+            format!("sha512.{}", hex(128)),
+        ] {
+            let tag = Tag::from(raw.clone());
+            let round_tripped: String = tag.clone().into();
+            assert_eq!(round_tripped, raw, "String::from({tag:?})");
+            assert_eq!(
+                serde_json::to_string(&tag).expect("serialize"),
+                format!("\"{raw}\""),
+                "Serialize routes through From<Tag> for String"
+            );
+        }
+    }
+
+    /// `:` is illegal in an OCI tag, so the colon form is not a tag OCX ever
+    /// writes and is not classified.
+    #[test]
+    fn tag_rejects_the_colon_form_as_other() {
+        let raw = format!("sha256:{}", hex(64));
+        let tag = Tag::from(raw.clone());
+        assert!(matches!(tag, Tag::Other(_)), "got {tag:?}");
+        assert!(!Tag::is_reserved_str(&raw));
+    }
+
+    #[test]
+    fn tag_reserves_bare_ocx_and_ocxfoo_and_uppercase() {
+        for raw in [
+            "__ocx.desc",
+            "__ocx.patch",
+            "__ocx",
+            "__ocxfoo",
+            "__OCX.desc",
+            "__ocx.FUTURE",
+            "__Ocx",
+        ] {
+            let tag = Tag::from(raw.to_string());
+            assert!(
+                matches!(tag, Tag::Internal(_)),
+                "'{raw}' should be Internal, got {tag:?}"
+            );
+            assert!(tag.is_reserved(), "'{raw}' should be reserved");
+            assert_eq!(tag.to_string(), raw);
+        }
+    }
+
+    #[test]
+    fn tag_does_not_reserve_boundary_forms() {
+        for raw in [
+            "3.28.1",
+            "latest",
+            "debug-3.12",
+            "custom-tag",
+            "debug",
+            "__oc",
+            "x__ocx",
+        ] {
+            let tag = Tag::from(raw.to_string());
+            assert!(!tag.is_reserved(), "'{raw}' should not be reserved, got {tag:?}");
+        }
+
+        for raw in [
+            format!("sha256.{}", hex(63)),
+            format!("sha256.{}", "z".repeat(64)),
+            format!("sha256{}", hex(64)),
+        ] {
+            let tag = Tag::from(raw.clone());
+            assert!(matches!(tag, Tag::Other(_)), "'{raw}' should be Other, got {tag:?}");
+            assert!(!tag.is_reserved(), "'{raw}' should not be reserved");
+        }
+    }
+
+    /// The D7 verdict table: every row states the expected verdict, so the
+    /// assertion never compares the implementation against itself. Both entry
+    /// points — the parsed [`Tag`] and the `&str` wrapper — are checked against
+    /// that stated verdict.
+    #[test]
+    fn d7_reserved_tag_verdict_table() {
+        let cases = [
+            ("__ocx.desc".to_string(), true),
+            ("__ocx.patch".to_string(), true),
+            ("__ocx".to_string(), true),
+            ("__ocxfoo".to_string(), true),
+            ("__OCX.desc".to_string(), true),
+            ("__ocx.FUTURE".to_string(), true),
+            ("__Ocx".to_string(), true),
+            (format!("sha256.{}", hex(64)), true),
+            (format!("sha384.{}", hex(96)), true),
+            (format!("sha512.{}", hex(128)), true),
+            (format!("sha256:{}", hex(64)), false),
+            (format!("sha256.{}", hex(63)), false),
+            (format!("sha384.{}", hex(64)), false),
+            (format!("sha256.{}", "z".repeat(64)), false),
+            (format!("sha256{}", hex(64)), false),
+            ("3.28.1".to_string(), false),
+            ("latest".to_string(), false),
+            ("debug-3.12".to_string(), false),
+            ("debug".to_string(), false),
+            ("custom-tag".to_string(), false),
+            ("__oc".to_string(), false),
+            ("x__ocx".to_string(), false),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(Tag::from(raw.clone()).is_reserved(), expected, "Tag::from('{raw}')");
+            assert_eq!(Tag::is_reserved_str(&raw), expected, "Tag::is_reserved_str('{raw}')");
+        }
+    }
+
     #[test]
     fn tag_internal_description() {
         let tag = Tag::from("__ocx.desc".to_string());
-        assert!(tag.is_internal());
         assert!(matches!(tag, Tag::Internal(InternalTag::Description)));
         assert_eq!(tag.to_string(), "__ocx.desc");
     }
@@ -193,31 +378,32 @@ mod tests {
     #[test]
     fn tag_internal_unknown_forward_compat() {
         let tag = Tag::from("__ocx.sbom".to_string());
-        assert!(tag.is_internal());
         assert!(matches!(tag, Tag::Internal(InternalTag::Unknown(_))));
         assert_eq!(tag.to_string(), "__ocx.sbom");
     }
 
     #[test]
-    fn tag_is_internal_str() {
-        assert!(Tag::is_internal_str("__ocx.desc"));
-        assert!(Tag::is_internal_str("__ocx.future"));
-        assert!(!Tag::is_internal_str("latest"));
-        assert!(!Tag::is_internal_str("3.28.1"));
-        assert!(!Tag::is_internal_str("debug"));
+    fn internal_namespace_matches_the_whole_prefix_case_insensitively() {
+        assert!(is_internal_namespace("__ocx.desc"));
+        assert!(is_internal_namespace("__ocx.future"));
+        assert!(is_internal_namespace("__ocx"));
+        assert!(is_internal_namespace("__ocxfoo"));
+        assert!(is_internal_namespace("__OCX.desc"));
+        assert!(!is_internal_namespace("latest"));
+        assert!(!is_internal_namespace("3.28.1"));
+        assert!(!is_internal_namespace("debug"));
+        assert!(!is_internal_namespace("__oc"));
+        assert!(!is_internal_namespace("x__ocx"));
     }
 
-    /// `PATCH_TAG` must be auto-hidden by the `__ocx.` prefix without any
-    /// extra filtering. `is_internal_str` is the filter gate.
+    /// `PATCH_TAG` must be auto-excluded by the `__ocx` namespace without any
+    /// extra filtering. `Tag::is_reserved` is the verdict.
     #[test]
-    fn patch_tag_is_internal() {
+    fn patch_tag_is_reserved() {
         assert_eq!(InternalTag::PATCH_TAG, "__ocx.patch");
-        assert!(
-            Tag::is_internal_str(InternalTag::PATCH_TAG),
-            "PATCH_TAG must pass is_internal_str (auto-hidden by __ocx. prefix)"
-        );
+        assert!(Tag::is_reserved_str(InternalTag::PATCH_TAG));
         let tag = Tag::from(InternalTag::PATCH_TAG.to_string());
-        assert!(tag.is_internal(), "Tag::from(PATCH_TAG) must be Tag::Internal");
+        assert!(tag.is_reserved(), "Tag::from(PATCH_TAG) must be reserved");
     }
 
     /// `Tag::from(PATCH_TAG)` must produce `Tag::Internal(InternalTag::Patch)`,
@@ -230,14 +416,6 @@ mod tests {
             "Tag::from(PATCH_TAG) must yield Tag::Internal(InternalTag::Patch), got: {tag:?}"
         );
         assert_eq!(tag.to_string(), "__ocx.patch");
-    }
-
-    #[test]
-    fn tag_non_internal() {
-        for name in ["latest", "3.28.1", "debug-3.12", "custom-tag", "debug"] {
-            let tag = Tag::from(name.to_string());
-            assert!(!tag.is_internal(), "'{name}' should not be internal");
-        }
     }
 
     // ── Variant tag parsing tests ─────────────────────────────────
@@ -290,8 +468,8 @@ mod tests {
         assert!(matches!(Tag::from("3.28.1_b1".to_string()), Tag::Version(_)));
         assert!(matches!(Tag::from("3.28.1-alpha_b1".to_string()), Tag::Version(_)));
         assert!(matches!(
-            Tag::from("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
-            Tag::Canonical(_)
+            Tag::from(format!("sha256.{}", hex(64))),
+            Tag::Canonical { .. }
         ));
         assert!(matches!(Tag::from("custom-tag".to_string()), Tag::Other(_)));
         assert!(matches!(Tag::from("__ocx.desc".to_string()), Tag::Internal(_)));
