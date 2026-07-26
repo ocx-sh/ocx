@@ -8,7 +8,17 @@ OCX = Rust package manager. OCI registries (Docker Hub, GHCR, private) as storag
 
 ## Current State
 
-Early stage. Core lib + CLI implemented. No stable API/CLI/config — refactors often delete-all-restart. Exception: metadata + OCI manifest must stay backward compatible for published packages.
+Early stage. Core lib + CLI implemented.
+
+### Stability tiers
+
+**Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. `ocx_lib` is not a published library; the binary is the only consumer.
+
+**Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
+
+**Even interfaces break pre-1.0.** A break is announced in `CHANGELOG.md` and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
+
+Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the CHANGELOG line.
 
 ## ⛔ MODEL POLICY — NON-NEGOTIABLE
 
