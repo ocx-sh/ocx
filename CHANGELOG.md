@@ -17,10 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Restructure `[group.<name>]` to hold only `[group.<name>.tools]` and `[group.<name>.env]` sub-tables — see [`[group.<name>]`](website/src/docs/reference/configuration.md#project-config-groups) *(cli)* **BREAKING**: a tool binding declared directly under `[group.<name>]` (the previous flat form) is now a parse error naming the group and pointing at `[group.<name>.tools]`. `[group.default]` and `[group.all]` remain reserved. `ocx.lock`'s `declaration_hash` is unaffected, so a hand-edited `ocx.toml` triggers no re-lock.
+- Flip `PATH`-style precedence under `--ci=github`/`--ci=gitlab` to match `ocx run` *(cli)* **BREAKING**: CI export used to prepend the whole buffered block and keep the *first* occurrence, so the first-accumulated value held the front of `PATH`. It now folds the same move-to-front operation `ocx run` applies in-process once per value, so the *last*-applied value lands at the front instead. A later pipeline stage can now override an earlier one for `PATH` and other path-type variables — it could not before.
+
+### Fixed
+
+- `ocx patch test` can run a base package that declares entrypoints *(cli)*: the launcher `pkg-root` guard allow-listed only `ocx package test`'s scratch root, so re-entry from a generated launcher under `patch test`'s own scratch root was rejected with exit 64 before the command could run.
 
 ### Removed
 
-- Drop `--self` from `ocx run` *(cli)* **BREAKING**: the self view is package vocabulary — it selects a package's own private surface, which by construction drops that package's `entrypoints/` from `PATH` because launchers exist for consumers. A toolchain consumer is a consumer of every tool it declares, so `ocx run --self` composed a strictly worse toolchain than the default. The flag stays on [`ocx package exec`](website/src/docs/reference/command-line.md#ocx-package-exec) and [`ocx package env`](website/src/docs/reference/command-line.md#ocx-package-env), where a package's own surface is the thing being asked about.
+- Drop `--self` from `ocx run` *(cli)* **BREAKING**: the self view is package vocabulary — it selects a package's own private surface, which by construction drops that package's `entrypoints/` from `PATH` because launchers exist for consumers. A toolchain consumer is a consumer of every tool it declares, so `ocx run --self` composed a strictly worse toolchain than the default. The flag stays on [`ocx package exec`](website/src/docs/reference/command-line.md#package-exec), [`ocx package env`](website/src/docs/reference/command-line.md#package-env), [`ocx package test`](website/src/docs/reference/command-line.md#package-test), and [`ocx package deps`](website/src/docs/reference/command-line.md#deps), where a package's own surface is the thing being asked about.
 
 ## [0.4.3] - 2026-07-10
 
