@@ -57,26 +57,39 @@ impl CiFlavor {
 
 /// Computes the final value for a path-type variable shared by both CI flavors.
 ///
-/// Reads the existing process value of `key`, prepends the buffered package
-/// `values` (in accumulation order), and joins everything with
-/// [`PATH_SEPARATOR`](crate::env::PATH_SEPARATOR). This is the one place the
-/// env-read + separator-join semantics live, so GitHub's `$GITHUB_ENV` path
-/// case and GitLab's flattened path case stay byte-identical.
+/// Reads the existing process value of `key` and folds each buffered package
+/// value from `values` (in accumulation order) through
+/// [`move_to_front`](crate::utility::path::move_to_front) — the same
+/// operation `Env::add_path` applies once per entry on the in-process
+/// `ocx run` path. This is the one place the env-read + move-to-front
+/// semantics live for CI export, so GitHub's `$GITHUB_ENV` path case and
+/// GitLab's flattened path case stay byte-identical *and* agree with
+/// `ocx run`'s in-process precedence.
 ///
-/// Move-to-front: a value already present in the existing variable is removed
-/// from its old position and kept at the front (the buffered `values` precede
-/// `existing`, then [`VecExt::unique`](crate::utility::vec_ext::VecExt::unique)
-/// keeps the first occurrence). Empty segments are dropped. Re-running an export
-/// against an already-exported variable therefore does not grow it.
+/// **Last-applied wins, landing at the front.** `values` accumulate in the
+/// same order `write_entry` is called (earliest-processed package or stage
+/// first). Folding `move_to_front` in that order means the value applied
+/// *last* ends up closest to the front — a value already present (in an
+/// earlier `values` entry, or in `existing`) is removed from its old position
+/// and kept at the new front. Empty segments are dropped. Re-running an
+/// export against an already-exported variable therefore does not grow it.
+///
+/// **Direction fixed by `adr_project_env_declaration.md` C1a.** This used to
+/// prepend the whole buffered block and keep the *first* occurrence, so the
+/// *first*-applied value held the front — the inverse of `Env::add_path`'s
+/// `ocx run` semantics. Under `--ci=github`/`--ci=gitlab` a later stage could
+/// not override an earlier one; it now can, matching `ocx run`.
 fn prepend_existing(key: &str, values: &[String]) -> String {
-    use crate::utility::vec_ext::VecExt;
+    use std::ffi::{OsStr, OsString};
+
+    use crate::utility::path::move_to_front;
+
     let existing = crate::env::var(key).unwrap_or_default();
-    let separator = crate::env::PATH_SEPARATOR;
-    let mut parts: Vec<String> = values.to_vec();
-    parts.extend(existing.split(separator).map(str::to_string));
-    parts.retain(|segment| !segment.is_empty());
-    parts.unique();
-    parts.join(separator)
+    let mut result = OsString::from(existing);
+    for value in values {
+        result = move_to_front(&result, OsStr::new(value));
+    }
+    result.to_string_lossy().into_owned()
 }
 
 impl std::fmt::Display for CiFlavor {
@@ -126,28 +139,44 @@ mod tests {
         assert!(CiFlavor::from_str("jenkins", false).is_err());
     }
 
-    // ── prepend_existing move-to-front (idempotency) ─────────────────────
+    // ── prepend_existing move-to-front (last-applied-wins) ────────────────
+    //
+    // C1a fix (`adr_project_env_declaration.md`): among several path values
+    // for one key, the value applied *last* now lands at the front, matching
+    // `Env::add_path`'s `ocx run` semantics — the inverse of the old
+    // first-applied-wins direction. These four tests pin the fixed
+    // direction; the first three assertions are unchanged by the flip
+    // (single-value / identical-duplicate cases are order-independent), the
+    // second one changes value and is the direct regression pin.
     use crate::env::PATH_SEPARATOR as SEP;
 
     #[test]
     fn prepend_existing_does_not_re_add_present_value() {
+        // A single value already present is moved to front, not duplicated.
+        // Order-independent under both the old and the fixed direction.
         let env = crate::test::env::lock();
         env.set("PREPEND_TEST", format!("/pkg/bin{SEP}/usr/bin"));
-        // `/pkg/bin` is already present → it is moved to front, not duplicated.
         let result = super::prepend_existing("PREPEND_TEST", &["/pkg/bin".to_string()]);
         assert_eq!(result, format!("/pkg/bin{SEP}/usr/bin"));
     }
 
     #[test]
-    fn prepend_existing_new_values_precede_existing() {
+    fn prepend_existing_last_applied_value_precedes_earlier_values() {
+        // Two distinct path contributions for the same key, applied in
+        // sequence: `/a/bin` first, `/b/bin` second. Pins last-applied-wins:
+        // `/b/bin` lands at the front. Fails under the old first-wins
+        // direction, which put `/a/bin` (applied first) at the front.
         let env = crate::test::env::lock();
         env.set("PREPEND_TEST", "/usr/bin");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
-        assert_eq!(result, format!("/a/bin{SEP}/b/bin{SEP}/usr/bin"));
+        assert_eq!(result, format!("/b/bin{SEP}/a/bin{SEP}/usr/bin"));
     }
 
     #[test]
     fn prepend_existing_drops_empty_segments() {
+        // Empty segments in the existing value are dropped regardless of
+        // direction — order-independent under both the old and the fixed
+        // direction (only one new value here).
         let env = crate::test::env::lock();
         env.set("PREPEND_TEST", format!("/usr/bin{SEP}{SEP}/bin"));
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string()]);
@@ -156,9 +185,26 @@ mod tests {
 
     #[test]
     fn prepend_existing_collapses_duplicate_new_values() {
+        // Identical repeated values collapse to a single front occurrence
+        // regardless of direction — order-independent under both the old and
+        // the fixed direction (no distinct values to reorder).
         let env = crate::test::env::lock();
         env.remove("PREPEND_TEST");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/a/bin".to_string()]);
         assert_eq!(result, "/a/bin");
+    }
+
+    #[test]
+    fn prepend_existing_last_applied_wins_over_existing_process_value() {
+        // Regression pin for C1a: a key already set in the existing process
+        // env, then two distinct path contributions for the same key applied
+        // in sequence. The value applied last (`/b/bin`) must be at the
+        // front, ahead of both the earlier contribution and the pre-existing
+        // value. Fails under the old first-wins behavior, which would have
+        // put `/a/bin` first instead.
+        let env = crate::test::env::lock();
+        env.set("PREPEND_TEST", "/existing/bin");
+        let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
+        assert_eq!(result, format!("/b/bin{SEP}/a/bin{SEP}/existing/bin"));
     }
 }

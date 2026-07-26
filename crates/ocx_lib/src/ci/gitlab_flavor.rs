@@ -238,10 +238,14 @@ mod tests {
             .unwrap();
         target.flush().unwrap();
 
+        // C1a: last applied wins and lands at the front, so `/pkg2/lib`
+        // (written second) precedes `/pkg1/lib`. Both CI flavors share
+        // `ci::prepend_existing`, so this direction is pinned identically
+        // here and in the GitHub flavor.
         assert_eq!(
             buf.contents(),
             format!(
-                "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg1/lib{0}/pkg2/lib\"}}\n",
+                "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg2/lib{0}/pkg1/lib\"}}\n",
                 crate::env::PATH_SEPARATOR
             )
         );

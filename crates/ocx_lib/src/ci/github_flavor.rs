@@ -359,10 +359,13 @@ mod tests {
             .unwrap();
         targets.flush().unwrap();
 
+        // C1a: last applied wins and lands at the front, matching
+        // `Env::add_path`'s in-process `ocx run` semantics. `/pkg2/lib` was
+        // written second, so it precedes `/pkg1/lib`.
         let content = read(&targets.env_file);
         assert_eq!(
             content,
-            format!("LD_LIBRARY_PATH=/pkg1/lib{0}/pkg2/lib\n", crate::env::PATH_SEPARATOR)
+            format!("LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib\n", crate::env::PATH_SEPARATOR)
         );
     }
 
@@ -381,11 +384,15 @@ mod tests {
             .unwrap();
         targets.flush().unwrap();
 
+        // C1a: last applied wins. Written order is pkg1 then pkg2, so the
+        // resulting order is pkg2, pkg1, then whatever the process already
+        // had — a later stage can now override an earlier one under `--ci`,
+        // exactly as it can under `ocx run`.
         let content = read(&targets.env_file);
         assert_eq!(
             content,
             format!(
-                "LD_LIBRARY_PATH=/pkg1/lib{0}/pkg2/lib{0}/existing/lib\n",
+                "LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib{0}/existing/lib\n",
                 crate::env::PATH_SEPARATOR
             )
         );
