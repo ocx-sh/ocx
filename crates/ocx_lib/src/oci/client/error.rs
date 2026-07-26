@@ -30,6 +30,11 @@ pub enum ClientError {
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
+    /// A registry served an image index that deserialised but violates the OCI
+    /// image spec (wrong `schemaVersion`, unaddressable descriptor). Refused at
+    /// registry admission so malformed bytes never reach the index.
+    #[error(transparent)]
+    InvalidImageIndex(#[from] crate::oci::manifest::InvalidImageIndex),
     /// A single-layer artifact manifest's `artifactType` did not match what
     /// the caller expected. Raised by
     /// [`crate::oci::Client::fetch_single_layer_artifact`].
@@ -187,6 +192,7 @@ impl ClassifyExitCode for ClientError {
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
             | Self::InvalidManifest(_)
+            | Self::InvalidImageIndex(_)
             | Self::UnexpectedArtifactType { .. }
             | Self::WrongLayerCount { .. }
             | Self::UnexpectedLayerMediaType { .. }

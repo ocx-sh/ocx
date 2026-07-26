@@ -288,7 +288,10 @@ impl Client {
             .await
         {
             Ok((blob, digest_str)) => {
-                let existing: oci::Manifest = serde_json::from_slice(&blob).map_err(ClientError::Serialization)?;
+                // The existing index is about to be mutated and pushed back, so
+                // it must be a valid one — otherwise a cascade would launder a
+                // malformed publisher document into a freshly written tag.
+                let existing = parse_registry_manifest(&blob)?;
                 match existing {
                     oci::Manifest::Image(_) => {
                         let blob_size = i64::try_from(blob.len()).map_err(|_| {
@@ -1519,6 +1522,17 @@ impl Client {
     ///
     /// The body is capped at [`MAX_INDEX_DOCUMENT_BYTES`]; an over-cap
     /// response is refused before it is parsed or handed to any caller.
+    ///
+    /// The cap is an **admission** check, not a memory bound. It runs on an
+    /// already-materialised body: [`OciTransport::pull_manifest_raw`] returns a
+    /// `Vec`, so a hostile registry can still force a transient allocation of
+    /// whatever it chooses to send before the refusal fires. What the cap
+    /// guarantees is that no over-cap body is ever parsed, digested, or carried
+    /// into the index — the property the dispatch-object store depends on.
+    /// Bounding the allocation too needs a capped read on the transport itself
+    /// (the `index.ocx.sh` fetch in `oci::index::ocx_index` owns its `reqwest`
+    /// call and does exactly that: `Content-Length` precheck, then an
+    /// incremental per-chunk cap). Tracked as FU-3.
     pub(crate) async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &Identifier,
@@ -1558,7 +1572,7 @@ impl Client {
             )));
         }
 
-        let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
+        let manifest = parse_registry_manifest(&raw_bytes)?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
         verify_raw_bytes_digest(&raw_bytes, &digest)?;
@@ -1631,9 +1645,33 @@ impl Client {
             .transport
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
             .await?;
-        let manifest: oci::Manifest = serde_json::from_slice(&data).map_err(ClientError::Serialization)?;
+        let manifest = parse_registry_manifest(&data)?;
         Ok((manifest, digest))
     }
+}
+
+/// Parses registry-served manifest bytes, refusing an image index that is not a
+/// valid one.
+///
+/// The one place `oci::Manifest` is decoded from registry bytes. Deserialisation
+/// proves shape only — `OciImageIndex::schema_version` is an unconstrained `u8`,
+/// so `{"schemaVersion":1,"manifests":[]}` parses happily — and the resulting
+/// index is then carried into the local index, merged into on a cascade push, or
+/// committed verbatim into a public git repository by `announce`. Admission is
+/// checked here rather than at each of those sites so no future caller can
+/// acquire an unvalidated one.
+///
+/// # Errors
+///
+/// [`ClientError::Serialization`] when the bytes are not a manifest at all;
+/// [`ClientError::InvalidImageIndex`] when they are an image index that violates
+/// [`oci::manifest::validate_image_index`].
+fn parse_registry_manifest(bytes: &[u8]) -> std::result::Result<oci::Manifest, ClientError> {
+    let manifest: oci::Manifest = serde_json::from_slice(bytes).map_err(ClientError::Serialization)?;
+    if let oci::Manifest::ImageIndex(index) = &manifest {
+        oci::manifest::validate_image_index(index)?;
+    }
+    Ok(manifest)
 }
 
 /// Recomputes the digest of `raw_bytes` (using the algorithm `claimed`
@@ -1928,6 +1966,84 @@ mod tests {
             .expect("a body of exactly the cap must be accepted")
             .expect("tag is present in the stub");
         assert_eq!(raw_bytes.len(), length);
+    }
+
+    /// Registers hand-authored manifest bytes under `id` at the digest they
+    /// actually hash to.
+    ///
+    /// The fixture is a byte literal on purpose: an invalid `schemaVersion`
+    /// cannot be produced by serialising an `oci::ImageIndex` (every write site
+    /// sets `oci::INDEX_SCHEMA_VERSION`), so a fixture built by the code under
+    /// test could never contradict it.
+    fn stub_raw_manifest(id: &Identifier, data: &StubTransportData, bytes: &[u8]) {
+        let digest = Algorithm::Sha256.hash(bytes).to_string();
+        data.write().manifests.insert(id.to_string(), (bytes.to_vec(), digest));
+    }
+
+    /// A registry serving an image index with `schemaVersion: 1` is refused at
+    /// admission. The document deserialises happily — `schema_version` is an
+    /// unconstrained `u8` — and its digest verifies, so nothing but the
+    /// semantic check stands between those bytes and the index that would carry
+    /// them verbatim into a public git repository.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_refuses_wrong_schema_version() {
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        stub_raw_manifest(&id, &data, br#"{"schemaVersion":1,"manifests":[]}"#);
+        let client = stub(&data);
+
+        match client.fetch_manifest_raw_bytes(&id).await {
+            Err(error @ ClientError::InvalidImageIndex(_)) => {
+                assert_eq!(
+                    crate::cli::ClassifyExitCode::classify(&error),
+                    Some(crate::cli::ExitCode::DataError)
+                );
+                assert!(
+                    error.to_string().contains("schemaVersion"),
+                    "the refusal must name the violated invariant: {error}"
+                );
+            }
+            other => panic!("expected Err(ClientError::InvalidImageIndex), got {other:?}"),
+        }
+    }
+
+    /// A descriptor with an empty `digest` names no child at all, so the index
+    /// is unusable. Refused at admission rather than surfacing later as an
+    /// unresolvable platform entry.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_refuses_unaddressable_descriptor() {
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        stub_raw_manifest(
+            &id,
+            &data,
+            br#"{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"","size":7}]}"#,
+        );
+        let client = stub(&data);
+
+        match client.fetch_manifest_raw_bytes(&id).await {
+            Err(ClientError::InvalidImageIndex(_)) => {}
+            other => panic!("expected Err(ClientError::InvalidImageIndex), got {other:?}"),
+        }
+    }
+
+    /// The check is semantic, never `deny_unknown_fields`: a sibling key a
+    /// newer writer added (here `subject`, which `oci::ImageIndex` does not
+    /// model) rides through, and the verbatim bytes come back untouched.
+    #[tokio::test]
+    async fn fetch_manifest_raw_bytes_admits_index_with_unknown_sibling_field() {
+        let id = test_identifier("1.0");
+        let data = StubTransportData::new();
+        let bytes: &[u8] = br#"{"schemaVersion":2,"manifests":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:cafe","size":3}}"#;
+        stub_raw_manifest(&id, &data, bytes);
+        let client = stub(&data);
+
+        let (raw_bytes, _digest, _parsed) = client
+            .fetch_manifest_raw_bytes(&id)
+            .await
+            .expect("an unknown sibling field must not be a refusal")
+            .expect("tag is present in the stub");
+        assert_eq!(raw_bytes, bytes, "the bytes must ride through verbatim");
     }
 
     // ── Pagination tests ─────────────────────────────────────────────
