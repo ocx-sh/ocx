@@ -1999,14 +1999,15 @@ def test_published_absent_dispatch_recovers_from_the_physical_registry_and_self_
 
 
 # ---------------------------------------------------------------------------
-# Jurisdiction — the INDEX declares which names it can express, the client asks.
+# Jurisdiction — the INDEX declares what a MISS means; the root always decides.
 #
 # `config.json`'s `name_segments` is the index operator's own published
 # statement about its name grammar. `index.ocx.sh` serves 2, restating its root
-# schema's `^ocx\.sh/<ns>/<pkg>$`. A name it declares inexpressible is outside
-# that source's jurisdiction: never requested, its silence decides nothing, and
-# the chain falls through to the registry. Absence of the field means "serves
-# every name" — today's behaviour verbatim, including the terminal stop.
+# schema's `^ocx\.sh/<ns>/<pkg>$`. For a name of another shape the client still
+# asks for the root: a served root keeps the source authoritative (so a wrong
+# declaration can bypass nothing), and only a genuine 404 falls through to the
+# registry. Absence of the field means "serves every name" — today's behaviour
+# verbatim, including the terminal stop.
 # ---------------------------------------------------------------------------
 
 
@@ -2018,8 +2019,8 @@ def test_flat_name_falls_through_to_the_registry_when_the_index_declares_a_names
 ) -> None:
     """The measured bug: with an index configured for the namespace, a flat
     identifier resolved only when NO index was configured. The index now
-    declares `name_segments: 2`, so a flat name installs through the plain-OCI
-    registry and the index never sees a request for it.
+    declares `name_segments: 2`, so the one root request for the flat name
+    404s and the install falls through to the plain-OCI registry.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
@@ -2038,11 +2039,14 @@ def test_flat_name_falls_through_to_the_registry_when_the_index_declares_a_names
         / "1.0.0"
     )
     assert_symlink_exists(candidate)
-    assert not any(
-        record.path.startswith(f"/p/{unique_repo}") for record in index_server.requests
-    ), (
-        "a declined name must never be asked of the index: "
-        f"{[record.path for record in index_server.requests]}"
+    probes = [
+        record.path
+        for record in index_server.requests
+        if record.path.startswith(f"/p/{unique_repo}")
+    ]
+    assert probes == [f"/p/{unique_repo}.json"], (
+        "a declined name costs exactly one memoized root probe that 404s, and is "
+        f"never dereferenced further: {[record.path for record in index_server.requests]}"
     )
 
 
@@ -2145,9 +2149,12 @@ def test_index_update_reroutes_a_flat_name_to_the_registry(
     ).is_file(), (
         "the registry-derived root must be written for a name the index declined"
     )
-    assert not any(
-        record.path.startswith(f"/p/{unique_repo}") for record in index_server.requests
-    ), (
-        "the index must never be asked about the declined name: "
-        f"{[record.path for record in index_server.requests]}"
+    probes = [
+        record.path
+        for record in index_server.requests
+        if record.path.startswith(f"/p/{unique_repo}")
+    ]
+    assert probes == [f"/p/{unique_repo}.json"], (
+        "the declined name costs the one jurisdiction probe and is never refreshed "
+        f"from the index: {[record.path for record in index_server.requests]}"
     )
