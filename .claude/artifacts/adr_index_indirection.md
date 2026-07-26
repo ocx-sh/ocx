@@ -19,7 +19,7 @@ self-contained — a version choice cannot resolve offline), [#212](https://gith
 **Domain Tags:** oci, index, storage, resolution, gc, project
 **Supersedes:** `design_spec_registry_indirection.md` (2026-07-12, unimplemented — physical-keyed
 storage overturned by Decision C)
-**Superseded By:** N/A
+**Superseded By:** [adr_oci_index_only_dispatch.md](./adr_oci_index_only_dispatch.md) — clauses A2, A3, C1, D (exemption rationale + corollary), F1 (table row + trust-anchor sentence), F4 (bullets 2-3) only; see that ADR's D6 for the clause-by-clause map. Decisions A1, A4, B, C2, C3, E, G, H stand unchanged.
 **Depends on:** [`adr_platform_model_unification.md`](./adr_platform_model_unification.md) (Accepted —
 `is_compatible` / `select_best` / canonical grammar / lock V3 feed every decision here)
 
@@ -220,6 +220,8 @@ explicit `--index` and a deployment-set `OCX_INDEX` — nothing ambient. Home pr
 
 ### A2. On-disk layout — a local copy IS the hosted wire grammar (owner decision 2026-07-18)
 
+> superseded — see `adr_oci_index_only_dispatch.md` D6
+
 **Decision: each source's subtree under the home is the hosted served tree, byte-for-byte grammar. No
 local re-encoding.** A source's subtree is:
 
@@ -263,6 +265,8 @@ local resolution (Invariant 1 — the local copy is never auto-invalidated, `sub
   the layout itself.
 
 ### A3. The object store holds dispatch objects only — manifests are never copied (owner decision 2026-07-18, headline)
+
+> superseded — see `adr_oci_index_only_dispatch.md` D6
 
 **Decision: `p/<repo>/o/` holds *dispatch objects* only — observation objects (published indices) and
 image indexes (derived indices). A leaf platform manifest is never written into the local index.** The
@@ -363,6 +367,8 @@ no manifest duplication. Collapsing the stores would recouple the index copy to 
 
 ### C1. Pipeline order
 
+> superseded — see `adr_oci_index_only_dispatch.md` D6
+
 ```
 logical id (ocx.sh/<ns>/<pkg>[:tag])
   → index resolve   : GET /p/<ns>/<pkg>.json (root) → tags[tag].content (obs digest)
@@ -438,6 +444,8 @@ lock resolution.
 
 ### The snapshot exemption (written explicitly, as the handover demands)
 
+> superseded — see `adr_oci_index_only_dispatch.md` D6
+
 The manifest-digest doctrine governs **content-less references that cross time or trust** — a lock, a
 pin, a public-index entry. Such a reference must name the exact bytes it authorizes because the bytes
 travel *separately* (fetched later, from a registry, by a different machine or a later CI run): an
@@ -495,6 +503,8 @@ encodes the exact wire bytes; live verification against the real index is a post
 lands. The client design spec is re-derived against these shapes (handover waiting-on #3).
 
 ### F1. Two-hop fetch + cache lifetimes
+
+> superseded — see `adr_oci_index_only_dispatch.md` D6
 
 | Object | Volatility | OCX behaviour |
 |---|---|---|
@@ -594,6 +604,8 @@ The `yanked` marker is human-governed and survives index regeneration, so it is 
 client may key on.
 
 ### F4. Open interop points (recorded, not built)
+
+> superseded — see `adr_oci_index_only_dispatch.md` D6 (bullets 2-3)
 
 - **`desc` blobs** share the `o/sha256/` CAS dir with obs objects but their frozen-contract status is
   **unresolved** index-side. OCX MUST NOT build resolution or verification logic on them until frozen;
@@ -1013,3 +1025,4 @@ future escape hatch, not a day-one shape.
 | 2026-07-18 | architect (opus) | **Conceptual-spine rewrite; lock coupling stripped (owner: "the OCX index is just a directory where a local copy of an index is stored… this has nothing to do with the ocx.lock").** Context reopened on the spine — **one** index format, differing only by *location* (hosted/mirrored/shipped/local), *provenance* (published = copied vs derived = OCX-authored from OCI tags), and *completeness* (partial per-package vs the degenerate full-mirror); the local home is a **collection**, one index per source. The index now serves **tag/version resolution only** — locks are index-free (they read the pinned leaf digest directly, `adr_platform_model_unification.md` D3); redirection (`--index`/`OCX_INDEX`) exists so a **shipped** copy resolves free version *choice* (devcontainer parameter, Gradle property, CLI tag) deterministically offline (#215 reframed). Stripped all lock/toolchain coupling from Context/DR1/DR3/C/D/G/Consequences/Validation (D kept as shared keying/verification discipline, not a resolution dependency). Default home `$OCX_HOME/state/registry-index` → **`$OCX_HOME/index`** (first-class store; `LocalIndex` home field `snapshot` → `index`); repo path de-architected (shipped copy lives anywhere, `--index`/`OCX_INDEX`; conventionally `.ocx/`, never required). **Decision H recast** to `LocalIndex`/`OcxIndex`/`OciIndex`/`IndexSync`/`ChainedIndex` — `IndexTree`/`MirrorIndex`/"tree store" abstraction killed (there is an index on disk; the `SnapshotStore` fs-layer is a `LocalIndex` internal). **F1/F2 rewritten** for partial snapshots: `ocx index update <pkg>` upserts the package's catalog entry atomically with its root (root always matches its own entry by construction) → read-time mismatch = tamper/corruption (`DataError`), remote-catalog drift = staleness ("update available"), never conflated; catalog flows issue an ETag `If-None-Match` conditional GET first (304 = one round trip, no body). Kept: dispatch-only `o/` + self-heal, the wire grammar, F5 `[registries]`/`[mirrors]` + Industry Context, R7/R8, E registry-GC tie. |
 | 2026-07-18 | builder (sonnet) | F1 crash-safety correction: the three-step upsert (dispatch object → root atomic-rename → catalog atomic-rename) was never one operation, so a crash between steps was previously undefined; rewritten as a fixed, idempotent step order where any interruption recovers on next read/update. Catalog entries reclassified as *derived* from the root (`sha256(root bytes)`), so a root/catalog mismatch is an inconsistency recovered by re-derivation and logged at info/debug, not a hard `DataError` — `DataError` narrowed to genuine corruption (unparseable root, dispatch-object digest failure, `repository` cross-check failure). Trust framing corrected: the check is tamper-evident against accidental corruption only, not adversarial substitution (root and catalog share one trust domain). Staleness semantics (remote catalog drift = "update available") unchanged. Validation item reworded to match. Added **Rules Sync** metadata field noting `subsystem-oci.md` / `subsystem-file-structure.md` / `product-context.md` storage layout still describe the superseded design pending the docs work package. |
 | 2026-07-19 | builder (sonnet) | **Flat blob CAS deleted from the local index home — B2 tightened.** `SnapshotStore` (renamed `IndexStore`, `file_structure/index_store.rs`) held two address grammars under one root: the wire-grammar collection (A2) plus an additive flat opaque-blob CAS (`object_path`/`write_object`/`object_exists`) for non-manifest content. The second grammar is deleted — it never had a production caller. Config blobs and any other non-manifest content live solely in the machine-global blob store (`$OCX_HOME/blobs`), GC-tracked via `refs/blobs/` for as long as a package installing them stays live (B1/B2 unchanged: the index home itself stays outside the GC graph, only the blob store is walked). `LocalIndex::fetch_blob` is now an `Ok(None)` stub; `ChainedIndex::fetch_blob` does the real work — cache-first digest-verified read against its attached `BlobStore` (`content_store`), a corrupt cached entry removed via the new `BlobStore::remove_blob` before falling through to the source walk, and a digest-verified write-through after a successful source fetch (CWE-345 class covered on both read and write directions). **Accepted cut:** this deliberately removes the GC-immune metadata-cache behavior an earlier revision of this ADR implied — offline repeat-inspection of a package that was cached but never installed no longer survives `ocx clean`, because that cache lived only in the now-deleted flat CAS. Nothing in Decision A–H depended on that behavior; the dispatch-object CAS (A3) is unaffected. **Wire digest fields retyped.** `RootTag::content`, `ObservationPlatform::digest`, and `DerivedTag::content` are now `oci::Digest` (were `String`) — exact-wire serde, no shape change. A malformed digest now fails the whole root-document parse: published-index roots surface `MalformedRootDocument`, derived (OCI-source) roots surface `MalformedIndexDocument`; a derived root's "start fresh" recovery path drops sibling tags on such a failure (accepted, test-locked — a malformed tag poisons the whole per-package root, not just itself). `CatalogIndex` stays `BTreeMap<String, String>` — unretyped by design (F1's blast-radius guarantee: one bad `c/index.json` entry never fails the whole catalog read, only that entry's own re-derivation). New failure-mode tests reference this amendment. Docs sync: `subsystem-file-structure.md` (`SnapshotStore`→`IndexStore` rename, flat-CAS purpose text dropped, "Two halves" paragraph rewritten), `arch-principles.md` (composite-root table), `subsystem-oci.md` (Absent-leaf recovery extended one sentence for the shared `fetch_blob` seam). |
+| 2026-07-25 | builder (sonnet, WP-A8) | **Superseded by `adr_oci_index_only_dispatch.md`, in part.** That ADR deletes the invented "observation object" and its two-codec `o/` split: `o/` now stores the OCI image index a tag resolved to, verbatim, for both provenance kinds — one decode path, no absence-disambiguation rule for curated tags. Clauses A2, A3, C1, D (exemption rationale + corollary), F1 (table row + trust-anchor sentence), and F4 (bullets 2-3) are superseded; see the new ADR's D6 for the clause-by-clause replacement text. A1, A4, B, C2, C3, E, G, H stand unchanged. This row records the supersession; the body prose above is left as originally written because it is the record the new ADR's D1 quotes and rebuts. |

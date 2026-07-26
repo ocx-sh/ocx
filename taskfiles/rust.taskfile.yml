@@ -80,8 +80,14 @@ tasks:
       artifacts come from cargo-dist (release.yml), which does not pass
       this feature flag and therefore physically lacks the seams.
     sources: *rust-sources
+    # `status:` short-circuits ahead of `sources:`, so a bare `test -f` here
+    # skipped the build forever once the binary existed — acceptance tests then
+    # ran a stale `test/bin/ocx` and reported phantom regressions against code
+    # that was never compiled. Both clauses are needed: the binary must exist,
+    # and nothing it is built from may be newer than it.
     status:
       - test -f {{.ROOT_DIR}}/target/release/ocx
+      - test -z "$(find {{.ROOT_DIR}}/crates {{.ROOT_DIR}}/Cargo.lock -newer {{.ROOT_DIR}}/target/release/ocx -print -quit)"
     method: timestamp
     cmd: cargo build --release -p ocx --features ocx/__testing --locked
 

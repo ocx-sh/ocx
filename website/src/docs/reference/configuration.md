@@ -100,7 +100,7 @@ The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo'
 
 **Type**: string
 
-Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → observation object → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry. There is exactly one resolution protocol per namespace: OCX never falls back from the index protocol to plain OCI tags, or the reverse.
+Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → OCI image index → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry. There is exactly one resolution protocol per namespace: OCX never falls back from the index protocol to plain OCI tags, or the reverse.
 
 ```toml
 [registries."ocx.sh"]
@@ -189,7 +189,7 @@ Older Nexus deployments expose each repository on a per-repository port. Those u
 
 **Docker Hub `library/` images.** OCX appends the repository path verbatim and does not expand Docker Hub short names. For Docker Hub official images, use the fully-qualified form (`docker.io/library/alpine`) so the mirror URL resolves to `<mirror>/<prefix>/library/alpine`.
 
-**Index role.** The same `scheme://host[/path-prefix]` shape applies to `index`, and OCX contacts it for every root, observation-object, and catalog fetch a resolved namespace's [ocx-index protocol][in-depth-indices-public] makes — content is still verified by SHA-256 against the digest recorded in the fetched object, so the mirror changes only where bytes come from, never whether they are trusted.
+**Index role.** The same `scheme://host[/path-prefix]` shape applies to `index`, and OCX contacts it for every root, index-object, and catalog fetch a resolved namespace's [ocx-index protocol][in-depth-indices-public] makes — content is still verified by SHA-256 against the digest recorded in the fetched object, so the mirror changes only where bytes come from, never whether they are trusted.
 
 **Same-host co-serving.** The two roles are path-disjoint (`/v2` versus `config.json`/`c/`/`p/`), so an object entry can point both roles at the same host without collision if a deployment ever serves both from one proxy.
 
@@ -224,7 +224,7 @@ Credentials are resolved against the **mirror** host, not the upstream. Configur
 | `--remote` | Mutable lookups (tag list, tag→digest resolution) hit the **mirror**, not the origin. |
 | `ocx.lock` | Stores canonical upstream coordinates and per-platform leaf digests — not the mirror host. A lock made behind a mirror is valid on a machine with direct egress, and vice versa. |
 | `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
-| `ocx index catalog` / `ocx index update` | Against a namespace resolving through the [ocx-index protocol][in-depth-indices-public], every root, observation-object, and catalog fetch honors that host's **index** role only — unrelated to the same host's `registry` role, if any. Against a plain OCI registry mirror, the catalog lists only repositories a proxy-type mirror has cached — a registry-side constraint, not an OCX behavior. |
+| `ocx index catalog` / `ocx index update` | Against a namespace resolving through the [ocx-index protocol][in-depth-indices-public], every root, index-object, and catalog fetch honors that host's **index** role only — unrelated to the same host's `registry` role, if any. Against a plain OCI registry mirror, the catalog lists only repositories a proxy-type mirror has cached — a registry-side constraint, not an OCX behavior. |
 
 ### `[patches]` section {#keys-patches}
 

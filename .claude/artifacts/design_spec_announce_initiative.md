@@ -59,9 +59,9 @@ explicitly marked OPEN.
 
 ## 3. Canonical serializer (the cross-repo byte contract)
 
-- Two forms, both pinned by CONTRACTS §14: **root** = 2-space indent, spec'd insertion-order fields, trailing newline; **CAS objects** = minified, alphabetized keys, `ensure_ascii`, no trailing newline; digest = sha256 of exactly those bytes.
-- Rust writer is a **hand-written spec'd serializer** — never `serde_json::to_string_pretty` over maps/structs. JSON guarantees no key order; ambient serde ordering is a correctness bug here.
-- **Golden fixtures published index-side (P0)**, CI-checked against the Python serializer, vendored/fetched by ocx's test suite. Minimum set: minimal root; root with yank + `superseded_by` + `upstream` + desc; observation object with multi-platform + `os.features`. Both sides gate on parse → re-serialize → byte-compare round-trips.
+- One form pinned by CONTRACTS §14: **root** = 2-space indent, spec'd insertion-order fields, trailing newline; digest = sha256 of exactly those bytes. **CAS objects** (`o/<algo>/<hex>.json`) are the registry's own OCI image index bytes, verbatim — never re-serialized; digest = sha256 of the bytes as served.
+- Rust writer is a **hand-written spec'd serializer** for the root only — never `serde_json::to_string_pretty` over maps/structs. JSON guarantees no key order; ambient serde ordering is a correctness bug here.
+- **Golden fixtures published index-side (P0)**, CI-checked against the Python serializer, vendored/fetched by ocx's test suite. Minimum set: minimal root; root with yank + `superseded_by` + `upstream` + desc; OCI image index with multi-platform + `os.features`. Root fixtures gate on parse → re-serialize → byte-compare round-trips; OCI image index fixtures gate on byte-equality against the registry-served bytes only (no re-serialization path exists to round-trip).
 - Cross-language hazards to test explicitly: string escaping (`ensure_ascii` unicode escapes), indent style, ordering. No floats in the schema (mercifully).
 - **Invariant (owner-stated): no representational churn** — refresh of unchanged data is byte-identical. No agent may ever "fix" the serializer with a generic pretty-printer.
 - `wire.rs` on main is `Deserialize`-only and `IndexStore` writes fetched bytes verbatim — the canonical **writer is net-new work**, not an extension of existing serialization.
