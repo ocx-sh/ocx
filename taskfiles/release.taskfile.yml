@@ -24,6 +24,15 @@ tasks:
           echo "git-cliff escaping regressed; the website (VitePress) build will fail." >&2
           exit 1
         fi
+      # Same @include, second failure mode: a repo-root-relative doc link resolves
+      # against src/docs/changelog.md and dies as a dead link. cliff.toml rewrites
+      # these to absolute ocx.sh URLs; this fails loudly if that rewrite regresses.
+      - |
+        if grep -n 'website/src/docs/' CHANGELOG.md; then
+          echo "ERROR: CHANGELOG.md contains repo-root-relative doc links (lines above)." >&2
+          echo "git-cliff link rewriting regressed; the website (VitePress) build will fail." >&2
+          exit 1
+        fi
 
   # Regenerate CHANGELOG.md from the full git history.
   changelog:
