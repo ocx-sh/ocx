@@ -9,6 +9,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
+use super::builder::MAX_UPLOAD_REQUEST_BYTES;
 use super::error::ClientError;
 use super::progress_reader::ProgressReader;
 use super::transport::{OciTransport, ProgressFn, Result};
@@ -391,7 +392,12 @@ impl NativeTransport {
     /// wire (not in `push_chunk_size` upload-session steps) while each request body
     /// stays bounded for proxies/registries that cap single-request body size. On
     /// `SpecViolationError` it falls back to the fork's buffered `push_blob` (its
-    /// own chunked-then-monolithic retry, no progress).
+    /// own chunked-then-monolithic retry, no progress) — but only for a blob that
+    /// still fits in one request. That fallback ends in a single `PUT` carrying the
+    /// whole blob, so above [`MAX_UPLOAD_REQUEST_BYTES`] it is rejected by the very
+    /// cap the chunking exists to respect: falling back there would trade a
+    /// diagnosable spec violation for the `416` this chunking was written to avoid.
+    /// Above the cap the violation is propagated instead.
     async fn do_push_blob(
         &self,
         image: &oci::native::Reference,
@@ -441,8 +447,16 @@ impl NativeTransport {
                 on_progress(total);
                 Ok(url)
             }
-            Err(oci_client::errors::OciDistributionError::SpecViolationError(violation)) => {
-                log::warn!("Registry spec violation during streamed chunked push: {}", violation);
+            Err(error @ oci_client::errors::OciDistributionError::SpecViolationError(_)) => {
+                log::warn!("Registry spec violation during streamed chunked push: {}", error);
+                if total > MAX_UPLOAD_REQUEST_BYTES as u64 {
+                    log::warn!(
+                        "Not falling back to buffered push: it ends in a single {total}-byte request, \
+                         over the {MAX_UPLOAD_REQUEST_BYTES}-byte per-request cap, so the registry would \
+                         reject it too"
+                    );
+                    return Err(registry_error(error));
+                }
                 log::warn!("Falling back to buffered push (chunked-then-monolithic retry, no progress)");
                 self.client
                     .push_blob(image, fallback_data, digest_str.as_str())
