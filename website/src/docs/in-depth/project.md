@@ -157,7 +157,7 @@ This rule determines iteration order through the resolved tool set. The composer
 
 ### Project and group `[env]` {#running-project-env}
 
-The rule above governs package-composed env — stage 2 of a longer pipeline. [Project Environment][env-composition-project-env] in the Environment Composition reference is the full six-stage table: ambient, packages, patches, project `[env]`, group `[env]`, then `--env`. Project and group `[env]` entries append after every package's own entries, so a project or group value always wins a same-key collision with a package default.
+The rule above governs package-composed env — stage 2 of a longer pipeline. [Project Environment][env-composition-project-env] in the Environment Composition reference is the full six-stage table: ambient, packages, patches, project `[env]`, group `[env]`, then `--env` — which accepts the same `constant`/`path` typing as the file form (see [`--env`][cmd-run]). Project and group `[env]` entries append after every package's own entries, so a project or group value always wins a same-key collision with a package default.
 
 Worked example, continuing the `[tools]` / `[group.ci]` declaration from [Groups](#groups):
 

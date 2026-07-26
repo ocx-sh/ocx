@@ -3,27 +3,27 @@
 """Acceptance tests for user-declarable project environment variables
 (``[env]`` / ``[group.<name>.env]`` in ``ocx.toml``, and ``ocx run --env``).
 
-Specification mode (contract-first TDD)
----------------------------------------
+Scope
+-----
 Encodes the Component Contracts (CLI, Precedence, Composition) and the
 Config-shape-fault table in
 ``.claude/state/plans/plan_project_env_declaration.md``, plus the ratified
 decisions (S1-S9b, C1-C5, L1-L3, Q1-Q7, R1-R3, X1-X3) in
-``.claude/artifacts/adr_project_env_declaration.md``. Several call sites
-still return ``unimplemented!()`` (``crates/ocx_lib/src/project/env.rs``,
-``crates/ocx_lib/src/project/config.rs``, ``crates/ocx_cli/src/command/
-run.rs``'s ``parse_env_overrides``), and the ``OCX_ENV`` launcher-forwarding
-wire (R1) has no decode-side implementation at all yet — every test in this
-file is expected to FAIL against today's binary.
+``.claude/artifacts/adr_project_env_declaration.md``.
 
 Test inventory
 ---------------
-CLI (``ocx run --env``):
+CLI (``ocx run --env KEY[:TYPE]=VALUE``):
   test_env_flag_is_highest_precedence_constant
   test_env_flag_splits_on_first_equals_only
   test_env_flag_bare_key_without_equals_exits_64
   test_env_flag_repeated_last_wins
   test_env_flag_rejects_ocx_prefixed_key_exits_64
+  test_env_flag_path_type_prepends_instead_of_replacing
+  test_env_flag_without_type_replaces_path
+  test_env_flag_relative_path_resolves_against_cwd
+  test_env_flag_rejects_unknown_and_empty_type_exits_64
+  test_env_flag_reserved_key_rejected_with_type_qualifier_exits_64
   test_env_flag_absent_on_env_subcommand
   test_env_flag_absent_on_package_exec_subcommand
 
@@ -49,6 +49,7 @@ Boundary-pinning (guard constraints whose consuming feature has not shipped):
   test_run_package_composed_env_byte_identical_with_and_without_clean  (R3)
   test_project_env_override_reaches_generated_entrypoint_launcher      (R1)
   test_project_env_override_survives_nested_launcher_hop               (R1)
+  test_env_flag_path_type_survives_generated_entrypoint_launcher       (R1/L1)
   test_launcher_forged_ocx_env_fails_closed_on_whole_payload           (R1/X1/X2)
   test_run_strips_stale_ambient_ocx_env                                (R1)
 
@@ -249,6 +250,176 @@ def test_env_flag_rejects_ocx_prefixed_key_exits_64(ocx: OcxRunner, tmp_path: Pa
         assert result.returncode == EXIT_USAGE, (
             f"--env {key}=x must exit {EXIT_USAGE} (reserved OCX_*/__OCX_* namespace); "
             f"got {result.returncode}\nstderr:\n{result.stderr}"
+        )
+
+
+def test_env_flag_path_type_prepends_instead_of_replacing(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--env PATH:path=<dir>`` puts ``<dir>`` at the FRONT of the composed
+    ``PATH`` and keeps every package directory behind it (L1).
+
+    This is the capability the qualifier exists for: a caller that builds an
+    argv array cannot inject ``$PATH`` into a value, so "prepend a directory
+    for this invocation" is otherwise inexpressible from the CLI.
+    """
+    repo, tag = _published_tool(ocx, tmp_path, "flagpath")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    extra = project / "flag_bin"
+    extra.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    baseline = _run(ocx, project, "run", "--", "env")
+    assert baseline.returncode == EXIT_SUCCESS, baseline.stderr
+    baseline_path = _env_value(baseline.stdout, "PATH")
+    assert baseline_path is not None, f"PATH must be present; stdout:\n{baseline.stdout}"
+
+    result = _run(ocx, project, "run", "--env", f"PATH:path={extra}", "--", "env")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run --env PATH:path=... must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    path_value = _env_value(result.stdout, "PATH")
+    assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
+
+    segments = path_value.split(":")  # POSIX separator; module is Linux-only
+    assert segments[0] == str(extra), (
+        f"a :path override must be the FRONT of PATH; got {segments[0]!r}, "
+        f"expected {str(extra)!r}; full PATH:\n{path_value}"
+    )
+    missing = [seg for seg in baseline_path.split(":") if seg not in segments]
+    assert not missing, (
+        f"a :path override must PREPEND, leaving every composed directory in "
+        f"place; these disappeared: {missing}\nbefore:\n{baseline_path}\n"
+        f"after:\n{path_value}"
+    )
+
+
+def test_env_flag_without_type_replaces_path(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``--env PATH=<dir>`` (no ``:path``) still REPLACES the composed value.
+
+    Pins the deliberate footgun so it cannot change silently: ``--env`` is a
+    stage-6 constant by default, and there is no name-based special case for
+    ``PATH``. The child must be named absolutely, because clobbering ``PATH``
+    is exactly what leaves nothing on it to resolve against.
+    """
+    repo, tag = _published_tool(ocx, tmp_path, "flagclobber")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    only = project / "only_bin"
+    only.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    env_binary = shutil.which("env")
+    assert env_binary is not None, "the POSIX `env` binary must be available"
+
+    result = _run(ocx, project, "run", "--env", f"PATH={only}", "--", env_binary)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run --env PATH=... must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert _env_value(result.stdout, "PATH") == str(only), (
+        f"an unqualified --env PATH must REPLACE the composed value, dropping "
+        f"every package directory — the documented hazard `:path` exists to "
+        f"avoid; stdout:\n{result.stdout}"
+    )
+
+
+def test_env_flag_relative_path_resolves_against_cwd(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A relative ``:path`` value anchors to the INVOCATION directory, not the
+    project root — the one behavior that distinguishes the flag's ``:path``
+    from the ``ocx.toml`` form, which anchors to the project root so a
+    checked-in file means the same thing from any subdirectory.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    subdirectory = project / "sub"
+    subdirectory.mkdir()
+    # Both candidates exist, so the assertion discriminates between the two
+    # bases rather than merely observing which one happens to be present.
+    (project / "rel_bin").mkdir()
+    (subdirectory / "rel_bin").mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    result = _run(ocx, subdirectory, "run", "--env", "PATH:path=rel_bin", "--", "env")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run from a subdirectory must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    path_value = _env_value(result.stdout, "PATH")
+    assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
+    first_segment = path_value.split(":")[0]  # POSIX separator; module is Linux-only
+    assert first_segment == str(subdirectory / "rel_bin"), (
+        f"a relative --env :path must resolve against the invocation directory, "
+        f"not the project root; got {first_segment!r}, expected "
+        f"{str(subdirectory / 'rel_bin')!r}; full PATH:\n{path_value}"
+    )
+
+
+def test_env_flag_rejects_unknown_and_empty_type_exits_64(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A ``TYPE`` naming no modifier is CLI misuse, exit 64.
+
+    Deliberately NOT the file form's exit 78: a bogus ``type`` in ``ocx.toml``
+    is a config-shape fault in a file, whereas this is a mistyped flag.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    for argument in ("X:bogus=v", "X:=v"):
+        result = _run(ocx, project, "run", "--env", argument, "--", "echo", "hi")
+        assert result.returncode == EXIT_USAGE, (
+            f"--env {argument} must exit {EXIT_USAGE}; got {result.returncode}\n"
+            f"stderr:\n{result.stderr}"
+        )
+        assert "constant" in result.stderr and "path" in result.stderr, (
+            f"the error must name the accepted types — the user has no file to "
+            f"look at; stderr:\n{result.stderr}"
+        )
+
+
+def test_env_flag_reserved_key_rejected_with_type_qualifier_exits_64(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--env OCX_FOO:path=x`` is still rejected, exit 64 (X1).
+
+    The security-relevant case: the reserved-namespace gate runs on the key
+    AFTER the ``:TYPE`` qualifier is stripped, so adding a qualifier is not a
+    way past it.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    for argument in ("OCX_INDEX:path=/tmp/evil", "__OCX_TESTING_X:constant=1"):
+        result = _run(ocx, project, "run", "--env", argument, "--", "echo", "hi")
+        assert result.returncode == EXIT_USAGE, (
+            f"--env {argument} must exit {EXIT_USAGE} (reserved OCX_*/__OCX_* "
+            f"namespace); got {result.returncode}\nstderr:\n{result.stderr}"
         )
 
 
@@ -894,6 +1065,66 @@ inner = "{inner_pkg.fq}"
         f"first launcher has to re-emit the validated OCX_ENV payload after "
         f"apply_ocx_config strips it, or the nested package's own value wins; "
         f"env dump:\n{result.stdout}"
+    )
+
+
+def test_env_flag_path_type_survives_generated_entrypoint_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A ``--env PATH:path=<dir>`` override reaches a tool invoked THROUGH a
+    generated entrypoint launcher, still prepending rather than replacing.
+
+    Pins the modifier's survival across the ``OCX_ENV`` wire: the payload
+    carries a ``"type"`` per entry, and a decode that dropped or defaulted it
+    would turn this into a constant — leaving ``<dir>`` as the whole of
+    ``PATH`` instead of its front. Asserting on the package directories that
+    remain behind it is what discriminates the two.
+    """
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"showenv": {"command": "env"}},
+    )
+    ocx.plain("package", "install", pkg.short)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    extra = project / "launcher_bin"
+    extra.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{pkg.fq}"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    baseline = _run(ocx, project, "run", "--", "showenv")
+    assert baseline.returncode == EXIT_SUCCESS, baseline.stderr
+    baseline_path = _env_value(baseline.stdout, "PATH")
+    assert baseline_path is not None, f"PATH must be present; stdout:\n{baseline.stdout}"
+
+    result = _run(ocx, project, "run", "--env", f"PATH:path={extra}", "--", "showenv")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run --env PATH:path=... -- showenv must succeed; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    path_value = _env_value(result.stdout, "PATH")
+    assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
+
+    segments = path_value.split(":")  # POSIX separator; module is Linux-only
+    assert segments[0] == str(extra), (
+        f"the forwarded :path override must be the FRONT of the launcher's "
+        f"PATH; got {segments[0]!r}, expected {str(extra)!r}; "
+        f"full PATH:\n{path_value}"
+    )
+    missing = [seg for seg in baseline_path.split(":") if seg not in segments]
+    assert not missing, (
+        f"the forwarded entry must keep its `path` modifier across OCX_ENV — a "
+        f"constant would have replaced these instead of prepending: {missing}\n"
+        f"before:\n{baseline_path}\nafter:\n{path_value}"
     )
 
 

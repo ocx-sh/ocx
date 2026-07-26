@@ -336,7 +336,7 @@ opt-out), see the [`[patches]`][config-patches] configuration reference and the
 
 ### `OCX_ENV` {#ocx-env}
 
-A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
+A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. A `--env` override may carry either kind, `constant` or `path`, the same as a project- or group-declared entry. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
 
 ```sh
 # Managed by OCX; not set manually.

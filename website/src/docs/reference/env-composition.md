@@ -157,9 +157,9 @@ Project and group `[env]` entries materialize as ordinary env entries and are **
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend |
 | 5 | Group [`[group.<name>.env]`][config-project-env] | In `-g` selection order — a group listed later wins |
-| 6 (highest) | [`ocx run --env KEY=VALUE`][cmd-run] | Repeatable; constant only, no path form |
+| 6 (highest) | [`ocx run --env KEY[:TYPE]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use |
 
-A stage-4 or stage-5 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
+A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). Stage 6's `path` resolution differs from stages 4 and 5 in one respect: a relative value anchors to the directory `ocx run` was invoked from, not the project root — see [`--env`][cmd-run] for why. A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
 
 ::: warning `--clean` is not the hermeticity boundary
 `--clean` controls only stage 1 — what the child process inherits from the parent shell. It is not what makes the package-composed set (stage 2) reproducible. That comes from the resolver's scope: package env values are computed from `ocx.lock` and the resolved digests alone, identically with or without `--clean`. Project `[env]` (stage 4) is the opposite case by design — it is the user's own file, deliberately allowed to read ambient state, and is excluded from the lock's `declaration_hash` for exactly that reason.

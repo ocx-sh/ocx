@@ -1358,11 +1358,15 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | `--self` | — | Expose each package's private-visibility env entries (same semantics as `ocx exec --self`). | off |
-| `--env <KEY=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Constant only — there is no path form on the flag. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=` is rejected (exit 64) rather than treated as ambient pass-through. An `OCX_*` or `__OCX_*` key is rejected the same way (exit 64). | — |
+| `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends) — the same two kinds [`[env]`][config-project-env] uses. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
 Pass `--global` **before** the subcommand: `ocx --global run -- cmake --version`. The global file must exist (no auto-init for read commands). See [`--global`][global-flag].
+:::
+
+::: warning `--env PATH=...` replaces the composed `PATH`, it does not extend it
+`--env` with no `:TYPE` is a `constant` — it replaces the key outright, the same as a bare-string [`[env]`][config-project-env] entry. `--env PATH=/opt/tools/bin` therefore overwrites the composed `PATH`, silently dropping every package's `bin/` and `entrypoints/` directory. There is no name-based special case for `PATH`; write `--env PATH:path=/opt/tools/bin` to prepend instead of replace.
 :::
 
 **Composition order**
@@ -1382,7 +1386,7 @@ The composer prepends env entries in iteration order, so the **last group listed
 |------|---------|
 | *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
 | 1 | Child spawn failed (binary not found, exec errno). |
-| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
+| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
 | 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
@@ -1412,6 +1416,9 @@ ocx run --clean -- env
 
 # One-off override — wins over ambient, package, and project/group [env]
 ocx run --env CI=1 --env SOURCE_DATE_EPOCH=0 -- task build
+
+# Prepend a project-local directory to PATH for this invocation only
+ocx run --env PATH:path=node_modules/.bin -- eslint .
 ```
 
 ::: tip Project-tier vs OCI-tier

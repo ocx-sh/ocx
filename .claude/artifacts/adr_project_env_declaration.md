@@ -327,7 +327,21 @@ Stages 4-6 are appended to the same entry vector in that order. Constants replac
 
 ### CLI
 
-**L1.** `ocx run --env KEY=VALUE`, repeatable. Split on the **first** `=`, so `FOO=a=b` yields `FOO` → `a=b`. Constant modifier only — no path form from the CLI in v1.
+**L1.** `ocx run --env KEY[:TYPE]=VALUE`, repeatable. Split on the **first** `=`, so `FOO=a=b` yields `FOO` → `a=b`. `TYPE` is `constant` or `path`; omitted it is `constant`, so a plain `KEY=VALUE` is unchanged.
+
+> **Amended.** L1 originally read "Constant modifier only — no path form from the CLI in v1" and recorded **no rationale** — unargued minimalism rather than a defended exclusion. Two things argue against it, and both point the same way.
+>
+> First, the exclusion contradicted **D9**, the argument for the flag existing at all: PowerShell and cmd have no per-invocation env prefix, and OCX is a backend tool for tools that build argv arrays and *cannot inject shell syntax*. A caller who cannot inject shell syntax also cannot write `$PATH` / `%PATH%` into a value — so "prepend a directory to PATH for this invocation" was inexpressible from the CLI. D9 applies to path prepending with **more** force than to constants, since a constant at least has a working spelling.
+>
+> Second, the natural attempt — `--env PATH=/opt/tools/bin` — is a stage-6 constant, so it *replaces* the composed PATH and every package `bin/` and `entrypoints/` directory disappears with no warning. **That behavior is kept**: no name-based special case for `PATH`, because a name-triggered modifier switch is exactly the kind of surprise `ModifierKind` exists to make explicit. `:path` is now the correct spelling and every doc surface names the hazard.
+>
+> **The one deliberate divergence from the file form**: a relative `:path` value resolves against the **current working directory**, not the project root. The `ocx.toml` form anchors to the project root (D4) because a checked-in file must mean the same thing from any subdirectory; a flag has no such obligation — it is composed by whatever script is invoking ocx, and cwd is the one base such a script can compute. Both surfaces document the other's rule.
+>
+> Grammar is unambiguous by construction: `is_valid_env_key` (X2) admits no `:`, so a colon in the segment *before the first `=`* is always a type marker, and a Windows value like `C:\tools\bin` is untouched because only that segment is inspected. An unknown or empty `TYPE` exits **64** (`UsageError`) — CLI misuse — where the file form's `EnvUnknownModifier` exits 78, a config-shape fault *in a file*. The reserved-key gate (X1) runs on the key **after** the qualifier is stripped, so `--env OCX_INDEX:path=…` is still rejected.
+>
+> No wire-format or schema change: the `OCX_ENV` payload (R1) already carries a `"type"` per entry, so a `:path` override forwards to `ocx launcher exec` unchanged. `ModifierKind` gained a `FromStr` — the inverse of its existing `Display` — so the file parser and the CLI parser share one grammar instead of hand-rolling a second copy.
+>
+> *Prior art in-repo:* no `KEY:TYPE=VALUE` form existed. The nearest shape is `LayerRef`'s `./libs.tar.gz:strip=1,prefix=share` (`publisher/layer_ref.rs`), where a colon splits a base value from a settings tail — adjacent, not the same.
 
 **L2.** Bare `--env FOO` (docker-style ambient pass-through) is rejected in v1 with `ExitCode::UsageError` (64). It has meaning only under `--clean`, and admitting it later is additive.
 
@@ -545,6 +559,8 @@ Every surface below is touched by this change and must be updated in the same PR
 - [ ] `declaration_hash_unchanged_by_env` — mirrors `declaration_hash_unchanged_by_no_patches` (H1)
 - [ ] `OCX_*` and `__OCX_*` keys rejected in `[env]`, `[group.X.env]`, and `--env` (X1)
 - [ ] `--env FOO=a=b` yields `FOO` → `a=b`; bare `--env FOO` exits 64 (L1/L2)
+- [ ] `--env KEY:path=…` prepends while `--env KEY=…` replaces; unknown/empty `TYPE` exits 64; `--env OCX_*:path=…` still rejected (L1 amendment)
+- [ ] Relative `--env KEY:path=…` resolves against CWD, not the project root — assert from a subdirectory (the inverse of the file-form check below)
 - [ ] Relative `type = "path"` resolves against project root, not CWD — assert from a subdirectory
 - [ ] Path entry is idempotent across repeated `direnv export` re-evaluation (`move_to_front`)
 - [ ] Project constant overrides a package constant of the same key (C2); CI export does not warn on it (C4)

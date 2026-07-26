@@ -209,17 +209,17 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
     let Some(declared_type) = table.get("type").and_then(toml::Value::as_str) else {
         return Err(invalid_value());
     };
-    let kind = match declared_type {
-        "path" => ModifierKind::Path,
-        "constant" => ModifierKind::Constant,
-        found => {
-            return Err(ProjectErrorKind::EnvUnknownModifier {
-                scope: scope.to_string(),
-                key: key.to_string(),
-                found: found.to_string(),
-            });
-        }
-    };
+    // Through `ModifierKind`'s own `FromStr` rather than a local match: the
+    // same grammar is parsed by `ocx run --env KEY:TYPE=VALUE`, and two
+    // hand-rolled copies of one union drift. The error only supplies `found` —
+    // the scope/key context that makes the message actionable is added here.
+    let kind = declared_type
+        .parse::<ModifierKind>()
+        .map_err(|error| ProjectErrorKind::EnvUnknownModifier {
+            scope: scope.to_string(),
+            key: key.to_string(),
+            found: error.found,
+        })?;
     let Some(literal) = table.get("value").and_then(toml::Value::as_str) else {
         return Err(invalid_value());
     };

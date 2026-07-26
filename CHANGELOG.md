@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Declare project and group environment variables in `ocx.toml` via [`[env]` / `[group.<name>.env]`](website/src/docs/reference/configuration.md#project-config-env), composed on top of package env with project/group entries winning on collision *(cli)*
-- Add repeatable `ocx run --env KEY=VALUE` for a one-off, highest-precedence override — see [Project Environment](website/src/docs/reference/env-composition.md#project-env) *(cli)*
+- Add repeatable `ocx run --env KEY[:TYPE]=VALUE` for a one-off, highest-precedence override — `TYPE` is `constant` (the default, replaces) or `path` (prepends, resolving a relative value against the current directory), so a caller that cannot inject shell syntax can still put a directory in front of `PATH`. See [Project Environment](website/src/docs/reference/env-composition.md#project-env) *(cli)*
 - Reject `OCX_*` and `__OCX_*` keys in `[env]`, `[group.<name>.env]`, and `--env` so a checked-in `ocx.toml` cannot reconfigure how `ocx` itself resolves *(security)*
 
 ### Changed

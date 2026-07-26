@@ -536,6 +536,8 @@ PATH = { type = "path", value = "node_modules/.bin" }
 
 There is no interpolation in v1 — every value is literal. The `path` type is what makes a project-local directory like `node_modules/.bin` expressible without one: no `${projectRoot}` token is needed, because relative resolution already targets the project root.
 
+The [`--env`][cmd-run] flag takes the same two types, written `KEY:TYPE=VALUE`, with one deliberate difference: a relative `path` value there resolves against the **current directory**, not the project root. A checked-in file must mean the same thing from any subdirectory; a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute.
+
 Two key classes are rejected everywhere `[env]` can appear — the project table, every `[group.<name>.env]`, and the [`--env`][cmd-run] flag on `ocx run`:
 
 - A key that is not a POSIX environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`).
