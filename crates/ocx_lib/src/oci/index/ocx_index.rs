@@ -578,9 +578,14 @@ impl OcxIndex {
                 super::Jurisdiction::Authoritative
             }
             Ok(None) => {
-                // Rare and deliberate: a namespace leaving the verified two-hop
-                // path must be visible without raising the log level.
-                log::warn!(
+                // `debug!`, not `warn!`: this is the ordinary steady state for
+                // the shipped namespace — 41 of the 44 `ocx.sh` repositories are
+                // flat names index.ocx.sh cannot express. It also fires per chain
+                // consult, not per name (the `roots` memo suppresses the request,
+                // not the log line, and `candidate_sources` re-enters this from
+                // every routing decision), so at `warn!` a cold `ocx lock` over
+                // one project's tools buries the log in tens of identical lines.
+                log::debug!(
                     "Index '{}' declares {segments}-segment names and holds no root for '{identifier}' — \
                      resolving it through the registry instead.",
                     self.namespace
@@ -717,6 +722,12 @@ impl OcxIndex {
 
     /// Fetches (and caches) the root for `repository`. `Ok(None)` on a 404
     /// miss — memoized like a hit, so a repeat ask costs nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) when the
+    /// endpoint answers `304` to this unconditional `GET` — see the arm below
+    /// for why that must not read as a miss.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         // An absent config.json makes the base a non-index — no root resolves
         // (fail-closed, F1), never a pass that consumes a valid-looking root.
@@ -733,7 +744,21 @@ impl OcxIndex {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
                 Some(Arc::new(parsed))
             }
-            IndexFetch::NotFound | IndexFetch::NotModified => None,
+            IndexFetch::NotFound => None,
+            // The request carried no `If-None-Match`, so a `304` answers a
+            // question nobody asked (RFC 9110 §15.4.5) — a misbehaving CDN, not
+            // a confirmed absence. It must NOT fold into the 404 miss: this
+            // `None` is what [`Self::jurisdiction`] reads an `Outside` verdict
+            // off, and the whole design rests on only a *confirmed* 404 being
+            // able to hand a name to plain OCI. The miss is memoized too, so one
+            // bad response would decide the name for the rest of the process.
+            IndexFetch::NotModified => {
+                return Err(super::error::Error::IndexHttpFailed {
+                    url: redact_url(&url),
+                    source: "304 Not Modified answered an unconditional GET".into(),
+                }
+                .into());
+            }
         };
         self.cache
             .write()
@@ -1157,6 +1182,9 @@ mod tests {
         requests: StubRequests,
         /// URLs that return a transport error (simulate a dead endpoint).
         failures: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// URLs that answer `304` to EVERY request, conditional or not —
+        /// a misbehaving CDN edge.
+        not_modified: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl StubIndexTransport {
@@ -1180,6 +1208,10 @@ mod tests {
 
         fn fail(&self, url: &str) {
             self.failures.lock().unwrap().insert(url.to_string());
+        }
+
+        fn always_not_modified(&self, url: &str) {
+            self.not_modified.lock().unwrap().insert(url.to_string());
         }
 
         fn request_urls(&self) -> Vec<String> {
@@ -1214,6 +1246,9 @@ mod tests {
                     source: "simulated transport failure".into(),
                 }
                 .into());
+            }
+            if self.not_modified.lock().unwrap().contains(url) {
+                return Ok(IndexFetch::NotModified);
             }
             let responses = self.responses.lock().unwrap();
             match responses.get(url) {
@@ -2925,6 +2960,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_confirmed_404_settles_a_declined_name_as_outside() {
+        // The root request carries no `If-None-Match`, so a `304` is a
+        // misbehaving edge, not an absence. Folding it into the 404 miss would
+        // let one bad response hand a declined name to plain OCI — and memoize
+        // that verdict for the process. Fail-closed instead: `resolve_root`
+        // errors, and an errored root keeps the source authoritative.
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        transport.always_not_modified(&flat_root_url());
+        let source = make_source(transport, false);
+
+        assert_eq!(
+            source.jurisdiction(&flat_id()).await,
+            super::super::Jurisdiction::Authoritative,
+            "only a confirmed 404 may hand a declined name to the registry"
+        );
+        let error = source
+            .resolve_root(FLAT_REPO)
+            .await
+            .expect_err("a 304 answering an unconditional GET is a protocol violation, not a miss");
+        assert!(
+            error.to_string().contains(&flat_root_url()),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_wrong_declaration_cannot_bypass_the_yank_gate() {
         // The bypass this design closes. `name_segments` rides an unsigned,
         // CDN-cacheable JSON file on the same channel as the roots: a template
@@ -3191,13 +3253,28 @@ mod tests {
 
     // ── sync_catalog: a self-contradicting catalog row is skipped, not fatal ───
 
+    /// The catalog entry `source` currently holds for `repository`, or `None`.
+    async fn catalog_entry(local: &super::super::LocalIndex, repository: &str) -> Option<String> {
+        local
+            .index_store()
+            .read_source_catalog(NAMESPACE)
+            .await
+            .unwrap()
+            .and_then(|catalog| catalog.get(repository).cloned())
+    }
+
     #[tokio::test]
-    async fn sync_catalog_skips_an_out_of_jurisdiction_catalog_key_and_still_commits_the_etag() {
+    async fn sync_catalog_neither_advances_nor_retires_an_out_of_jurisdiction_catalog_key() {
         // R2: the flat key HAS a local root on disk, so without the guard step 3
         // calls `refresh_tags` -> `refresh_derived` -> `list_tags` -> `Ok(None)`
         // -> `RemoteManifestNotFound`, whose `?` aborts before the catalog + ETag
         // commit. The ETag then never advances and every later `ocx index update`
         // aborts identically, swallowed as a non-fatal warn.
+        //
+        // The row is skipped, but its FETCHED value must not be adopted either:
+        // the root that value names is unfetchable by construction (its 404 is
+        // what the `Outside` verdict was read off), so committing it would leave
+        // the on-disk root and the catalog straddled.
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
         transport.insert_with_etag(&catalog_url(), br#"{"go-task":"sha256:moved"}"#, "etag-jurisdiction");
@@ -3206,6 +3283,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let local = local_index(&dir);
         seed_stale_root(local.index_store(), FLAT_REPO).await;
+        let before = catalog_entry(&local, FLAT_REPO).await;
 
         let outcome = local
             .sync_catalog(&source)
@@ -3219,30 +3297,31 @@ mod tests {
             transport.request_urls()
         );
         assert_eq!(
-            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
-            Some("etag-jurisdiction".to_string()),
-            "the catalog + ETag must still commit, or the source is permanently stale"
+            catalog_entry(&local, FLAT_REPO).await,
+            before,
+            "the entry must still describe the root actually on disk"
         );
-        assert!(
-            local
-                .index_store()
-                .read_source_catalog(NAMESPACE)
-                .await
-                .unwrap()
-                .unwrap()
-                .contains_key(FLAT_REPO),
-            "the row is still adopted as an ordinary listing row"
+        assert_eq!(
+            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
+            None,
+            "committing the ETag would answer 304 forever and retire the retry"
         );
     }
 
     #[tokio::test]
-    async fn sync_catalog_commits_the_etag_when_one_moved_key_fails_to_re_snapshot() {
+    async fn sync_catalog_lands_the_healthy_rows_and_retries_the_failed_one_next_run() {
         // Publish skew, no grammar violation anywhere: both keys are expressible
         // and materialized, but `ns/skewed`'s root 404s (rolled back, or the
-        // catalog regenerated ahead of the roots). `refresh_tags` errors; before
-        // the fix its `?` aborted step 3, so the ETag never advanced and NO other
-        // moved package landed — repeated identically by every later
-        // `ocx index update`, each exiting 0 with a non-fatal warn.
+        // catalog regenerated ahead of the roots). `refresh_tags` errors.
+        //
+        // Three properties, and the third is the point. The failure must not
+        // veto the source-wide commit (its `?` used to, stranding every other
+        // moved package on every later `ocx index update`). It must not advance
+        // the failed row either — the on-disk root is still the old one, so the
+        // fetched entry would straddle them, `read_root` would self-heal the
+        // catalog back and serve the STALE root past the yank gate. And with the
+        // entry kept, the ETag must be held back, or the next sync answers 304,
+        // diffs nothing, and the row is never retried at all.
         let transport = StubIndexTransport::new();
         seed_empty_index(&transport, "ns/pkg", "1.0");
         transport.insert_with_etag(
@@ -3251,36 +3330,57 @@ mod tests {
             "etag-skew",
         );
         let source = make_source(transport.clone(), false);
+        let skewed_root_url = format!("{BASE}/p/ns/skewed.json");
 
         let dir = tempfile::tempdir().unwrap();
         let local = local_index(&dir);
         seed_stale_root(local.index_store(), "ns/pkg").await;
         seed_stale_root(local.index_store(), "ns/skewed").await;
+        let skewed_before = catalog_entry(&local, "ns/skewed").await;
+        let healthy_before = catalog_entry(&local, "ns/pkg").await;
 
         local
             .sync_catalog(&source)
             .await
             .expect("one package's re-snapshot failure must not fail the source-wide sync");
 
-        assert_eq!(
-            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
-            Some("etag-skew".to_string()),
-            "the ETag must commit, or the source is permanently stale"
-        );
-        let catalog = local
-            .index_store()
-            .read_source_catalog(NAMESPACE)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            catalog.contains_key("ns/skewed"),
-            "the failed row adopts its fetched value"
-        );
-        assert!(catalog.contains_key("ns/pkg"), "the healthy row must still land");
         assert!(
             transport.request_urls().contains(&format!("{BASE}/p/ns/pkg.json")),
             "the healthy moved key is still re-snapshotted: {:?}",
+            transport.request_urls()
+        );
+        let healthy_after = catalog_entry(&local, "ns/pkg").await;
+        assert!(
+            healthy_after.is_some() && healthy_after != healthy_before,
+            "the healthy row must land its re-snapshotted entry"
+        );
+        assert_eq!(
+            catalog_entry(&local, "ns/skewed").await,
+            skewed_before,
+            "the failed row must keep the entry matching the root actually on disk"
+        );
+        assert_eq!(
+            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
+            None,
+            "the ETag must be withheld while a moved row is stale"
+        );
+        let attempts = transport.request_count(&skewed_root_url);
+        assert!(
+            attempts > 0,
+            "the first run must have tried: {:?}",
+            transport.request_urls()
+        );
+
+        // The whole point: the next update re-diffs the failed key and tries
+        // again. With the fetched entry adopted and the ETag committed, the
+        // second sync would get a `304`, diff nothing, and never touch it.
+        local
+            .sync_catalog(&source)
+            .await
+            .expect("the retry must be an ordinary sync, not a failure");
+        assert!(
+            transport.request_count(&skewed_root_url) > attempts,
+            "the failed key must be re-diffed and retried: {:?}",
             transport.request_urls()
         );
     }
