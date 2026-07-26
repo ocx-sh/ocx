@@ -188,6 +188,44 @@ published root is never auto-refreshed under Default) holds because `grow_root` 
 (yanked tag, dispatch-object tamper, fail-closed unknown `config.json` version, network failure), the walk
 returns that error immediately rather than falling through to a "not found" result — a broken or
 misconfigured `[registries."<ns>"] index` endpoint fails loud, never silently resolves as absent.
+Its clean miss is equally terminal.
+
+**Index-declared jurisdiction (`Jurisdiction`, `oci/index.rs`).** Whether a source is asked at all is
+a *three*-valued question, asked before any fetch — never an `Ok(None)` read after one:
+
+| Verdict | Meaning |
+|---|---|
+| `Authoritative` | Ask it; its miss or refusal is terminal (the stop above). |
+| `FallThrough` | Ask it; its miss tries the next source (the `OciIndex` catch-all). |
+| `Outside` | It **declared** it cannot express this name — never asked, silence decides nothing. |
+
+`OcxIndex::jurisdiction` (async, inherent `pub`, trait impl forwards) answers `Outside` for a foreign
+registry with **no I/O**, and for a name whose `repository().split('/').count()` disagrees with the
+`name_segments` its `config.json` publishes — `index.ocx.sh` serves `2`, restating its root schema's
+`^ocx\.sh/<ns>/<pkg>$`. Absent `name_segments` = serves every name = historical behaviour verbatim, so
+a private index is never narrowed by the client. **Fail-closed:** only a successfully-read config that
+positively declares the name inexpressible moves it out of jurisdiction; a 404, malformed, unsupported
+or unreachable `config.json` keeps the source `Authoritative` (an index outage must never downgrade a
+namespace to plain OCI). Infallible, not error-swallowing — nothing is cached on failure, so the
+immediately-following `resolve_root` re-fetches and raises the real error.
+
+`ChainedIndex::candidate_sources(id) -> Vec<(&Index, bool)>` is the one place the question is asked;
+the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — the
+declaration is the index operator's, and `name_segments` is **not** a security control (an older
+client ignores it; the yank gate, obs-digest verify and terminal stop delegate nothing to it).
+
+**Provenance is per REGISTRY, jurisdiction per NAME.** `IndexImpl::serves_registry(&str)` (sync,
+no I/O) is the ownership primitive behind `ChainedIndex::kind_for_registry`; `kind_for(id)` delegates
+with `id.registry()`. Local subtree layout (`c/index.json` catalog vs `p/` enumeration) is per-source,
+never per-name, so every name under a published registry reports `Published` regardless of grammar.
+Deriving provenance from a per-name predicate would flip a declined name to `Derived` and silently
+drop the published root's catalog cross-check. There is no placeholder identifier anywhere.
+
+`LocalIndex::sync_catalog` step 3 skips (warn, `continue`) a moved catalog key its own source declares
+inexpressible — deliberately **not** in `validate_catalog_key`, which fails the whole sync closed for a
+traversal key; failing there would abort before the catalog + ETag commit and leave the source
+permanently stale. `LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
+outcomes (`sync_catalog` skips, `ocx index update` reroutes to the registry).
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`
 re-serialization. The digest is recomputed from those bytes and verified against the

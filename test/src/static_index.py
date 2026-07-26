@@ -37,9 +37,20 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
-def write_config(fixture_root: Path, *, format_version: int = 1) -> None:
-    """Writes `config.json` (● `{"format_version": N}`)."""
-    (fixture_root / "config.json").write_text(json.dumps({"format_version": format_version}))
+def write_config(
+    fixture_root: Path, *, format_version: int = 1, name_segments: int | None = None
+) -> None:
+    """Writes `config.json` (● `{"format_version": N}`).
+
+    `name_segments` is the index's own declaration of its name grammar — the
+    slash-separated segment count a package name must have *within* the
+    namespace. `index.ocx.sh` serves ``2``. Omitted (the default) means the
+    index declares no constraint and can express every name.
+    """
+    config: dict[str, object] = {"format_version": format_version}
+    if name_segments is not None:
+        config["name_segments"] = name_segments
+    (fixture_root / "config.json").write_text(json.dumps(config))
 
 
 def index_bytes(platform_digest: str, *, os: str = "linux", architecture: str = "amd64") -> bytes:

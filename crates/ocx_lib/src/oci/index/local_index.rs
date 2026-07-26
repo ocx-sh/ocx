@@ -126,6 +126,11 @@ impl LocalIndex {
     ///
     /// A tagged identifier (`cmake:3.28`) refreshes only that tag; a bare
     /// identifier (`cmake`) first enumerates the source's tags.
+    ///
+    /// Jurisdiction-unaware by design: whether `source` can express
+    /// `identifier` at all is the **caller's** call, because the two callers
+    /// want opposite outcomes — [`Self::sync_catalog`] skips a name the source
+    /// declined, while `ocx index update` reroutes it to the registry.
     pub async fn refresh_tags(&self, identifier: &oci::Identifier, source: &super::Index) -> Result<()> {
         // One info line per identifier; per-tag detail is debug-only so an index
         // update over a many-tagged package does not flood info logs.
@@ -339,6 +344,22 @@ impl LocalIndex {
                 continue;
             }
             let identifier = oci::Identifier::new_registry(repository.clone(), namespace);
+            // A published index that lists a key its own `config.json` says it
+            // cannot express contradicts itself. Skip the row and keep syncing:
+            // step 4 still adopts it as an ordinary listing row (dropping remote
+            // rows would fight the reconcile contract, and a listing row that is
+            // never fetched is harmless). Deliberately NOT hardened into
+            // `validate_catalog_key`, which fails the WHOLE sync closed because a
+            // traversal key is a filesystem-escape risk — a grammar violation is
+            // not, and failing there would abort before the catalog + ETag commit,
+            // leaving this source permanently stale on every later `index update`.
+            if source.jurisdiction(&identifier).await == super::Jurisdiction::Outside {
+                log::warn!(
+                    "index source '{namespace}' lists '{repository}', which its declared name grammar \
+                     cannot express — skipping re-snapshot"
+                );
+                continue;
+            }
             self.refresh_tags(&identifier, &source_index).await?;
             refreshed.insert(repository);
         }

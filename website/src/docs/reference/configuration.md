@@ -100,7 +100,9 @@ The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo'
 
 **Type**: string
 
-Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → OCI image index → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry. There is exactly one resolution protocol per namespace: OCX never falls back from the index protocol to plain OCI tags, or the reverse.
+Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → OCI image index → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry. There is exactly one resolution protocol per namespace: for every name the index serves, OCX never falls back from the index protocol to plain OCI tags, or the reverse — an index that has no root for such a name fails the resolve, it does not quietly try the registry.
+
+An index may **decline** a name outright, which is not a fallback. Its [`config.json`][in-depth-indices-declared-names] can publish a `name_segments` count declaring the shape of names it is able to hold at all; `index.ocx.sh` publishes `2`, because its root schema pins a package name to `<namespace>/<package>`. A name of a different shape is one the index has stated it can never have an opinion about, so it is never asked and resolves as plain OCI. The index never claimed it, so nothing was bypassed. An index that publishes no `name_segments` declares no constraint and stays authoritative for every name in its namespace.
 
 ```toml
 [registries."ocx.sh"]
@@ -605,6 +607,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [config-indepth]: ../in-depth/configuration.md
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-indices-dispatch]: ../in-depth/indices.md#local-dispatch
+[in-depth-indices-declared-names]: ../in-depth/indices.md#public-index-declared-names
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config

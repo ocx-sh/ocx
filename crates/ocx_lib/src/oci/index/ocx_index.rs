@@ -74,13 +74,30 @@ use crate::{Result, log, oci};
 // (`crate::file_structure::IndexStore`), imported above. What a tag points at
 // is an `oci::ImageIndex`, whose shape is the OCI image spec's, not ours.
 
-/// `config.json` — the version pin (● `{"format_version": 1}`).
+/// `config.json` — the version pin (● `{"format_version": 1}`) and the index's
+/// own declaration of the names it can express.
 ///
 /// Read once per source; an unknown `format_version` is a hard error
 /// (fail-closed, F1). Forward-compatible: unknown sibling fields are ignored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexFormatConfig {
     pub format_version: u64,
+    /// Slash-separated segment count a package name must have under this index,
+    /// counted on the name **within** the namespace ([`oci::Identifier::repository`]).
+    /// `index.ocx.sh` serves `2` — its root schema pins the logical name to
+    /// `<ns>/<pkg>`, so it can never hold a root for a flat name.
+    ///
+    /// Absent = this index declares no constraint and can express every name,
+    /// which is the historical behaviour verbatim. Deliberately **not** a
+    /// security control: an older client ignores the field entirely, so nothing
+    /// about the yank gate, the dispatch-object verify, or the authoritative
+    /// stop is delegated to it — it only ever narrows what a client asks for.
+    ///
+    /// `NonZeroU32` does the validation: `0` fails deserialization into the
+    /// existing [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
+    /// path, so there is no hand-written validator to keep in sync.
+    #[serde(default)]
+    pub name_segments: Option<std::num::NonZeroU32>,
 }
 
 /// The `format_version` OCX understands. A served value other than this is
@@ -392,23 +409,25 @@ pub const DEFAULT_INDEX_BASE_URL: &str = "https://index.ocx.sh";
 struct SourceCacheInner {
     /// repository → root document.
     roots: BTreeMap<String, Arc<IndexRoot>>,
-    /// Set once `config.json`'s `format_version` has been confirmed supported
-    /// this invocation, so a repeat call skips the fetch (F1 "read once").
-    /// Never set on a served-but-unsupported version (a re-checked hard error,
-    /// not a remembered steady state) NOR on an absent `config.json` (a
-    /// re-checked inert state — a fixed deploy that later serves `config.json`
-    /// is picked up without restarting). Config-driven construction means there
-    /// is no probe outcome to soften a transport failure into — that always
-    /// propagates.
-    format_version_confirmed: bool,
+    /// Set once `config.json` has been fetched and its `format_version`
+    /// confirmed supported this invocation, so a repeat call skips the fetch
+    /// (F1 "read once") and [`OcxIndex::jurisdiction`] reads the declared name
+    /// grammar for free. Never set on a served-but-unsupported version (a
+    /// re-checked hard error, not a remembered steady state) NOR on an absent
+    /// `config.json` (a re-checked inert state — a fixed deploy that later
+    /// serves `config.json` is picked up without restarting). Config-driven
+    /// construction means there is no probe outcome to soften a transport
+    /// failure into — that always propagates.
+    config: Option<Arc<IndexFormatConfig>>,
 }
 
 /// Outcome of the per-source `config.json` version check
 /// ([`OcxIndex::check_format_version`]).
 enum FormatVersionState {
     /// `config.json` present and its `format_version` is supported — roots may
-    /// resolve.
-    Confirmed,
+    /// resolve. Carries the parsed document so the declared name grammar
+    /// ([`IndexFormatConfig::name_segments`]) rides the same memoized fetch.
+    Confirmed(Arc<IndexFormatConfig>),
     /// `config.json` absent (404) — this base URL is not (yet) a version-pinned
     /// OCX index, so no root resolves and nothing is cached (fail-closed, F1;
     /// re-checked every call). Serving a valid-looking root without the version
@@ -470,6 +489,78 @@ impl OcxIndex {
     /// The logical registry this source serves (e.g. `"ocx.sh"`).
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// Whether `registry` is the one this source serves — a cheap, no-I/O
+    /// ownership test, and the single predicate behind every read-path guard
+    /// below.
+    ///
+    /// Distinct from [`Self::jurisdiction`]: ownership is per-**registry** and
+    /// decides local-subtree layout (the `c/index.json` catalog vs `p/`
+    /// enumeration), which is per-source and never per-name. Jurisdiction is
+    /// per-**name** and needs the published `config.json`.
+    pub fn serves_registry(&self, registry: &str) -> bool {
+        registry == self.namespace
+    }
+
+    /// Whether this source will answer for `identifier`, and what its silence
+    /// means — the index's own published statement, never a client guess.
+    ///
+    /// [`Jurisdiction::Outside`] on two grounds, in order:
+    ///
+    /// 1. A foreign registry. Decided with **no I/O** — nothing is fetched for
+    ///    a name this source does not own.
+    /// 2. The source's `config.json` declares a
+    ///    [`name_segments`](IndexFormatConfig::name_segments) count the name
+    ///    does not have. `index.ocx.sh` serves `2`, restating its root schema's
+    ///    `^ocx\.sh/<ns>/<pkg>$`: it has publicly said it can never hold a root
+    ///    for `ocx.sh/go-task`, so asking would turn an unavoidable 404 into a
+    ///    terminal stop and strand every flat package on the registry the index
+    ///    never covered. Declining a name is not a fallback — the source never
+    ///    claimed it.
+    ///
+    /// Everything else is [`Jurisdiction::Authoritative`], **fail-closed**: only
+    /// a successfully-read config that *positively* declares the name
+    /// inexpressible moves it out of jurisdiction. An absent, malformed,
+    /// unsupported or unreachable `config.json` keeps the source authoritative,
+    /// so an index outage can never silently downgrade a namespace to plain OCI.
+    ///
+    /// Infallible by construction, and not error-swallowing: the config is never
+    /// cached on failure, so the `resolve_root` / `fetch_root_document` that
+    /// immediately follows on the same source re-fetches and raises the real
+    /// `UnsupportedIndexFormat` / transport error loud. This probe only defers.
+    ///
+    /// No new network call: a foreign registry never touches the wire, and an
+    /// in-namespace name fires exactly the `GET /config.json` that
+    /// [`Self::resolve_root`] would have fired one step later, memoized
+    /// identically.
+    pub async fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
+        if !self.serves_registry(identifier.registry()) {
+            return super::Jurisdiction::Outside;
+        }
+        let declared = match self.check_format_version().await {
+            Ok(FormatVersionState::Confirmed(config)) => config.name_segments,
+            // 404 (not a version-pinned index) — no declaration to honour.
+            Ok(FormatVersionState::NotAnIndex) => None,
+            Err(error) => {
+                log::debug!(
+                    "Could not read '{}' config.json to check jurisdiction over '{identifier}' \
+                     (staying authoritative; the resolve below re-raises it): {error}",
+                    self.namespace
+                );
+                None
+            }
+        };
+        match declared {
+            Some(segments) if identifier.repository().split('/').count() != segments.get() as usize => {
+                log::debug!(
+                    "Index '{}' declares {segments}-segment names; '{identifier}' is outside what it can express.",
+                    self.namespace
+                );
+                super::Jurisdiction::Outside
+            }
+            _ => super::Jurisdiction::Authoritative,
+        }
     }
 
     /// This source's own SSRF escape hatch (`[registries."<ns>"].trusted_hosts`,
@@ -563,11 +654,11 @@ impl OcxIndex {
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
     /// on a served-but-unknown version; the transport error otherwise.
     async fn check_format_version(&self) -> Result<FormatVersionState> {
-        if self.cache.read().await.format_version_confirmed {
-            return Ok(FormatVersionState::Confirmed);
+        if let Some(config) = &self.cache.read().await.config {
+            return Ok(FormatVersionState::Confirmed(config.clone()));
         }
         let url = format!("{}/config.json", self.base_url);
-        match self.transport.get(&url, None).await? {
+        let config = match self.transport.get(&url, None).await? {
             IndexFetch::Found { bytes, .. } => {
                 let config: IndexFormatConfig = parse_document(&bytes, &url)?;
                 if config.format_version != SUPPORTED_FORMAT_VERSION {
@@ -576,14 +667,15 @@ impl OcxIndex {
                     }
                     .into());
                 }
+                Arc::new(config)
             }
             // Absent config: not a version-pinned OCX index at this base URL.
             // Do NOT cache and do NOT let roots resolve — fail-closed (F1),
             // re-checked every call so a later-deployed config.json is picked up.
             IndexFetch::NotFound | IndexFetch::NotModified => return Ok(FormatVersionState::NotAnIndex),
-        }
-        self.cache.write().await.format_version_confirmed = true;
-        Ok(FormatVersionState::Confirmed)
+        };
+        self.cache.write().await.config = Some(config.clone());
+        Ok(FormatVersionState::Confirmed(config))
     }
 
     // ── root (F1 volatile) ──────────────────────────────────────────────────
@@ -847,7 +939,7 @@ impl index_impl::IndexImpl for OcxIndex {
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
@@ -861,7 +953,7 @@ impl index_impl::IndexImpl for OcxIndex {
         identifier: &oci::Identifier,
         _op: IndexOperation,
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
 
@@ -888,7 +980,7 @@ impl index_impl::IndexImpl for OcxIndex {
         identifier: &oci::Identifier,
         _op: IndexOperation,
     ) -> Result<Option<oci::Digest>> {
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
         // A digest-addressed identifier already names its manifest digest.
@@ -900,7 +992,7 @@ impl index_impl::IndexImpl for OcxIndex {
     }
 
     async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-        if blob_ref.as_identifier().registry() != self.namespace {
+        if !self.serves_registry(blob_ref.as_identifier().registry()) {
             return Ok(None);
         }
         // Layers are physical — dereference the root's repository pointer and
@@ -916,7 +1008,7 @@ impl index_impl::IndexImpl for OcxIndex {
         &self,
         identifier: &oci::Identifier,
     ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
 
@@ -953,7 +1045,7 @@ impl index_impl::IndexImpl for OcxIndex {
         // with the parsed root, so `LocalIndex::persist_published_root` grows the
         // local copy byte-for-byte (copy-a-mirror, A2). The bytes are returned
         // verbatim (never re-serialized) so they hash to the catalog entry (F1).
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
         // Fail-closed: an absent config.json means this base is not a
@@ -973,7 +1065,7 @@ impl index_impl::IndexImpl for OcxIndex {
     }
 
     async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
-        if identifier.registry() != self.namespace {
+        if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
         // Dereference the root's `repository` pointer, carrying the logical
@@ -981,10 +1073,15 @@ impl index_impl::IndexImpl for OcxIndex {
         self.physical_identifier(identifier).await
     }
 
-    fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
-        // This source is the authoritative resolver for every reference in the
-        // namespace it serves, so a refusal here stops the chain (F3).
-        identifier.registry() == self.namespace
+    async fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
+        // Forwards to the inherent method (same shape as `namespace()`) so the
+        // one caller that holds a concrete `OcxIndex` — `ocx index update`'s
+        // source routing — reaches it without the private trait.
+        OcxIndex::jurisdiction(self, identifier).await
+    }
+
+    fn serves_registry(&self, registry: &str) -> bool {
+        OcxIndex::serves_registry(self, registry)
     }
 
     fn source_kind(&self) -> super::local_index::SourceKind {
@@ -2349,13 +2446,17 @@ mod tests {
         assert_eq!(physical.registry(), "ghcr.io");
         assert_eq!(physical.repository(), "ocx-contrib/cmake");
         assert_eq!(physical.digest(), Some(leaf));
-        assert!(source.is_authoritative_for(&logical), "the source owns its namespace");
+        assert_eq!(
+            source.jurisdiction(&logical).await,
+            super::super::Jurisdiction::Authoritative,
+            "the source owns its namespace"
+        );
 
         // A foreign namespace is neither rewritten nor owned.
         let foreign =
             oci::Identifier::new_registry("x/y", "ghcr.io").clone_with_digest(oci::Digest::Sha256("b".repeat(64)));
         assert!(source.physical_reference(&foreign).await.unwrap().is_none());
-        assert!(!source.is_authoritative_for(&foreign));
+        assert_eq!(source.jurisdiction(&foreign).await, super::super::Jurisdiction::Outside);
     }
 
     // ── GAP 2: authoritative refusal stops the chain (Codex R4) ───────────────
@@ -2712,6 +2813,377 @@ mod tests {
         assert!(
             source.fetch_root_document(&foreign).await.unwrap().is_none(),
             "a foreign-namespace identifier is not this source's concern"
+        );
+    }
+
+    // ── jurisdiction: the INDEX declares what it can express, the client asks ──
+    //
+    // `name_segments` in `config.json` is the index operator's own published
+    // statement about its name grammar. A name it declares inexpressible is
+    // outside that source's jurisdiction: never asked, its silence decides
+    // nothing, and the chain falls through to the registry. Every other outcome
+    // — absent, malformed, unsupported, unreachable config — stays
+    // AUTHORITATIVE, so an index outage can never silently downgrade a
+    // namespace to plain OCI.
+
+    const FLAT_REPO: &str = "go-task";
+
+    fn flat_id() -> oci::Identifier {
+        oci::Identifier::new_registry(FLAT_REPO, NAMESPACE).clone_with_tag("3")
+    }
+
+    fn flat_root_url() -> String {
+        format!("{BASE}/p/{FLAT_REPO}.json")
+    }
+
+    /// Seeds `config.json` with the given body and a resolvable root for BOTH a
+    /// flat and a namespaced name, so a test that expects "no request" is
+    /// distinguishable from one that would merely have 404ed.
+    fn seed_with_config(transport: &StubIndexTransport, config_body: &[u8]) {
+        transport.insert(&config_url(), config_body);
+        seed_package(transport, false);
+        transport.insert(&config_url(), config_body); // seed_package writes its own
+        let dispatch_bytes = glibc_musl_index();
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
+        let root = format!(
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/task","tags":{{"3":{{"content":"{dispatch_digest}"}}}}}}"#
+        );
+        transport.insert(&flat_root_url(), root.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_outside_for_a_foreign_registry_and_issues_no_request() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport.clone(), false);
+
+        let foreign = oci::Identifier::new_registry(REPO, "ghcr.io").clone_with_tag("3.28");
+        assert_eq!(source.jurisdiction(&foreign).await, super::super::Jurisdiction::Outside);
+        assert_eq!(
+            transport.request_urls(),
+            Vec::<String>::new(),
+            "a foreign registry is decided with no I/O — not even config.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_outside_for_a_name_the_declared_grammar_cannot_express() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport.clone(), false);
+
+        assert_eq!(
+            source.jurisdiction(&flat_id()).await,
+            super::super::Jurisdiction::Outside,
+            "the index declares 2-segment names; `ocx.sh/go-task` has one"
+        );
+        // Asserting on the request log (not just the verdict) is the point: the
+        // probe itself must not touch the name it is deciding about — under an
+        // authoritative source, merely asking already decides the name's fate,
+        // because a 404 is a terminal stop. The chain-level proof that the name
+        // is then never fetched at all is
+        // `a_declared_out_of_jurisdiction_name_falls_through_to_the_registry`.
+        assert_eq!(
+            transport.request_urls(),
+            vec![config_url()],
+            "the verdict costs exactly the config.json the resolve would fetch anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_authoritative_for_a_name_matching_the_declared_grammar() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport, false);
+
+        assert_eq!(
+            source.jurisdiction(&tagged_id()).await,
+            super::super::Jurisdiction::Authoritative,
+            "`ocx.sh/kitware/cmake` is exactly what the index declared it serves"
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_authoritative_when_the_config_declares_no_grammar() {
+        // R1's private index: it declares nothing, so the client never narrows
+        // it. Today's behaviour, verbatim — including for a flat name.
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1}"#);
+        let source = make_source(transport, false);
+
+        assert_eq!(
+            source.jurisdiction(&flat_id()).await,
+            super::super::Jurisdiction::Authoritative
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_authoritative_when_config_json_is_absent() {
+        let transport = StubIndexTransport::new();
+        let source = make_source(transport, false);
+        assert_eq!(
+            source.jurisdiction(&flat_id()).await,
+            super::super::Jurisdiction::Authoritative,
+            "a 404 config.json is not a declaration that the name is inexpressible"
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_authoritative_when_the_config_fetch_fails() {
+        // Fail CLOSED: an index that cannot be asked what it serves must not be
+        // assumed to serve nothing, or an outage silently downgrades the whole
+        // namespace to plain OCI.
+        let transport = StubIndexTransport::new();
+        transport.fail(&config_url());
+        let source = make_source(transport, false);
+        assert_eq!(
+            source.jurisdiction(&flat_id()).await,
+            super::super::Jurisdiction::Authoritative
+        );
+        // Not swallowed: nothing was cached, so the resolve that follows on the
+        // same source re-fetches and raises the real transport error.
+        assert!(
+            source.fetch_root_document(&flat_id()).await.is_err(),
+            "the deferred error must surface loud on the very next read"
+        );
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_is_authoritative_when_the_config_is_malformed() {
+        for body in [
+            &b"not json at all"[..],
+            // `name_segments: 0` is rejected by NonZeroU32 — same malformed path,
+            // no hand-written validator.
+            &br#"{"format_version":1,"name_segments":0}"#[..],
+        ] {
+            let transport = StubIndexTransport::new();
+            transport.insert(&config_url(), body);
+            let source = make_source(transport, false);
+            assert_eq!(
+                source.jurisdiction(&flat_id()).await,
+                super::super::Jurisdiction::Authoritative,
+                "a malformed config declares nothing: {}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_reuses_the_memoized_config() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport.clone(), false);
+
+        source.jurisdiction(&tagged_id()).await;
+        source.jurisdiction(&tagged_id()).await;
+        source.resolve_root(REPO).await.unwrap();
+        assert_eq!(
+            transport.request_count(&config_url()),
+            1,
+            "the probe rides the same read-once config.json fetch the resolve makes"
+        );
+    }
+
+    // ── chain routing: fall through for a declined name, fail closed otherwise ─
+
+    /// The chain the production wiring builds: index source first, plain-OCI
+    /// registry catch-all second.
+    fn chain_with(dir: &tempfile::TempDir, source: OcxIndex, registry: RegistryStub) -> super::super::Index {
+        super::super::Index::from_chained(
+            local_index(dir),
+            vec![
+                super::super::Index::from_source(source),
+                super::super::Index::from_impl(registry),
+            ],
+            super::super::ChainMode::Default,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_declared_out_of_jurisdiction_name_falls_through_to_the_registry() {
+        // The measured bug: with an index configured for ocx.sh, `ocx.sh/go-task`
+        // resolved ONLY when no index was configured.
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport.clone(), false);
+        let registry = RegistryStub::new();
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry.clone());
+
+        let (digest, _) = chained
+            .fetch_manifest(&flat_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("a declined name resolves through the plain-OCI registry");
+        assert_eq!(digest, registry_manifest().1);
+        assert!(
+            !transport.request_urls().contains(&flat_root_url()),
+            "the index must not be asked about a name it declared it cannot express"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expressible_name_keeps_the_terminal_stop_on_a_clean_miss() {
+        // Fail-closed survives for every name the index CAN express: an absent
+        // root is terminal, never a fall-through the registry could shadow.
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport, false);
+        let registry = RegistryStub::new();
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry.clone());
+
+        let absent = oci::Identifier::new_registry("ns/absent", NAMESPACE).clone_with_tag("1.0");
+        assert!(
+            chained
+                .fetch_manifest(&absent, IndexOperation::Resolve)
+                .await
+                .unwrap()
+                .is_none(),
+            "an authoritative source's clean miss is terminal"
+        );
+        assert_eq!(registry.calls(), 0, "the registry must never be consulted");
+    }
+
+    #[tokio::test]
+    async fn an_expressible_name_keeps_the_yank_gate() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, true);
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport, false);
+        let registry = RegistryStub::new();
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry.clone());
+
+        let error = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("a yanked tag must be refused, not silently served by the registry");
+        assert!(error.to_string().contains("yanked"), "unexpected error: {error}");
+        assert_eq!(registry.calls(), 0, "the registry must never be consulted");
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_index_still_stops_the_chain_for_a_flat_name() {
+        // R1's exact vulnerability. A PRIVATE index that declares no
+        // `name_segments` keeps full authority over every name in its
+        // namespace — including a flat one — so its yank refusal is never
+        // bypassed by the plain-OCI catch-all.
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let dispatch_bytes = glibc_musl_index();
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
+        let root = format!(
+            r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"3":{{"content":"{dispatch_digest}","yanked":{{"reason":"bad build","at":"2026-02-01T00:00:00Z"}}}}}}}}"#
+        );
+        transport.insert(&flat_root_url(), root.as_bytes());
+        let source = make_source(transport, false);
+        let registry = RegistryStub::new();
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry.clone());
+
+        let error = chained
+            .fetch_manifest(&flat_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("an undeclared index owns every name in its namespace");
+        assert!(error.to_string().contains("yanked"), "unexpected error: {error}");
+        assert_eq!(
+            registry.calls(),
+            0,
+            "the yanked build must never be resolvable through the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_reference_and_fetch_blob_skip_an_out_of_jurisdiction_source() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
+        let source = make_source(transport.clone(), false);
+        let registry = RegistryStub::new();
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry);
+
+        assert!(chained.physical_reference(&flat_id()).await.unwrap().is_none());
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry(FLAT_REPO, NAMESPACE).clone_with_digest(oci::Digest::Sha256("c".repeat(64))),
+        )
+        .unwrap();
+        let _ = chained.fetch_blob(&pinned).await;
+        assert!(
+            !transport.request_urls().contains(&flat_root_url()),
+            "neither path may dereference a root the index declared it cannot hold: {:?}",
+            transport.request_urls()
+        );
+    }
+
+    // ── sync_catalog: a self-contradicting catalog row is skipped, not fatal ───
+
+    #[tokio::test]
+    async fn sync_catalog_skips_an_out_of_jurisdiction_catalog_key_and_still_commits_the_etag() {
+        // R2: the flat key HAS a local root on disk, so without the guard step 3
+        // calls `refresh_tags` -> `refresh_derived` -> `list_tags` -> `Ok(None)`
+        // -> `RemoteManifestNotFound`, whose `?` aborts before the catalog + ETag
+        // commit. The ETag then never advances and every later `ocx index update`
+        // aborts identically, swallowed as a non-fatal warn.
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        transport.insert_with_etag(&catalog_url(), br#"{"go-task":"sha256:moved"}"#, "etag-jurisdiction");
+        let source = make_source(transport.clone(), false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let local = local_index(&dir);
+        seed_stale_root(local.index_store(), FLAT_REPO).await;
+
+        let outcome = local
+            .sync_catalog(&source)
+            .await
+            .expect("a grammar violation in the remote catalog must not fail the whole sync");
+        assert_eq!(outcome.moved, vec![FLAT_REPO.to_string()]);
+        assert!(
+            !transport.request_urls().contains(&flat_root_url()),
+            "the declined row must not be re-snapshotted: {:?}",
+            transport.request_urls()
+        );
+        assert_eq!(
+            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
+            Some("etag-jurisdiction".to_string()),
+            "the catalog + ETag must still commit, or the source is permanently stale"
+        );
+        assert!(
+            local
+                .index_store()
+                .read_source_catalog(NAMESPACE)
+                .await
+                .unwrap()
+                .unwrap()
+                .contains_key(FLAT_REPO),
+            "the row is still adopted as an ordinary listing row"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_catalog_still_refreshes_an_expressible_moved_key() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        seed_empty_index(&transport, "ns/pkg", "1.0");
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:moved"}"#, "etag-ok");
+        let source = make_source(transport.clone(), false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let local = local_index(&dir);
+        seed_stale_root(local.index_store(), "ns/pkg").await;
+
+        local.sync_catalog(&source).await.unwrap();
+        assert!(
+            transport.request_urls().contains(&format!("{BASE}/p/ns/pkg.json")),
+            "an expressible moved key is still re-snapshotted: {:?}",
+            transport.request_urls()
         );
     }
 }
