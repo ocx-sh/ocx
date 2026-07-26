@@ -5,7 +5,12 @@ requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+# "." exposes the `src` package (`from src.helpers import ...`, the suite-wide
+# convention); "src" additionally exposes `announce_e2e` as a top-level import
+# so the Track D evidence module does not drag `src/__init__.py`'s registry /
+# oras imports into a pure-logic unit test. Scripts outside pytest set
+# PYTHONPATH=<repo>/test/src for the same reason.
+pythonpath = [".", "src"]
 markers = [
     "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
 ]

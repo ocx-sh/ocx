@@ -111,3 +111,12 @@ venv/
 # =============================================================================
 *.pid
 *.sock
+
+# =============================================================================
+# Announce E2E per-run evidence (real PR URLs, live timestamps, container logs
+# — scratch). Everything, not just *.json: a `.log` left tracked is one
+# `git add -A` away from being committed. The durable record is
+# .claude/artifacts/e2e_results_announce.md.
+# =============================================================================
+test/manual/announce-e2e/results/*
+!test/manual/announce-e2e/results/.gitkeep

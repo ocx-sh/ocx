@@ -64,6 +64,13 @@ ocx_done() {
     printf '%s%s%s\n' "$OCX_C_DONE" "$*" "$OCX_C_RESET"
 }
 
+# Fatal error to stderr, then exit 1. Scripts that assert against live
+# infrastructure fail closed rather than warning and continuing.
+ocx_fail() {
+    printf '%serror: %s%s\n' "$OCX_C_WARN" "$*" "$OCX_C_RESET" >&2
+    exit 1
+}
+
 # Write an executable `bin/<name>` script under <pkg_root>/<src>. Body read
 # from stdin. Parents created; mode 0755.
 scaffold_bin() {
