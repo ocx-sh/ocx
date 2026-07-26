@@ -1209,8 +1209,8 @@ def test_pull_emits_package_root_not_content_dir(
     """``ocx pull`` and ``ocx pull --dry-run`` both emit package-root paths.
 
     Locks the contract documented on ``api/data/paths.rs::PathEntry`` and
-    ``api/data/pull_dry_run.rs::DryRunEntry``: the ``Path`` column / JSON
-    ``path`` field is the package root (parent of ``content/`` and
+    ``api/data/pull_dry_run.rs::DryRunEntry``: the JSON ``path`` field is
+    the package root (parent of ``content/`` and
     ``entrypoints/``), never the ``content/`` subdirectory. Consumers (CI
     scripts, project tooling) traverse into ``<root>/content/`` themselves
     or, preferably, consume ``ocx env``.

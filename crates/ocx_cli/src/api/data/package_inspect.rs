@@ -640,21 +640,30 @@ fn binaries_node(binaries: &Binaries) -> Node {
 }
 
 fn candidates_node(candidates: &[CandidateOut]) -> Node {
+    // No media type: every child of an image index is an image manifest, so the
+    // column is a constant that pushes the size off a narrow terminal.
     let entries = candidates
         .iter()
         .map(|c| {
             Node::leaf(c.platform.clone())
                 .with_digest(c.digest.clone())
-                .with_note(c.media_type.clone())
                 .with_note(human_bytes(c.size))
         })
         .collect();
     Node::branch("candidates", entries)
 }
 
+/// The discriminating tail of a media type — `…image.layer.v1.tar+gzip` renders
+/// as `tar+gzip`. Every layer of a package repeats the same 30-character
+/// `application/vnd.oci.image.layer.v1` prefix, which pushes the layer size
+/// past the right edge; only the suffix tells two layers apart.
+fn media_type_suffix(media_type: &str) -> &str {
+    media_type.rsplit('.').next().unwrap_or(media_type)
+}
+
 /// Renders the manifest's layer descriptors as a `layers` branch — one indexed
-/// `[i]` leaf per layer with digest / media type / human size. Shared by the
-/// default-manifest and resolved views.
+/// `[i]` leaf per layer with digest / media type suffix / human size. Shared by
+/// the default-manifest and resolved views.
 fn layers_node(layers: &[Layer]) -> Node {
     let entries = layers
         .iter()
@@ -662,35 +671,37 @@ fn layers_node(layers: &[Layer]) -> Node {
         .map(|(i, layer)| {
             Node::leaf(format!("[{i}]"))
                 .with_digest(layer.digest.clone())
-                .with_note(layer.media_type.clone())
+                .with_note(media_type_suffix(&layer.media_type).to_string())
                 .with_note(human_bytes(layer.size))
         })
         .collect();
     Node::branch("layers", entries)
 }
 
-fn resolution_node(resolution: &Resolution) -> Node {
-    // Chain entries render like layers — role label, then digest / media type /
-    // size annotations — so the OCI walk (index → manifest → config) is legible
-    // instead of an opaque positional digest list. The role doubles as the
-    // walk-order marker the bare `[i]` used to carry. Layers are not part of
-    // the walk; they render under the manifest itself, not here.
+/// Renders the `resolution` branch: the platform the walk selected against, then
+/// the OCI walk itself. `platform` is the answer under `--platform` (a libc
+/// refinement in particular is invisible anywhere else in the tree), so it is
+/// rendered even though it also serializes at the top level.
+fn resolution_node(resolution: &Resolution, platform: &oci::Platform) -> Node {
+    // Chain entries render like layers — role label, then digest / size — so the
+    // OCI walk (index → manifest → config) is legible instead of an opaque
+    // positional digest list. The role doubles as the walk-order marker the bare
+    // `[i]` used to carry, and as the media type: an `index` role IS
+    // `image.index.v1+json`. Layers are not part of the walk; they render under
+    // the manifest itself, not here. No `pinned` leaf either — it is the tree
+    // root, byte for byte.
     let chain = resolution
         .chain
         .iter()
         .map(|c| {
             Node::leaf(c.role.clone())
                 .with_digest(c.digest.clone())
-                .with_note(c.media_type.clone())
                 .with_note(human_bytes(c.size))
         })
         .collect();
     Node::branch(
         "resolution",
-        vec![
-            Node::leaf("pinned".to_string()).with_digest(resolution.pinned.clone()),
-            Node::branch("chain", chain),
-        ],
+        vec![Node::leaf(format!("platform {platform}")), Node::branch("chain", chain)],
     )
 }
 
@@ -713,21 +724,27 @@ fn closure_node(closure: &ClosureOut) -> Node {
 
     children.push(surfaces_node(&closure.surface));
 
-    // Interface-projection conflicts render as their own note leaves.
+    // Interface-projection conflicts render as their own branches, one child per
+    // colliding party. This is the one place worth spending vertical space: it
+    // fires exactly when the user has a decision to make, and a joined list of
+    // pinned identifiers is the widest cell the whole view can produce.
     for conflict in &closure.conflicts.entrypoints {
-        children.push(
-            Node::leaf(format!("entrypoint '{}' claimed by multiple packages", conflict.name))
-                .with_note(conflict.packages.join(", ")),
-        );
+        let packages = conflict
+            .packages
+            .iter()
+            .map(|p| Node::leaf(without_digest(p)))
+            .collect();
+        children.push(Node::branch(
+            format!("entrypoint '{}' claimed by multiple packages", conflict.name),
+            packages,
+        ));
     }
     for conflict in &closure.conflicts.repositories {
-        children.push(
-            Node::leaf(format!(
-                "repository '{}' resolves to multiple digests",
-                conflict.repository
-            ))
-            .with_note(conflict.digests.join(", ")),
-        );
+        let digests = conflict.digests.iter().map(|d| Node::leaf(short_digest(d))).collect();
+        children.push(Node::branch(
+            format!("repository '{}' resolves to multiple digests", conflict.repository),
+            digests,
+        ));
     }
 
     Node::branch("closure", children)
@@ -741,6 +758,29 @@ fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
         leaf = leaf.with_visibility(visibility);
     }
     leaf
+}
+
+/// A wire identifier string with its digest stripped — `registry/repo:tag`. The
+/// conflict leaves answer *which packages* collide; the digest is not that
+/// answer, and repository conflicts report digests in their own branch. Falls
+/// back to the verbatim string if the wire value does not parse.
+fn without_digest(identifier: &str) -> String {
+    oci::Identifier::parse(identifier)
+        .map_or_else(|_| identifier.to_string(), |parsed| parsed.without_digest().to_string())
+}
+
+/// A wire digest string in its canonical short form (`sha256:` + 12 hex). Falls
+/// back to the verbatim string if the wire value does not parse.
+fn short_digest(digest: &str) -> String {
+    oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
+}
+
+/// The short display name of a wire identifier string — the repository's final
+/// path segment, the same name [`ClosureDepOut::name`] carries, so the `deps`
+/// branch reads as the legend for every surface attribution. Falls back to the
+/// verbatim string if the wire value does not parse.
+fn attribution_name(identifier: &str) -> String {
+    oci::Identifier::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
 }
 
 /// Parses a wire `effective_visibility` string back into the palette-typed
@@ -795,25 +835,25 @@ fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
     Node::branch(label.to_string(), children)
 }
 
-/// Renders one [`BinaryAttribution`] as a leaf, annotating the owning
-/// package with the digest palette (the whole identifier as one blue span,
-/// matching every other identifier annotation in the tree) when attribution
-/// is known.
+/// Renders one [`BinaryAttribution`] as a leaf, attributing the claim to the
+/// owning package by its short name (see [`attribution_name`]) when known. The
+/// full pinned identifier would otherwise repeat once per binary per package —
+/// a 3-dependency, 5-binary closure prints it 15 times.
 fn binary_attribution_leaf(attribution: &BinaryAttribution) -> Node {
     let leaf = Node::leaf(attribution.name.clone());
     match &attribution.package {
-        Some(package) => leaf.with_digest(package.clone()),
+        Some(package) => leaf.with_note(attribution_name(package)),
         None => leaf,
     }
 }
 
 /// Renders one [`EnvVarAttribution`] as a leaf: the env key, its modifier kind
-/// as a note (`path` / `constant`), and the owning package as a digest-inked
-/// identifier when attribution is known.
+/// as a note (`path` / `constant`), and the owning package's short name when
+/// attribution is known.
 fn env_var_attribution_leaf(attribution: &EnvVarAttribution) -> Node {
     let leaf = Node::leaf(attribution.key.clone()).with_note(attribution.kind.clone());
     match &attribution.package {
-        Some(package) => leaf.with_digest(package.clone()),
+        Some(package) => leaf.with_note(attribution_name(package)),
         None => leaf,
     }
 }
@@ -838,16 +878,16 @@ impl Printable for PackageInspect {
             }
             Body::Resolved {
                 pinned,
+                platform,
                 metadata,
                 layers,
                 resolution,
                 closure,
-                ..
             } => {
                 let mut sections = vec![
                     metadata_node(metadata),
                     layers_node(layers),
-                    resolution_node(resolution),
+                    resolution_node(resolution, platform),
                 ];
                 if let Some(closure) = closure {
                     sections.push(closure_node(closure));
@@ -1358,9 +1398,13 @@ mod tests {
     }
 
     /// Interface-projection conflicts render under the `closure` branch as
-    /// their own note leaves, naming the colliding entrypoint and repository.
+    /// their own branches — the colliding entrypoint / repository names the
+    /// branch, and each colliding party is one child leaf, shortened
+    /// (identifier without digest / short digest). Never one joined cell: a
+    /// joined list of pinned identifiers is the widest line the view can
+    /// produce, and this fires exactly when the user must decide something.
     #[test]
-    fn closure_node_renders_conflict_notes() {
+    fn closure_node_renders_conflicts_as_child_leaves() {
         let closure = ClosureOut {
             deps: vec![],
             surface: SurfacesOut {
@@ -1383,17 +1427,35 @@ mod tests {
         };
 
         let node = closure_node(&closure);
-        let mut text = Vec::new();
-        collect_node_text(&node, &mut text);
-        let joined = text.join(" | ");
+        let find = |marker: &str| {
+            node.children
+                .iter()
+                .find(|child| child.label.contains(marker))
+                .unwrap_or_else(|| panic!("no conflict branch names '{marker}'"))
+        };
 
-        assert!(
-            joined.contains("shared-ep"),
-            "the entrypoint conflict names the colliding name: {joined}"
+        let entrypoint = find("shared-ep");
+        let packages: Vec<&str> = entrypoint.children.iter().map(|child| child.label.as_str()).collect();
+        assert_eq!(
+            packages,
+            vec!["example.com/a", "example.com/b"],
+            "one leaf per colliding package, digest stripped"
         );
         assert!(
-            joined.contains("shared-lib"),
-            "the repository conflict names the colliding repository: {joined}"
+            entrypoint.annotations.is_empty(),
+            "the colliding packages are children, never one joined annotation"
+        );
+
+        let repository = find("shared-lib");
+        let digests: Vec<&str> = repository.children.iter().map(|child| child.label.as_str()).collect();
+        assert_eq!(
+            digests,
+            vec!["sha256:eeeeeeeeeeee", "sha256:ffffffffffff"],
+            "one leaf per colliding digest, shortened to 12 hex"
+        );
+        assert!(
+            repository.annotations.is_empty(),
+            "the colliding digests are children, never one joined annotation"
         );
     }
 
@@ -1437,16 +1499,17 @@ mod tests {
         );
     }
 
-    /// Surface attribution renders the owning package with the digest palette
-    /// (`SemanticAnnotation::Digest` — the whole identifier as one blue span),
-    /// NOT the dim `Note` style — matching every other identifier annotation.
+    /// Surface attribution names the owning package by its short name — the
+    /// same name the `deps` branch labels it with, so that branch reads as the
+    /// legend. The pinned identifier is never re-printed per claim: it would
+    /// otherwise repeat once per binary per package (89 columns each).
     #[test]
-    fn surface_attribution_inks_package_as_identifier() {
+    fn surface_attribution_names_package_by_short_name() {
         let surface = SurfaceOut {
-            binaries: BinaryAttribution::from_pairs(&[(pinned("cmake", 'a'), "cmake".to_string())]),
+            binaries: BinaryAttribution::from_pairs(&[(pinned("toolchain/cmake", 'a'), "cmake".to_string())]),
             entrypoints: vec![],
             env: EnvVarAttribution::from_pairs(&[(
-                pinned("cmake", 'a'),
+                pinned("toolchain/cmake", 'a'),
                 env_var("CMAKE_ROOT", ModifierKind::Constant, Visibility::PUBLIC),
             )]),
             binaries_complete: true,
@@ -1455,19 +1518,21 @@ mod tests {
 
         let mut annotations = Vec::new();
         collect_annotations(&node, &mut annotations);
-
-        let cmake_id = pinned("cmake", 'a').to_string();
-        assert!(
+        assert_eq!(
             annotations
                 .iter()
-                .any(|a| matches!(a, SemanticAnnotation::Digest(text) if *text == cmake_id)),
-            "attribution package must be inked as a whole-identifier digest span"
+                .filter(|a| matches!(a, SemanticAnnotation::Note(text) if text == "cmake"))
+                .count(),
+            2,
+            "the binary leaf and the env leaf each attribute to the package's short name"
         );
+
+        let mut text = Vec::new();
+        collect_node_text(&node, &mut text);
+        let joined = text.join(" | ");
         assert!(
-            !annotations
-                .iter()
-                .any(|a| matches!(a, SemanticAnnotation::Note(text) if text.contains("cmake@"))),
-            "the package identifier must not be rendered with the dim note style"
+            !joined.contains(&fake_digest('a')),
+            "the pinned identifier must not be re-printed per claim: {joined}"
         );
     }
 

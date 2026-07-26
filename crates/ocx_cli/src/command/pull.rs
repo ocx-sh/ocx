@@ -252,7 +252,7 @@ async fn run_dry_run(
         .zip(slots)
         .map(|(id, slot)| {
             let (status, path) = slot.expect("all slots filled on success");
-            DryRunEntry::new(id.to_string(), status, path)
+            DryRunEntry::new(id.clone(), status, path)
         })
         .collect();
     let report = PullDryRun::new(entries);

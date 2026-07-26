@@ -8,10 +8,12 @@ use crate::api::Printable;
 
 /// Result of a successful `ocx package push`.
 ///
-/// Plain format: a one-row table mirroring the JSON — `Identifier`, `Status`,
-/// `Digest`, `Tags` (the rolling cascade tags, comma-joined), and `Canonical
-/// Tags`. Keeps a plain push from being silent; progress still surfaces on
-/// stderr via the log layer.
+/// Plain format: a one-row table — `Identifier`, `Digest`, `Tags` (the rolling
+/// cascade tags, comma-joined) and `Canonical Tags` (how many were written).
+/// Keeps a plain push from being silent; progress still surfaces on stderr via
+/// the log layer. `status` is plain-omitted (it is the constant `"pushed"`) and
+/// the canonical tags are counted rather than listed — each is a 71-column
+/// `sha256.<hex>` and there is one per distinct platform manifest.
 ///
 /// JSON format:
 /// `{ "identifier", "status", "manifest_digest", "cascade_tags_written",
@@ -58,25 +60,26 @@ impl PushReport {
 }
 
 impl Printable for PushReport {
-    /// One-row table mirroring the JSON: identifier, status, digest, the
-    /// rolling cascade tags, and the canonical tags (both comma-joined).
-    /// Machine consumers should prefer `--format json`; this line keeps a
-    /// plain push from emitting nothing.
+    /// One-row table: identifier, digest, the rolling cascade tags, and the
+    /// number of canonical tags written. Machine consumers should prefer
+    /// `--format json`; this line keeps a plain push from emitting nothing.
+    ///
+    /// `status` has no column because it is always `"pushed"`, and the
+    /// canonical tags are a count because listing them is 71 columns each.
+    /// Both stay in the JSON contract, where `ocx-mirror` reads them.
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
         data.print_table(
             &[
                 "Identifier".into(),
-                "Status".into(),
                 "Digest".into(),
                 "Tags".into(),
                 "Canonical Tags".into(),
             ],
             &[
                 vec![Cell::from(self.identifier.clone())],
-                vec![Cell::from(self.status.clone())],
                 vec![Cell::from(self.manifest_digest.clone())],
                 vec![Cell::from(self.cascade_tags_written.join(","))],
-                vec![Cell::from(self.canonical_tags_written.join(","))],
+                vec![Cell::from(self.canonical_tags_written.len().to_string())],
             ],
         );
     }
