@@ -87,4 +87,9 @@ pub struct AnnounceOutcome {
     /// The relative paths written under the `--out` directory (sorted) — always
     /// the whole entry, unchanged runs included; empty in fork mode.
     pub written_paths: Vec<String>,
+    /// Reserved tags dropped from the curated set (D7) — the OCX-internal
+    /// `__ocx` namespace and `<algorithm>.<hex>` canonical tags. Dropping them
+    /// is not a failure, so they are reported here rather than refused; empty
+    /// when the selection carried none.
+    pub reserved_tags_dropped: Vec<String>,
 }

@@ -39,7 +39,9 @@ pub struct PackageAnnounce {
     package: options::Identifier,
 
     /// Replace the curated tag set with this comma-separated list. A
-    /// currently-committed tag that is not named here is dropped.
+    /// currently-committed tag that is not named here is dropped. So is a
+    /// reserved tag named here: a canonical `sha256.<hex>` tag or an `__ocx`
+    /// one is not a version, so the run still succeeds and reports the drops.
     #[clap(
         long = "tags",
         value_name = "TAGS",
@@ -158,6 +160,16 @@ impl PackageAnnounce {
         let publisher = Publisher::new(announce_client(&context, trusted_hosts)?);
 
         let outcome = announce::announce(&publisher, Some(&forge), request).await?;
+
+        // Reserved tags are dropped, not refused — the run succeeded, so the
+        // notice is a diagnostic on stderr and the drops also ride out in the
+        // report on stdout.
+        if !outcome.reserved_tags_dropped.is_empty() {
+            context.ui().warn(format!(
+                "not a version, dropped from the curated set: {}",
+                outcome.reserved_tags_dropped.join(", ")
+            ));
+        }
 
         context.api().report(&AnnounceReport::from_outcome(outcome))?;
 

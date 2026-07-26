@@ -6,12 +6,12 @@
 //! A self-contained, forge-neutral routine (reused by `ocx-mirror`) that a
 //! publisher runs to update **one** package's entry in the `ocx-sh/index`
 //! repository. It observes an owner-curated set of registry tags, rebuilds the
-//! package's index root plus its content-addressed observation objects
-//! byte-exactly (CONTRACTS §14, via [`crate::oci::index::serialize_root`] /
-//! [`serialize_observation`](crate::oci::index::serialize_observation)), and
-//! either writes the result locally (`--out`) or opens/updates a fork pull
-//! request against the index (`--fork`). Server-side privileged verification
-//! (ownership, claim re-derivation) happens in the index CI, never here.
+//! package's index root byte-exactly (CONTRACTS §14, via
+//! [`crate::oci::index::serialize_root`]) and stores each observed tag's image
+//! index verbatim as a content-addressed object, then either writes the result
+//! locally (`--out`) or opens/updates a fork pull request against the index
+//! (`--fork`). Server-side privileged verification (ownership, claim
+//! re-derivation) happens in the index CI, never here.
 //!
 //! The pipeline behaviourally matches the Python reference tool
 //! (`ocx-sh/index` `bot/cli/announce.py`, design register FP-9), with the
@@ -107,6 +107,7 @@ pub async fn announce(
         root_bytes: new_root_bytes,
         files,
         observed,
+        mut reserved_dropped,
     } = observe_and_rebuild(publisher, &committed_root, &request, &now, &root_path, &package).await?;
 
     // C6: byte-identical root AND no new CAS object ⇒ nothing moved.
@@ -135,6 +136,7 @@ pub async fn announce(
                 pull_request: None,
                 fork: None,
                 written_paths,
+                reserved_tags_dropped: reserved_dropped,
             })
         }
         AnnounceTarget::Fork(target) => {
@@ -170,6 +172,7 @@ pub async fn announce(
                         pull_request: Some(pull_request),
                         fork: Some(fork.clone()),
                         written_paths: Vec::new(),
+                        reserved_tags_dropped: reserved_dropped,
                     });
                 }
                 return Ok(AnnounceOutcome {
@@ -178,6 +181,7 @@ pub async fn announce(
                     pull_request: None,
                     fork: None,
                     written_paths: Vec::new(),
+                    reserved_tags_dropped: reserved_dropped,
                 });
             }
             // C8: reuse the already-resolved fork, else create one under the
@@ -229,6 +233,12 @@ pub async fn announce(
                         })?;
                     let merged =
                         observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
+                    // The retry re-resolved the curated set against the winning
+                    // head, so its drop list supersedes — never unions with —
+                    // the pre-race one: for `--tags-file`/`--refresh` the base
+                    // root differs between passes, so the two lists legitimately
+                    // differ and only the second describes what was announced.
+                    reserved_dropped = merged.reserved_dropped;
                     // Re-apply C6 against the head that WON the race: two
                     // identical racing announces both regenerate the same
                     // bytes, so committing again would push a commit whose tree
@@ -264,6 +274,7 @@ pub async fn announce(
                 pull_request: Some(pull_request),
                 fork: Some(fork),
                 written_paths: Vec::new(),
+                reserved_tags_dropped: reserved_dropped,
             })
         }
     }
@@ -277,12 +288,15 @@ struct Rebuilt {
     /// The atomic file set a commit would carry: the root plus every CAS object
     /// (C15).
     files: BTreeMap<String, Vec<u8>>,
-    /// Every curated tag's fresh observation — the C6 "no new CAS object" input.
+    /// What every curated tag was observed to hold — the C6 "no new CAS object"
+    /// input.
     observed: Vec<pipeline::Observed>,
+    /// Reserved tags this pass dropped from the curated set (D7).
+    reserved_dropped: Vec<String>,
 }
 
 /// One full regeneration pass over `base_root`: resolve the curated tag universe
-/// (C3/C5), observe every curated tag behind the SSRF pre-flight (X3), rebuild
+/// (C3/C5) and drop its reserved tags (D7), observe every curated tag behind the SSRF pre-flight (X3), rebuild
 /// the tags (C6), apply the yank markers (C7), serialize the root, and assemble
 /// the atomic file set (C15).
 ///
@@ -310,7 +324,10 @@ async fn observe_and_rebuild(
     package: &str,
 ) -> Result<Rebuilt, AnnounceError> {
     let base_tags = pipeline::committed_tag_names(base_root);
-    let curated = pipeline::resolve_curated_tags(&request.curated, &base_tags)?;
+    let pipeline::ResolvedTags {
+        tags: curated,
+        reserved_dropped,
+    } = pipeline::resolve_curated_tags(&request.curated, &base_tags)?;
     let observed = pipeline::observe_curated(publisher, base_root, &curated, &request.trusted_hosts).await?;
     let mut root = pipeline::regenerate(base_root, &observed, now);
     pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
@@ -320,6 +337,7 @@ async fn observe_and_rebuild(
         root_bytes,
         files,
         observed,
+        reserved_dropped,
     })
 }
 
@@ -366,4 +384,146 @@ async fn read_committed_root(
         branch_sha: None,
         base_ref: INDEX_BASE_REF.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci;
+    use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+    /// A committed root for `acme/widget` on a loopback physical repository,
+    /// carrying `tags` verbatim.
+    fn committed_root(tags: Value) -> Value {
+        serde_json::json!({
+            "name": "ocx.sh/acme/widget",
+            "repository": "oci://127.0.0.1/x",
+            "owners": [{ "github": "alice", "github_id": 1 }],
+            "status": "active",
+            "created": "2026-07-24",
+            "desc": null,
+            "tags": tags,
+        })
+    }
+
+    fn request(curated: TagSelection) -> AnnounceRequest {
+        AnnounceRequest {
+            package: oci::Identifier::new_registry("acme/widget", "ocx.sh"),
+            curated,
+            target: AnnounceTarget::Out(std::path::PathBuf::from("unused")),
+            index_repo: crate::forge::RepoCoordinate {
+                owner: "ocx-sh".to_string(),
+                repo: "index".to_string(),
+            },
+            yank: Vec::new(),
+            unyank: Vec::new(),
+            yank_reason: String::new(),
+            // The loopback physical host is forbidden by default; trusting it
+            // is what lets the observe loop reach the stub transport.
+            trusted_hosts: vec!["127.0.0.1".to_string()],
+        }
+    }
+
+    /// Seed the stub with a one-platform image index served at `127.0.0.1/x:<tag>`.
+    ///
+    /// Pretty-printed for the same reason as `pipeline::tests::seed_manifest`:
+    /// the served encoding must differ from serde's canonical one, or a
+    /// re-serializing regression stays invisible to every byte assertion.
+    fn seed_index(data: &StubTransportData, tag: &str) {
+        let manifest = oci::Manifest::ImageIndex(oci::ImageIndex {
+            schema_version: oci::INDEX_SCHEMA_VERSION,
+            media_type: Some(oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
+            artifact_type: None,
+            manifests: vec![oci::ImageIndexEntry {
+                media_type: oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 0,
+                platform: Some(oci::native::Platform {
+                    architecture: "amd64".into(),
+                    os: "linux".into(),
+                    os_version: None,
+                    os_features: None,
+                    variant: None,
+                    features: None,
+                }),
+                artifact_type: None,
+                annotations: None,
+            }],
+            annotations: None,
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("index serializes");
+        let digest = oci::Algorithm::Sha256.hash(&bytes);
+        data.write()
+            .manifests
+            .insert(format!("127.0.0.1/x:{tag}"), (bytes, digest.to_string()));
+    }
+
+    /// The D7 drop list is threaded out of the regeneration pass, not recomputed
+    /// or dropped on the floor: every `AnnounceOutcome` construction site reads
+    /// it from here, and the retry pass supersedes it from the same field.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regeneration_threads_the_reserved_drops_out_of_the_pass() {
+        let data = StubTransportData::new();
+        seed_index(&data, "1.0.0");
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data))));
+        let canonical = format!("sha256.{}", "a".repeat(64));
+        let root = committed_root(serde_json::json!({}));
+        let request = request(TagSelection::Replace(vec![
+            "1.0.0".to_string(),
+            "__ocx.desc".to_string(),
+            canonical.clone(),
+        ]));
+
+        let rebuilt = observe_and_rebuild(
+            &publisher,
+            &root,
+            &request,
+            "2026-07-25T00:00:00Z",
+            "p/acme/widget.json",
+            "acme/widget",
+        )
+        .await
+        .expect("the one real version announces");
+
+        assert_eq!(
+            rebuilt.reserved_dropped,
+            vec!["__ocx.desc".to_string(), canonical],
+            "both reserved tags ride out of the pass"
+        );
+        assert_eq!(rebuilt.observed.len(), 1, "only the real version was observed");
+        assert_eq!(rebuilt.observed[0].tag, "1.0.0");
+    }
+
+    /// A reserved tag never reaches the registry: it is dropped at resolution,
+    /// so no round trip is spent on a tag that cannot be a version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reserved_tag_costs_no_registry_round_trip() {
+        let data = StubTransportData::new();
+        seed_index(&data, "1.0.0");
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+        let root = committed_root(serde_json::json!({}));
+        let request = request(TagSelection::Replace(vec![
+            "1.0.0".to_string(),
+            "__ocx.desc".to_string(),
+        ]));
+
+        observe_and_rebuild(
+            &publisher,
+            &root,
+            &request,
+            "2026-07-25T00:00:00Z",
+            "p/acme/widget.json",
+            "acme/widget",
+        )
+        .await
+        .expect("the one real version announces");
+
+        let manifest_pulls = data.read().calls.iter().filter(|c| *c == "pull_manifest_raw").count();
+        assert_eq!(
+            manifest_pulls,
+            1,
+            "exactly one tag was fetched: {:?}",
+            data.read().calls
+        );
+    }
 }
