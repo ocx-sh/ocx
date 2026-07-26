@@ -308,20 +308,27 @@ assert_no_reserved_tags() {
 main() {
     local tag="${1:?usage: run_sequence.sh <tag>}"
     local sha t0 publisher_run pr merge_line merge_sha merged_at deploy_run latency
+    local publish_floor pr_base deploy_floor
     local root_json
     local secret_args=()
 
     require_claimed_namespace
 
+    # Freshness floors, all read before the push: what GitHub had already
+    # numbered, so nothing an earlier rehearsal left behind can answer for this
+    # run. t0 stays a timestamp — it is only ever reported as latency.
     t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    publish_floor="$(run_floor "$GH_REPO_PUBLISHER" e2e-publish "$tag")"
+    deploy_floor="$(run_floor "$GH_REPO_INDEX" render-deploy main)"
+    pr_base="$(pr_floor)"
     sha="$(push_publisher_tag "$tag")"
 
     ocx_step "(b) waiting for the publisher's build + push + announce at ${sha:0:7}"
-    publisher_run="$(poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$t0")" ||
+    publisher_run="$(poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$publish_floor")" ||
         ocx_fail "publisher CI did not conclude successfully — see PLAYBOOKS.md"
 
     ocx_step "(c) waiting for the tag-refresh PR on $ANNOUNCE_BRANCH"
-    pr="$(poll_pr "$t0")" || ocx_fail "no pull request appeared on $ANNOUNCE_BRANCH"
+    pr="$(poll_pr "$pr_base")" || ocx_fail "no pull request appeared on $ANNOUNCE_BRANCH"
     ocx_done "(c) pull request #$pr"
 
     ocx_step "(d) waiting for validate.yml on PR #$pr"
@@ -334,7 +341,7 @@ main() {
     merge_line="$(poll_merge "$pr")" || ocx_fail "PR #$pr did not merge"
     merge_sha="${merge_line%% *}"
     merged_at="${merge_line##* }"
-    deploy_run="$(poll_run "$GH_REPO_INDEX" render-deploy main "$merge_sha" "$t0")" ||
+    deploy_run="$(poll_run "$GH_REPO_INDEX" render-deploy main "$merge_sha" "$deploy_floor")" ||
         ocx_fail "render-deploy did not conclude successfully at ${merge_sha:0:7}"
 
     ocx_step "(g) checking that $INDEX_SITE serves the root"
