@@ -145,6 +145,7 @@ Exempt from overlap detection (intended broad coupling):
 | Security review | `security-auditor` |
 | Architecture decision | `architect` |
 | Code quality audit | `code-check` |
+| Triaging a large diff — what to actually read | `review-surface` |
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
 | Planning a feature (multi-agent) | `swarm-plan` |

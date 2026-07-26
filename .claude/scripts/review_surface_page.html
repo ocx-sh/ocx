@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ — review surface</title>
+<style>
+  :root {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #161d26; --ink-soft: #55636f;
+    --ink-faint: #8794a1; --rule: #dfe4ea; --rule-soft: #ebeef2; --accent: #2f7f9e;
+    --t0: #b3543f; --t1: #b5842c; --t2: #3f77b0; --t3: #5d6d80; --ledger: #97a3ae;
+    /* Diff lines: a subtle tint carries the ground, the glyph carries the hue,
+       and the code itself stays at full-strength ink. Tinting the text as well
+       put green on green — 6.9:1, which passes WCAG and is still hard to read,
+       because hue similarity destroys legibility that a ratio cannot see.
+       Body text is 15.3:1 here. */
+    --add-bg: #eaf6ee; --add-glyph: #1a7f37;
+    --del-bg: #fdeceb; --del-glyph: #b3372a;
+    --tok-comment: #6a7078; --tok-string: #38705a; --tok-keyword: #8a4a7a; --tok-number: #8a5a2b; --tok-attr: #2f7f9e;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --serif: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0f1419; --card: #161d26; --ink: #dce3ea; --ink-soft: #94a2b0;
+      --ink-faint: #67757f; --rule: #262f3a; --rule-soft: #1d242d; --accent: #5aa8c6;
+      --t0: #d97a63; --t1: #d6a54a; --t2: #6b9fd4; --t3: #8496a8; --ledger: #5d6a75;
+      --add-bg: #132218; --add-glyph: #56b96f; --del-bg: #26161a; --del-glyph: #e0796b; --tok-comment: #7d8791; --tok-string: #7fb79b; --tok-keyword: #c795b8; --tok-number: #cc9a6b; --tok-attr: #5aa8c6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0f1419; --card: #161d26; --ink: #dce3ea; --ink-soft: #94a2b0;
+    --ink-faint: #67757f; --rule: #262f3a; --rule-soft: #1d242d; --accent: #5aa8c6;
+    --t0: #d97a63; --t1: #d6a54a; --t2: #6b9fd4; --t3: #8496a8; --ledger: #5d6a75;
+    --add-bg: #132218; --add-glyph: #56b96f; --del-bg: #26161a; --del-glyph: #e0796b; --tok-comment: #7d8791; --tok-string: #7fb79b; --tok-keyword: #c795b8; --tok-number: #cc9a6b; --tok-attr: #5aa8c6;
+  }
+  :root[data-theme="light"] {
+    --paper: #f4f6f8; --card: #ffffff; --ink: #161d26; --ink-soft: #55636f;
+    --ink-faint: #8794a1; --rule: #dfe4ea; --rule-soft: #ebeef2; --accent: #2f7f9e;
+    --t0: #b3543f; --t1: #b5842c; --t2: #3f77b0; --t3: #5d6d80; --ledger: #97a3ae;
+    --add-bg: #eaf6ee; --add-glyph: #1a7f37; --del-bg: #fdeceb; --del-glyph: #b3372a; --tok-comment: #6a7078; --tok-string: #38705a; --tok-keyword: #8a4a7a; --tok-number: #8a5a2b; --tok-attr: #2f7f9e;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--mono); font-size: 13px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 20px 96px; }
+
+  .eyebrow {
+    font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(20px, 3.4vw, 30px); font-weight: 600; margin: 0 0 6px;
+    letter-spacing: -.015em; text-wrap: balance; line-height: 1.2;
+  }
+  .sub { color: var(--ink-soft); margin: 0 0 4px; font-size: 12.5px; }
+  .sub a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+  .sub a:hover, .sub a:focus-visible { border-bottom-color: currentColor; }
+
+  .funnel { margin: 34px 0 8px; }
+  .funnel-nums { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .big { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .big.hero { color: var(--accent); }
+  .arrow { color: var(--ink-faint); font-size: 17px; }
+  .nlabel { font-size: 11px; color: var(--ink-soft); letter-spacing: .04em; }
+  .bar { display: flex; height: 12px; border-radius: 2px; overflow: hidden; background: var(--rule-soft); }
+  .bar span { display: block; }
+  .barkey {
+    display: flex; gap: 16px; flex-wrap: wrap; margin-top: 9px;
+    font-size: 10.5px; color: var(--ink-soft); letter-spacing: .03em;
+  }
+  .barkey i { display: inline-block; width: 8px; height: 8px; border-radius: 1px; margin-right: 5px; }
+  .note {
+    font-family: var(--serif); font-size: 14.5px; line-height: 1.62;
+    color: var(--ink-soft); max-width: 64ch; margin: 20px 0 0;
+  }
+  .note strong { color: var(--ink); font-weight: 600; }
+
+  .movers {
+    margin: 34px 0 0; border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--card); padding: 15px 17px;
+  }
+  .movers h2 {
+    font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
+    margin: 0 0 4px; color: var(--ink); font-weight: 600;
+  }
+  .movers > p { margin: 0 0 12px; font-size: 11.5px; color: var(--ink-faint); }
+  .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 7px 20px; }
+  .mrow { display: flex; align-items: baseline; gap: 9px; font-size: 12px; }
+  .mnum {
+    font-variant-numeric: tabular-nums; font-weight: 600; min-width: 26px;
+    text-align: right; color: var(--accent);
+  }
+  .mpath {
+    color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border: 0; background: none; font: inherit; padding: 0; cursor: pointer; text-align: left;
+  }
+  .mpath:hover, .mpath:hover b { color: var(--accent); }
+  .mpath:hover { text-decoration: underline; }
+  .mpath:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .mpath b { color: var(--ink); font-weight: 600; }
+
+  .tier { margin-top: 34px; }
+  .thead {
+    display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap;
+    padding-bottom: 8px; border-bottom: 2px solid var(--tc);
+  }
+  .tid { font-weight: 700; font-size: 12px; letter-spacing: .1em; color: var(--tc); }
+  .tname { font-weight: 600; font-size: 13px; letter-spacing: .03em; }
+  .tcount {
+    margin-left: auto; font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--ink-faint);
+  }
+  .tblurb {
+    font-family: var(--serif); font-size: 13.5px; color: var(--ink-soft);
+    margin: 8px 0 2px; max-width: 64ch;
+  }
+
+  .file { border-bottom: 1px solid var(--rule-soft); }
+  .frow { display: flex; align-items: center; }
+  .fbtn {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 11px;
+    padding: 8px 4px 8px 11px; background: none; border: 0; border-left: 3px solid var(--tc);
+    font: inherit; color: inherit; cursor: pointer; text-align: left;
+  }
+  .fbtn:hover { background: var(--rule-soft); }
+  .fbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .chev { color: var(--ink-faint); font-size: 9px; width: 9px; flex: none; transition: transform .14s; }
+  .fbtn[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .fpath { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+  .fpath b { font-weight: 600; }
+  .fpath i { color: var(--ink-faint); font-style: normal; }
+  .fcount {
+    font-variant-numeric: tabular-nums; font-size: 11px; color: var(--ink-faint);
+    flex: none; letter-spacing: .02em;
+  }
+  .fcount em { font-style: normal; opacity: .6; }
+  .pill {
+    font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 6px;
+    border-radius: 2px; border: 1px solid var(--tc); color: var(--tc); flex: none; font-weight: 600;
+  }
+  .fcopy {
+    flex: none; border: 1px solid var(--rule); background: none; color: var(--ink-faint);
+    font: inherit; font-size: 10px; letter-spacing: .06em; padding: 3px 8px; margin-left: 8px;
+    border-radius: 2px; cursor: pointer; text-transform: uppercase;
+  }
+  .fcopy:hover { border-color: var(--accent); color: var(--accent); }
+  .fcopy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Hunks use <details> so the page is fully usable with no JavaScript at all —
+     an IDE preview pane or a locked-down browser still expands every file. */
+  .file > details > summary { display: none; }
+  .hunks { padding: 4px 0 14px 14px; overflow-x: auto; }
+  .hhead {
+    font-size: 10.5px; color: var(--ink-faint); padding: 9px 0 3px;
+    letter-spacing: .02em; border-top: 1px dashed var(--rule);
+  }
+  .hunks pre { margin: 0; }
+  .ln { display: flex; white-space: pre; font-size: 12px; line-height: 1.5; border-left: 3px solid transparent; }
+  /* Changed lines keep full-strength ink and take only a tint; context recedes.
+     The hue lives on the glyph, which also means add/delete is never encoded by
+     colour alone. */
+  .ln.add { background: var(--add-bg); }
+  .ln.del { background: var(--del-bg); }
+  .ln.ctx { color: var(--ink-faint); }
+  .ln.p { border-left-color: var(--accent); }
+  /* The add/delete hue now lives on the line's left edge rather than on a
+     +/- glyph, so the code column stays aligned with the real file. */
+  .ln.add { box-shadow: inset 2px 0 0 var(--add-glyph); }
+  .ln.del { box-shadow: inset 2px 0 0 var(--del-glyph); }
+
+  /* Four roles only. A full IDE rainbow would compete with the tier colours,
+     which are the actual signal on this page. Comments recede to ~4.6:1 —
+     clearly secondary, still AA — because prose is not logic; strings and
+     keywords orient; punctuation just softens. */
+  .tk-c { color: var(--tok-comment); font-style: italic; }
+  .tk-s { color: var(--tok-string); }
+  .tk-k { color: var(--tok-keyword); }
+  .tk-n { color: var(--tok-number); }
+  .tk-f { color: var(--ink); font-weight: 600; }
+  /* Rust attributes: emphasised, never dimmed — `#[serde(...)]` is what T0 keys on. */
+  .tk-a { color: var(--tok-attr); font-weight: 600; }
+  .code { padding-right: 10px; }
+  .lno {
+    flex: none; width: 52px; padding: 0 9px 0 0; text-align: right; user-select: none;
+    font-variant-numeric: tabular-nums; font-size: 11px; color: var(--ink-faint);
+    opacity: .62; border: 0; background: none; font-family: inherit; cursor: pointer;
+  }
+  .lno:hover { opacity: 1; color: var(--accent); text-decoration: underline; }
+  .lno:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; opacity: 1; }
+  .lno[disabled] { cursor: default; opacity: .3; text-decoration: none; }
+
+  .ledger {
+    margin-top: 40px; border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--card); padding: 16px 18px;
+  }
+  .ledger h2 {
+    font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; margin: 0 0 3px; font-weight: 600;
+  }
+  .ledger > p { margin: 0 0 13px; font-size: 11.5px; color: var(--ink-faint); }
+  .lrow {
+    display: flex; align-items: baseline; gap: 12px; padding: 6px 0;
+    border-top: 1px solid var(--rule-soft); font-size: 12px;
+  }
+  .lrow:first-of-type { border-top: 0; }
+  .lid { color: var(--ledger); font-weight: 700; letter-spacing: .08em; min-width: 24px; }
+  .lname { font-weight: 600; min-width: 92px; }
+  .lblurb { color: var(--ink-faint); flex: 1; font-size: 11.5px; }
+  .lnum { font-variant-numeric: tabular-nums; color: var(--ink-soft); font-weight: 600; }
+  .caveat {
+    margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--rule);
+    font-family: var(--serif); font-size: 13.5px; color: var(--ink-soft); max-width: 66ch;
+  }
+  code.k {
+    font-family: var(--mono); font-size: 11.5px; background: var(--rule-soft);
+    padding: 1px 5px; border-radius: 2px; color: var(--ink);
+  }
+  footer {
+    margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule);
+    font-size: 11px; color: var(--ink-faint); line-height: 1.7;
+  }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: var(--ink); color: var(--paper); padding: 8px 15px; border-radius: 3px;
+    font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .16s; z-index: 20;
+    max-width: 88vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">__EYEBROW__</p>
+  <h1>__TITLE__</h1>
+  <p class="sub">__SUB__</p>
+
+  <section class="funnel" aria-label="Churn versus reviewable logic">
+    <div class="funnel-nums">
+      <span class="big">__CHURN__</span><span class="nlabel">lines changed</span>
+      <span class="arrow">→</span>
+      <span class="big hero">__PROD__</span><span class="nlabel">lines of production logic · __PCT__%</span>
+    </div>
+    <div class="bar" role="img" aria-label="Composition of the diff by tier">__BAR__</div>
+    <div class="barkey">__BARKEY__</div>
+    <p class="note">__NOTE__</p>
+  </section>
+
+  <section class="movers">
+    <h2>Biggest movers</h2>
+    <p>Top production files by line count — shown before the tiers, deliberately.</p>
+    <div class="mgrid">__MOVERS__</div>
+  </section>
+
+__TIERS__
+
+  <section class="ledger">
+    <h2>Ledger</h2>
+    <p>Counted, not ranked.</p>
+    __LEDGER__
+    <p class="caveat">
+      This page skipped the ledger. It did not verify it. To read it yourself:
+      <code class="k">__LEDGERCMD__</code>
+    </p>
+  </section>
+
+  <footer>
+    Tiers are assigned per line, not per file — test code lives inside production files, so
+    file-level granularity hides exactly what you are looking for.<br>
+    <strong>T3 carries no contract signal and is never collapsed to a number</strong>, because the
+    largest change in a diff often lands there. This page is a reading order, not a list of things
+    you may skip.
+  </footer>
+</div>
+<div class="toast" role="status" aria-live="polite"></div>
+
+<script>
+// Progressive enhancement only: every file's hunks are already in the markup
+// inside a <details>, so the page is complete with JavaScript disabled. This
+// adds the collapse toggle and click-to-copy on top.
+(function () {
+  var toast = document.querySelector('.toast'), timer;
+  function flash(msg) {
+    toast.textContent = 'Copied  ' + msg;
+    toast.classList.add('show');
+    clearTimeout(timer);
+    timer = setTimeout(function () { toast.classList.remove('show'); }, 1400);
+  }
+  // navigator.clipboard needs a secure context; this page is opened from disk by
+  // design, so fall back rather than fail silently on its only delivery method.
+  function copy(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { flash(text); }, function () { legacy(text); });
+    } else { legacy(text); }
+  }
+  function legacy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(ta); ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    if (ok) { flash(text); } else { toast.textContent = 'Copy blocked — select manually'; toast.classList.add('show'); }
+  }
+
+  // Collapse by default only once JS is confirmed running, so a no-JS viewer
+  // still sees every hunk rather than an empty page.
+  var all = document.querySelectorAll('.file > details');
+  for (var i = 0; i < all.length; i++) { all[i].open = false; }
+
+  document.addEventListener('click', function (e) {
+    var c = e.target.closest('[data-copy]');
+    if (c) { copy(c.getAttribute('data-copy')); return; }
+    var b = e.target.closest('.fbtn');
+    if (!b) return;
+    var d = b.parentNode.parentNode.querySelector('details');
+    if (!d) return;
+    d.open = !d.open;
+    b.setAttribute('aria-expanded', String(d.open));
+  });
+})();
+</script>
+</body>
+</html>
