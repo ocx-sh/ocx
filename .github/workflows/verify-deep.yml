@@ -5,15 +5,58 @@ on:
   # Reusable: composed into the pre-release `release-readiness.yml` gate so a
   # single dispatch reports one GO/NO-GO across all platforms.
   workflow_call:
+    inputs:
+      full:
+        description: Run the build / cross-compile / acceptance matrix, not just the drift check.
+        type: boolean
+        default: true
+  # Weekly, for `index-conformance-drift` only — it is the one check here that
+  # can go stale without anyone touching this repository. The build / cross-compile
+  # / acceptance matrix stays dispatch-and-call-only: a cron'd 3-OS build plus
+  # Docker acceptance is real money for a signal that a PR already produces.
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
   checks: write
   pull-requests: write
 
+# Literal group name (not the subsystem-ci.md §6 `${{ github.workflow }}-...`
+# convention), for the reason spelled out in `shell-activation-deep.yml`: this
+# workflow is also reused from `release-readiness.yml`, where `github.workflow`
+# resolves to the CALLER's name and the convention would make parent and child
+# contend for one group.
+concurrency:
+  group: verify-deep-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  index-conformance-drift:
+    name: Index Conformance Drift
+    runs-on: ubuntu-latest
+    # Reads a public repository through `gh api`; nothing here writes.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Compare vendored fixtures against ocx-sh/index@main
+        env:
+          # `gh api` against the public ocx-sh/index; read-only, no elevation.
+          GH_TOKEN: ${{ github.token }}
+        run: task test:index-conformance-drift
+
   build:
     name: Build & Unit Test (${{ matrix.job.name }})
+    # Under `workflow_call` the `github` context is the CALLER's, so
+    # `github.event_name` alone would skip this matrix for a caller that ever
+    # gains a `schedule:` trigger — a GO verdict over no build at all.
+    # `inputs.full` is null on our own dispatch/cron and true (its default) on
+    # every call, so the expensive legs are tied to the call, not the trigger.
+    if: github.event_name != 'schedule' || inputs.full
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -64,6 +107,7 @@ jobs:
 
   cross-compile:
     name: Cross-compile (${{ matrix.job.name }})
+    if: github.event_name != 'schedule' || inputs.full
     runs-on: ubuntu-latest
     container:
       image: messense/cargo-xwin
@@ -172,7 +216,7 @@ jobs:
     name: Publish Deep Test Results
     needs: [build, cross-compile, acceptance-tests]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) }}
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

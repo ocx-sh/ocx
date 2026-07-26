@@ -142,7 +142,7 @@ construct a second instance elsewhere instead (never through `FileStructure`).
 `begin_catalog_transaction` → `CatalogTransaction`) — the actual local index `oci::index::LocalIndex`
 reads and writes. There is no flat blob CAS in this store: config blobs and managed-config
 payloads route exclusively through the machine-global `BlobStore` (`$OCX_HOME/blobs`) via
-`ChainedIndex`'s attached content store — the same seam `recover_absent_leaf` uses.
+`ChainedIndex`'s attached content store — the same seam `recover_absent_dispatch` uses.
 `ChainedIndex` recompute-verifies both directions (cache-read and post-source-fetch, CWE-345); a
 present-but-corrupt entry is removed (`BlobStore::remove_blob`) before the source walk so the
 write-through that follows a successful fetch heals it.

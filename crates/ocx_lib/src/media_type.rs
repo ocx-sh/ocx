@@ -55,19 +55,6 @@ pub fn media_type_from_path(path: impl AsRef<std::path::Path>) -> Option<&'stati
 
 /// Validates that the given media type is one of the expected media types, and returns it as a String.
 /// If the media type is not one of the expected media types, returns an UnsupportedMediaType error.
-pub fn media_type_select_some<S: AsRef<str>>(
-    media_type: &Option<S>,
-    expected: &'static [&'static str],
-) -> Result<String> {
-    match media_type.as_ref().map(|s| s.as_ref().to_string()) {
-        Some(media_type) if expected.contains(&media_type.as_str()) => Ok(media_type),
-        Some(media_type) => Err(Error::UnsupportedMediaType(media_type, expected)),
-        None => Err(Error::UnsupportedMediaType("<none>".to_string(), expected)),
-    }
-}
-
-/// Validates that the given media type is one of the expected media types, and returns it as a String.
-/// If the media type is not one of the expected media types, returns an UnsupportedMediaType error.
 pub fn media_type_select<S: AsRef<str>>(media_type: &S, expected: &'static [&'static str]) -> Result<String> {
     let media_type = media_type.as_ref().to_string();
     if expected.contains(&media_type.as_str()) {

@@ -74,8 +74,9 @@ not open questions:
   drops a ready-made CI unit in; everything else is automatic — on both GitHub Actions
   and GitLab CI.
 - **Byte-exact fidelity is correctness, not polish.** The Rust client must reproduce the
-  canonical root and observation serialization (CONTRACTS §14) byte-for-byte or every
-  honest PR fails index CI. This is the single load-bearing conformance surface.
+  canonical root serialization (CONTRACTS §14) byte-for-byte, and the CAS object it writes
+  is the registry's own OCI image index bytes verbatim, or every honest PR fails index CI.
+  This is the single load-bearing conformance surface.
 - **Keep the one-way doors narrow.** The index is GitHub today; private/enterprise
   indices may be GitLab-hosted tomorrow. What must be forge-neutral from v1 is the *user
   surface* (flags, config keys, contract), not necessarily the *implementation*.
@@ -243,12 +244,14 @@ build report from the return value → `report_announce()`), and `ocx-mirror` dr
   deploy and is read-only. The Python reference confirms this: it reads the root via
   `GitHubPort.get_file_contents(path, ref="main")`, never via `index.ocx.sh`. **Therefore
   announce does not depend on the read-only `IndexImpl`/`IndexSource` at all.**
-- **Observes registry tags and builds observation objects** by reusing `Publisher` /
-  `oci::Client` (`list_tags`, `fetch_manifest`) — present on `main` today.
-- **Needs the wire types + canonical serializer** (`IndexRoot`/`RootTag`/`Observation`/
-  `ObservationPlatform` and the byte-exact root/observation serialization). These currently
-  live in `oci/index/index_source.rs` **on the unmerged `feat/index-indirection` branch**.
-  This is the real dependency edge.
+- **Observes registry tags and records the OCI image index each one resolved to** by
+  reusing `Publisher` / `oci::Client` (`list_tags`, `fetch_manifest`) — present on `main`
+  today.
+- **Needs the wire types + canonical serializer** (`IndexRoot`/`RootTag`, and the
+  byte-exact root serialization; the CAS object itself is the registry's OCI image index
+  decoded directly, no bespoke wrapper type). These currently live in
+  `oci/index/index_source.rs` **on the unmerged `feat/index-indirection` branch**. This is
+  the real dependency edge.
 
 **Dependency-order recommendation.** The canonical serializer + wire types are needed by
 both the read path (`IndexSource`) and the write path (announce). Extract them into a
@@ -333,7 +336,7 @@ publisher CI (GitHub Actions | GitLab CI)
                                     ▼
                               ocx_lib::announce  (D5)
                                 ├─ Publisher/oci::Client  → observe curated tags, build CAS bytes
-                                ├─ wire.rs (shared)        → canonical root+observation serialize (FP-4)
+                                ├─ wire.rs (shared)        → canonical root serialize; CAS bytes are the registry's own image index, verbatim (FP-4)
                                 └─ forge REST client (D2, GitHub v1; test-seam trait)
                                      get root @ main (contents API, NOT index.ocx.sh)
                                      merge tags → commit_files to fork branch
@@ -356,9 +359,9 @@ repository = "github:ocx-sh/index"       # NEW: forge-neutral source-repo coordi
 ```
 
 Wire/serializer contract: index-repo `bot/CONTRACTS.md` §14 (root: `indent=2`,
-insertion-order, `ensure_ascii`, single trailing `\n`; observation: minified, sorted keys,
-no newline, tuple platform-sort). Rust port conformance-tested against index golden
-fixtures.
+insertion-order, `ensure_ascii`, single trailing `\n`; CAS object: the registry's own OCI
+image index bytes, verbatim — no re-serialization). Rust port conformance-tested against
+index golden fixtures.
 
 ## Implementation Plan
 
@@ -378,7 +381,7 @@ fixtures.
 
 ## Validation
 
-- [ ] Rust serializer byte-matches index golden fixtures (root + observation).
+- [ ] Rust serializer byte-matches index golden fixtures (root); CAS object bytes match the registry's own image index verbatim.
 - [ ] Idempotent re-announce yields empty diff; open-PR update-in-place, no duplicate PRs.
 - [ ] Ambient-token rejection path verified (GITHUB_TOKEN warns, does not silently proceed).
 - [ ] Security review of the token boundary (never in `auth/store.rs`).

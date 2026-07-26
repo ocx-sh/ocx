@@ -66,10 +66,9 @@ impl ConfigPushArgs {
         // The reported digest doubles as the operator's TOFU signal: it is
         // the value a digest-pinned seed or `ocx config update --check`
         // compares against.
-        context.api().report(&crate::api::data::push::PushReport::new(
+        context.api().report(&crate::api::data::push::PushReport::from_outcome(
             identifier.to_string(),
-            outcome.manifest_digest.to_string(),
-            outcome.cascade_tags,
+            outcome,
         ))?;
 
         Ok(ExitCode::SUCCESS)

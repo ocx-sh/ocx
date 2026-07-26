@@ -665,7 +665,7 @@ was never logged in — CI cleanup scripts are safe to run unconditionally.
 
 [`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] only change *which collection* is read from — useful when consuming a [bundled index copy][in-depth-indices-bundled] from a GitHub Action or Bazel rule.
 
-The index resolves *version choice* offline — which platform-manifest digest a tag currently means — not a lock: `ocx.lock` already records the exact digest it pinned and never consults the index to read it back. A multi-platform tag's local entry points at a [dispatch object][in-depth-indices-dispatch] — an image index or observation object carrying the full platform → digest map — cached alongside the tag pointer and verified by digest; a single-platform tag's entry names the platform-manifest digest directly and has no dispatch object at all. Either way, a git-committed `.ocx/index/` resolves the tag's version choice on a clean clone with no network. Fetching the actual manifest and layers still needs the registry the first time a given digest is installed (or an already-warm [package store][in-depth-storage-packages]).
+The index resolves *version choice* offline — which platform-manifest digest a tag currently means — not a lock: `ocx.lock` already records the exact digest it pinned and never consults the index to read it back. A tag's local entry points at a [dispatch object][in-depth-indices-dispatch] — an OCI image index carrying the full platform → digest map — cached alongside the tag pointer and verified by digest; a digest-pinned reference (`pkg@sha256:…`) names the platform-manifest digest directly and has no dispatch object at all. Either way, a git-committed `.ocx/index/` resolves the tag's version choice on a clean clone with no network. Fetching the actual manifest and layers still needs the registry the first time a given digest is installed (or an already-warm [package store][in-depth-storage-packages]).
 
 ### What has to travel for a home copy to work offline {#offline-portable}
 
@@ -756,7 +756,7 @@ export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}'
 `OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
 
 ::: info Mirroring `index.ocx.sh` traffic is a role, not a separate table
-A plain `[mirrors]` string redirects both OCI registry traffic (manifests, layers) and index traffic (root/observation/catalog fetches) for that host — but the two usually live on different hosts. A project resolving packages through [index.ocx.sh][index-ocx-sh] sets the **`index` role** on that entry: `"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }`. See [Route index traffic through a mirror][in-depth-indices-mirroring] for the full split.
+A plain `[mirrors]` string redirects both OCI registry traffic (manifests, layers) and index traffic (root/index-object/catalog fetches) for that host — but the two usually live on different hosts. A project resolving packages through [index.ocx.sh][index-ocx-sh] sets the **`index` role** on that entry: `"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }`. See [Route index traffic through a mirror][in-depth-indices-mirroring] for the full split.
 :::
 
 ::: tip Learn more

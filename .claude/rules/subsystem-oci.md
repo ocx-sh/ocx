@@ -20,7 +20,7 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/index/index_impl.rs` | Private `IndexImpl` async trait (11 methods — 6 required, 5 default-provided) |
 | `oci/index/chained_index.rs` | `ChainedIndex`: cache + ordered sources + `ChainMode` routing |
 | `oci/index/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
-| `oci/index/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → obs → `select_best` |
+| `oci/index/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
 | `oci/index/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
 | `oci/index/index_sync.rs` | `IndexSync`: per-package refresh + per-source catalog conditional-GET sync; no daemon, a policy seam only |
 | `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
@@ -81,7 +81,7 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 **`LocalWritePolicy` — how much a `Resolve` may write.** `ChainedIndex` carries a `LocalWritePolicy` (replaces the former `suppress_tag_commit` bool), a descending ladder of local-index mutation independent of `ChainMode`:
 
-| Policy | Constructor | Dispatch object (`o/`) | Root-doc tag pointer | AbsentLeaf self-heal |
+| Policy | Constructor | Dispatch object (`o/`) | Root-doc tag pointer | AbsentDispatch self-heal |
 |--------|-------------|------------------------|----------------------|----------------------|
 | `Full` | `new` / `from_chained*` | write | grow | write |
 | `NoTag` | `new_lock_scoped` (update family) | write | skip | write |
@@ -155,37 +155,37 @@ bytes:
   (`{ repository: "oci://<physical>", tags: { "<tag>": { content, observed } } }`); no
   `config.json`/`c/index.json`; catalog = directory enumeration of `p/`.
 
-**Dispatch objects only — `o/` never holds a leaf manifest.** An observation object (published) or
-an OCI image index (derived) is the only thing `o/` stores; a leaf platform manifest is content,
-fetched on demand into the machine-global blob store, never copied here. A tag's `content` digest
-disambiguates by its own absence: present in `o/` ⇒ decode → `select_best(host, [(Platform,
-Digest)])` → leaf digest → fetch; absent from `o/` ⇒ it names a manifest directly ⇒ fetch by
-digest. A fetch-by-digest whose bytes decode as an image index (an incomplete copy) self-heals:
-write it into `o/`, then continue dispatch.
+**Dispatch objects only — `o/` never holds a leaf manifest.** `o/` stores the OCI image index a tag
+resolved to, verbatim — nothing else. A leaf platform manifest is content, fetched on demand into
+the machine-global blob store, never copied here. Every tag's `content` names an image index present
+in `o/`; a curated tag that resolves to a bare manifest is refused at announce time, not recorded
+(`TagIsNotAnImageIndex`). Digest-addressed leaves (`pkg@sha256:…`) are content addressing, not
+dispatch, and never touch `o/`.
 
-**Absent-leaf recovery from the blob store (A3 step 2).** `ChainedIndex::with_content_store`
+**Absent-dispatch recovery from the blob store (A3 step 2).** `ChainedIndex::with_content_store`
 (wired once in `context.rs` via `Index::from_chained_with_content_store`, passing
 `file_structure.blobs`) tries `$OCX_HOME/blobs` **before** any source walk when a resolve hits
-`DispatchResolution::AbsentLeaf`: an installed tool's leaf manifest was cached there at install
+`DispatchResolution::AbsentDispatch`: an installed package's image index was cached there at install
 time (`stage_and_link_chain_blobs`), so it resolves fully offline with zero network — the
 "installed-tool offline exec is unaffected by A3" guarantee (B2). The read is digest-verified
 (A4); a verify or decode failure is a clean miss (`Ok(None)`), never a hard error, falling through
-to the ordinary source walk or offline/policy path. Recovered bytes that decode as an image index
-(not a leaf) self-heal back into `o/` the same way a source-fetched one does. `ChainedIndex::fetch_blob`
-shares this same content-store seam — cache-first digest-verified read and, on a source fetch, the
-verified write-through against the same attached `BlobStore`; `LocalIndex::fetch_blob` is an
-`Ok(None)` stub, the index home owns no blob CAS of its own.
+to the ordinary source walk or offline/policy path. Recovered bytes are unconditionally an OCI
+image index — there is no leaf outcome to disambiguate — and self-heal back into `o/` the same way
+a source-fetched one does. `ChainedIndex::fetch_blob` shares this same content-store seam —
+cache-first digest-verified read and, on a source fetch, the verified write-through against the
+same attached `BlobStore`; `LocalIndex::fetch_blob` is an `Ok(None)` stub, the index home owns no
+blob CAS of its own.
 
 **Grow ≠ refresh.** `ChainedIndex::walk_chain`'s `grow_root` flag distinguishes the two miss
 shapes a caller can observe locally before walking: a genuinely unknown root/tag (`true` — the
 walk also grows the local copy) versus an already-known root whose dispatch object is merely
-absent (`AbsentLeaf`, `false` — recovery only, the root is never re-copied). Invariant 1 (a
+absent (`AbsentDispatch`, `false` — recovery only, the root is never re-copied). Invariant 1 (a
 published root is never auto-refreshed under Default) holds because `grow_root` is only ever
-`true` on a genuine first-time miss, never on an `AbsentLeaf` recovery of an already-present root.
+`true` on a genuine first-time miss, never on an `AbsentDispatch` recovery of an already-present root.
 
 **Authoritative-stop, no silent fallthrough.** When the one configured source for a namespace
 (Decision H — exactly one remote per namespace) is authoritative for an identifier and errors
-(yanked tag, obs tamper, fail-closed unknown `config.json` version, network failure), the walk
+(yanked tag, dispatch-object tamper, fail-closed unknown `config.json` version, network failure), the walk
 returns that error immediately rather than falling through to a "not found" result — a broken or
 misconfigured `[registries."<ns>"] index` endpoint fails loud, never silently resolves as absent.
 
@@ -215,9 +215,9 @@ any index.
 inspects only `packages/layers/blobs`, so a machine-local clean can never collect a shipped copy's
 data. ADR: `adr_index_indirection.md` Decision A, B1.
 
-**Snapshot exemption.** A dispatch object's `content`-pointer digest (an image-index digest for a
-derived source, an observation-object digest for a published one) is exempt from the
-platform-manifest-only lock doctrine (`adr_platform_model_unification.md` D3) because its bytes
+**Snapshot exemption.** A dispatch object's `content`-pointer digest (an image-index digest, for
+either source kind) is exempt from the platform-manifest-only lock doctrine
+(`adr_platform_model_unification.md` D3) because its bytes
 travel *with* the pointer in the same `o/` — no later re-resolvable fetch exists for the doctrine
 to protect against. `adr_index_indirection.md` Decision D.
 
@@ -225,8 +225,8 @@ to protect against. `adr_index_indirection.md` Decision D.
 
 | Component | Role |
 |---|---|
-| `LocalIndex` | Owns the collection above. Both provenance kinds go through it — the only divergence is catalog source (file vs directory enumeration) and dispatch decode (obs vs image index). Filesystem mechanics (tempfile+rename CAS, the self-heal write) are an internal, non-headline detail. |
-| `OcxIndex` | Remote client of a **published** ocx-index — root → obs → `select_best`. |
+| `LocalIndex` | Owns the collection above. Both provenance kinds go through it — the only divergence is catalog source (file vs directory enumeration) — dispatch decode is unconditional, one OCI parse for both provenance kinds. Filesystem mechanics (tempfile+rename CAS, the self-heal write) are an internal, non-headline detail. |
+| `OcxIndex` | Remote client of a **published** ocx-index — root → dispatch object → `select_best`. |
 | `OciIndex` | Remote client that **derives** an index from a plain OCI registry's tags API. |
 | `IndexSync` | Thin wrapper over `LocalIndex`'s two write paths — `refresh_package` (per-package dispatch object + root write, either provenance) and `sync_catalog` (published-source-only conditional-GET digest-diff; a derived source has no catalog). `ocx index update` piggybacks both. No daemon — a policy seam only. |
 | `ChainedIndex` | `LocalIndex` ▸ **exactly one** remote per namespace, chosen by config (`[registries."<ns>"] index` field presence), never probed. |
@@ -238,13 +238,13 @@ ADR: `adr_index_indirection.md` Decision H.
 `index.ocx.sh` is a pointer index, not a registry — no `/v2`, no blobs. Resolution pipeline (Decision C):
 
 ```
-logical id → index resolve (root p/<ns>/<pkg>.json → tags[tag].content → obs digest, verified)
-           → GET p/<ns>/<pkg>/o/sha256/<obs-digest>.json → platforms[] : select_best(host, [(Platform, Digest)])
+logical id → index resolve (root p/<ns>/<pkg>.json → tags[tag].content → index digest, verified)
+           → GET p/<ns>/<pkg>/o/<algo>/<hex>.json → manifests[] : select_best(host, [(Platform, Digest)])
            → physical (root.repository, e.g. "oci://ghcr.io/…") → mirror_map → fetch (OCI CAS verify)
 ```
 
-The OCI image-index hop is skipped entirely — the observation object already carries the per-platform
-`[(Platform, Digest)]` list `select_best` consumes. `repository` is transport-only input (`oci://`
+The OCI image-index hop is **served by the index instead of the registry** — not skipped, relocated.
+Hop count is unchanged. `repository` is transport-only input (`oci://`
 scheme, index-side wire contract) and never round-trips into a storage path — mirrors the `[mirrors]`
 seam precedent (`Client::transport_reference`). Storage paths, `ocx.lock`, and GC roots key on the
 **logical** identifier only (the `<source>` path segment), so a registry migration never orphans a
@@ -254,7 +254,7 @@ from the path segment and the config registry kind, never a `repository`-field s
 `[registries."<ns>"] index` (config) selects the ocx-index protocol for a namespace — field
 presence is the kind marker, no probing, one protocol per namespace. `[mirrors]` splits into
 `registry`/`index` roles keyed by traffic host: the `index` role overrides the base URL for
-root/obs/`c/index.json` fetches, the `registry` role covers OCI distribution traffic, independently.
+root/dispatch-object/`c/index.json` fetches, the `registry` role covers OCI distribution traffic, independently.
 Both replace semantics, no egress fallback, resolved once at the client seam (`resolve_base_url`
 for the index role, `Client::transport_reference` for the registry role). ADR:
 `adr_index_indirection.md` Decision C, F.
@@ -365,9 +365,6 @@ into a `utility::fs::LayerPlacement`, called from `pull.rs` before
 ## Gotchas {#gotchas}
 
 - **OCI tags mutable.** Never assume tag "frozen" or "pinned." Only digests immutable.
-- **`index.ocx.sh` observation-object digests are not guaranteed stable across re-announces** (index-bot
-  canonical-serialization caveat). Cache obs objects by whatever digest they were actually served with;
-  never assume a package's obs digest is a stable long-term identity.
 - **`Platform::can_run` deleted.** Superseded by `is_compatible`/`select_best` (D1) at every real call site; its unit tests were either redundant with `is_compatible_truth_table` or ported into it.
 - **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. Bypasses cache, produces inconsistent results. All index ops should route through `default_index`.
 - **SSRF guard is default-on (`oci/ssrf.rs`, ocx#218).** An index root's `repository` pointer is remote-controlled data; `OcxIndex::physical_identifier` runs `resolve_and_validate` on the physical host **before** the first `oci::Client` fetch (X3 ordering) and the physical-fetch client is built with a `GuardedResolver` (`ClientBuilder::ssrf_guard`) so the connect pins the validated address (resolve → validate → pin, no DNS-rebinding window). The escape hatch is per-namespace `[registries."<ns>"].trusted_hosts` (exact host or CIDR) — never inferred from `[mirrors]`, `system_locked` applies. Refusal → `SsrfError` → `ConfigError` (78). Host *allowlisting* stays index-side governance; the client only enforces the private/loopback/link-local/metadata floor.

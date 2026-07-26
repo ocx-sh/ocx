@@ -83,17 +83,14 @@ A derived source carries no `config.json` or `c/index.json` of its own — its c
 
 ### Dispatch objects only {#local-dispatch}
 
-`o/` holds **dispatch objects only** — an observation object for a published source, an [OCI image index][oci-image-index] for a derived one. A leaf platform manifest, the manifest that actually names a binary's layers, is never copied into the local index. The copy pins what a re-push can change — the tag→digest binding, the platform→digest map — and leaves everything below a digest to the [package store][in-depth-storage-packages], which fetches it on demand and is content-addressed anyway.
+`o/` holds **dispatch objects only** — the [OCI image index][oci-image-index] a tag resolved to, verbatim, for either provenance kind. A leaf platform manifest, the manifest that actually names a binary's layers, is never copied into the local index. The copy pins what a re-push can change — the tag→digest binding, the platform→digest map — and leaves everything below a digest to the [package store][in-depth-storage-packages], which fetches it on demand and is content-addressed anyway.
 
-A tag's `content` digest in the root document disambiguates by its own absence:
+Every tag's `content` digest in the root document names an image index present in `o/`: OCX decodes it, runs [platform selection][reference-platforms-compatibility] over the per-platform digest list it carries, then fetches the resulting leaf digest from the physical registry, checking the [package store][in-depth-storage-packages] first — an already-installed tool's leaf manifest was cached there at install time, so re-resolving it needs no network at all. A tag that resolves to a bare platform manifest instead of an index is refused when the source announces it and is never recorded; `ocx package push` always publishes an index, so this can only happen for a repository ocx did not publish.
 
-- **Present in `o/`** — decode it, run [platform selection][reference-platforms-compatibility] over the per-platform digest list it carries, then fetch the resulting leaf digest from the physical registry.
-- **Absent from `o/`** — it names a manifest directly, the shape a single-platform tag uses. OCX checks the [package store][in-depth-storage-packages] first — an already-installed tool's leaf manifest was cached there at install time, so re-resolving it needs no network at all — and only reaches the registry on a genuine cold miss.
-
-A multi-platform package therefore holds exactly one dispatch object under `o/`; a single-platform one holds none. Compared to copying the whole manifest chain, that is roughly a sixth the size for a typical multi-platform package.
+A digest-pinned reference (`pkg@sha256:…`) is content addressing, not dispatch — it is fetched directly by digest and never touches `o/`. A multi-platform package therefore holds exactly one dispatch object under `o/` per tag. Compared to copying the whole manifest chain, that is roughly a sixth the size for a typical multi-platform package.
 
 ::: info An incomplete copy self-heals
-Resolving a tag whose `content` is absent from `o/` fetches a manifest by digest from the registry — but the fetched bytes can turn out to decode as an image index instead: a multi-platform tag whose dispatch object simply had not been written to this particular copy yet. OCX writes it into `o/` and continues resolving from there, rather than failing. A partial copy heals a gap the moment it is asked to resolve it, with no separate repair step.
+A dispatch object missing from a partially-synced copy — a package the copy has not fully cached yet — is, by construction, an OCI image index: OCX fetches it by digest, verifies it, and writes it into `o/` before dispatch continues, rather than failing. A partial copy heals a gap the moment it is asked to resolve it, with no separate repair step. This is unrelated to the digest-pinned references above, which never touch `o/` at all.
 :::
 
 ### Crash-safe updates {#local-crash-safety}
@@ -163,7 +160,7 @@ A shipped copy resolves the tag → platform-manifest digest offline, but the ma
 
 An OCI registry path is a physical detail — a hostname and repository path — but a package's *identity* is logical: "the `cmake` package published under `ocx.sh`". When a maintainer migrates the backing registry (say, from a self-hosted GHCR org to Docker Hub), every consumer that pinned the physical `ghcr.io/…` path directly breaks, even though the package itself did not change.
 
-[`index.ocx.sh`][index-ocx-sh] is a pointer index, not a registry: it carries no `/v2` API and stores no blobs. It maps a stable logical identifier (`ocx.sh/<namespace>/<package>`) to the physical registry currently hosting it, plus the per-platform content digests observed there. OCX resolves `ocx.sh/kitware/cmake:3.28` by asking the index for the current physical location and digest, then fetching the actual manifest from that physical registry — the OCI image-index hop a direct registry resolve performs is skipped entirely, because the index already carries the per-platform digest list. The index HTTP client ships its own bundled CA root set, the same source the main OCI client uses, so root and observation-object fetches work on a minimal container with no system CA store installed.
+[`index.ocx.sh`][index-ocx-sh] is a pointer index, not a registry: it carries no `/v2` API and stores no blobs. It maps a stable logical identifier (`ocx.sh/<namespace>/<package>`) to the physical registry currently hosting it, plus the per-platform content digests recorded there. OCX resolves `ocx.sh/kitware/cmake:3.28` by asking the index for the current physical location and digest, then fetching the actual manifest from that physical registry — the OCI image-index hop a direct registry resolve performs is served by the index instead of the registry, not skipped: the hop count is the same, only which side answers it changes. The index HTTP client ships its own bundled CA root set, the same source the main OCI client uses, so root and index-object fetches work on a minimal container with no system CA store installed.
 
 For any `ocx.sh/<namespace>/<package>` identifier, the public index is consulted **before** the OCI registry — never the other way around — so a logical reference always resolves through the verified two-hop path below rather than a registry that happens to serve a repository under the same name. Identifiers on any other registry are unaffected; the index is never consulted for them. Until the index is generally available, an absent or unreachable `config.json` is an inert fall-through: OCX resolves straight against the registry, unchanged from today.
 
@@ -171,9 +168,9 @@ For any `ocx.sh/<namespace>/<package>` identifier, the public index is consulted
 
 ```
 logical id (ocx.sh/<ns>/<pkg>[:tag])
-  → index resolve   : GET p/<ns>/<pkg>.json (root) → tags[tag].content (obs digest)
-                      → GET p/<ns>/<pkg>/o/sha256/<obs-digest>.json (verify sha256 of bytes)
-                      → platforms[]: select the platform matching this host
+  → index resolve   : GET p/<ns>/<pkg>.json (root) → tags[tag].content (image-index digest)
+                      → GET p/<ns>/<pkg>/o/<algo>/<hex>.json (verify sha256 of bytes)
+                      → manifests[]: select the platform matching this host
   → physical        : root.repository, e.g. "oci://ghcr.io/ocx-contrib/cmake"
   → mirror_map      : rewritten through [mirrors]'s registry role, if configured for this host
   → fetch           : GET physical-registry /v2/.../manifests/<leaf-digest> (verify OCI CAS)
@@ -182,7 +179,7 @@ logical id (ocx.sh/<ns>/<pkg>[:tag])
 `index.ocx.sh` yields **only pointers** — the platform manifest and its layers always come from the physical registry named by `repository`. The `repository` field carries an `oci://` scheme marker identifying it as a physical, transport-only reference; it is never used as a storage key. Locally, OCX keys everything — the local index path, `ocx.lock`, garbage-collection roots — on the *logical* identifier, so a registry migration never orphans a local copy or breaks a committed team lock.
 
 ::: warning A configured index that breaks fails loud, not silent
-The "resolves straight against the registry" fall-through above applies only while `ocx.sh` is *not yet* configured as index-kind. Once a namespace names an index in [`[registries.<name>]`][config-registries] — the default once `index.ocx.sh` is generally available — that source is authoritative for it: a yanked tag, a tampered observation object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name.
+The "resolves straight against the registry" fall-through above applies only while `ocx.sh` is *not yet* configured as index-kind. Once a namespace names an index in [`[registries.<name>]`][config-registries] — the default once `index.ocx.sh` is generally available — that source is authoritative for it: a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name.
 :::
 
 ### Two-hop fetch and caching {#public-index-caching}
@@ -190,16 +187,12 @@ The "resolves straight against the registry" fall-through above applies only whi
 | Object | Volatility | OCX behaviour |
 |---|---|---|
 | `p/<ns>/<pkg>.json` root | Volatile — the `repository` pointer can move by maintainer PR, tags are curated | Copy-first: never auto-refreshed under the default mode. A live re-fetch happens only on an explicit [`ocx index update`][cmd-index-update] or a [`--remote`][arg-remote] resolve, which rewrites the local copy and bumps `observed`. |
-| `o/sha256/<hex>.json` observation object | Immutable | Fetched once, verified against its own SHA-256 filename, cached forever. |
+| `o/<algo>/<hex>.json` — the OCI image index this tag resolved to, verbatim | Immutable | Fetched once, verified against its own SHA-256 filename, cached forever. |
 | `c/index.json` catalog | Volatile | [`ocx index catalog`][cmd-index-catalog] against an `index.ocx.sh` source sends the ETag from a persisted `c/index.json.etag` sidecar as `If-None-Match`; an unchanged catalog answers `304` with no further work. On a real change, OCX re-snapshots only the packages whose root digest actually moved — one request amortized across the full catalog instead of one probe per package. |
-
-::: warning Cached observation digests are not guaranteed stable across re-announces
-An observation object's own digest can, in rare cases, change between two index re-announces of what is otherwise the same platform set, because of how the index canonicalizes platform ordering. OCX caches each observation object under the digest it was actually served with and never assumes a package's observation digest is a stable long-term identity — only the per-platform leaf digests it names are the durable pin.
-:::
 
 ### Local layout for index.ocx.sh sources {#public-index-layout}
 
-The local index uses the identical `p/<ns>/<pkg>.json` + `o/sha256/<hex>.json` shape for an `index.ocx.sh` source as for any other — it is [one wire format](#format), not a special case:
+The local index uses the identical `p/<ns>/<pkg>.json` + `o/<algo>/<hex>.json` shape for an `index.ocx.sh` source as for any other — it is [one wire format](#format), not a special case:
 
 ```
 $OCX_HOME/index/ocx.sh/
@@ -208,10 +201,12 @@ $OCX_HOME/index/ocx.sh/
 └── p/kitware/
     ├── cmake.json              root doc — copied verbatim from the hosted site
     └── cmake/o/sha256/
-        └── <obs-digest>.json   verbatim observation object (immutable)
+        └── <index-digest>.json   OCI image index, verbatim (immutable)
 ```
 
-Unlike an OCI-registry source, there is no image-index digest to store here — the observation object's own `platforms[].digest` entries are already the per-platform manifest digests OCX needs, each independently verified against the physical registry's OCI content-addressed storage when actually fetched.
+The stored object *is* the registry's OCI image index — its `manifests[].digest` entries are the per-platform manifest digests OCX needs, each independently verified against the physical registry's OCI content-addressed storage when actually fetched.
+
+The index's file format is specified by the index repository: [wire format][index-wire-format].
 
 ### Status surfacing {#public-index-status}
 
@@ -224,12 +219,12 @@ A package's root document carries publisher-set status fields, which OCX surface
 | `superseded_by` | Shown as advisory information in [`ocx package info`][cmd-package-info] and resolve diagnostics; OCX never auto-follows it — that would silently substitute a different package than the one you asked for. |
 
 ::: info Open interop point — description assets
-Observation objects share the same object store as `desc` blobs (README text, logo images) the index may carry for a package, but that part of the wire format is not yet frozen. [`ocx package info --save-readme`][cmd-package-info] / `--save-logo` stay driven by registry-side metadata for now, independent of `index.ocx.sh`.
+Index objects share the same object store as `desc` blobs (README text, logo images) the index may carry for a package, but that part of the wire format is not yet frozen. [`ocx package info --save-readme`][cmd-package-info] / `--save-logo` stay driven by registry-side metadata for now, independent of `index.ocx.sh`.
 :::
 
 ## Route index traffic through a mirror {#mirroring}
 
-[Corporate mirrors][config-mirrors] redirect OCX's traffic host-by-host — and cover two different roles a host might serve. `index.ocx.sh`'s root, observation-object, and catalog fetches are plain HTTPS, not OCI distribution calls, so a mirror entry has to say which kind of traffic it is redirecting.
+[Corporate mirrors][config-mirrors] redirect OCX's traffic host-by-host — and cover two different roles a host might serve. `index.ocx.sh`'s root, index-object, and catalog fetches are plain HTTPS, not OCI distribution calls, so a mirror entry has to say which kind of traffic it is redirecting.
 
 The [`[mirrors]`][config-mirrors] table value is either a plain string, which redirects both roles for a host, or an object that splits them:
 
@@ -239,7 +234,7 @@ The [`[mirrors]`][config-mirrors] table value is either a plain string, which re
 "ghcr.io" = "https://company.jfrog.io/ghcr-remote"                  # both roles → registry-only host
 ```
 
-Same doctrine as the registry role: the value replaces the base URL wholesale, there is no fallback to the public origin, and the table merges through the [managed-config][config-managed] tier the same way, per role. Every root, observation-object, and catalog fetch still verifies its content against the recorded SHA-256 digest — the mirror changes only where the bytes come from, never whether they are trusted.
+Same doctrine as the registry role: the value replaces the base URL wholesale, there is no fallback to the public origin, and the table merges through the [managed-config][config-managed] tier the same way, per role. Every root, index-object, and catalog fetch still verifies its content against the recorded SHA-256 digest — the mirror changes only where the bytes come from, never whether they are trusted.
 
 See [`[registries.<name>]`][config-registries] for the separate question of *which* namespaces resolve through the ocx-index protocol at all — a mirror only redirects an already-selected protocol's traffic, it does not select the protocol.
 
@@ -249,7 +244,7 @@ A registry tag can be deleted by mistake, even when a digest it once pointed at 
 
 [`ocx package push`'s `--canonical-tag`/`--no-canonical-tag`][cmd-package-push] closes this gap on the registry side, on by default: for every platform manifest pushed **in that invocation**, OCX also pushes a digest-named `sha256.<hex>` tag alongside the version tag. As long as that canonical tag exists, the registry sees the manifest as referenced, regardless of what happens to the human-readable tags around it. There is no retroactive tagging — a push does not reach back and canonical-tag manifests published by earlier pushes.
 
-Because the local index never copies a leaf platform manifest — only its [dispatch object](#local-dispatch) — an index-resolved install always fetches the leaf from the registry on demand, sometimes long after the index entry was written. Canonical tags are exactly the registry-side safety net that keeps that leaf tag-reachable in the meantime.
+Because the local index never copies a leaf platform manifest — only its [dispatch object](#local-dispatch) — an index-resolved install always fetches the leaf from the registry on demand, sometimes long after the index entry was written. A manifest stays reachable as long as *anything* still references it — a version tag, or an image index that still lists it in its platform map — so most manifests never need a canonical tag to stay alive. Canonical tags are a safeguard OCX offers for the case that falls through the cracks: a tag moved or a patch released such that nothing else points at the old digest any more, and it would otherwise become garbage-collection-eligible before an index-resolved install ever fetches it.
 
 Canonical tags are a pure registry-side safety net scoped to `ocx package push` — [`ocx config push`][cmd-config-push] has no `--canonical-tag` flag, and [`index.ocx.sh`](#public-index) ignores canonical tags entirely; they carry no wire semantics on the index side.
 
@@ -283,6 +278,7 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 [renovate]: https://docs.renovatebot.com/
 [toolchains-llvm]: https://github.com/bazel-contrib/toolchains_llvm/blob/master/toolchain/internal/llvm_distributions.bzl
 [index-ocx-sh]: https://index.ocx.sh
+[index-wire-format]: https://index.ocx.sh/docs/reference/wire-format
 
 <!-- security -->
 [cwe-345]: https://cwe.mitre.org/data/definitions/345.html
