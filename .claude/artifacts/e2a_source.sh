@@ -4,10 +4,10 @@
 # had them would prove nothing.
 set -euo pipefail
 REPO=michael-herwig/ocx-e2e-hello
-TOK="$(curl -fsS "https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io" \
-  | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')"
-curl -fsS -H "Authorization: Bearer $TOK" "https://ghcr.io/v2/${REPO}/tags/list?n=200" \
-  | python3 -c "
+TOK="$(curl -fsS "https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io" |
+    python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')"
+curl -fsS -H "Authorization: Bearer $TOK" "https://ghcr.io/v2/${REPO}/tags/list?n=200" |
+    python3 -c "
 import json,sys,re
 tags=json.load(sys.stdin).get('tags',[])
 ocx=[t for t in tags if re.match(r'(?i)^__ocx',t)]
