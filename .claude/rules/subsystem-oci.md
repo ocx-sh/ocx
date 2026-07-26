@@ -199,15 +199,33 @@ a *three*-valued question, asked before any fetch — never an `Ok(None)` read a
 | `FallThrough` | Ask it; its miss tries the next source (the `OciIndex` catch-all). |
 | `Outside` | It **declared** it cannot express this name — never asked, silence decides nothing. |
 
-`OcxIndex::jurisdiction` (async, inherent `pub`, trait impl forwards) answers `Outside` for a foreign
-registry with **no I/O**, and for a name whose `repository().split('/').count()` disagrees with the
-`name_segments` its `config.json` publishes — `index.ocx.sh` serves `2`, restating its root schema's
-`^ocx\.sh/<ns>/<pkg>$`. Absent `name_segments` = serves every name = historical behaviour verbatim, so
-a private index is never narrowed by the client. **Fail-closed:** only a successfully-read config that
-positively declares the name inexpressible moves it out of jurisdiction; a 404, malformed, unsupported
-or unreachable `config.json` keeps the source `Authoritative` (an index outage must never downgrade a
-namespace to plain OCI). Infallible, not error-swallowing — nothing is cached on failure, so the
-immediately-following `resolve_root` re-fetches and raises the real error.
+`OcxIndex::jurisdiction` (async, inherent `pub`, trait impl forwards) decides on **evidence**; the
+published declaration (`name_segments` — `index.ocx.sh` serves `2`, restating its root schema's
+`^ocx\.sh/<ns>/<pkg>$`) only ever interprets a *miss*:
+
+| Case | Verdict |
+|---|---|
+| Foreign registry | `Outside`, **no I/O** (runs first) |
+| No declaration, or a name it satisfies | `Authoritative`, no root fetch |
+| Declared inexpressible, root **found** | `Authoritative` — the root overrules the declaration |
+| Declared inexpressible, root **404** | `Outside` — the flat-`ocx.sh/go-task` case |
+| Declared inexpressible, root fetch **errors** | `Authoritative`, fail-closed |
+
+The declaration must never stop the client *asking*: it is an unsigned, CDN-cacheable integer on the
+same channel as the roots, so a template bug, a stale edge or a compromise scoped to that one file
+would otherwise narrow a namespace and skip the yank gate on a name the index does hold a root for.
+Because the root decides whenever it exists, a wrong `name_segments` can bypass nothing. Absent
+`name_segments` = serves every name = historical behaviour verbatim, so a private index is never
+narrowed by the client. **Fail-closed** throughout: a 404, malformed, unsupported or unreachable
+`config.json`, or a root fetch that errors, keeps the source `Authoritative` (an index outage must
+never downgrade a namespace to plain OCI). Infallible, not error-swallowing — nothing is cached on
+failure, so the immediately-following `resolve_root` re-fetches and raises the real error.
+
+Cost: a declined name adds exactly one root `GET` that 404s. `SourceCacheInner.roots` memoizes the
+miss (`Option<Arc<IndexRoot>>`) alongside the hit, so it is one request per name per process however
+many times the chain consults jurisdiction — eight flat tools in a project = eight cached 404s on a
+cold run. The `Outside` verdict logs at **`warn!`**: a namespace leaving the verified two-hop path is
+rare and deliberate, and must be visible at default verbosity.
 
 `ChainedIndex::candidate_sources(id) -> Vec<(&Index, bool)>` is the one place the question is asked;
 the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — the
@@ -221,10 +239,14 @@ never per-name, so every name under a published registry reports `Published` reg
 Deriving provenance from a per-name predicate would flip a declined name to `Derived` and silently
 drop the published root's catalog cross-check. There is no placeholder identifier anywhere.
 
-`LocalIndex::sync_catalog` step 3 skips (warn, `continue`) a moved catalog key its own source declares
-inexpressible — deliberately **not** in `validate_catalog_key`, which fails the whole sync closed for a
-traversal key; failing there would abort before the catalog + ETag commit and leave the source
-permanently stale. `LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
+`LocalIndex::sync_catalog` step 3 is non-fatal end to end: it skips (warn, `continue`) a moved catalog
+key its own source declares inexpressible, **and** warns-and-continues when `refresh_tags` itself fails
+(publish skew alone reaches that — a catalog regenerated ahead of its roots 404s `p/<key>.json`). Both
+are deliberately **not** in `validate_catalog_key`, which fails the whole sync closed for a traversal
+key; aborting there would skip the step-4 catalog + ETag commit, so the ETag would never advance, no
+other moved package would land, and every later `ocx index update` would repeat it and exit 0 — a
+permanently, silently stale source. A per-package failure is already reported by `ocx index update`'s
+own fan-out; it must not veto the source-wide commit. `LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
 outcomes (`sync_catalog` skips, `ocx index update` reroutes to the registry).
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`

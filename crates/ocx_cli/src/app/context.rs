@@ -563,7 +563,7 @@ impl Context {
                 // namespace always resolves through the verified two-hop path
                 // (root -> sha256-verified obs -> physical) and the yank gate —
                 // never bypassed by a registry that happens to serve the same
-                // name (`adr_index_indirection.md` F, Codex R3). `is_authoritative_for`
+                // name (`adr_index_indirection.md` F, Codex R3). `jurisdiction`
                 // routes each source to its own namespace and stops fall-through,
                 // so exactly one remote resolves any given namespace (Decision H).
                 // A namespace nobody configured as index-kind is absent here and
@@ -1156,7 +1156,7 @@ mod tests {
         // Two index sources ⇒ the chain is [source, source, registry]: each
         // index source is registered ahead of the plain-OCI registry so a
         // logical reference in its namespace resolves through the verified
-        // two-hop path, and `is_authoritative_for` stops fall-through so
+        // two-hop path, and `jurisdiction` stops fall-through so
         // exactly one remote resolves each namespace (Decision H).
         let config = config_with_registries(&[
             (oci::OCX_SH_REGISTRY, Some("https://index.ocx.sh")),

@@ -407,8 +407,11 @@ pub const DEFAULT_INDEX_BASE_URL: &str = "https://index.ocx.sh";
 /// the committed local index.
 #[derive(Default)]
 struct SourceCacheInner {
-    /// repository → root document.
-    roots: BTreeMap<String, Arc<IndexRoot>>,
+    /// repository → root document, `None` for a confirmed 404. The negative
+    /// entry is what keeps [`OcxIndex::jurisdiction`]'s miss probe from
+    /// re-asking the wire once per chain consult: a flat name costs exactly one
+    /// 404 per process, not one per source loop.
+    roots: BTreeMap<String, Option<Arc<IndexRoot>>>,
     /// Set once `config.json` has been fetched and its `format_version`
     /// confirmed supported this invocation, so a repeat call skips the fetch
     /// (F1 "read once") and [`OcxIndex::jurisdiction`] reads the declared name
@@ -504,36 +507,41 @@ impl OcxIndex {
     }
 
     /// Whether this source will answer for `identifier`, and what its silence
-    /// means — the index's own published statement, never a client guess.
+    /// means — decided on **evidence**, with the index's published declaration
+    /// only ever interpreting a miss.
     ///
-    /// [`Jurisdiction::Outside`] on two grounds, in order:
+    /// | Case | Verdict |
+    /// |---|---|
+    /// | Foreign registry | [`Outside`](super::Jurisdiction::Outside), **no I/O** |
+    /// | No declaration, or a declaration the name satisfies | [`Authoritative`](super::Jurisdiction::Authoritative), no root fetch |
+    /// | Declared inexpressible, root **found** | [`Authoritative`](super::Jurisdiction::Authoritative) — the root is the index's opinion about this name; the declaration is overruled by it |
+    /// | Declared inexpressible, root **absent** (404) | [`Outside`](super::Jurisdiction::Outside) — the flat-`ocx.sh/go-task` case, and the only thing the declaration decides |
+    /// | Declared inexpressible, root fetch **failed** | [`Authoritative`](super::Jurisdiction::Authoritative), fail-closed |
     ///
-    /// 1. A foreign registry. Decided with **no I/O** — nothing is fetched for
-    ///    a name this source does not own.
-    /// 2. The source's `config.json` declares a
-    ///    [`name_segments`](IndexFormatConfig::name_segments) count the name
-    ///    does not have. `index.ocx.sh` serves `2`, restating its root schema's
-    ///    `^ocx\.sh/<ns>/<pkg>$`: it has publicly said it can never hold a root
-    ///    for `ocx.sh/go-task`, so asking would turn an unavoidable 404 into a
-    ///    terminal stop and strand every flat package on the registry the index
-    ///    never covered. Declining a name is not a fallback — the source never
-    ///    claimed it.
+    /// The declaration ([`name_segments`](IndexFormatConfig::name_segments),
+    /// `2` on `index.ocx.sh`, restating its root schema's
+    /// `^ocx\.sh/<ns>/<pkg>$`) is an unsigned, CDN-cacheable integer fetched
+    /// over the same channel as the roots — so it must never be able to *stop
+    /// the client asking*. A template bug, a stale edge, or a compromise scoped
+    /// to that one file could otherwise narrow a namespace and skip the yank
+    /// gate on a name the index does hold a (yanking) root for. Here it can
+    /// only say what an unavoidable 404 means: fall through to plain OCI rather
+    /// than stop the chain, which is what strands every flat package otherwise.
     ///
-    /// Everything else is [`Jurisdiction::Authoritative`], **fail-closed**: only
-    /// a successfully-read config that *positively* declares the name
-    /// inexpressible moves it out of jurisdiction. An absent, malformed,
-    /// unsupported or unreachable `config.json` keeps the source authoritative,
-    /// so an index outage can never silently downgrade a namespace to plain OCI.
+    /// **Fail-closed** end to end: an absent, malformed, unsupported or
+    /// unreachable `config.json` — or a root fetch that errors — keeps the
+    /// source authoritative, so an index outage can never silently downgrade a
+    /// namespace to plain OCI.
     ///
-    /// Infallible by construction, and not error-swallowing: the config is never
-    /// cached on failure, so the `resolve_root` / `fetch_root_document` that
+    /// Infallible by construction, and not error-swallowing: nothing is cached
+    /// on failure, so the `resolve_root` / `fetch_root_document` that
     /// immediately follows on the same source re-fetches and raises the real
     /// `UnsupportedIndexFormat` / transport error loud. This probe only defers.
     ///
-    /// No new network call: a foreign registry never touches the wire, and an
-    /// in-namespace name fires exactly the `GET /config.json` that
-    /// [`Self::resolve_root`] would have fired one step later, memoized
-    /// identically.
+    /// Cost: one `GET /config.json` that [`Self::resolve_root`] would fire one
+    /// step later anyway, plus — for a name the declaration rejects — one root
+    /// `GET` that 404s. Both memoized per source instance, so eight flat tools
+    /// in a project cost eight 404s on a cold run and none thereafter.
     pub async fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
         if !self.serves_registry(identifier.registry()) {
             return super::Jurisdiction::Outside;
@@ -551,15 +559,42 @@ impl OcxIndex {
                 None
             }
         };
-        match declared {
-            Some(segments) if identifier.repository().split('/').count() != segments.get() as usize => {
+        let Some(segments) = declared else {
+            return super::Jurisdiction::Authoritative;
+        };
+        if identifier.repository().split('/').count() == segments.get() as usize {
+            return super::Jurisdiction::Authoritative;
+        }
+
+        // The declaration says this name is inexpressible. Ask anyway: only the
+        // MEANING of the miss is delegated to it, never the decision to ask.
+        match self.resolve_root(identifier.repository()).await {
+            Ok(Some(_)) => {
                 log::debug!(
-                    "Index '{}' declares {segments}-segment names; '{identifier}' is outside what it can express.",
+                    "Index '{}' declares {segments}-segment names but does hold a root for '{identifier}' — \
+                     the root decides.",
+                    self.namespace
+                );
+                super::Jurisdiction::Authoritative
+            }
+            Ok(None) => {
+                // Rare and deliberate: a namespace leaving the verified two-hop
+                // path must be visible without raising the log level.
+                log::warn!(
+                    "Index '{}' declares {segments}-segment names and holds no root for '{identifier}' — \
+                     resolving it through the registry instead.",
                     self.namespace
                 );
                 super::Jurisdiction::Outside
             }
-            _ => super::Jurisdiction::Authoritative,
+            Err(error) => {
+                log::debug!(
+                    "Could not read '{}' root for '{identifier}' to settle jurisdiction \
+                     (staying authoritative; the resolve below re-raises it): {error}",
+                    self.namespace
+                );
+                super::Jurisdiction::Authoritative
+            }
         }
     }
 
@@ -681,30 +716,31 @@ impl OcxIndex {
     // ── root (F1 volatile) ──────────────────────────────────────────────────
 
     /// Fetches (and caches) the root for `repository`. `Ok(None)` on a 404
-    /// miss.
+    /// miss — memoized like a hit, so a repeat ask costs nothing.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         // An absent config.json makes the base a non-index — no root resolves
         // (fail-closed, F1), never a pass that consumes a valid-looking root.
+        // Deliberately NOT memoized: the config itself is re-checked every call.
         if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
             return Ok(None);
         }
         if let Some(root) = self.cache.read().await.roots.get(repository) {
-            return Ok(Some(root.clone()));
+            return Ok(root.clone());
         }
         let url = format!("{}/p/{}.json", self.base_url, repository);
         let root = match self.transport.get(&url, None).await? {
             IndexFetch::Found { bytes, .. } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
-                Arc::new(parsed)
+                Some(Arc::new(parsed))
             }
-            IndexFetch::NotFound | IndexFetch::NotModified => return Ok(None),
+            IndexFetch::NotFound | IndexFetch::NotModified => None,
         };
         self.cache
             .write()
             .await
             .roots
             .insert(repository.to_string(), root.clone());
-        Ok(Some(root))
+        Ok(root)
     }
 
     // ── dispatch object (F1 immutable, VERIFIED) ─────────────────────────────
@@ -2836,19 +2872,13 @@ mod tests {
         format!("{BASE}/p/{FLAT_REPO}.json")
     }
 
-    /// Seeds `config.json` with the given body and a resolvable root for BOTH a
-    /// flat and a namespaced name, so a test that expects "no request" is
-    /// distinguishable from one that would merely have 404ed.
+    /// Seeds `config.json` with the given body plus a resolvable root for the
+    /// namespaced name. The FLAT name is deliberately left un-served: the
+    /// declaration only decides what its 404 means, so a seeded flat root would
+    /// make every "declined" test authoritative by evidence.
     fn seed_with_config(transport: &StubIndexTransport, config_body: &[u8]) {
-        transport.insert(&config_url(), config_body);
         seed_package(transport, false);
         transport.insert(&config_url(), config_body); // seed_package writes its own
-        let dispatch_bytes = glibc_musl_index();
-        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
-        let root = format!(
-            r#"{{"repository":"oci://ghcr.io/ocx-contrib/task","tags":{{"3":{{"content":"{dispatch_digest}"}}}}}}"#
-        );
-        transport.insert(&flat_root_url(), root.as_bytes());
     }
 
     #[tokio::test]
@@ -2875,19 +2905,54 @@ mod tests {
         assert_eq!(
             source.jurisdiction(&flat_id()).await,
             super::super::Jurisdiction::Outside,
-            "the index declares 2-segment names; `ocx.sh/go-task` has one"
+            "the index declares 2-segment names AND holds no root for `ocx.sh/go-task`"
         );
-        // Asserting on the request log (not just the verdict) is the point: the
-        // probe itself must not touch the name it is deciding about — under an
-        // authoritative source, merely asking already decides the name's fate,
-        // because a 404 is a terminal stop. The chain-level proof that the name
-        // is then never fetched at all is
-        // `a_declared_out_of_jurisdiction_name_falls_through_to_the_registry`.
+        // The measured cost of the verdict, asserted rather than assumed: the
+        // config.json the resolve would fetch anyway, plus ONE root request that
+        // 404s. The declaration is what turns that 404 from a terminal stop into
+        // a fall-through — it never decides whether to ask.
         assert_eq!(
             transport.request_urls(),
-            vec![config_url()],
-            "the verdict costs exactly the config.json the resolve would fetch anyway"
+            vec![config_url(), flat_root_url()],
+            "one memoized 404 per declined name, nothing more"
         );
+        source.jurisdiction(&flat_id()).await;
+        assert_eq!(
+            transport.request_count(&flat_root_url()),
+            1,
+            "the miss is memoized — a repeat consult costs no request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_declaration_cannot_bypass_the_yank_gate() {
+        // The bypass this design closes. `name_segments` rides an unsigned,
+        // CDN-cacheable JSON file on the same channel as the roots: a template
+        // bug, a stale edge, or a compromise scoped to that one file can declare
+        // a WRONG count. If the declaration decided whether to ask, the client
+        // would stop asking about a name the index does hold a yanking root for,
+        // and the yanked build would install through the plain-OCI catch-all.
+        // The root exists, so the root decides.
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, true);
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":3}"#);
+        let source = make_source(transport, false);
+        let registry = RegistryStub::new();
+
+        assert_eq!(
+            source.jurisdiction(&tagged_id()).await,
+            super::super::Jurisdiction::Authoritative,
+            "`kitware/cmake` has 2 segments, not the declared 3 — but the index holds its root"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let chained = chain_with(&dir, source, registry.clone());
+        let error = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("a yanked tag must be refused however the config mis-declares the grammar");
+        assert!(error.to_string().contains("yanked"), "unexpected error: {error}");
+        assert_eq!(registry.calls(), 0, "the registry must never shadow the yank refusal");
     }
 
     #[tokio::test]
@@ -3017,9 +3082,11 @@ mod tests {
             .unwrap()
             .expect("a declined name resolves through the plain-OCI registry");
         assert_eq!(digest, registry_manifest().1);
-        assert!(
-            !transport.request_urls().contains(&flat_root_url()),
-            "the index must not be asked about a name it declared it cannot express"
+        assert_eq!(
+            transport.request_count(&flat_root_url()),
+            1,
+            "the declined name costs exactly one memoized 404, then falls through: {:?}",
+            transport.request_urls()
         );
     }
 
@@ -3114,9 +3181,10 @@ mod tests {
         )
         .unwrap();
         let _ = chained.fetch_blob(&pinned).await;
-        assert!(
-            !transport.request_urls().contains(&flat_root_url()),
-            "neither path may dereference a root the index declared it cannot hold: {:?}",
+        assert_eq!(
+            transport.request_count(&flat_root_url()),
+            1,
+            "both paths skip the declined source off ONE memoized jurisdiction probe: {:?}",
             transport.request_urls()
         );
     }
@@ -3144,9 +3212,10 @@ mod tests {
             .await
             .expect("a grammar violation in the remote catalog must not fail the whole sync");
         assert_eq!(outcome.moved, vec![FLAT_REPO.to_string()]);
-        assert!(
-            !transport.request_urls().contains(&flat_root_url()),
-            "the declined row must not be re-snapshotted: {:?}",
+        assert_eq!(
+            transport.request_count(&flat_root_url()),
+            1,
+            "the declined row costs the one jurisdiction probe and is never re-snapshotted: {:?}",
             transport.request_urls()
         );
         assert_eq!(
@@ -3163,6 +3232,56 @@ mod tests {
                 .unwrap()
                 .contains_key(FLAT_REPO),
             "the row is still adopted as an ordinary listing row"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_catalog_commits_the_etag_when_one_moved_key_fails_to_re_snapshot() {
+        // Publish skew, no grammar violation anywhere: both keys are expressible
+        // and materialized, but `ns/skewed`'s root 404s (rolled back, or the
+        // catalog regenerated ahead of the roots). `refresh_tags` errors; before
+        // the fix its `?` aborted step 3, so the ETag never advanced and NO other
+        // moved package landed — repeated identically by every later
+        // `ocx index update`, each exiting 0 with a non-fatal warn.
+        let transport = StubIndexTransport::new();
+        seed_empty_index(&transport, "ns/pkg", "1.0");
+        transport.insert_with_etag(
+            &catalog_url(),
+            br#"{"ns/pkg":"sha256:moved","ns/skewed":"sha256:moved"}"#,
+            "etag-skew",
+        );
+        let source = make_source(transport.clone(), false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let local = local_index(&dir);
+        seed_stale_root(local.index_store(), "ns/pkg").await;
+        seed_stale_root(local.index_store(), "ns/skewed").await;
+
+        local
+            .sync_catalog(&source)
+            .await
+            .expect("one package's re-snapshot failure must not fail the source-wide sync");
+
+        assert_eq!(
+            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
+            Some("etag-skew".to_string()),
+            "the ETag must commit, or the source is permanently stale"
+        );
+        let catalog = local
+            .index_store()
+            .read_source_catalog(NAMESPACE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            catalog.contains_key("ns/skewed"),
+            "the failed row adopts its fetched value"
+        );
+        assert!(catalog.contains_key("ns/pkg"), "the healthy row must still land");
+        assert!(
+            transport.request_urls().contains(&format!("{BASE}/p/ns/pkg.json")),
+            "the healthy moved key is still re-snapshotted: {:?}",
+            transport.request_urls()
         );
     }
 
