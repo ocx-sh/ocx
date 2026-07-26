@@ -162,7 +162,7 @@ An OCI registry path is a physical detail — a hostname and repository path —
 
 [`index.ocx.sh`][index-ocx-sh] is a pointer index, not a registry: it carries no `/v2` API and stores no blobs. It maps a stable logical identifier (`ocx.sh/<namespace>/<package>`) to the physical registry currently hosting it, plus the per-platform content digests recorded there. OCX resolves `ocx.sh/kitware/cmake:3.28` by asking the index for the current physical location and digest, then fetching the actual manifest from that physical registry — the OCI image-index hop a direct registry resolve performs is served by the index instead of the registry, not skipped: the hop count is the same, only which side answers it changes. The index HTTP client ships its own bundled CA root set, the same source the main OCI client uses, so root and index-object fetches work on a minimal container with no system CA store installed.
 
-For any `ocx.sh/<namespace>/<package>` identifier, the public index is consulted **before** the OCI registry — never the other way around — so a logical reference always resolves through the verified two-hop path below rather than a registry that happens to serve a repository under the same name. Identifiers on any other registry are unaffected; the index is never consulted for them. Until the index is generally available, an absent or unreachable `config.json` is an inert fall-through: OCX resolves straight against the registry, unchanged from today.
+For any `ocx.sh/<namespace>/<package>` identifier, the public index is consulted **before** the OCI registry — never the other way around — so a logical reference always resolves through the verified two-hop path below rather than a registry that happens to serve a repository under the same name. Identifiers on any other registry are unaffected; the index is never consulted for them. This wiring ships in the binary: `ocx.sh` names `https://index.ocx.sh` in the [compiled-defaults tier][config-precedence], and any config tier can point it elsewhere or set [`index = ""`][config-registries-index] to resolve `ocx.sh` as a plain OCI registry instead.
 
 ### Resolution pipeline {#public-index-pipeline}
 
@@ -194,8 +194,8 @@ Deciding on the served root rather than on the declaration is what keeps `name_s
 
 The field is optional and its absence means "serves every name". A private index that publishes no `name_segments` stays authoritative for every reference in its namespace, flat names included, so its refusals keep the fail-loud behaviour below unchanged. If the index cannot be reached, or serves a malformed or unrecognised `config.json`, OCX keeps it authoritative rather than assuming it serves nothing; an index outage must not silently downgrade a namespace to plain OCI.
 
-::: warning A configured index that breaks fails loud, not silent
-The "resolves straight against the registry" fall-through above applies only while `ocx.sh` is *not yet* configured as index-kind. Once a namespace names an index in [`[registries.<name>]`][config-registries] — the default once `index.ocx.sh` is generally available — that source is authoritative for it: a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name.
+::: warning An index that breaks fails loud, not silent
+A namespace that names an index in [`[registries.<name>]`][config-registries] — `ocx.sh` by default — has that source as its authority for every name it [can hold](#public-index-declared-names): a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name. So an `index.ocx.sh` outage blocks `ocx.sh/…` resolution rather than quietly resolving it somewhere else. Namespaces on other registries are untouched, and setting [`index = ""`][config-registries-index] for `ocx.sh` opts out of the index path entirely.
 :::
 
 ### Two-hop fetch and caching {#public-index-caching}
@@ -324,6 +324,8 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 <!-- reference -->
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
 [config-registries]: ../reference/configuration.md#keys-registries
+[config-registries-index]: ../reference/configuration.md#keys-registries-index
+[config-precedence]: ../reference/configuration.md#precedence
 [config-managed]: ../reference/configuration.md#keys-managed
 [reference-platforms-compatibility]: ../reference/platforms.md#compatibility
 

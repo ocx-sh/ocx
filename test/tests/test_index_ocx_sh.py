@@ -1013,21 +1013,112 @@ def test_ocx_mirrors_env_union_forms_override_index_base(
 def test_absent_index_field_never_touches_a_dead_index_endpoint(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """No `[registries."ocx.sh"].index` field configured -> `ocx.sh` resolves
-    as plain OCI even though the default index base is (index-role)
-    mirror-routed here to an unreachable endpoint, for a fast deterministic
-    failure IF it were ever contacted.
+    """No `[registries."plain.example"].index` field configured -> that
+    namespace resolves as plain OCI even though the default index base is
+    (index-role) mirror-routed here to an unreachable endpoint, for a fast
+    deterministic failure IF it were ever contacted.
 
-    `build_index_source` gates `OcxIndex` construction purely on field
-    presence (`registries_index_field_present`) — an index outage can never
-    hard-block a plain-OCI-configured namespace (arch-verify terra-on-D
-    ruling, folded into E as mandatory item 1).
+    `build_index_sources` gates `OcxIndex` construction purely on field
+    presence — an index outage can never hard-block a plain-OCI namespace
+    (arch-verify terra-on-D ruling, folded into E as mandatory item 1). The
+    namespace under test is a foreign one, not `ocx.sh`: the compiled-in base
+    tier makes `ocx.sh` itself index-bearing, so it is no longer an example of
+    an unconfigured namespace.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
         "[mirrors]\n"
+        f'"plain.example" = "http://{ocx.registry}"\n'
+        '"index.ocx.sh" = { index = "http://127.0.0.1:1" }\n'
+    )
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},127.0.0.1:1"
+
+    fq = f"plain.example/{pkg.repo}:1.0.0"
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    result = ocx.plain("--index", str(index_dir), "index", "update", fq)
+    assert result.returncode == 0, (
+        'absent registries."plain.example".index must resolve it as plain OCI, '
+        f"never touching the dead default-index mirror target: {result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW — the compiled-in base tier ships `[registries."ocx.sh"] index`
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_base_tier_makes_ocx_sh_index_bearing(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """Nothing in the config declares an `index` for `ocx.sh`, yet the
+    namespace resolves through the ocx-index protocol: the compiled-in base
+    tier supplies `https://index.ocx.sh`.
+
+    The index-role `[mirrors]` entry for `index.ocx.sh` is what proves it — a
+    plain-OCI `ocx.sh` would never dial that host, so the fixture would record
+    no root request. The `[registries."ocx.sh"]` entry present here declares
+    only `trusted_hosts` (the loopback test registry the root points at); the
+    built-in `index` survives it because the table merges field-wise.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        f'[registries."ocx.sh"]\ntrusted_hosts = ["{registry_host}"]\n'
+        "\n[mirrors]\n"
+        f'"index.ocx.sh" = {{ index = "{index_server.base_url}" }}\n'
+    )
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    result = ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
+    assert result.returncode == 0, (
+        f"the compiled-in ocx.sh index must resolve: {result.stderr}"
+    )
+    assert any(
+        record.path.endswith(f"/p/{repository}.json")
+        for record in index_server.requests
+    ), "the index fixture must have served the root document"
+
+
+def test_empty_index_field_reverts_ocx_sh_to_plain_oci(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`index = ""` is the documented off-switch for the compiled-in default:
+    an empty base URL is not index-kind, so `ocx.sh` falls back to plain OCI.
+
+    Same dead-endpoint trick as
+    `test_absent_index_field_never_touches_a_dead_index_endpoint` — if the
+    off-switch did not take, the resolve would dial `127.0.0.1:1` and fail.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        '[registries."ocx.sh"]\nindex = ""\n'
+        "\n[mirrors]\n"
         f'"ocx.sh" = "http://{ocx.registry}"\n'
         '"index.ocx.sh" = { index = "http://127.0.0.1:1" }\n'
     )
@@ -1038,8 +1129,8 @@ def test_absent_index_field_never_touches_a_dead_index_endpoint(
     index_dir.mkdir()
     result = ocx.plain("--index", str(index_dir), "index", "update", fq)
     assert result.returncode == 0, (
-        'absent registries."ocx.sh".index must resolve ocx.sh as plain OCI, '
-        f"never touching the dead default-index mirror target: {result.stderr}"
+        'index = "" must revert ocx.sh to plain OCI, never touching the dead '
+        f"default-index mirror target: {result.stderr}"
     )
 
 

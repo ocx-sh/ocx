@@ -239,24 +239,26 @@ def test_project_flag_resolves_custom_filename(
     ``ocx add`` writes to the supplied custom-named config and never
     creates a sibling ``ocx.toml``.
 
-    Note: ``ocx add`` resolves the registry tag, so pointing at a real
-    registry would cost network. The first thing the mutator does — flock
-    + load — exercises the path-threading contract, so we check for the
-    early failure mode (config-file presence) rather than the final
-    write. If the mutator silently created a sibling ``ocx.toml`` (the
-    pre-fix bug shape), this test would observe the file on disk.
+    Note: ``ocx add`` resolves the tag, so the run is pinned to
+    ``--offline`` to keep it off the network. The first thing the mutator
+    does — flock + load — exercises the path-threading contract, so we
+    check for the early failure mode (config-file presence) rather than
+    the final write. If the mutator silently created a sibling
+    ``ocx.toml`` (the pre-fix bug shape), this test would observe the
+    file on disk.
     """
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     custom = project_dir / "custom-name.toml"
     custom.write_text("[tools]\n")
 
-    # Run `ocx add` against an unreachable identifier so the resolver
-    # short-circuits before touching the network in a way the test
-    # environment cannot satisfy. The path-threading contract fires
-    # during the load phase, before resolve.
+    # `--offline` keeps the resolver off the network entirely, so the
+    # unresolvable identifier fails locally instead of dialling a real
+    # source. The path-threading contract fires during the load phase,
+    # before resolve.
     result = _run_with_env(
         ocx,
+        "--offline",
         "--project",
         str(custom),
         "add",
