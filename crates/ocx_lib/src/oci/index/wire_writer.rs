@@ -16,12 +16,19 @@
 //! index writes no object shapes of its own, so there is nothing else here to
 //! emit (`adr_oci_index_only_dispatch.md` D1).
 //!
-//! The form is **not** a generic pretty-printer (`serde_json::to_string_pretty`
-//! byte-diverges on the first non-ASCII value — it is banned here by design):
-//! Python `json.dumps(data, indent=2, sort_keys=False, ensure_ascii=True)` plus
-//! a single trailing `\n`, i.e. 2-space indent, fields in **insertion order**
-//! (never alphabetized), `\uXXXX` escapes for every non-ASCII scalar via
-//! [`escape_ascii`].
+//! The form is Python `json.dumps(data, indent=2, sort_keys=False,
+//! ensure_ascii=True)` plus a single trailing `\n`. Everything structural about
+//! that — 2-space indent, `": "` between key and value, inline `{}` / `[]`,
+//! insertion order, number spelling — is [`serde_json::ser::PrettyFormatter`],
+//! delegated to wholesale. OCX owns exactly one rule the JSON ecosystem does not
+//! implement: `ensure_ascii`, escaping every scalar outside printable ASCII
+//! (serde-rs/json#907 declined it). That one rule is [`PythonJson`]'s two escape
+//! methods; nothing else here is hand-rolled.
+
+use std::io;
+
+use serde::Serialize;
+use serde_json::ser::{CharEscape, Formatter, PrettyFormatter};
 
 /// Byte-exact package-root serialization (CONTRACTS §14).
 ///
@@ -35,130 +42,123 @@
 /// Output: 2-space indent, insertion-order fields, `\uXXXX` for every non-ASCII
 /// scalar, a single trailing `\n`. Empty `{}` / `[]` emit inline.
 pub fn serialize_root(root: &serde_json::Value) -> Vec<u8> {
-    let mut out = String::new();
-    write_value(root, 0, &mut out);
-    out.push('\n');
-    out.into_bytes()
+    let mut out = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut out, PythonJson::new());
+    root.serialize(&mut serializer)
+        .expect("serializing a Value into a Vec cannot fail");
+    out.push(b'\n');
+    out
 }
 
-/// Recursively emit a [`serde_json::Value`] in the root form.
-fn write_value(value: &serde_json::Value, depth: usize, out: &mut String) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        // A `serde_json::Number`'s `Display` is the canonical JSON form and matches
-        // Python's `repr` for the integer values this grammar carries (ids,
-        // timestamps and digests are strings; the wire format has no floats).
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => escape_ascii(text, out),
-        serde_json::Value::Array(items) => write_array(items, depth, out),
-        serde_json::Value::Object(map) => write_object(map, depth, out),
-    }
+/// `PrettyFormatter`'s layout with Python's `ensure_ascii=True` escape policy
+/// owned here, not inherited.
+struct PythonJson<'a> {
+    layout: PrettyFormatter<'a>,
 }
 
-fn write_array(items: &[serde_json::Value], depth: usize, out: &mut String) {
-    if items.is_empty() {
-        out.push_str("[]");
-        return;
-    }
-    out.push_str("[\n");
-    let inner = indent(depth + 1);
-    for (position, item) in items.iter().enumerate() {
-        if position > 0 {
-            out.push_str(",\n");
+impl PythonJson<'_> {
+    fn new() -> Self {
+        Self {
+            layout: PrettyFormatter::with_indent(b"  "),
         }
-        out.push_str(&inner);
-        write_value(item, depth + 1, out);
     }
-    out.push('\n');
-    out.push_str(&indent(depth));
-    out.push(']');
 }
 
-fn write_object(map: &serde_json::Map<String, serde_json::Value>, depth: usize, out: &mut String) {
-    if map.is_empty() {
-        out.push_str("{}");
-        return;
-    }
-    // Insertion order — the `preserve_order` `Map` iterates in on-disk order.
-    out.push_str("{\n");
-    let inner = indent(depth + 1);
-    for (position, (key, value)) in map.iter().enumerate() {
-        if position > 0 {
-            out.push_str(",\n");
-        }
-        out.push_str(&inner);
-        escape_ascii(key, out);
-        out.push_str(": ");
-        write_value(value, depth + 1, out);
-    }
-    out.push('\n');
-    out.push_str(&indent(depth));
-    out.push('}');
-}
-
-/// Two spaces per level — the fixed indent width of the root form.
-fn indent(depth: usize) -> String {
-    "  ".repeat(depth)
-}
-
-/// Emit a JSON string literal reproducing Python's `json.dumps(ensure_ascii=True)`
-/// escaping exactly: the seven short escapes (`\"` `\\` `\n` `\r` `\t` `\b` `\f`),
-/// `\u00XX` for the remaining C0 control chars, and `\uXXXX` (lowercase hex,
-/// surrogate-paired above the BMP) for every scalar with a code point `> 0x7F`.
+/// Forward a [`Formatter`] layout method to the wrapped [`PrettyFormatter`].
 ///
-/// `0x7F` (DEL) is emitted raw — Python escapes only `code < 0x20 || code > 0x7F`,
-/// and `/` is never escaped.
-fn escape_ascii(text: &str, out: &mut String) {
-    use std::fmt::Write as _;
+/// Covers every method `PrettyFormatter` overrides in serde_json 1.0.150, plus
+/// `end_object_key` (a no-op default today) so a future override is inherited
+/// rather than silently dropped.
+macro_rules! delegate_layout {
+    ($($name:ident($($arg:ident: $ty:ty),*)),* $(,)?) => {$(
+        fn $name<W: ?Sized + io::Write>(&mut self, writer: &mut W $(, $arg: $ty)*) -> io::Result<()> {
+            self.layout.$name(writer $(, $arg)*)
+        }
+    )*};
+}
 
-    out.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            control if (control as u32) < 0x20 => {
-                // Remaining C0 controls: `\u00XX`, lowercase, zero-padded.
-                let _ = write!(out, "\\u{:04x}", control as u32);
+impl Formatter for PythonJson<'_> {
+    delegate_layout!(
+        begin_array(),
+        end_array(),
+        begin_array_value(first: bool),
+        end_array_value(),
+        begin_object(),
+        end_object(),
+        begin_object_key(first: bool),
+        end_object_key(),
+        begin_object_value(),
+        end_object_value(),
+    );
+
+    /// Escape every scalar from `0x7F` up — Python's `json.encoder` keeps only
+    /// `[\x20-\x7e]` raw, so **DEL is escaped**, not printable. Astral scalars
+    /// become UTF-16 surrogate pairs, as `ensure_ascii` has no other spelling.
+    ///
+    /// Only unescaped runs reach here: serde_json splits the string on its own
+    /// escape table (`"`, `\`, and every C0 control), which is a strict subset of
+    /// Python's, so the remainder is exactly the range this method must decide.
+    fn write_string_fragment<W: ?Sized + io::Write>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()> {
+        // Copy raw runs wholesale; only the escaped scalars interrupt the memcpy.
+        let mut run_start = 0;
+        for (offset, character) in fragment.char_indices() {
+            let code = character as u32;
+            if code < 0x7F {
+                continue;
             }
-            ascii if (ascii as u32) <= 0x7f => out.push(ascii),
-            non_ascii => {
-                let code = non_ascii as u32;
-                if code <= 0xFFFF {
-                    let _ = write!(out, "\\u{code:04x}");
-                } else {
-                    // Astral plane: encode as a UTF-16 surrogate pair.
-                    let offset = code - 0x1_0000;
-                    let high = 0xD800 + (offset >> 10);
-                    let low = 0xDC00 + (offset & 0x3FF);
-                    let _ = write!(out, "\\u{high:04x}\\u{low:04x}");
-                }
+            writer.write_all(&fragment.as_bytes()[run_start..offset])?;
+            match code.checked_sub(0x1_0000) {
+                None => write!(writer, "\\u{code:04x}")?,
+                Some(rest) => write!(
+                    writer,
+                    "\\u{:04x}\\u{:04x}",
+                    0xD800 + (rest >> 10),
+                    0xDC00 + (rest & 0x3FF)
+                )?,
             }
+            run_start = offset + character.len_utf8();
+        }
+        writer.write_all(&fragment.as_bytes()[run_start..])
+    }
+
+    /// Python's escape spellings for the scalars serde_json hands off pre-classified.
+    ///
+    /// `Solidus` is deliberately raw: serde_json reserves the `\/` escape, Python
+    /// never emits it. serde_json's own escape table never produces this variant
+    /// today — the arm is the guard against that changing under us.
+    fn write_char_escape<W: ?Sized + io::Write>(&mut self, writer: &mut W, escape: CharEscape) -> io::Result<()> {
+        match escape {
+            CharEscape::Quote => writer.write_all(b"\\\""),
+            CharEscape::ReverseSolidus => writer.write_all(b"\\\\"),
+            CharEscape::Solidus => writer.write_all(b"/"),
+            CharEscape::Backspace => writer.write_all(b"\\b"),
+            CharEscape::FormFeed => writer.write_all(b"\\f"),
+            CharEscape::LineFeed => writer.write_all(b"\\n"),
+            CharEscape::CarriageReturn => writer.write_all(b"\\r"),
+            CharEscape::Tab => writer.write_all(b"\\t"),
+            // Lowercase, zero-padded — Python's `\u00XX` for the remaining C0 controls.
+            CharEscape::AsciiControl(byte) => write!(writer, "\\u{byte:04x}"),
         }
     }
-    out.push('"');
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── escape_ascii truth table ─────────────────────────────────────────────
+    // ── ensure_ascii truth table (via the public entry point) ────────────────
 
+    /// The JSON string literal `text` serializes to, unwrapped from the root form.
     fn escaped(text: &str) -> String {
-        let mut out = String::new();
-        escape_ascii(text, &mut out);
-        out
+        let bytes = serialize_root(&serde_json::Value::String(text.to_string()));
+        String::from_utf8(bytes)
+            .expect("ensure_ascii output is ASCII")
+            .trim_end_matches('\n')
+            .to_string()
     }
 
     #[test]
-    fn escape_ascii_short_escapes() {
+    fn short_escapes_use_pythons_spellings() {
         assert_eq!(escaped("a\"b"), r#""a\"b""#);
         assert_eq!(escaped("a\\b"), r#""a\\b""#);
         assert_eq!(escaped("a\nb"), r#""a\nb""#);
@@ -169,21 +169,35 @@ mod tests {
     }
 
     #[test]
-    fn escape_ascii_control_chars_use_lowercase_u00xx() {
+    fn control_chars_use_lowercase_u00xx() {
         // NUL and unit-separator (0x1F) — the C0 controls without a short escape.
         assert_eq!(escaped("\u{00}"), "\"\\u0000\"");
         assert_eq!(escaped("\u{1f}"), "\"\\u001f\"");
     }
 
+    /// The printable-ASCII boundary, pinned on both sides.
+    ///
+    /// Python's `json.encoder` escapes `[^\ -~]`, so the raw range ends at `~`
+    /// (`0x7E`) and DEL (`0x7F`) **is** escaped. An earlier reading of that
+    /// bound as `> 0x7F` emitted DEL raw and diverged from the Python reference
+    /// on exactly one code point — invisible to the golden corpus, which
+    /// contains no `0x7F` byte. Verified against CPython:
+    /// `json.dumps("\u{7f}", ensure_ascii=True) == '"\\u007f"'`.
     #[test]
-    fn escape_ascii_del_and_slash_are_raw() {
-        // Python escapes only `< 0x20 || > 0x7F`: DEL (0x7F) and `/` stay raw.
-        assert_eq!(escaped("\u{7f}"), "\"\u{7f}\"");
+    fn printable_boundary_is_tilde() {
+        assert_eq!(escaped("~"), r#""~""#, "0x7E is the last raw scalar");
+        assert_eq!(escaped("\u{7f}"), "\"\\u007f\"", "DEL is escaped, not raw");
+    }
+
+    #[test]
+    fn slash_is_raw() {
+        // Python has no solidus escape; `serde_json` reserves one (`CharEscape::Solidus`,
+        // spelled `\/`), which is why this writer owns its own escape spelling.
         assert_eq!(escaped("a/b"), r#""a/b""#);
     }
 
     #[test]
-    fn escape_ascii_non_ascii_bmp_becomes_uxxxx() {
+    fn non_ascii_bmp_becomes_uxxxx() {
         // U+00E9 (é) — the CONTRACTS §14 worked example. The input carries the
         // real char; the output must be the 6 ASCII bytes of the escape.
         assert_eq!(escaped("caf\u{e9}"), "\"caf\\u00e9\"");
@@ -192,12 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn escape_ascii_astral_becomes_surrogate_pair() {
+    fn astral_becomes_surrogate_pair() {
         // U+1F600 GRINNING FACE encodes as the surrogate pair D83D DE00.
         assert_eq!(escaped("\u{1f600}"), "\"\\ud83d\\ude00\"");
     }
 
-    // ── empty-container edge cases (root form) ───────────────────────────────
+    #[test]
+    fn keys_take_the_same_escape_policy_as_values() {
+        let value = serde_json::json!({ "caf\u{e9}\u{7f}": 1 });
+        let text = String::from_utf8(serialize_root(&value)).unwrap();
+        assert_eq!(text, "{\n  \"caf\\u00e9\\u007f\": 1\n}\n");
+    }
+
+    // ── layout edge cases (root form) ────────────────────────────────────────
 
     #[test]
     fn root_emits_empty_containers_inline() {

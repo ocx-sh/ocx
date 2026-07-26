@@ -77,6 +77,54 @@ fn root_fixtures_round_trip_byte_exact() {
     }
 }
 
+/// Per-scalar escape parity against a CPython-generated truth table.
+///
+/// The vendored `root/` corpus certifies the shapes the index actually ships,
+/// which is why a wrong escape boundary (DEL emitted raw) once survived it: no
+/// fixture contains a `0x7F` byte. This sweep closes that by asking CPython
+/// directly, scalar by scalar — dense through U+02FF, every boundary
+/// neighbourhood, then strides over the BMP and the astral planes. See
+/// `fixtures/index_wire/cpython/generate.py` for the exact selection and how to
+/// regenerate.
+#[test]
+fn codepoint_escapes_match_the_cpython_truth_table() {
+    let path = fixtures_dir().join("cpython/codepoint_escapes.txt");
+    let table = std::fs::read_to_string(&path).expect("read codepoint truth table");
+
+    let mut checked = 0_usize;
+    for line in table.lines().filter(|line| !line.starts_with('#')) {
+        let (code, expected) = line.split_once('\t').expect("<hex>\\t<literal> line");
+        let scalar = u32::from_str_radix(code, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or_else(|| panic!("{code} is not a Unicode scalar"));
+
+        // A top-level string: `json.dumps` renders it identically at any indent,
+        // so the vector is the whole expected document bar the trailing newline.
+        let produced = serialize_root(&serde_json::Value::String(scalar.to_string()));
+        assert_bytes_equal(&produced, format!("{expected}\n").as_bytes(), &format!("U+{code}"));
+        checked += 1;
+    }
+    assert!(checked > 3000, "truth table looks truncated: {checked} scalars");
+}
+
+/// Layout parity against CPython for the shapes the vendored corpus never
+/// exercises: empty containers, an array root, deep nesting, u64/i64 extremes
+/// and escape-bearing object keys. Each vector is already in the canonical form,
+/// so re-serializing its parse must reproduce it byte-for-byte.
+#[test]
+fn cpython_structural_vectors_round_trip_byte_exact() {
+    let vectors = json_fixtures(&fixtures_dir().join("cpython"));
+    assert_eq!(vectors.len(), 2, "expected the layout + array-root vectors");
+
+    for path in vectors {
+        let expected = std::fs::read(&path).expect("read cpython vector");
+        let value: serde_json::Value =
+            serde_json::from_slice(&expected).expect("parse cpython vector as order-preserving Value");
+        assert_bytes_equal(&serialize_root(&value), &expected, &path.display().to_string());
+    }
+}
+
 #[test]
 fn non_ascii_scalars_emit_unicode_escapes_not_raw_utf8() {
     // §3.3 hazard: `ensure_ascii`. The full-fields root carries `"Café Widget"`;
