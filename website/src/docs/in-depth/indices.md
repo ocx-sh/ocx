@@ -57,7 +57,7 @@ Every source's subtree under the home is the [index.ocx.sh][index-ocx-sh] wire g
 
 ```
 $OCX_HOME/index/ocx.sh/
-├── config.json                published sources only — {"format_version": 1}
+├── config.json                published sources only — {"format_version": 1, "name_segments": 2}
 ├── c/index.json (+ .etag)     published sources only — catalog + conditional-GET validator
 └── p/<ns>/
     ├── <pkg>.json              root document — repository pointer, tags, publisher status
@@ -177,6 +177,20 @@ logical id (ocx.sh/<ns>/<pkg>[:tag])
 ```
 
 `index.ocx.sh` yields **only pointers** — the platform manifest and its layers always come from the physical registry named by `repository`. The `repository` field carries an `oci://` scheme marker identifying it as a physical, transport-only reference; it is never used as a storage key. Locally, OCX keys everything — the local index path, `ocx.lock`, garbage-collection roots — on the *logical* identifier, so a registry migration never orphans a local copy or breaks a committed team lock.
+
+### The index declares which names it can hold {#public-index-declared-names}
+
+`config.json` carries the wire-format version and, optionally, the index's own statement of its name grammar:
+
+```json
+{ "format_version": 1, "name_segments": 2 }
+```
+
+`name_segments` is the slash-separated segment count a package name must have *within* the namespace. `index.ocx.sh` publishes `2`: its root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so `ocx.sh/kitware/cmake` is expressible and `ocx.sh/go-task` is not — there is no path in the wire layout where a root for a flat name could live.
+
+A name the index declares it cannot express is outside that source's jurisdiction. OCX never sends a request for it and the source's silence decides nothing: the reference resolves as a plain OCI registry reference instead. That is the index operator's published statement, not a guess the client makes — which is why nothing about it is inferred from the URL shape or the name itself.
+
+The field is optional and its absence means "serves every name". A private index that publishes no `name_segments` stays authoritative for every reference in its namespace, flat names included, so its refusals keep the fail-loud behaviour below unchanged. For the same reason `name_segments` is **not a security control**: an older ocx simply ignores the field, and nothing about the yank gate, the object digest verify, or the authoritative stop is delegated to it — it only ever narrows what a client asks for. If the index cannot be reached, or serves a malformed or unrecognised `config.json`, OCX keeps it authoritative rather than assuming it serves nothing; an index outage must not silently downgrade a namespace to plain OCI.
 
 ::: warning A configured index that breaks fails loud, not silent
 The "resolves straight against the registry" fall-through above applies only while `ocx.sh` is *not yet* configured as index-kind. Once a namespace names an index in [`[registries.<name>]`][config-registries] — the default once `index.ocx.sh` is generally available — that source is authoritative for it: a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name.

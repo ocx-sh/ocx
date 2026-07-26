@@ -1996,3 +1996,158 @@ def test_published_absent_dispatch_recovers_from_the_physical_registry_and_self_
     assert dispatch.read_bytes() == expected_bytes, (
         "the healed object must be byte-identical — it is the registry's own image index"
     )
+
+
+# ---------------------------------------------------------------------------
+# Jurisdiction — the INDEX declares which names it can express, the client asks.
+#
+# `config.json`'s `name_segments` is the index operator's own published
+# statement about its name grammar. `index.ocx.sh` serves 2, restating its root
+# schema's `^ocx\.sh/<ns>/<pkg>$`. A name it declares inexpressible is outside
+# that source's jurisdiction: never requested, its silence decides nothing, and
+# the chain falls through to the registry. Absence of the field means "serves
+# every name" — today's behaviour verbatim, including the terminal stop.
+# ---------------------------------------------------------------------------
+
+
+def test_flat_name_falls_through_to_the_registry_when_the_index_declares_a_namespace_segment(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The measured bug: with an index configured for the namespace, a flat
+    identifier resolved only when NO index was configured. The index now
+    declares `name_segments: 2`, so a flat name installs through the plain-OCI
+    registry and the index never sees a request for it.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
+    assert "/" not in unique_repo, "the fixture repository must be flat for this test"
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root, name_segments=2)
+
+    ocx.plain("package", "install", pkg.fq)
+
+    candidate = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / unique_repo
+        / "candidates"
+        / "1.0.0"
+    )
+    assert_symlink_exists(candidate)
+    assert not any(
+        record.path.startswith(f"/p/{unique_repo}") for record in index_server.requests
+    ), (
+        "a declined name must never be asked of the index: "
+        f"{[record.path for record in index_server.requests]}"
+    )
+
+
+def test_namespaced_name_still_fails_closed_when_the_index_has_no_root(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """Fail-closed survives for every name the index CAN express: a namespaced
+    identifier with no root is a terminal stop, never a fall-through the
+    registry could shadow. This is the property the yank gate rests on.
+    """
+    # Published to the registry under a NAMESPACED repository the index declares
+    # it can hold — but the index has no root for it.
+    namespaced_repo = f"{unique_repo}/tool"
+    pkg = make_package(ocx, namespaced_repo, "1.0.0", tmp_path)
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root, name_segments=2)
+
+    refused = ocx.plain("package", "install", pkg.fq, check=False)
+    assert refused.returncode != 0, (
+        "an expressible name absent from the index must not resolve through the "
+        f"registry behind the index's back:\n{refused.stdout}\n{refused.stderr}"
+    )
+    assert any(
+        record.path == f"/p/{namespaced_repo}.json" for record in index_server.requests
+    ), (
+        "the index must have been asked — it is authoritative for this name: "
+        f"{[record.path for record in index_server.requests]}"
+    )
+
+
+def test_yank_gate_holds_for_an_index_that_declares_no_grammar(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """A private index that declares no `name_segments` keeps full authority
+    over every name in its namespace — including a FLAT one — so its yank
+    refusal is never bypassed by the plain-OCI catch-all.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    assert "/" not in unique_repo, "the fixture repository must be flat for this test"
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root)  # no name_segments declared
+    static_index.write_package(
+        index_server.root,
+        repository=unique_repo,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+        yanked=True,
+    )
+
+    refused = ocx.plain("package", "install", pkg.fq, check=False)
+    assert refused.returncode == 65, (
+        f"expected DataError(65), got rc={refused.returncode}\n{refused.stderr}"
+    )
+    assert "yanked" in refused.stderr
+    candidate = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / unique_repo
+        / "candidates"
+        / "1.0.0"
+    )
+    assert_not_exists(candidate)
+
+
+def test_index_update_reroutes_a_flat_name_to_the_registry(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """`ocx index update` on a declined name refreshes against the registry
+    instead of dying in the index source's derived-refresh path.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    assert "/" not in unique_repo, "the fixture repository must be flat for this test"
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root, name_segments=2)
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", pkg.fq)
+
+    assert _root_document_path(
+        index_dir, unique_repo, namespace=registry_dir(ocx.registry)
+    ).is_file(), (
+        "the registry-derived root must be written for a name the index declined"
+    )
+    assert not any(
+        record.path.startswith(f"/p/{unique_repo}") for record in index_server.requests
+    ), (
+        "the index must never be asked about the declined name: "
+        f"{[record.path for record in index_server.requests]}"
+    )

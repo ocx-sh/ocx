@@ -37,6 +37,27 @@ pub mod wire_writer;
 #[cfg(test)]
 pub(crate) use index_impl::IndexImpl;
 
+/// Whether a chain source will answer for a given name, and what its silence
+/// means (`adr_index_indirection.md` F3/H).
+///
+/// A distinct type returned by a distinct method, consulted **before** a source
+/// is asked — so "outside jurisdiction" can never be confused with the
+/// `Ok(None)` a fetch returns. An out-of-jurisdiction source is never fetched
+/// from, so there is no fetch outcome to misread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jurisdiction {
+    /// Ask it; its miss or refusal is terminal for the chain. A registry that
+    /// happens to serve the same name must never shadow this source's answer.
+    Authoritative,
+    /// Ask it; its miss falls through to the next source (the OCI catch-all).
+    FallThrough,
+    /// It has **declared** it cannot express this name — never ask it, and its
+    /// silence decides nothing. Either the name is in another registry
+    /// altogether, or the index's published `config.json` says its name grammar
+    /// has no place to put this name.
+    Outside,
+}
+
 /// Routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
 ///
 /// Threaded through `Index::from_chained` and on into the chained index so
@@ -315,10 +336,20 @@ impl Index {
         self.inner.fetch_root_document(identifier).await
     }
 
-    /// Whether a source in this index is the authoritative resolver for
-    /// `identifier`'s namespace (its refusal must not be bypassed).
-    pub fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
-        self.inner.is_authoritative_for(identifier)
+    /// Whether this index will answer for `identifier`, and what its silence
+    /// means. See [`index_impl::IndexImpl::jurisdiction`].
+    ///
+    /// `oci::index`-internal (no `pub`), like [`Self::source_kind`] — the chain
+    /// is the only consumer, and `OcxIndex`'s inherent `pub` method serves the
+    /// one caller outside this module.
+    async fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
+        self.inner.jurisdiction(identifier).await
+    }
+
+    /// Whether a source in this index is the configured owner of `registry` —
+    /// cheap, synchronous, no I/O. See [`index_impl::IndexImpl::serves_registry`].
+    fn serves_registry(&self, registry: &str) -> bool {
+        self.inner.serves_registry(registry)
     }
 
     /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`

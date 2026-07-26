@@ -37,13 +37,21 @@ impl IndexUpdate {
         // index-tagged fan-out is inlined here (same shape as `package info`).
         let mut join_set: tokio::task::JoinSet<(usize, ocx_lib::Result<()>)> = tokio::task::JoinSet::new();
         for (index, identifier) in packages.iter().enumerate() {
-            // Route to the index source whose namespace serves this package, if
-            // any; otherwise refresh against the registry.
-            let source = index_sources
-                .iter()
-                .find(|source| source.namespace() == identifier.registry())
-                .map(|source| index::Index::from_source(source.clone()))
-                .unwrap_or_else(|| oci_index.clone());
+            // Route to the index source that will answer for this package, if
+            // any; otherwise refresh against the registry. Asking `jurisdiction`
+            // rather than comparing namespaces keeps this from being a second,
+            // independent guess: a registry mismatch already answers `Outside`,
+            // and so does a name the source's published `config.json` says its
+            // grammar cannot express — which then reroutes to the registry
+            // instead of dying in `refresh_derived`.
+            let mut selected = None;
+            for source in index_sources {
+                if source.jurisdiction(identifier).await != index::Jurisdiction::Outside {
+                    selected = Some(index::Index::from_source(source.clone()));
+                    break;
+                }
+            }
+            let source = selected.unwrap_or_else(|| oci_index.clone());
             let context = context.clone();
             let identifier = identifier.clone();
             join_set.spawn(async move { (index, context.index_sync().refresh_package(&identifier, &source).await) });
