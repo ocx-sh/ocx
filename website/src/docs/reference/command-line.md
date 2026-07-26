@@ -1328,15 +1328,18 @@ forbid the cache-miss network probe entirely.
 
 ```shell
 $ ocx pull --dry-run
-Package                         Status       Path
-localhost:5000/cmake@sha256:... cached       /home/me/.ocx/packages/...
-localhost:5000/ripgrep@sha256:..would-fetch  -
+Package                                     Status
+localhost:5000/cmake@sha256:1f4a9c2e7b03    cached
+localhost:5000/ripgrep@sha256:8d2b60fa1c95  would-fetch
 ```
 
-The `Path` column matches the contract of [`ocx package which`](#package-which): it
-is the **package root** (parent of `content/` and `entrypoints/`), not the
-`content/` subdirectory. Consumers traverse into `<path>/content/` for files or
-prefer [`ocx env`](#env) to compose `PATH` and friends.
+Plain output shortens each locked leaf to a 12-hex digest; the full pin rides
+out under [`--format json`](#arg-format), which also carries a `path` field. That
+`path` matches the contract of [`ocx package which`](#package-which): it is the
+**package root** (parent of `content/` and `entrypoints/`), not the `content/`
+subdirectory, and it is populated only for `cached` rows. Consumers traverse into
+`<path>/content/` for files or prefer [`ocx env`](#env) to compose `PATH` and
+friends.
 
 The staleness gate fires ahead of the dry-run branch, so a stale lock still
 exits 65 — the preview is not a way to bypass `declaration_hash` validation.
@@ -2500,7 +2503,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 {
   "identifier": "registry/repo:tag",
   "pinned_digest": "sha256:…",
-  "platforms": ["linux/amd64"],
+  "platform": { "os": "linux", "architecture": "amd64", "os.features": ["libc.glibc"] },
   "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
   "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }],
   "resolution": {
@@ -2628,77 +2631,101 @@ ocx --format json package inspect --closure mytool:1.0.0 | jq '.["mytool:1.0.0"]
 
 **Plain output**
 
-With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier. The candidate listing shows one node per platform child; the single-manifest view shows the `metadata` branch (`env`, `dependencies`, `entrypoints`, and — when declared — [`binaries`][reference-binaries]) followed by a `layers` branch listing each layer by index, annotated with media type and a human-readable size. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation. `binaries` renders the same [undeclared vs. declared-empty][reference-binaries-none-vs-empty] distinction the field carries on the wire: an undeclared claim produces no `binaries` node at all, a declared-but-empty claim renders a `binaries (none declared)` leaf, and a non-empty claim renders a `binaries` branch listing each name. JSON output is unaffected by this rendering split — the `metadata` field is the full metadata document, so the `binaries` key is present or absent exactly as declared:
+With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier — the one place a full `sha256:` digest is spelled out, because it is what the command was asked for. The candidate listing shows one node per platform child; the single-manifest view shows the `metadata` branch (`env`, `dependencies`, `entrypoints`, and — when declared — [`binaries`][reference-binaries]) followed by a `layers` branch listing each layer by index, annotated with the discriminating tail of its media type (`tar+xz`) and a human-readable size. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation. `binaries` renders the same [undeclared vs. declared-empty][reference-binaries-none-vs-empty] distinction the field carries on the wire: an undeclared claim produces no `binaries` node at all, a declared-but-empty claim renders a `binaries (none declared)` leaf, and a non-empty claim renders a `binaries` branch listing each name. JSON output is unaffected by this rendering split — the `metadata` field is the full metadata document, so the `binaries` key is present or absent exactly as declared:
 
 ```text
 registry/repo@sha256:…
-├─ metadata
-│  ├─ entrypoints
-│  │  ├─ fmt → cargo-fmt
-│  │  └─ build
-│  └─ binaries
-│     ├─ build
-│     └─ cargo-fmt
-└─ layers
-   └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
+├── metadata
+│   ├── entrypoints
+│   │   ├── fmt → cargo-fmt
+│   │   └── build
+│   └── binaries
+│       ├── build
+│       └── cargo-fmt
+└── layers
+    └── [0] · sha256:… · tar+xz · 192 B
 ```
+
+Only the tail of the media type is shown because every layer of a package repeats the same `application/vnd.oci.image.layer.v1` prefix — 30 characters that push the size past the right edge of a narrow terminal without telling two layers apart. `--format json` carries the full media type.
 
 Here `fmt` dispatches to the `cargo-fmt` binary while `build` dispatches to a binary named `build`;
 `binaries` lists both underlying names the entry points wrap. A package that never declared the
 field renders no `binaries` node at all; one that declared it empty renders a single
 `binaries (none declared)` leaf instead of the branch shown above.
 
-With `--resolve`, a `resolution` branch is added alongside `metadata` and `layers`, listing each chain blob by its `role` (`index`, `manifest`, `config`), annotated with media type and a human-readable size. The layers stay under the manifest — they are content the manifest references, not steps in the walk:
+With `--resolve`, a `resolution` branch is added alongside `metadata` and `layers`. It opens with the `platform` the walk selected against, then a `chain` listing each blob by its `role` (`index`, `manifest`, `config`) with a human-readable size. The layers stay under the manifest — they are content the manifest references, not steps in the walk:
 
 ```text
 registry/repo:tag@sha256:…
-├─ metadata
-│  └─ …
-├─ layers
-│  └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
-└─ resolution
-   ├─ pinned · registry/repo:tag@sha256:…
-   └─ chain
-      ├─ index · sha256:… · application/vnd.oci.image.index.v1+json · 429 B
-      ├─ manifest · sha256:… · application/vnd.oci.image.manifest.v1+json · 448 B
-      └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
+├── metadata
+│   └── …
+├── layers
+│   └── [0] · sha256:… · tar+xz · 192 B
+└── resolution
+    ├── platform linux/amd64+libc.glibc
+    └── chain
+        ├── index · sha256:… · 429 B
+        ├── manifest · sha256:… · 448 B
+        └── config · sha256:… · 244 B
 ```
+
+The `platform` leaf is the answer whenever `--platform` drove the selection: a libc refinement like `+libc.glibc` is chosen during the walk and is visible nowhere else in the tree. The chain carries no media-type column — the `role` label already names it (an `index` role *is* `application/vnd.oci.image.index.v1+json`), and there is no `pinned` leaf because it would repeat the tree root byte for byte.
 
 With `--closure`, a `closure` branch is added alongside `metadata` and `layers` (and `resolution`, on a multi-platform reference — `--closure` platform-selects the same way `--resolve` does). The branch holds a flat `deps` list — one leaf per transitive dependency, in transitive-closure order, labeled by its short name with the whole identifier annotated as a digest-inked span and its composed visibility tagged after — and a `surface` branch with `interface` and `private` sub-branches, each rendering its admitted binaries/entrypoints/env the same way the JSON `surface` object does. A dependency reached through two different paths already merges into one entry before rendering (see [Visibility][reference-visibility]), so `deps` needs no repeat-visit marker:
 
 ```text
 registry/cmake:3.28@sha256:cccc…
-├─ metadata
-│  └─ …
-├─ layers
-│  └─ …
-└─ closure
-   ├─ deps
-   │  ├─ zlib · registry/zlib@sha256:bbbb… · public
-   │  └─ gcc · registry/gcc@sha256:dddd… · private
-   └─ surface
-      ├─ interface
-      │  ├─ entrypoints
-      │  │  ├─ cc · registry/cmake:3.28@sha256:cccc…
-      │  │  └─ zfmt · registry/zlib@sha256:bbbb…
-      │  ├─ env
-      │  │  ├─ PATH · path · registry/cmake:3.28@sha256:cccc…
-      │  │  └─ ZLIB_ROOT · constant · registry/zlib@sha256:bbbb…
-      │  └─ binaries incomplete: at least one admitted package leaves binaries undeclared
-      └─ private
-         ├─ binaries
-         │  ├─ gcc · registry/gcc@sha256:dddd…
-         │  └─ g++ · registry/gcc@sha256:dddd…
-         ├─ entrypoints
-         │  └─ zfmt · registry/zlib@sha256:bbbb…
-         ├─ env
-         │  ├─ PATH · path · registry/cmake:3.28@sha256:cccc…
-         │  ├─ GCC_HOME · constant · registry/gcc@sha256:dddd…
-         │  └─ ZLIB_ROOT · constant · registry/zlib@sha256:bbbb…
-         └─ binaries incomplete: at least one admitted package leaves binaries undeclared
+├── metadata
+│   └── …
+├── layers
+│   └── …
+└── closure
+    ├── deps
+    │   ├── zlib · registry/zlib@sha256:bbbb… · public
+    │   └── gcc · registry/gcc@sha256:dddd… · private
+    └── surface
+        ├── interface
+        │   ├── entrypoints
+        │   │   ├── cc · cmake
+        │   │   └── zfmt · zlib
+        │   ├── env
+        │   │   ├── PATH · path · cmake
+        │   │   └── ZLIB_ROOT · constant · zlib
+        │   └── binaries incomplete: at least one admitted package leaves binaries undeclared
+        └── private
+            ├── binaries
+            │   ├── gcc · gcc
+            │   └── g++ · gcc
+            ├── entrypoints
+            │   └── zfmt · zlib
+            ├── env
+            │   ├── PATH · path · cmake
+            │   ├── GCC_HOME · constant · gcc
+            │   └── ZLIB_ROOT · constant · zlib
+            └── binaries incomplete: at least one admitted package leaves binaries undeclared
 ```
 
-Here `gcc`'s direct edge is `private` — it never reaches the interface surface, so `cc` (the reference's own entrypoint) and `zfmt` (`zlib`, reachable by a separate `public` edge) are the only entries under `interface`, while `private` drops `cc` (the reference does not go through its own launcher) and gains `gcc`'s two binaries. Both surfaces flag `binaries incomplete`: the reference itself and `zlib` never declare a `binaries` claim on either axis they're admitted to, and completeness requires every admitted node to have declared — `gcc`'s own `["gcc"]` claim does not offset it. An entrypoint or repository conflict, when present, renders as its own leaf directly under `closure`, naming the colliding entrypoint or repository.
+Surface entries attribute each claim to its owning package by short name — the same name the `deps` branch above uses as its label, so `deps` reads as the legend for the whole surface. The full pinned identifier appears once per dependency there rather than once per claim; a three-dependency, five-binary closure would otherwise repeat an 89-character pin thirty times. `--format json` attributes by full identifier in both places.
+
+Here `gcc`'s direct edge is `private` — it never reaches the interface surface, so `cc` (the reference's own entrypoint) and `zfmt` (`zlib`, reachable by a separate `public` edge) are the only entries under `interface`, while `private` drops `cc` (the reference does not go through its own launcher) and gains `gcc`'s two binaries. Both surfaces flag `binaries incomplete`: the reference itself and `zlib` never declare a `binaries` claim on either axis they're admitted to, and completeness requires every admitted node to have declared — `gcc`'s own `["gcc"]` claim does not offset it.
+
+An entrypoint or repository conflict, when present, renders as its own branch directly under `closure` with one child per colliding party — the one place the view spends vertical space, because it fires exactly when there is a decision to make:
+
+```text
+└── closure
+    ├── deps
+    │   └── …
+    ├── surface
+    │   └── …
+    ├── entrypoint 'fmt' claimed by multiple packages
+    │   ├── registry/zlib:1.3
+    │   └── registry/gcc:13
+    └── repository 'registry/zlib' resolves to multiple digests
+        ├── sha256:bbbb11223344
+        └── sha256:eeee55667788
+```
+
+Entrypoint conflicts name the colliding packages without their digests — *which* packages collide is the answer, and the digest is not. Repository conflicts are the inverse: one repository, several digests, each shortened to twelve hex characters.
 
 **Exit codes**
 
