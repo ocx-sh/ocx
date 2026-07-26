@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
-from src import OcxRunner, assert_symlink_exists, make_package, registry_dir
+import pytest
+
+from src import OcxRunner, assert_symlink_exists, make_package, registry_dir, static_index
+from src.registry import fetch_platform_manifest_digest
 
 # ---------------------------------------------------------------------------
 # Store-copy helpers
@@ -218,6 +222,95 @@ def test_offline_install_missing_index_exits_policy_blocked(
     assert "unpinned reference" in result.stderr.lower(), (
         f"stderr must describe the unresolved-tag policy block; got:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (e) Subtree-copy parity: `ocx index update` output == a recursive mirror of
+#     the served paths (ADR Validation bullet 11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def index_server(tmp_path: Path) -> Iterator[static_index.StaticIndexServer]:
+    root = tmp_path / "static_index_root"
+    root.mkdir()
+    with static_index.running(root) as server:
+        yield server
+
+
+def _subtree(root: Path) -> dict[str, bytes]:
+    """Every file under `root`, keyed by POSIX-relative path — the comparable
+    form of a recursive directory diff."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_index_update_subtree_is_byte_identical_to_a_recursive_mirror(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """`adr_oci_index_only_dispatch.md` Validation bullet 11: "`ocx index
+    update` output for a published package is byte-identical to `wget
+    --mirror` of the same subtree".
+
+    This is the executable form of the copy-paste property D1 exists for — a
+    hosted index subtree pasted into a machine's local index just works,
+    because ocx writes exactly what the site serves and nothing else. It is
+    asserted as a recursive comparison of the two `p/<ns>/<pkg>` subtrees:
+    every file present on both sides, same bytes, and no file on either side
+    the other does not have. A per-file spot check would miss the last of
+    those, which is the half that catches ocx *adding* something of its own.
+
+    Rendering the served tree rather than shelling out to `wget` keeps the
+    assertion on byte-identity of a subtree instead of one tool's behaviour:
+    the fixture server serves its root directory verbatim, so that directory
+    IS the mirror, with no new tool dependency and nothing to run in CI.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    registry_host = ocx.registry.split(":", 1)[0]
+    (ocx.ocx_home / "config.toml").write_text(
+        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+    )
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+    static_index.write_catalog(index_server.root, {repository: entry.root_digest})
+
+    index_home = tmp_path / "index_home"
+    index_home.mkdir()
+    ocx.plain("--index", str(index_home), "index", "update", entry.logical_id)
+
+    # `p/<ns>` covers both halves of a package's published subtree: the root
+    # document (`p/<ns>/<pkg>.json`) and the dispatch-object CAS beside it
+    # (`p/<ns>/<pkg>/o/sha256/*.json`). Scoping to it excludes `config.json`
+    # and `c/index.json`, which are site-level and not part of the claim.
+    namespace = unique_repo
+    mirrored = _subtree(index_server.root / "p" / namespace)
+    written = _subtree(index_home / "ocx.sh" / "p" / namespace)
+
+    assert mirrored, "the fixture must serve a package subtree, or this proves nothing"
+    assert sorted(written) == sorted(mirrored), (
+        f"the written subtree must have exactly the mirror's files;\n"
+        f"only written: {sorted(set(written) - set(mirrored))}\n"
+        f"only mirrored: {sorted(set(mirrored) - set(written))}"
+    )
+    for relative, expected in mirrored.items():
+        assert written[relative] == expected, f"{relative} differs from the mirrored copy"
 
 
 def test_offline_install_missing_blobs_exits_policy_blocked(

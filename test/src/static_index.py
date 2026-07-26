@@ -1,15 +1,18 @@
 """Local static-file HTTP fixture encoding the `index.ocx.sh` wire shapes.
 
-Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `Observation`,
-`ObservationPlatform`, `CatalogIndex` in `crates/ocx_lib/src/oci/index/wire.rs`,
-and `IndexFormatConfig` in `crates/ocx_lib/src/oci/index/ocx_index.rs`. Only the
-``●`` frozen shapes in `.claude/artifacts/adr_index_indirection.md` (Decision F,
-Data Model) are served here:
+Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogIndex` in
+`crates/ocx_lib/src/oci/index/wire.rs`, and `IndexFormatConfig` in
+`crates/ocx_lib/src/oci/index/ocx_index.rs`. Only the ``●`` frozen shapes in
+`.claude/artifacts/adr_oci_index_only_dispatch.md` (Decision D1) are served
+here:
 
     config.json                {"format_version": 1}
     c/index.json                {"<repository>": "sha256:<root-digest>", ...}
     p/<repository>.json         root: repository, tags{tag: {content, ...}}, status...
-    p/<repository>/o/sha256/<hex>.json   observation: {"platforms": [{"platform": {...}, "digest": ...}]}
+    p/<repository>/o/sha256/<hex>.json   a real OCI image index, verbatim
+                                          ({"schemaVersion": 2, "mediaType":
+                                          "application/vnd.oci.image.index.v1+json",
+                                          "manifests": [...]})
 
 `repository` is the identifier's full `<ns>/<pkg>` path (may nest further).
 """
@@ -39,12 +42,26 @@ def write_config(fixture_root: Path, *, format_version: int = 1) -> None:
     (fixture_root / "config.json").write_text(json.dumps({"format_version": format_version}))
 
 
-def observation_bytes(platform_digest: str, *, os: str = "linux", architecture: str = "amd64") -> bytes:
-    """Minified, sorted-key observation-object bytes (`platforms[].digest` is
-    the platform-MANIFEST digest, never an image-index digest).
+def index_bytes(platform_digest: str, *, os: str = "linux", architecture: str = "amd64") -> bytes:
+    """Minified, sorted-key bytes for a real OCI image index — the same shape
+    a registry serves for a tag, e.g. `{"schemaVersion":2,"mediaType":
+    "application/vnd.oci.image.index.v1+json","manifests":[...]}`.
+    `manifests[].digest` is the platform-MANIFEST digest, never a second
+    image-index digest.
     """
-    obs = {"platforms": [{"platform": {"architecture": architecture, "os": os}, "digest": platform_digest}]}
-    return json.dumps(obs, sort_keys=True, separators=(",", ":")).encode()
+    index = {
+        "manifests": [
+            {
+                "digest": platform_digest,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "platform": {"architecture": architecture, "os": os},
+                "size": 314,  # placeholder: fixture only has the digest, not bytes to size
+            }
+        ],
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "schemaVersion": 2,
+    }
+    return json.dumps(index, sort_keys=True, separators=(",", ":")).encode()
 
 
 @dataclasses.dataclass(slots=True)
@@ -54,7 +71,7 @@ class PackageEntry:
     repository: str
     tag: str
     root_digest: str
-    obs_digest: str
+    index_digest: str
     logical_id: str
 
 
@@ -72,15 +89,15 @@ def write_package(
     superseded_by: str | None = None,
     yanked: bool = False,
 ) -> PackageEntry:
-    """Writes a root document + its observation object under `repository`.
+    """Writes a root document + its OCI image index under `repository`.
 
     Returns the entry's digests and its `ocx.sh/<repository>:<tag>` logical
     identifier for use in `ocx` invocations.
     """
-    obs_bytes = observation_bytes(platform_digest, os=os, architecture=architecture)
-    obs_hex = hashlib.sha256(obs_bytes).hexdigest()
+    index_body = index_bytes(platform_digest, os=os, architecture=architecture)
+    index_hex = hashlib.sha256(index_body).hexdigest()
 
-    tag_entry: dict = {"content": f"sha256:{obs_hex}", "observed": "2026-01-01T00:00:00Z"}
+    tag_entry: dict = {"content": f"sha256:{index_hex}", "observed": "2026-01-01T00:00:00Z"}
     if yanked:
         # Wire shape is an object (`RootTag::yanked` is `Option<YankMarker>` in
         # `wire.rs`), never a bare boolean — a publisher's reason + timestamp.
@@ -99,15 +116,15 @@ def write_package(
     root_path.parent.mkdir(parents=True, exist_ok=True)
     root_path.write_bytes(root_bytes)
 
-    obs_path = fixture_root / "p" / repository / "o" / "sha256" / f"{obs_hex}.json"
-    obs_path.parent.mkdir(parents=True, exist_ok=True)
-    obs_path.write_bytes(obs_bytes)
+    index_path = fixture_root / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_bytes(index_body)
 
     return PackageEntry(
         repository=repository,
         tag=tag,
         root_digest=f"sha256:{root_hex}",
-        obs_digest=f"sha256:{obs_hex}",
+        index_digest=f"sha256:{index_hex}",
         logical_id=f"ocx.sh/{repository}:{tag}",
     )
 

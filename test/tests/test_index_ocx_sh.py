@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 """Acceptance tests for the `index.ocx.sh` client (`adr_index_indirection.md`
-Decision F): two-hop resolve (root -> sha256-verified obs -> physical
-manifest), catalog sync (F2), status surfacing (F3), and the `[registries]`/
-`[mirrors]` config surfaces (F5) against a local static-file HTTP fixture that
-encodes the frozen ● wire shapes.
+Decision F): two-hop resolve (root -> sha256-verified dispatch object ->
+physical manifest), catalog sync (F2), status surfacing (F3), and the
+`[registries]`/`[mirrors]` config surfaces (F5) against a local static-file
+HTTP fixture that encodes the frozen ● wire shapes.
 
-Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `Observation`,
-`ObservationPlatform`, `IndexFormatConfig`, `CatalogIndex` in
+Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogIndex` in
 `crates/ocx_lib/src/oci/index/wire.rs` (`IndexFormatConfig`/`CatalogSyncOutcome`
-in `crates/ocx_lib/src/oci/index/ocx_index.rs`).
+in `crates/ocx_lib/src/oci/index/ocx_index.rs`). The dispatch object a root's
+`content` names is a real OCI image index, stored verbatim
+(`adr_oci_index_only_dispatch.md` D1).
 
 The `[registries."ocx.sh"] index = "<url>"` config-writing mechanism mirrors
 `test_oci_registry_mirror.py::write_home_config`; the fixture server's
@@ -41,7 +42,7 @@ import pytest
 from src import static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
-from src.registry import clone_manifest_chain, fetch_platform_manifest_digest
+from src.registry import clone_manifest_chain, fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner, registry_dir
 
 
@@ -180,13 +181,14 @@ def test_two_hop_resolve_snapshots_offline_and_hits_only_the_fixture(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """`ocx index update` two-hop resolves through the fixture (root -> obs,
-    sha256-verified -> physical manifest from the local registry), and the
-    resulting local index resolves the same package fully offline afterwards.
+    """`ocx index update` two-hop resolves through the fixture (root ->
+    sha256-verified dispatch object -> physical manifest from the local
+    registry), and the resulting local index resolves the same package fully
+    offline afterwards.
 
-    Also covers item #8 ([registries] override authority): every root/obs/
-    config request in this flow lands on the fixture, never the default
-    `https://index.ocx.sh`.
+    Also covers item #8 ([registries] override authority): every root,
+    dispatch-object and config request in this flow lands on the fixture,
+    never the default `https://index.ocx.sh`.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -209,20 +211,20 @@ def test_two_hop_resolve_snapshots_offline_and_hits_only_the_fixture(
     index_dir.mkdir()
     ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
 
-    # Every hop landed on the fixture (item #8) — root, obs, and the
-    # config.json probe all resolved through the configured override.
+    # Every hop landed on the fixture (item #8) — root, dispatch object, and
+    # the config.json probe all resolved through the configured override.
     requested_paths = [record.path for record in index_server.requests]
     assert any(path.endswith("/config.json") for path in requested_paths)
     assert any(path.endswith(f"/p/{repository}.json") for path in requested_paths)
-    obs_hex = entry.obs_digest.split(":", 1)[1]
-    assert any(f"/o/sha256/{obs_hex}.json" in path for path in requested_paths)
+    index_hex = entry.index_digest.split(":", 1)[1]
+    assert any(f"/o/sha256/{index_hex}.json" in path for path in requested_paths)
 
-    # Self-contained afterwards: the root document + the obs dispatch object,
+    # Self-contained afterwards: the root document + the dispatch object,
     # under the `ocx.sh` source subtree (A2 — dots preserved by slugify).
     assert _root_document_path(index_dir, repository).is_file()
-    obs_object = _dispatch_object_path(index_dir, repository, obs_hex)
-    assert obs_object.is_file()
-    assert hashlib.sha256(obs_object.read_bytes()).hexdigest() == obs_hex
+    index_object = _dispatch_object_path(index_dir, repository, index_hex)
+    assert index_object.is_file()
+    assert hashlib.sha256(index_object.read_bytes()).hexdigest() == index_hex
 
     # Offline re-resolve: zero network, resolves through the local index
     # alone (mirrors test_index_selfcontained.py's self-containment check).
@@ -280,8 +282,8 @@ def test_two_hop_resolve_under_a_non_ocx_sh_namespace(
     # The logical id carries the NON-ocx.sh namespace (static_index hardcodes
     # `ocx.sh/...` in its own `logical_id`, so build it explicitly here).
     logical_id = f"{namespace}/{repository}:1.0.0"
-    obs_hex = hashlib.sha256(
-        static_index.observation_bytes(leaf_digest, os=os_name, architecture=arch_name)
+    index_hex = hashlib.sha256(
+        static_index.index_bytes(leaf_digest, os=os_name, architecture=arch_name)
     ).hexdigest()
 
     index_dir = tmp_path / "index_dir"
@@ -293,11 +295,11 @@ def test_two_hop_resolve_under_a_non_ocx_sh_namespace(
     requested_paths = [record.path for record in index_server.requests]
     assert any(path.endswith("/config.json") for path in requested_paths)
     assert any(path.endswith(f"/p/{repository}.json") for path in requested_paths)
-    assert any(f"/o/sha256/{obs_hex}.json" in path for path in requested_paths)
+    assert any(f"/o/sha256/{index_hex}.json" in path for path in requested_paths)
 
     # Snapshotted under the `corp.example` source subtree (A2).
     assert _root_document_path(index_dir, repository, namespace).is_file()
-    assert _dispatch_object_path(index_dir, repository, obs_hex, namespace).is_file()
+    assert _dispatch_object_path(index_dir, repository, index_hex, namespace).is_file()
 
     # Offline re-resolve through the local index alone — zero network.
     clean_home = tmp_path / "clean_home"
@@ -323,7 +325,7 @@ def test_package_install_pulls_layers_from_physical_registry_and_execs_offline(
     index_server: static_index.StaticIndexServer,
 ) -> None:
     """A full `ocx package install` through the live chain: the manifest resolves
-    via the fixture (root -> obs -> physical manifest) and the LAYER blobs are
+    via the fixture (root -> dispatch object -> physical manifest) and the LAYER blobs are
     pulled from the physical registry the root's `repository` points at — never
     from the logical `ocx.sh` host, which has no `/v2` surface.
 
@@ -398,7 +400,7 @@ def test_corrupt_leaf_manifest_blob_self_heals_online_then_resolves_offline(
     loaded or linked.
 
     Regression for two defects in the index chain's blob recovery:
-    `recover_absent_leaf`'s digest-mismatch branch returned `Ok(None)` and left
+    `recover_absent_dispatch`'s digest-mismatch branch returned `Ok(None)` and left
     the corrupt blob in place (so `write_blob`'s check-first fast path re-accepted
     it forever, and every later offline resolve reloaded tampered bytes), and the
     install-staging shortcut short-circuited on blob-path EXISTENCE alone. The
@@ -462,11 +464,11 @@ def test_corrupt_leaf_manifest_blob_self_heals_online_then_resolves_offline(
 
 
 # ---------------------------------------------------------------------------
-# 2 — obs tamper: hard DataError, nothing persisted
+# 2 — dispatch-object tamper: hard DataError, nothing persisted
 # ---------------------------------------------------------------------------
 
 
-def test_observation_tamper_is_hard_dataerror_and_persists_nothing(
+def test_dispatch_object_tamper_is_hard_dataerror_and_persists_nothing(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
@@ -491,9 +493,9 @@ def test_observation_tamper_is_hard_dataerror_and_persists_nothing(
 
     # Tamper: the root still points at the honest digest, but the bytes
     # served at that same URL no longer hash to it.
-    obs_hex = entry.obs_digest.split(":", 1)[1]
-    obs_path = index_server.root / "p" / repository / "o" / "sha256" / f"{obs_hex}.json"
-    obs_path.write_bytes(b'{"platforms":[]}TAMPERED-BYTES-DO-NOT-HASH')
+    index_hex = entry.index_digest.split(":", 1)[1]
+    index_path = index_server.root / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
+    index_path.write_bytes(b'{"platforms":[]}TAMPERED-BYTES-DO-NOT-HASH')
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
@@ -507,10 +509,10 @@ def test_observation_tamper_is_hard_dataerror_and_persists_nothing(
     assert "digest mismatch" in result.stderr
 
     # F1 write order (dispatch object -> root -> catalog entry) means a
-    # tampered obs fetch fails BEFORE anything is written — no dispatch
+    # tampered fetch fails BEFORE anything is written — no dispatch
     # object, no root document, under the whole index home.
     assert not list(index_dir.rglob("*.json")), (
-        "a tampered obs fetch must persist nothing at all"
+        "a tampered dispatch-object fetch must persist nothing at all"
     )
 
 
@@ -576,7 +578,7 @@ def test_yanked_tag_refused_optin_allows_digest_pin_bypasses(
 
     # (a) a tag resolve is refused without the opt-in. The refusal fires
     # before any dispatch object or root is persisted (surface_status runs
-    # before the obs fetch commits) — nothing lands on disk.
+    # before the dispatch-object fetch commits) — nothing lands on disk.
     refused = ocx.plain(
         "--index", str(index_dir), "index", "update", entry.logical_id, check=False
     )
@@ -831,9 +833,9 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
     assert digest_before == expected_leaf_digest
 
     # Migrate: byte-identical content moves to a new physical repo; only the
-    # root's `repository` pointer changes — the obs/tag digests are untouched
-    # (the platform-manifest digest is the same content, so the obs object's
-    # own digest is unchanged too).
+    # root's `repository` pointer changes — the dispatch/tag digests are
+    # untouched (the platform-manifest digest is the same content, so the
+    # dispatch object's own digest is unchanged too).
     clone_manifest_chain(ocx.registry, repo_before, repo_after, "1.0.0")
     static_index.write_package(
         index_server.root,
@@ -849,13 +851,13 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
     ocx.plain("--index", str(index_dir), "index", "update", logical_id)
 
     # The migrated root re-verifies and re-stores under the SAME logical id,
-    # naming the NEW physical repository. The dispatch object (the obs
-    # object, keyed by content digest, never a leaf manifest — A3) is
-    # unchanged since the underlying platform content did not move.
-    obs_hex = entry.obs_digest.split(":", 1)[1]
-    obs_object = _dispatch_object_path(index_dir, repository, obs_hex)
-    assert obs_object.is_file()
-    assert hashlib.sha256(obs_object.read_bytes()).hexdigest() == obs_hex
+    # naming the NEW physical repository. The dispatch object (keyed by content
+    # digest, never a leaf manifest — A3) is unchanged since the underlying
+    # platform content did not move.
+    index_hex = entry.index_digest.split(":", 1)[1]
+    index_object = _dispatch_object_path(index_dir, repository, index_hex)
+    assert index_object.is_file()
+    assert hashlib.sha256(index_object.read_bytes()).hexdigest() == index_hex
 
     root_doc = json.loads(_root_document_path(index_dir, repository).read_text())
     assert root_doc["repository"] == f"oci://{ocx.registry}/{repo_after}", (
@@ -863,8 +865,8 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
     )
 
     # The pre-migration committed lock still resolves — fully offline. Listing
-    # platforms needs no network: the obs object already carries the resolved
-    # `platform -> digest` map (A3).
+    # platforms needs no network: the dispatch object already carries the
+    # resolved `platform -> digest` map (A3).
     clean_home = tmp_path / "clean_home"
     clean_home.mkdir()
     offline_runner = OcxRunner(ocx.binary, clean_home, ocx.registry)
@@ -899,7 +901,7 @@ def test_index_role_mirror_override_routes_every_request_to_the_override(
     hostname (`.invalid` TLD, RFC 2606); a direct hit would fail DNS
     resolution immediately. Success here is only possible because the
     override substitutes the fixture BEFORE any network call — every
-    root/obs/config request lands on the fixture, none on the un-mirrored
+    root, dispatch-object and config request lands on the fixture, none on the un-mirrored
     base host.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
@@ -1079,7 +1081,7 @@ def test_tag_scoped_update_preserves_sibling_tag_in_persisted_root(
     )
     # `write_package` only writes the ONE tag it is given. Add a sibling tag
     # (`2.0`) to the SAME published root document by patching the fixture
-    # bytes directly (same technique as `test_observation_tamper_...` above)
+    # bytes directly (same technique as `test_dispatch_object_tamper_...` above)
     # — the published root now carries two tags for one repository.
     root_path = index_server.root / "p" / f"{repository}.json"
     root_doc = json.loads(root_path.read_text())
@@ -1130,12 +1132,13 @@ def test_tag_scoped_update_preserves_sibling_tag_in_persisted_root(
 
 # ---------------------------------------------------------------------------
 # B2 — snapshot completeness: a tag-scoped update persists the full published
-#      root, so it must fetch EVERY distinct obs that root references, not just
-#      the named tag's. (`LocalIndex::refresh_published`, A2/A3/F1.)
+#      root, so it must fetch EVERY distinct dispatch object that root
+#      references, not just the named tag's.
+#      (`LocalIndex::refresh_published`, A2/A3/F1.)
 # ---------------------------------------------------------------------------
 
 
-def test_tag_scoped_update_fetches_every_distinct_sibling_obs(
+def test_tag_scoped_update_fetches_every_distinct_sibling_dispatch_object(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
@@ -1143,17 +1146,17 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_obs(
 ) -> None:
     """B2 (Codex-high): `ocx index update pkg:1.0` persists the FULL published
     root document (every tag the publisher wrote), so it must also fetch every
-    DISTINCT observation object those sibling tags reference — otherwise the
-    committed root points a sibling tag at an obs object absent from `o/`, and
+    DISTINCT dispatch object those sibling tags reference — otherwise the
+    committed root points a sibling tag at an object absent from `o/`, and
     that sibling cannot resolve offline (`adr_index_indirection.md` A2/A3/F1).
 
     Distinct from the existing
     `test_tag_scoped_update_preserves_sibling_tag_in_persisted_root`: that one
-    makes both tags share ONE obs digest, so persisting the named tag's obs
-    incidentally covers the sibling and the gap stays hidden. Here tag `2.0`
-    points at a DISTINCT obs digest, so only fetching `1.0`'s obs leaves `2.0`
-    dangling — the actual bug `refresh_published` carries (it fans obs persists
-    over `identifier.tag()` only, then writes the whole root).
+    makes both tags share ONE dispatch digest, so persisting the named tag's
+    object incidentally covers the sibling and the gap stays hidden. Here tag
+    `2.0` points at a DISTINCT dispatch digest, so only fetching `1.0`'s leaves
+    `2.0` dangling — the actual bug `refresh_published` carries (it fans the
+    persists over `identifier.tag()` only, then writes the whole root).
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -1172,29 +1175,30 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_obs(
         architecture=arch_name,
     )
 
-    # A DISTINCT sibling obs: tag `2.0` points at a different platform digest,
-    # so its observation object hashes to a different digest than `1.0`'s. The
-    # obs bytes are self-serving for an offline `index list --platforms` (which
-    # never fetches the leaf), so a fabricated-but-valid leaf digest is enough.
+    # A DISTINCT sibling dispatch object: tag `2.0` points at a different
+    # platform digest, so its image index hashes to a different digest than
+    # `1.0`'s. Those bytes are self-serving for an offline
+    # `index list --platforms` (which never fetches the leaf), so a
+    # fabricated-but-valid leaf digest is enough.
     sibling_leaf = "sha256:" + hashlib.sha256(b"b2-distinct-sibling-leaf").hexdigest()
-    sibling_obs_bytes = static_index.observation_bytes(
+    sibling_index_bytes = static_index.index_bytes(
         sibling_leaf, os=os_name, architecture=arch_name
     )
-    sibling_obs_hex = hashlib.sha256(sibling_obs_bytes).hexdigest()
-    assert sibling_obs_hex != entry.obs_digest.split(":", 1)[1], (
-        "test precondition: the sibling obs must differ from the named tag's obs"
+    sibling_index_hex = hashlib.sha256(sibling_index_bytes).hexdigest()
+    assert sibling_index_hex != entry.index_digest.split(":", 1)[1], (
+        "test precondition: the sibling object must differ from the named tag's"
     )
-    sibling_obs_path = (
-        index_server.root / "p" / repository / "o" / "sha256" / f"{sibling_obs_hex}.json"
+    sibling_index_path = (
+        index_server.root / "p" / repository / "o" / "sha256" / f"{sibling_index_hex}.json"
     )
-    sibling_obs_path.write_bytes(sibling_obs_bytes)
+    sibling_index_path.write_bytes(sibling_index_bytes)
 
-    # Patch the published root to add tag `2.0` -> the distinct obs (same
+    # Patch the published root to add tag `2.0` -> the distinct object (same
     # direct-bytes technique the sibling-preservation test uses).
     root_path = index_server.root / "p" / f"{repository}.json"
     root_doc = json.loads(root_path.read_text())
     root_doc["tags"]["2.0"] = {
-        "content": f"sha256:{sibling_obs_hex}",
+        "content": f"sha256:{sibling_index_hex}",
         "observed": "2026-01-01T00:00:00Z",
     }
     root_path.write_bytes(
@@ -1206,15 +1210,16 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_obs(
     # Tag-scoped update names ONLY "1.0".
     ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
 
-    # Direct check: the sibling tag's DISTINCT obs object must be present in the
-    # local dispatch-object CAS. Fetching only the named tag's obs (the bug)
+    # Direct check: the sibling tag's DISTINCT dispatch object must be present
+    # in the local dispatch-object CAS. Fetching only the named tag's (the bug)
     # leaves it absent even though the persisted root references it.
-    sibling_obs_local = _dispatch_object_path(index_dir, repository, sibling_obs_hex)
-    assert sibling_obs_local.is_file(), (
-        "a tag-scoped update must fetch every DISTINCT obs the persisted root "
-        "references, not only the named tag's — sibling '2.0' obs is missing"
+    sibling_local = _dispatch_object_path(index_dir, repository, sibling_index_hex)
+    assert sibling_local.is_file(), (
+        "a tag-scoped update must fetch every DISTINCT dispatch object the "
+        "persisted root references, not only the named tag's — sibling '2.0' "
+        "is missing"
     )
-    assert hashlib.sha256(sibling_obs_local.read_bytes()).hexdigest() == sibling_obs_hex
+    assert hashlib.sha256(sibling_local.read_bytes()).hexdigest() == sibling_index_hex
 
     # Behavioral check: sibling '2.0' — never named — resolves fully offline.
     sibling_id = f"ocx.sh/{repository}:2.0"
@@ -1242,7 +1247,7 @@ def test_piggyback_catalog_sync_snapshots_only_the_named_package(
 ) -> None:
     """B3 (Codex-medium + perf): the first piggyback catalog sync after a
     single-package `ocx index update` must materialize ONLY the named package's
-    root + obs on disk. Sibling packages that are merely NEW in the remote
+    root + dispatch object on disk. Sibling packages that are merely NEW in the remote
     catalog (absent from the local catalog) are LISTING ROWS — recorded in
     `c/index.json`, materialized only when first `update`d
     (`adr_index_indirection.md` F2: "for packages in the remote catalog but not
@@ -1397,7 +1402,7 @@ def test_offline_yanked_tag_resolve_refused_from_committed_root(
 
     # (b) OFFLINE digest-pinned resolve of the same content succeeds — a yank is
     # a tag-lane signal, never checked on an immutable digest pin.
-    digest_id = f"ocx.sh/{repository}@{entry.obs_digest}"
+    digest_id = f"ocx.sh/{repository}@{entry.index_digest}"
     allowed = ocx.plain(
         "--offline",
         "--index",
@@ -1591,7 +1596,7 @@ def test_index_role_only_mirror_for_registry_host_never_affects_plain_install(
 
 # ---------------------------------------------------------------------------
 # G6 case B — a registry-role-only mirror entry for the INDEX fixture's host
-#             never redirects index (root/obs/config) traffic.
+#             never redirects index (root/dispatch/config) traffic.
 # ---------------------------------------------------------------------------
 
 
@@ -1611,7 +1616,7 @@ def test_registry_role_only_mirror_for_index_host_never_redirects_index_traffic(
     (`mirrors_index`, fed by `resolved_mirrors.index`); a registry-role entry
     keyed by the same host is invisible to it. The registry-role value points
     at a dead `.invalid` host: if it leaked into `resolve_base_url`'s override
-    lookup, every root/obs/config request would be sent there instead and
+    lookup, every root, dispatch-object and config request would be sent there instead and
     `ocx index update` would fail outright.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
@@ -1645,13 +1650,13 @@ def test_registry_role_only_mirror_for_index_host_never_redirects_index_traffic(
     assert requested_paths, "the fixture must have received the two-hop traffic"
     assert any(path.endswith("/config.json") for path in requested_paths)
     assert any(path.endswith(f"/p/{repository}.json") for path in requested_paths)
-    obs_hex = entry.obs_digest.split(":", 1)[1]
-    assert any(f"/o/sha256/{obs_hex}.json" in path for path in requested_paths)
+    index_hex = entry.index_digest.split(":", 1)[1]
+    assert any(f"/o/sha256/{index_hex}.json" in path for path in requested_paths)
 
 
 # ---------------------------------------------------------------------------
 # G7 — both roles composed in ONE install: the index-role mirror serves the
-#      root/obs traffic while the registry-role mirror carries the physical
+#      root/dispatch traffic while the registry-role mirror carries the physical
 #      manifest/layer fetch, neither clobbering the other's seam.
 # ---------------------------------------------------------------------------
 
@@ -1673,9 +1678,9 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     live ONLY on `mirror_registry`. A successful install, with the manifest
     fetch proven absent from the canonical registry, is only possible if the
     registry-role mirror rewrote the physical fetch while the fixture (never
-    the dead `.invalid` base) served every root/obs/config request via the
-    index-role mirror — the two seams compose without either clobbering the
-    other.
+    the dead `.invalid` base) served every root, dispatch-object and config
+    request via the index-role mirror — the two seams compose without either
+    clobbering the other.
     """
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
     pkg = make_package(
@@ -1717,8 +1722,9 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     index_dir.mkdir()
     ocx.plain("--index", str(index_dir), "package", "install", entry.logical_id)
 
-    # (2) every root/obs/config request landed on the fixture — the index-role
-    # mirror substituted it for the dead base, replace semantics.
+    # (2) every root, dispatch-object and config request landed on the fixture
+    # — the index-role mirror substituted it for the dead base, replace
+    # semantics.
     requested_paths = [record.path for record in index_server.requests]
     assert requested_paths, "the fixture must have received the two-hop traffic"
     assert any(path.endswith("/config.json") for path in requested_paths)
@@ -1740,3 +1746,253 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     assert_symlink_exists(candidate)
     mirror_slug = registry_dir(mirror_registry)
     assert_not_exists(symlinks_root / mirror_slug)
+
+
+# ===========================================================================
+# adr_oci_index_only_dispatch.md — the stored object IS the registry's image
+# index, so three things become true that could not be before.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# A13 — the pinned-leaf path: resolved, never refused, and writes nothing
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_leaf_digest_resolves_and_leaves_the_dispatch_store_untouched(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """A digest-pinned leaf platform manifest — the shape a committed
+    `ocx.lock` stores — resolves, and the `o/` directory is byte-identical
+    before and after.
+
+    This pins `LocalIndex::persist_dispatch`'s EXISTING gate and adds no
+    refusal to it. D2's scope boundary is tag entries in a root document; a
+    digest pin is not a tag entry, so `Manifest::Image` is *required* here,
+    not rejected. A fail-closed reflex that made `persist_dispatch` refuse a
+    bare manifest would break every locked project on the machine — which is
+    exactly why the negative half (nothing written) and the positive half (it
+    resolves at all) are asserted together.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    configure_index_source(ocx, index_server)
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "package", "install", entry.logical_id)
+
+    objects_before = {
+        path.relative_to(index_dir).as_posix(): path.read_bytes()
+        for path in index_dir.rglob("o/*/*.json")
+    }
+    assert objects_before, "precondition: the tag resolve must have stored a dispatch object"
+
+    # The lock's own identity: `<logical>@<platform-leaf-digest>` (locks store
+    # the platform-leaf digest directly, never an index digest — an index
+    # digest is rewritten on every platform push).
+    pinned = f"ocx.sh/{repository}@{leaf_digest}"
+    result = ocx.plain("--index", str(index_dir), "package", "exec", pinned, "--", "hello", check=False)
+    assert result.returncode == 0, (
+        f"a pinned leaf digest must resolve, never be refused: rc={result.returncode}\n{result.stderr}"
+    )
+    assert pkg.marker in result.stdout
+
+    objects_after = {
+        path.relative_to(index_dir).as_posix(): path.read_bytes()
+        for path in index_dir.rglob("o/*/*.json")
+    }
+    assert objects_after == objects_before, (
+        "a pinned leaf manifest is never copied into the dispatch-object store"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A14 — a superseded tag still resolves from the local snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_superseded_tag_still_resolves_from_the_local_dispatch_object(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The case the snapshot exists for (ADR Context point 3): the publisher
+    re-points the tag at a different image index, so the index the snapshot
+    named is superseded upstream. The local copy keeps resolving it, and does
+    so without asking the fixture again.
+
+    The assertion that carries the test is the request log: after the
+    supersession the resolve must land ZERO new requests on the fixture. A
+    plain "it still resolves" would also be satisfied by a client that
+    re-fetched and silently followed the moved tag — the opposite of a
+    snapshot.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    configure_index_source(ocx, index_server)
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
+    snapshot = _dispatch_object_path(index_dir, repository, entry.index_digest.split(":", 1)[1])
+    snapshot_bytes = snapshot.read_bytes()
+
+    # Supersede: the publisher re-points `1.0.0` at a DIFFERENT image index and
+    # the old one is gone from the served tree entirely — the shape a garbage
+    # collected registry leaves behind.
+    superseded_leaf = "sha256:" + hashlib.sha256(b"a14-superseding-leaf").hexdigest()
+    for stale in (index_server.root / "p" / repository / "o" / "sha256").iterdir():
+        stale.unlink()
+    static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=superseded_leaf,
+        os=os_name,
+        architecture=arch_name,
+    )
+    requests_before = len(index_server.requests)
+
+    result = ocx.plain(
+        "--index", str(index_dir), "index", "list", entry.logical_id, "--platforms"
+    )
+    assert pkg.platform in result.stdout
+
+    assert len(index_server.requests) == requests_before, (
+        "a committed snapshot resolves from `o/`; it must not re-ask the source, "
+        f"saw {[r.path for r in index_server.requests[requests_before:]]}"
+    )
+    assert snapshot.read_bytes() == snapshot_bytes, (
+        "the committed dispatch object must be untouched by an upstream supersession"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A10 — an absent dispatch object recovers from the machine-global blob store
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Not implemented: a Published source's AbsentDispatch recovery never reaches the "
+        "physical registry — `ChainedIndex::walk_chain` asks the published source, which "
+        "serves `p/<repo>/o/sha256/<hex>.json` and 404s. Two statements in the tree "
+        "contradict each other: `DispatchResolution::AbsentDispatch` documents recovery as "
+        "'the machine-global blob store first, then the physical registry', and "
+        "adr_oci_index_only_dispatch.md's 'Published absent-dispatch recovers offline' "
+        "bullet assumes the install staged the image index into $OCX_HOME/blobs — measured, "
+        "an index.ocx.sh-resolved install stages the leaf manifest and the config blob only "
+        "(the behaviour test_index_selfcontained.py item 8 pins deliberately). Strict, so "
+        "this flips to a failure the day the capability lands rather than rotting."
+    ),
+)
+def test_published_absent_dispatch_recovers_from_the_physical_registry_and_self_heals(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """A published root whose dispatch object is missing EVERYWHERE but the
+    physical registry still resolves, and the recovered bytes heal `o/` back.
+
+    This is the case `adr_oci_index_only_dispatch.md` calls impossible before
+    it. The root's `content` used to name a document ocx derived for itself:
+    no registry could serve that digest, so an incomplete CAS was terminal —
+    `GET /v2/<repo>/manifests/sha256:<minted-hex>` is a 404 by construction.
+    Now `content` IS the digest the registry served the image index under, so
+    an `AbsentDispatch` is recoverable by fetching `content` by digest
+    (`ChainedIndex` → `LocalIndex::persist_dispatch` → `stage_dispatch_bytes`).
+
+    Deleting the object from the FIXTURE as well as from the local index is
+    what makes the assertion about the physical registry: leave it served and
+    the recovery is just an ordinary re-fetch from the source, which proves
+    nothing about `content` being registry-addressable.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+
+    configure_index_source(ocx, index_server)
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+
+    # Seeded by hand rather than through `static_index.write_package`: this
+    # test's whole premise is that `content` names a digest the PHYSICAL
+    # REGISTRY can serve. `write_package` fabricates an image index (an
+    # explicit placeholder `size`, sorted keys) that no registry ever stored,
+    # so the recovery fetch would 404 by construction and the strict xfail
+    # could never flip when the capability lands.
+    served_bytes, served_digest = fetch_manifest_raw(ocx.registry, pkg.repo, "1.0.0")
+    index_hex = served_digest.split(":", 1)[1]
+    root = {
+        "repository": f"oci://{ocx.registry}/{pkg.repo}",
+        "tags": {"1.0.0": {"content": served_digest, "observed": "2026-01-01T00:00:00Z"}},
+    }
+    root_bytes = json.dumps(root, sort_keys=True, separators=(",", ":")).encode()
+    root_path = index_server.root / "p" / f"{repository}.json"
+    root_path.parent.mkdir(parents=True, exist_ok=True)
+    root_path.write_bytes(root_bytes)
+    served_object = index_server.root / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
+    served_object.parent.mkdir(parents=True, exist_ok=True)
+    served_object.write_bytes(served_bytes)
+    logical_id = f"ocx.sh/{repository}:1.0.0"
+    static_index.write_catalog(
+        index_server.root, {repository: "sha256:" + hashlib.sha256(root_bytes).hexdigest()}
+    )
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", logical_id)
+
+    dispatch = _dispatch_object_path(index_dir, repository, index_hex)
+    expected_bytes = dispatch.read_bytes()
+
+    # The root keeps naming `content`; the object is gone from the snapshot AND
+    # from the published site. Only the physical registry still has the bytes,
+    # addressable by exactly that digest.
+    dispatch.unlink()
+    for served in (index_server.root / "p" / repository / "o" / "sha256").iterdir():
+        served.unlink()
+    assert not dispatch.exists()
+
+    result = ocx.plain(
+        "--index", str(index_dir), "index", "list", logical_id, "--platforms"
+    )
+    assert pkg.platform in result.stdout, (
+        f"content must be recoverable by digest from the physical registry:\n{result.stderr}"
+    )
+    assert dispatch.is_file(), "the recovered bytes must heal the object back into `o/`"
+    assert dispatch.read_bytes() == expected_bytes, (
+        "the healed object must be byte-identical — it is the registry's own image index"
+    )

@@ -271,7 +271,14 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     body, _ = _registry_get(f"{base}/{child}", img_mt)
     _registry_put(f"{base}/flat", body, img_mt)
     flat_ref = f"{unique_repo}:flat"
-    ocx.plain("index", "update", flat_ref)
+    # A bare image manifest is not indexable: the index locks image indices, so
+    # there is nothing to record and `index update` says so rather than
+    # committing a root tag pointing at a manifest with no `o/` object.
+    result = ocx.plain("index", "update", flat_ref, check=False)
+    assert result.returncode == 79, (
+        "a tag resolving to a bare image manifest must report no indexable tag, "
+        f"got {result.returncode}: {result.stderr}"
+    )
 
     data = ocx.json("package", "inspect", flat_ref)[flat_ref]
 

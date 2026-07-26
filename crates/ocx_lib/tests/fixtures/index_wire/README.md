@@ -1,29 +1,52 @@
-# Vendored index wire-format conformance fixtures
+# Vendored index conformance fixtures
 
-Byte-exact golden vectors for the `ocx-sh/index` CONTRACTS §14 serializer,
-**vendored verbatim** from that repo's `bot/tests/golden/serializer/` — never
-hand-edit. They are this crate's cross-language conformance corpus: the Rust
-`serializer_parity` test (Track A — not built by the plan that vendored these)
-parses and re-serializes each vector and asserts byte-identity against the
-committed bytes, proving the Rust wire writer matches the Python bot's output
-exactly.
+Golden vectors **vendored verbatim** from `ocx-sh/index` (`bot/tests/golden/`) —
+never hand-edit. They are this crate's cross-language conformance corpus: the
+same bytes drive the Python bot's tests and this crate's, so two implementations
+of one rule cannot drift silently. A fixture generated from ocx's own code would
+certify whatever ocx does, which is the failure mode the corpus exists to prevent.
 
 ## Layout
 
-- `root/*.json` — `PackageRoot` vectors in the pretty-printed root form
-  (2-space indent, insertion-order fields, one trailing newline).
-- `observation/sha256/<hex>.json` — `ObservationObject` vectors in the minified
-  CAS form (alphabetized keys, `ensure_ascii`, no trailing newline); `<hex>` is
-  the sha256 of the file's own bytes, matching the real CAS filename convention.
+- `root/*.json` — `PackageRoot` vectors in the pretty-printed root form (2-space
+  indent, insertion-order fields, one trailing newline). The root document is the
+  only shape OCX serializes, so these are asserted **byte-exact**:
+  `index_wire_conformance.rs::root_fixtures_round_trip_byte_exact` re-serializes
+  each vector through `oci::index::serialize_root` and compares bytes.
+- `tag_verdicts.json` — `{tag, reserved, why}` rows for the reserved-tag rule
+  (`adr_oci_index_only_dispatch.md` D7). `tag_verdicts.rs` drives every row
+  through both `Tag::is_reserved` and `Tag::is_reserved_str`. Reservation spans
+  `oci::Algorithm::ALL` = {sha256, sha384, sha512}, deliberately wider than
+  D7:319's sha256-only text — reservation and addressability are different
+  questions, and only reservation widens. `why` is documentation, never asserted.
+- `dispatch/sha256/<hex>.json` — real OCI image indices, one per file, each named
+  by the sha256 of its own bytes (the CAS convention of `p/<ns>/<pkg>/o/<algo>/`,
+  D1). `dispatch/expected_platforms.json` records, per vector, the exact
+  `(platform, digest)` candidate list a correct selection derives.
+  `dispatch_conformance.rs` asserts both.
+
+`dispatch/` vectors are **decode** parity, not byte parity: what a tag points at
+is a registry's own image index, stored byte-for-byte as served and never
+re-rendered (`adr_oci_index_only_dispatch.md` R4), so nothing re-serializes them.
+The CAS filename guards the *fixtures* — it fails when a vector is hand-edited
+or regenerated rather than re-captured. It does not guard ocx: that ocx keeps
+the served bytes is enforced by `LocalIndex::stage_dispatch_bytes` recomputing
+the digest before it writes, and pinned by that module's unit tests.
+
+Upstream's `dispatch/README.md` records where every byte in that directory came
+from: which registry, which index digest, and the one field deliberately altered.
+It is not vendored — read it at the pinned commit in `ocx-sh/index`.
 
 ## Provenance & re-sync
 
 - `SOURCE_COMMIT` pins the `ocx-sh/index` commit these bytes came from.
-- Re-sync with `test/scripts/sync_index_conformance.sh` — fast path when a local
-  `ocx-sh/index` checkout is available, otherwise a GitHub fetch pinned to
-  `SOURCE_COMMIT`. It prints a diff and **never commits**; review and commit the
-  result yourself.
-- Deliberately **not** wired into `task verify`: an automatic live check would
+- `test/scripts/sync_index_conformance.sh` re-vendors: a bare re-run verifies
+  against the pin, `--ref <ref>` vendors and re-pins, `--check` compares the
+  vendored tree against `ocx-sh/index@main` without writing to it. It prints the
+  resulting working-tree changes and **never commits** — review and commit
+  yourself.
+- Deliberately **not** wired into `task verify`: a live check at test time would
   reintroduce the network dependency this vendored copy exists to remove
-  (offline-first). Staleness is caught by re-running the sync script, not at
-  test time — an explicit, accepted trade-off.
+  (offline-first). Drift is bounded instead by `task test:index-conformance-drift`
+  on the weekly `verify-deep.yml` schedule — a 7-day window, not per-PR network
+  cost for a signal that changes monthly.

@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "description": "Cross-repo drift gate for the D7 reserved-tag rule (ADR oci_index_only_dispatch, D7:319). Both crates/ocx_lib's Tag::is_reserved (Rust) and the bot's reserved-tag predicate (Python) must reproduce this exact verdict table. Per meta-plan_oci_index_alignment.md §10.3, the reserved-canonical-form rule here is deliberately widened beyond D7:319's sha256-only text to cover Algorithm::ALL = {sha256, sha384, sha512} -- reservation and addressability are different questions, and only reservation widens; addressability stays sha256-only pending N-12. A new row is a shared-fixture change reviewed on both sides; a new key on a case is a schema change reviewed on both sides. `why` is documentation only, never asserted.",
+  "cases": [
+    {
+      "tag": "3.28.1",
+      "reserved": false,
+      "why": "ordinary version"
+    },
+    {
+      "tag": "latest",
+      "reserved": false,
+      "why": "rolling tag"
+    },
+    {
+      "tag": "debug-3.12",
+      "reserved": false,
+      "why": "variant-prefixed version"
+    },
+    {
+      "tag": "__ocx.desc",
+      "reserved": true,
+      "why": "internal namespace, dotted"
+    },
+    {
+      "tag": "__ocx.patch",
+      "reserved": true,
+      "why": "internal namespace, dotted"
+    },
+    {
+      "tag": "__ocx",
+      "reserved": true,
+      "why": "internal namespace, bare"
+    },
+    {
+      "tag": "__ocxfoo",
+      "reserved": true,
+      "why": "internal namespace, no dot"
+    },
+    {
+      "tag": "__OCX.desc",
+      "reserved": true,
+      "why": "internal namespace, case-folded"
+    },
+    {
+      "tag": "__ocx.FUTURE",
+      "reserved": true,
+      "why": "unknown internal tag"
+    },
+    {
+      "tag": "sha256.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "reserved": true,
+      "why": "canonical digest alias, sha256"
+    },
+    {
+      "tag": "sha256.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+      "reserved": false,
+      "why": "wrong hex length, not a digest alias"
+    },
+    {
+      "tag": "sha256.ghijklmnopqrstuvghijklmnopqrstuvghijklmnopqrstuvghijklmnopqrstuv",
+      "reserved": false,
+      "why": "non-hex body"
+    },
+    {
+      "tag": "__oc",
+      "reserved": false,
+      "why": "shorter than the prefix"
+    },
+    {
+      "tag": "x__ocx",
+      "reserved": false,
+      "why": "prefix not at position 0"
+    },
+    {
+      "tag": "sha384.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "reserved": true,
+      "why": "canonical digest alias, sha384 -- an implementation hardcoded to sha256 fails this row"
+    },
+    {
+      "tag": "sha512.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "reserved": true,
+      "why": "canonical digest alias, sha512 -- an implementation hardcoded to sha256 fails this row. Note: this tag is 135 chars (\"sha512.\" + 128 hex), exceeding the OCI tag grammar's 128-char max (schema/root.schema.json ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$), so it can never appear as an actual tag from a registry -- the verdict here documents the reserved-canonical-form rule's own logic, not a reachable input"
+    },
+    {
+      "tag": "sha384.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "reserved": false,
+      "why": "prefix matches sha384, but hex length is sha256's -- catches a prefix-only check"
+    }
+  ]
+}

@@ -35,7 +35,7 @@ Covers:
 12. Root copy-first (F1): a Default-mode resolve of an already-snapshotted
     package never re-fetches or rewrites the root document; only an
     explicit `ocx index update` bumps `observed`.
-13. F1 crash-orphan recovery: an obs object written but root/catalog never
+13. F1 crash-orphan recovery: a dispatch object written but root/catalog never
     committed (steps 2-3 pending) self-heals cleanly on the next online
     `ocx index update`, reusing rather than duplicating the orphan.
 14. F1 crash-orphan recovery: a root re-written but catalog entry left
@@ -53,10 +53,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import tomllib
-import urllib.error
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -64,7 +63,7 @@ import pytest
 
 from src import OcxRunner, PackageInfo, static_index
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest
+from src.registry import fetch_manifest_digest, fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import registry_dir
 
 # ---------------------------------------------------------------------------
@@ -102,24 +101,6 @@ def configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServe
         f'[registries."ocx.sh"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
-
-
-def _fetch_raw_manifest(registry: str, repo: str, ref: str) -> bytes:
-    """Fetch the exact bytes the registry serves for `repo:ref`."""
-    url = f"http://{registry}/v2/{repo}/manifests/{ref}"
-    for media_type in (
-        "application/vnd.oci.image.index.v1+json",
-        "application/vnd.oci.image.manifest.v1+json",
-        "application/vnd.docker.distribution.manifest.v2+json",
-        "application/vnd.docker.distribution.manifest.list.v2+json",
-    ):
-        request = urllib.request.Request(url, headers={"Accept": media_type})
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                return response.read()
-        except urllib.error.HTTPError:
-            continue
-    raise RuntimeError(f"could not fetch manifest bytes for {registry}/{repo}@{ref}")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +153,13 @@ def test_dispatch_object_count_multi_platform_one_single_platform_zero(
     `sha256.<hex>` tag (`Client::push_canonical_tag`), which points DIRECTLY
     at the bare platform manifest — a real, product-reachable single-platform
     tag shape, not a synthetic one.
+
+    That tag is also the whole curated universe of its own tag-scoped update,
+    and it can carry no version, so the refresh has nothing left to record:
+    `NotFound` (79), "no indexable tag". The refusal is the point — under
+    `adr_oci_index_only_dispatch.md` D1 there is no second document shape to
+    fall back on, so "zero objects" here is the absence of a write, not the
+    absence of a fetch.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -182,28 +170,34 @@ def test_dispatch_object_count_multi_platform_one_single_platform_zero(
     index_dir.mkdir()
     ocx.plain("--index", str(index_dir), "index", "update", pkg.short)
 
-    index_bytes = _fetch_raw_manifest(ocx.registry, pkg.repo, pkg.tag)
+    index_bytes = fetch_manifest_raw(ocx.registry, pkg.repo, pkg.tag)[0]
     index_hex = hashlib.sha256(index_bytes).hexdigest()
     objects = list(index_dir.rglob("o/sha256/*.json"))
     assert len(objects) == 1, f"expected exactly one dispatch object, got {objects}"
     assert objects[0].name == f"{index_hex}.json"
     assert objects[0].read_bytes() == index_bytes, (
-        "the persisted dispatch object must be byte-identical to the registry's own image index"
+        "the persisted object is the registry's index digest and content"
     )
 
-    # Single-platform (canonical `sha256.<hex>`) tag: zero dispatch objects.
+    # Single-platform (canonical `sha256.<hex>`) tag: zero dispatch objects,
+    # and no root entry either.
     algo, leaf_hex = leaf_digest.split(":", 1)
     canonical_tag = f"{algo}.{leaf_hex}"
     index_dir2 = tmp_path / "index_dir_single"
     index_dir2.mkdir()
-    ocx.plain("--index", str(index_dir2), "index", "update", f"{pkg.repo}:{canonical_tag}")
+    refused = ocx.plain(
+        "--index", str(index_dir2), "index", "update", f"{pkg.repo}:{canonical_tag}", check=False
+    )
 
+    assert refused.returncode == 79, (
+        f"expected NotFound (79), got rc={refused.returncode}\n{refused.stderr}"
+    )
+    assert "no indexable tag" in refused.stderr, refused.stderr
     assert not list(index_dir2.rglob("o/*/*.json")), (
         "a single-platform (bare Image manifest) tag must persist zero dispatch objects"
     )
-    root_doc = json.loads(next(index_dir2.rglob(f"{pkg.repo}.json")).read_text())
-    assert root_doc["tags"][canonical_tag]["content"] == leaf_digest, (
-        "a single-platform tag's content must be the leaf manifest digest itself"
+    assert not list(index_dir2.rglob(f"{pkg.repo}.json")), (
+        "a tag that can carry no version must leave no root document behind"
     )
 
 
@@ -382,8 +376,6 @@ def test_copy_a_mirror_parity_offline_resolve_and_byte_identical_subtree(
     # 1. Raw filesystem copy ("wget --mirror") of the fixture's served tree
     #    into a fresh index home under the `ocx.sh` source key — no `ocx
     #    index update` involved at all.
-    import shutil
-
     copy_home = tmp_path / "copy_home"
     copy_home.mkdir()
     shutil.copytree(index_server.root, copy_home / "ocx.sh")
@@ -407,15 +399,81 @@ def test_copy_a_mirror_parity_offline_resolve_and_byte_identical_subtree(
     written_root_bytes = (written_home / "ocx.sh" / "p" / f"{repository}.json").read_bytes()
     assert written_root_bytes == fixture_root_bytes, "the written root document must byte-equal the fixture's own"
 
-    fixture_obs_dir = index_server.root / "p" / repository / "o" / "sha256"
-    written_obs_dir = written_home / "ocx.sh" / "p" / repository / "o" / "sha256"
-    fixture_obs_files = sorted(p.name for p in fixture_obs_dir.iterdir())
-    written_obs_files = sorted(p.name for p in written_obs_dir.iterdir())
-    assert fixture_obs_files == written_obs_files
-    for name in fixture_obs_files:
-        assert (fixture_obs_dir / name).read_bytes() == (written_obs_dir / name).read_bytes(), (
+    fixture_dispatch_dir = index_server.root / "p" / repository / "o" / "sha256"
+    written_dispatch_dir = written_home / "ocx.sh" / "p" / repository / "o" / "sha256"
+    fixture_dispatch_files = sorted(p.name for p in fixture_dispatch_dir.iterdir())
+    written_dispatch_files = sorted(p.name for p in written_dispatch_dir.iterdir())
+    assert fixture_dispatch_files == written_dispatch_files
+    for name in fixture_dispatch_files:
+        assert (fixture_dispatch_dir / name).read_bytes() == (written_dispatch_dir / name).read_bytes(), (
             f"dispatch object {name} must byte-equal the fixture's own copy"
         )
+
+
+def test_copied_subtree_resolves_with_no_source_kind_configured(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+):
+    """ADR Validation bullet 6 — the decode is unconditional.
+
+    A subtree copied out of a PUBLISHED index is resolved by a machine that
+    has no `[registries."ocx.sh"] index = ...` entry at all, so the local
+    index reads it as `SourceKind::Derived`. It still resolves: the dispatch
+    object is an OCI image index whatever produced it, and
+    `local_index::decode_index_manifest` has exactly one parse — there is no
+    source-kind-dependent second codec to pick wrong
+    (`adr_oci_index_only_dispatch.md` D1).
+
+    Two things make it falsifiable rather than incidental. The consuming home
+    carries NO `config.toml` (asserted), so nothing can teach it the source
+    kind. And the copied tree is byte-compared before and after: an unknown
+    source kind must not provoke a re-authoring of somebody else's documents.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    configure_index_source(ocx, index_server)
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+    static_index.write_catalog(index_server.root, {repository: entry.root_digest})
+
+    copy_home = tmp_path / "copied_index"
+    copy_home.mkdir()
+    shutil.copytree(index_server.root, copy_home / "ocx.sh")
+    before = {
+        path.relative_to(copy_home).as_posix(): path.read_bytes()
+        for path in copy_home.rglob("*")
+        if path.is_file()
+    }
+
+    clean_home = tmp_path / "unconfigured_home"
+    clean_home.mkdir()
+    assert not (clean_home / "config.toml").exists(), (
+        "precondition: the consuming home must know nothing about the ocx.sh namespace"
+    )
+    runner = OcxRunner(ocx.binary, clean_home, ocx.registry)
+    result = runner.plain(
+        "--offline", "--index", str(copy_home), "index", "list", entry.logical_id, "--platforms"
+    )
+    assert pkg.platform in result.stdout, (
+        "a copied published subtree must resolve on a machine that never heard of its source"
+    )
+
+    after = {
+        path.relative_to(copy_home).as_posix(): path.read_bytes()
+        for path in copy_home.rglob("*")
+        if path.is_file()
+    }
+    assert after == before, "resolving a copied subtree must not rewrite it"
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +1018,7 @@ def test_orphan_dispatch_object_without_root_self_heals_on_next_online_update(
     never committed (a crash strictly between write-order steps 1 and 2).
 
     Hand-crafts the interrupted state directly on disk (bypassing the CLI
-    entirely, so no real crash is needed): only the obs object under `o/`
+    entirely, so no real crash is needed): only the dispatch object under `o/`
     exists; the root document and its catalog entry were never written. F1:
     "an orphan left by an aborted write is harmless — nothing points at it
     yet." A pure local read against this state must not error or corrupt
@@ -990,15 +1048,15 @@ def test_orphan_dispatch_object_without_root_self_heals_on_next_online_update(
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
 
-    # Hand-craft ONLY write-order step 1: the obs object exists under `o/`;
+    # Hand-craft ONLY write-order step 1: the dispatch object exists under `o/`;
     # the root document (step 2) and catalog entry (step 3) were never
     # written.
-    obs_hex = entry.obs_digest.split(":", 1)[1]
-    obs_src = index_server.root / "p" / repository / "o" / "sha256" / f"{obs_hex}.json"
-    obs_dst = index_dir / "ocx.sh" / "p" / repository / "o" / "sha256" / f"{obs_hex}.json"
-    obs_dst.parent.mkdir(parents=True, exist_ok=True)
-    orphan_bytes = obs_src.read_bytes()
-    obs_dst.write_bytes(orphan_bytes)
+    index_hex = entry.index_digest.split(":", 1)[1]
+    index_src = index_server.root / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
+    index_dst = index_dir / "ocx.sh" / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
+    index_dst.parent.mkdir(parents=True, exist_ok=True)
+    orphan_bytes = index_src.read_bytes()
+    index_dst.write_bytes(orphan_bytes)
     root_path = index_dir / "ocx.sh" / "p" / f"{repository}.json"
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
     assert not root_path.exists(), "precondition: the root document must not exist yet"

@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Cross-language byte-parity conformance for the canonical wire serializer
+//! Cross-language byte-parity conformance for the canonical root wire serializer
 //! (cross-track contract #1). Every vector under
-//! `tests/fixtures/index_wire/` is the exact output of `ocx-sh/index`'s
+//! `tests/fixtures/index_wire/root/` is the exact output of `ocx-sh/index`'s
 //! `bot/CONTRACTS.md` §14 Python serializer, vendored verbatim (see that
 //! directory's `README.md` — never hand-edited here). This test proves the Rust
-//! [`ocx_lib::oci::index::serialize_root`] / [`serialize_observation`] port emits
-//! byte-identical bytes, and that each observation object's bytes SHA-256-hash to
-//! its own CAS filename (the content-addressing self-consistency invariant).
+//! [`ocx_lib::oci::index::serialize_root`] port emits byte-identical bytes.
 //!
 //! A byte mismatch is a serializer bug — the fixtures are frozen upstream (pinned
 //! by `SOURCE_COMMIT`); fix the emitter, never the fixture.
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::oci::index::{IndexRoot, Observation, YankMarker, serialize_observation, serialize_root};
-use sha2::{Digest, Sha256};
+use ocx_lib::oci::index::{IndexRoot, YankMarker, serialize_root};
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index_wire")
@@ -77,39 +74,6 @@ fn root_fixtures_round_trip_byte_exact() {
             serde_json::from_slice(&expected).expect("parse root fixture as order-preserving Value");
         let produced = serialize_root(&value);
         assert_bytes_equal(&produced, &expected, &path.display().to_string());
-    }
-}
-
-#[test]
-fn observation_fixtures_round_trip_and_hash_to_filename() {
-    let obs_dir = fixtures_dir().join("observation/sha256");
-    let fixtures = json_fixtures(&obs_dir);
-    assert!(
-        !fixtures.is_empty(),
-        "expected at least one observation vector under {}",
-        obs_dir.display()
-    );
-
-    for path in fixtures {
-        let expected = std::fs::read(&path).expect("read observation fixture");
-        let observation: Observation =
-            serde_json::from_slice(&expected).expect("parse observation fixture as typed model");
-        let produced = serialize_observation(&observation);
-
-        let label = path.display().to_string();
-        assert_bytes_equal(&produced, &expected, &label);
-
-        // CAS self-consistency: the produced bytes must SHA-256-hash to the
-        // filename hex (the content-addressing invariant the whole format rests on).
-        let hash = hex::encode(Sha256::digest(&produced));
-        let filename_hex = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("observation filename stem");
-        assert_eq!(
-            hash, filename_hex,
-            "sha256 of serialized observation must equal its CAS filename for {label}"
-        );
     }
 }
 
