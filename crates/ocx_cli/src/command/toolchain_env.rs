@@ -126,15 +126,11 @@ use crate::{
 /// - 65 (`DataError`): `ocx.lock` stale (project tier).
 #[derive(Parser)]
 pub struct ToolchainEnv {
-    /// Restrict the env composition to the named group(s).
-    ///
-    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table.
-    /// The reserved name `all` expands to `default` + every declared
-    /// `[group.*]`. When omitted, scope is exactly the top-level
-    /// `[tools]` table, not every group.
-    #[arg(short = 'g', long = "group", value_delimiter = ',')]
-    pub groups: Vec<String>,
+    #[clap(flatten)]
+    pub groups: options::GroupSelection,
+
+    #[clap(flatten)]
+    pub env: options::EnvOverride,
 
     /// Target shell for eval-safe export lines.
     ///
@@ -196,7 +192,16 @@ impl ToolchainEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Reject empty comma segments (`-g ci,,lint`) BEFORE any tier split or
         // config load (parse-level, mirrors `run`/`pull` Phase A).
-        crate::app::project_context::ensure_group_segments_nonempty(&self.groups)?;
+        crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
+
+        // Same parse-level class as the group check, so it runs beside it and
+        // before the slower emit-channel resolution below. A relative `:path`
+        // value anchors to the invocation directory, exactly as under
+        // `ocx run` — and it is resolved to an absolute value here, so an
+        // emitted export line means the same thing wherever it is evaluated.
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+        let env_overrides = self.env.entries(&cwd)?;
 
         // `None` → default-format path; `Some(s)` → eval-safe emit.
         let shell = resolve_shell_arg(self.shell)?;
@@ -245,7 +250,7 @@ impl ToolchainEnv {
             // semantics. It stays offline, never installs, never hangs. The
             // PROJECT tier (the `else` arm) stays strict throughout: an explicit
             // project's missing/stale/corrupt `ocx.lock` IS an error.
-            match resolve_global_pinned_env(&context, &target, self.groups.as_slice()).await {
+            match resolve_global_pinned_env(&context, &target, self.groups.names(), &env_overrides).await {
                 Ok(Some((entries, patch_start, provenance, binaries, entrypoints))) => {
                     (entries, patch_start, provenance, binaries, entrypoints)
                 }
@@ -258,11 +263,11 @@ impl ToolchainEnv {
 
             // Validate requested groups against the loaded config (`all` is
             // expanded below; unknown → exit 64).
-            crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;
+            crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
 
             // Expand `all` in place, then promote an empty scope to the default
             // group — identical to `ocx run` Phase C.
-            let mut expanded = expand_all_keyword(&self.groups, &ctx.config);
+            let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
             if expanded.is_empty() {
                 expanded = vec![DEFAULT_GROUP.to_owned()];
             }
@@ -316,13 +321,19 @@ impl ToolchainEnv {
                 infos
             };
             // Per-package opt-out from the in-scope project `ocx.toml`, plus
-            // its `[env]` and each selected group's `[env]` (stages 4-5 —
-            // `ocx env` has no `--env`, so stage 6 is empty here). Uniformity
-            // with `ocx run` is structural: both append to the same entry
-            // vector, so what this command prints is what `ocx run` applies.
+            // its `[env]`, each selected group's `[env]`, and `--env` last —
+            // stages 4-6, assembled exactly as `ocx run` assembles them.
+            // Uniformity is structural: both append to the same entry vector,
+            // so what this command prints IS what `ocx run` applies. That
+            // equivalence is the reason `--env` belongs here at all — a caller
+            // that builds an argv array must be able to export the environment
+            // it would otherwise execute in.
+            let mut project_env =
+                crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+            project_env.extend(env_overrides);
             let scope = ocx_lib::package_manager::EnvScope::Project {
                 no_patches: ctx.config.no_patches_repositories(),
-                env: crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded),
+                env: project_env,
             };
             let (entries, patch_start, provenance, attribution) =
                 manager.resolve_env_with_attribution(&infos, false, scope).await?;
@@ -463,6 +474,7 @@ pub(crate) async fn resolve_global_pinned_env(
     context: &crate::app::Context,
     target: &Platform,
     groups: &[String],
+    env_overrides: &[Entry],
 ) -> anyhow::Result<
     Option<(
         Vec<Entry>,
@@ -488,7 +500,7 @@ pub(crate) async fn resolve_global_pinned_env(
     // applies to `ocx --global env` / `ocx --global run` and never composes
     // into a project-tier resolution — the two tiers are resolved by disjoint
     // branches of `execute`, never unioned.
-    let (no_patches, project_env) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+    let (no_patches, mut project_env) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
         Ok(config) => {
             // Expand `all` against the CONFIG's groups, not the lock's: a group
             // that declares only `[group.<name>.env]` and no tools has no lock
@@ -502,6 +514,10 @@ pub(crate) async fn resolve_global_pinned_env(
         }
         Err(_) => (std::collections::BTreeSet::new(), Vec::new()),
     };
+    // Stage 6 last, on this tier too. An unparseable global file yields an
+    // empty stage 4-5 above, but the caller's own `--env` is not the global
+    // file's to lose: it was typed on this invocation and still applies.
+    project_env.extend_from_slice(env_overrides);
 
     // Offline-only manager clone: MUST NOT contact the registry regardless
     // of `--remote` (architect boundary; §4 login-path guarantee).
@@ -612,6 +628,8 @@ fn selected_groups_global(raw: &[String], lock: &ProjectLock) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use clap::Parser;
 
@@ -638,10 +656,19 @@ mod tests {
     #[test]
     fn parses_repeatable_comma_group_flag() {
         let env = ToolchainEnv::try_parse_from(["env", "-g", "ci,lint", "-g", "release"]).unwrap();
-        assert_eq!(
-            env.groups,
-            vec!["ci".to_owned(), "lint".to_owned(), "release".to_owned()]
-        );
+        assert_eq!(env.groups.names(), ["ci", "lint", "release"]);
+    }
+
+    /// `--env` reaches the composition on this command too, so an exporter can
+    /// print the environment the equivalent `ocx run` would execute in. Parsing
+    /// is `options::EnvOverride`'s own contract; this pins only the wiring.
+    #[test]
+    fn parses_repeatable_env_flag() {
+        let env = ToolchainEnv::try_parse_from(["env", "--env", "A=1", "--env", "PATH:path=/opt/bin"]).unwrap();
+        let entries = env.env.entries(Path::new("/invocation")).expect("entries");
+        assert_eq!(entries.len(), 2, "both occurrences must reach the command");
+        assert_eq!(entries[0].key, "A");
+        assert_eq!(entries[1].key, "PATH");
     }
 
     /// `ocx env` installs on miss by default; `--no-pull` opts out. Pins the

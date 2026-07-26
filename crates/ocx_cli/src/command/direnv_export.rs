@@ -7,7 +7,7 @@ use clap::Parser;
 use ocx_lib::{
     env, oci,
     package_manager::collect_applied,
-    project::{DEFAULT_GROUP, MissingState, host_leaf_identifier, load_project_state},
+    project::{DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, load_project_state},
     shell,
 };
 
@@ -18,10 +18,15 @@ use crate::options;
 ///
 /// Reads the nearest project `ocx.toml` (project tier only — no home-tier
 /// fallback in this phase), loads the matching `ocx.lock`, looks up each
-/// default-group tool in the local object store, and prints bash export
+/// selected tool in the local object store, and prints bash export
 /// lines for the resolved environment. The command is stateless: it does
 /// not consult or update `_OCX_APPLIED`, making it suitable for use from
 /// `direnv`'s `.envrc` via `eval "$(ocx direnv export)"`.
+///
+/// `ocx direnv init` writes an `.envrc` that calls this command with no
+/// arguments, which selects the default group. Edit that line to widen the
+/// scope or add an override — `eval "$(ocx direnv export -g ci --env
+/// FORCE_COLOR=1)"` — and direnv picks it up on the next reload.
 ///
 /// Output is always bash. `direnv` evaluates `.envrc` files in a bash
 /// sub-shell regardless of the user's interactive shell; translation to
@@ -42,6 +47,12 @@ use crate::options;
 #[derive(Parser)]
 pub struct DirenvExport {
     #[clap(flatten)]
+    groups: options::GroupSelection,
+
+    #[clap(flatten)]
+    env: options::EnvOverride,
+
+    #[clap(flatten)]
     pull: options::Pull,
 }
 
@@ -49,10 +60,21 @@ impl DirenvExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let shell = shell::Shell::Bash;
 
+        // Parse-level validation first, before any filesystem work. Both are
+        // usage errors (exit 64) — the one place this command is allowed to
+        // fail loudly, because a malformed argument in `.envrc` is a typo the
+        // user must see, not a transient toolchain state to warn past.
+        crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
+
         // Project tier ONLY in Phase 7 — Phase 9 will add home-tier
         // fallback. The OCX_NO_PROJECT=1 kill switch is honored by
         // `load_project_state` via `ProjectConfig::resolve`.
         let cwd = env::current_dir()?;
+        // A relative `:path` value anchors here, to the directory ocx runs in
+        // — which under direnv is the directory holding `.envrc`. Resolved to
+        // an absolute value before the entry exists, so the emitted export
+        // line is stable regardless of where direnv later replays it.
+        let env_overrides = self.env.entries(&cwd)?;
         let project = match load_project_state(&cwd, context.project_path()).await? {
             Ok(state) => state,
             Err(MissingState::NoProject) => {
@@ -81,6 +103,17 @@ impl DirenvExport {
             eprintln!("# ocx: ocx.lock is stale (ocx.toml changed since last `ocx lock`); using stale digests");
         }
 
+        // Group selection is validated against the loaded config, so a `-g`
+        // naming a group that no longer exists fails loudly (exit 64) rather
+        // than silently exporting nothing. That is an argv typo in a
+        // hand-edited `.envrc`, not a transient toolchain state — the
+        // never-fail-the-prompt contract covers the latter, not the former.
+        crate::app::project_context::ensure_groups_known(self.groups.names(), &project.config)?;
+        let mut expanded = expand_all_keyword(self.groups.names(), &project.config);
+        if expanded.is_empty() {
+            expanded = vec![DEFAULT_GROUP.to_owned()];
+        }
+
         // Probe the local object store first through an offline `PackageManager`
         // clone: any incidental index lookup (V1 legacy locks walk the cached
         // index->manifest chain; V2 locks read the pinned leaf directly) stays
@@ -88,7 +121,7 @@ impl DirenvExport {
         // not-materialised tool buckets into `missing`.
         let offline = context.manager().offline_view(context.local_index().clone());
         let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-        let mut applied = collect_applied(&offline, &project.lock, &platform).await?;
+        let mut applied = collect_applied(&offline, &project.lock, &platform, &expanded).await?;
 
         // Default: materialise anything the store is missing, then re-probe so
         // the freshly-pulled tools join the export. `--no-pull` opts out and the
@@ -103,7 +136,7 @@ impl DirenvExport {
                 .lock
                 .tools
                 .iter()
-                .filter(|tool| tool.group == DEFAULT_GROUP && missing.contains(tool.name.as_str()))
+                .filter(|tool| expanded.contains(&tool.group) && missing.contains(tool.name.as_str()))
                 .filter_map(|tool| host_leaf_identifier(tool, &platform).ok())
                 .collect();
             if !to_install.is_empty() {
@@ -116,7 +149,7 @@ impl DirenvExport {
                     .find_or_install_all(to_install, platform.clone(), context.concurrency())
                     .await
                 {
-                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platform).await?,
+                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platform, &expanded).await?,
                     Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
                 }
             }
@@ -126,9 +159,11 @@ impl DirenvExport {
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
         }
 
-        // Stage 4 only: this command exports the default group, so there is no
-        // group `[env]` to select and no `--env` flag to append.
-        let project_env = crate::app::project_context::project_env_entries(&project.config, &project.config_path, &[]);
+        // Stages 4-6, same assembly as `ocx run` and `ocx env`: the project's
+        // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
+        let mut project_env =
+            crate::app::project_context::project_env_entries(&project.config, &project.config_path, &expanded);
+        project_env.extend(env_overrides);
         let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: project.config.no_patches_repositories(),
             env: project_env,

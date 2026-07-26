@@ -56,6 +56,9 @@ pub struct PatchTestArgs {
     #[clap(long, conflicts_with = "command")]
     script: Option<PathBuf>,
 
+    #[clap(flatten)]
+    env: crate::options::EnvOverride,
+
     /// Command to run in the composed environment, after `--`. Mutually
     /// exclusive with `--script`. When neither is given, the composed
     /// environment is printed.
@@ -138,6 +141,11 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         .unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any));
     let base_id = args.base.with_domain(context.default_registry())?;
 
+    // Parse-level, before any file or registry work.
+    let cwd = std::env::current_dir()
+        .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+    let env_overrides = args.env.entries(&cwd)?;
+
     // ── Step 1: Read + validate the descriptor file. ──
     let descriptor_bytes = tokio::fs::read(&args.descriptor)
         .await
@@ -180,7 +188,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
 
     // ── Step 5: Seed the local descriptor and compose the overlay onto the base. ──
     let composition = manager
-        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches)
+        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides)
         .await
         .map_err(ocx_lib::Error::from)?;
 

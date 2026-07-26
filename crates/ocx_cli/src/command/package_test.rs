@@ -58,6 +58,9 @@ pub struct PackageTest {
     #[clap(long, default_value_t = false)]
     clean: bool,
 
+    #[clap(flatten)]
+    env: options::EnvOverride,
+
     /// Identifier under which the package is materialized. Tag form
     /// (`repo:tag`) only; an explicit `@digest` is rejected (the digest is
     /// computed locally during this command and supplying one would conflict).
@@ -220,11 +223,16 @@ impl PackageTest {
             .install_info_from_package_root(&dest_path)
             .await
             .context("loading install info from materialized package root")?;
+        // Overrides are the caller's own contribution; the OCI tier reads no
+        // `ocx.toml`, so they are the only thing this scope can carry.
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+        let env_overrides = self.env.entries(&cwd)?;
         let entries = manager
             .resolve_env(
                 &[Arc::new(info_via_root)],
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::package_tier(),
+                ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
             )
             .await?;
 

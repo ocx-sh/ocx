@@ -31,6 +31,9 @@ pub struct Exec {
     self_view: bool,
 
     #[clap(flatten)]
+    env: options::EnvOverride,
+
+    #[clap(flatten)]
     platform: options::PlatformOption,
 
     /// Package identifiers to layer environment from.
@@ -56,20 +59,33 @@ impl Exec {
         let manager = context.manager();
         let platform = platform_or_default(self.platform.platform.clone());
 
+        // Reject a malformed `--env` before any registry or filesystem work.
+        // A relative `:path` value anchors to the invocation directory, the
+        // same base the project tier's flag uses.
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+        let env_overrides = self.env.entries(&cwd)?;
+
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         let infos = manager
             .find_or_install_all(identifiers, platform, context.concurrency())
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
+        // `Package`, not `Project`: this tier reads no `ocx.toml` and never
+        // will. The only thing a caller can contribute here is the override it
+        // typed on this invocation — that is a CLI argument, not project
+        // configuration, so carrying it does not cross the tier boundary.
         let entries = manager
             .resolve_env(
                 &install_infos,
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::package_tier(),
+                ocx_lib::package_manager::EnvScope::Package {
+                    env: env_overrides.clone(),
+                },
             )
             .await?;
-        self.run_with_env(entries, context.config_view()).await
+        self.run_with_env(entries, &env_overrides, context.config_view()).await
     }
 
     /// Run the configured command with the given resolved environment.
@@ -79,7 +95,12 @@ impl Exec {
     /// this function only returns when start-up itself fails. The
     /// `anyhow::Result<ExitCode>` shape is kept for symmetry with sibling
     /// commands; the `Ok` arm is unreachable.
-    async fn run_with_env(&self, entries: Vec<EnvEntry>, config_view: &OcxConfigView) -> anyhow::Result<ExitCode> {
+    async fn run_with_env(
+        &self,
+        entries: Vec<EnvEntry>,
+        env_overrides: &[EnvEntry],
+        config_view: &OcxConfigView,
+    ) -> anyhow::Result<ExitCode> {
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
         process_env.apply_entries(&entries);
         // Forward the running ocx's resolution-affecting config (binary path,
@@ -89,6 +110,18 @@ impl Exec {
         // for `OCX_*` keys on the child env — no ambient parent-shell export
         // can override it.
         process_env.apply_ocx_config(config_view);
+        // Forward the overrides over `OCX_ENV`, AFTER `apply_ocx_config` —
+        // which unconditionally strips any stale inherited value, so the order
+        // is load-bearing, not stylistic.
+        //
+        // A package that declares entrypoints resolves THROUGH its generated
+        // launcher here too: `composer` pushes the synthetic `entrypoints/`
+        // PATH entry last precisely so it shadows `bin/`. That launcher
+        // re-enters `ocx launcher exec`, which builds a fresh `Env` and
+        // re-applies the package's own entries on top — silently reverting the
+        // override unless it is forwarded. Same failure R1 closes for the
+        // project tier, reached by the same path.
+        process_env.set_forwarded_env(env_overrides);
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.

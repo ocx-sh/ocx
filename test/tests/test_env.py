@@ -205,3 +205,192 @@ def test_package_env_plain_omits_hint_without_claims(
 
     assert result.returncode == 0, result.stderr
     assert "available" not in result.stdout.lower(), result.stdout
+
+
+# ---------------------------------------------------------------------------
+# `--env` on the OCI tier
+#
+# `--env` is a per-invocation CLI override, not project configuration, so it
+# lands here too. It does NOT make this tier read `ocx.toml` — there is no
+# `-g`, no project `[env]`, nothing but what the caller typed.
+# ---------------------------------------------------------------------------
+
+
+def _export_value(lines: str, key: str) -> str | None:
+    """Return the effective value of ``export KEY="value"`` in a shell block.
+
+    Returns the LAST assignment: the block replays the composed entry vector,
+    so a later-stage constant is emitted as a second ``export`` line and a
+    shell evaluating top to bottom keeps the last one.
+    """
+    prefix = f"export {key}="
+    effective: str | None = None
+    for line in lines.splitlines():
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix) :]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        effective = value
+    return effective
+
+
+def _dumped_value(dump: str, key: str) -> str | None:
+    """Return the value of a ``KEY=value`` line in an ``env``-dumped block."""
+    prefix = f"{key}="
+    for line in dump.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
+
+
+def test_package_env_flag_matches_what_package_exec_executes(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``ocx package env --env`` prints what ``ocx package exec --env`` runs with.
+
+    The export/execute parity that justifies the flag existing on an emit-only
+    command, asserted against one shared oracle so a divergence between the two
+    fails rather than two independently-passing assertions.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"])
+    ocx.plain("package", "install", pkg.short)
+
+    overrides = ["--env", "FROM_FLAG=flag-value"]
+
+    executed = subprocess.run(
+        [str(ocx.binary), "package", "exec", *overrides, pkg.short, "--", "env"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+
+    exported = subprocess.run(
+        [str(ocx.binary), "package", "env", *overrides, "--shell=bash", pkg.short],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    )
+    assert exported.returncode == 0, exported.stderr
+
+    assert _dumped_value(executed.stdout, "FROM_FLAG") == "flag-value", (
+        f"package exec --env must apply the override; stdout:\n{executed.stdout}"
+    )
+    assert _export_value(exported.stdout, "FROM_FLAG") == "flag-value", (
+        f"package env --env must export the same value package exec applies; "
+        f"export lines:\n{exported.stdout}"
+    )
+
+
+def test_package_env_flag_does_not_read_ocx_toml(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The OCI tier stays OCI-tier: an `ocx.toml` beside the invocation
+    contributes nothing, even though `--env` now composes here.
+
+    Pins the boundary the flag deliberately does not cross.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"])
+    ocx.plain("package", "install", pkg.short)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text('[tools]\n\n[env]\nFROM_FILE = "must-not-appear"\n')
+
+    result = subprocess.run(
+        [str(ocx.binary), "package", "exec", "--env", "FROM_FLAG=ok", pkg.short, "--", "env"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _dumped_value(result.stdout, "FROM_FLAG") == "ok"
+    assert _dumped_value(result.stdout, "FROM_FILE") is None, (
+        f"the OCI tier must never read ocx.toml; stdout:\n{result.stdout}"
+    )
+
+
+def test_package_exec_env_flag_survives_generated_entrypoint_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A `--env` override reaches a tool invoked THROUGH a generated launcher.
+
+    A package that declares entrypoints resolves through its launcher, which
+    re-enters `ocx launcher exec` — a process with no project context that
+    rebuilds its env from scratch and re-applies the package's own entries on
+    top. Without `set_forwarded_env` on this command the override is silently
+    reverted at that hop.
+
+    The override MUST target a key the package itself declares. A key the
+    package does not declare survives the hop by plain inheritance whether or
+    not it was forwarded, so a test using one passes either way and proves
+    nothing — that is exactly the shape this assertion avoids.
+    """
+    from src.helpers import make_package_with_entrypoints
+
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"showenv": {"command": "env"}},
+        env=[
+            {
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+            },
+            {
+                "key": "LAUNCHER_PROBE",
+                "type": "constant",
+                "value": "package-value",
+            },
+        ],
+    )
+    ocx.plain("package", "install", pkg.short)
+
+    result = subprocess.run(
+        [str(ocx.binary), "package", "exec", "--env", "LAUNCHER_PROBE=flag-value", pkg.short, "--", "showenv"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _dumped_value(result.stdout, "LAUNCHER_PROBE") == "flag-value", (
+        f"the override must survive the launcher re-entry — without forwarding "
+        f"the launcher re-applies the package's own 'package-value' on top; "
+        f"stdout:\n{result.stdout}"
+    )
+
+
+def test_package_tier_env_flag_rejects_reserved_and_bad_type(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The key and type gates apply identically on this tier — the flag is one
+    parser, so `OCX_*` cannot be set and an unknown `:TYPE` is exit 64.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"])
+    ocx.plain("package", "install", pkg.short)
+
+    for argument in ("OCX_DEFAULT_REGISTRY=evil.example.com", "X:bogus=v", "X:=v"):
+        for command in (
+            ["package", "exec", "--env", argument, pkg.short, "--", "hello"],
+            ["package", "env", "--env", argument, pkg.short],
+        ):
+            result = subprocess.run(
+                [str(ocx.binary), *command],
+                capture_output=True,
+                text=True,
+                env=ocx.env,
+                check=False,
+            )
+            assert result.returncode == EXIT_USAGE, (
+                f"--env {argument} on `ocx {' '.join(command[:2])}` must exit "
+                f"{EXIT_USAGE}; got {result.returncode}\nstderr:\n{result.stderr}"
+            )

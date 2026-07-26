@@ -109,6 +109,7 @@ impl PackageManager {
         base: &Arc<InstallInfo>,
         descriptor_bytes: &[u8],
         patches: &ResolvedPatchConfig,
+        env_overrides: Vec<Entry>,
     ) -> Result<PatchTestComposition, PackageErrorKind> {
         // Validate the descriptor up front so a malformed file fails before any
         // store mutation.
@@ -153,11 +154,16 @@ impl PackageManager {
         // can trace each overlay var to its rule + companion. A `required` companion
         // that cannot be resolved in the scratch store surfaces as
         // `RequiredCompanionFailed` (C7 fail-closed) — propagated unchanged.
+        // `--env` overrides ride the scope's own arm: they compose after the
+        // companion overlay, so a maintainer can pin a variable while previewing
+        // a descriptor. They carry no `PatchProvenance` — they are not a
+        // companion's contribution — so the report below attributes only what
+        // the descriptor actually matched.
         let (entries, patch_start, provenance) = self
             .resolve_env_with_patch_boundary(
                 std::slice::from_ref(base),
                 false,
-                crate::package_manager::EnvScope::package_tier(),
+                crate::package_manager::EnvScope::Package { env: env_overrides },
             )
             .await
             .map_err(unwrap_resolve_env_error)?;
@@ -538,7 +544,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let composition = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches)
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
             .await
             .expect("seed-and-compose must succeed when the required companion is present");
 
@@ -620,7 +626,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let result = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches)
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
             .await;
 
         assert!(

@@ -31,6 +31,9 @@ pub struct Env {
     self_view: bool,
 
     #[clap(flatten)]
+    env: options::EnvOverride,
+
+    #[clap(flatten)]
     platform: options::PlatformOption,
 
     #[clap(flatten)]
@@ -99,6 +102,12 @@ impl Env {
         // `--ci` is mutually exclusive with `--shell` (clap `conflicts_with`).
         let ci = resolve_ci_arg(self.ci)?;
 
+        // Parse-level, beside the `--ci` resolution above and before the
+        // (potentially slow) package resolution below.
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+        let env_overrides = self.env.entries(&cwd)?;
+
         let platform = platform_or_default(self.platform.platform.clone());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
@@ -120,12 +129,17 @@ impl Env {
         // way `resolve_env_with_patch_boundary` used it (annotate `--show-patches`
         // entries). For `--ci`/`--shell` output the extra data is simply unused.
         //
-        // OCI-tier (`ocx package env`): no `ocx.toml`, so no per-package opt-out.
+        // OCI-tier (`ocx package env`): no `ocx.toml`, so no per-package
+        // opt-out and no project/group `[env]`. The `--env` overrides are the
+        // one thing a caller can contribute — a CLI argument, not project
+        // configuration, so it composes here without the tier reading a file.
+        // Their being applied last is what makes this command's output equal
+        // to what `ocx package exec --env` executes with.
         let (entries, patch_start, provenance, attribution) = manager
             .resolve_env_with_attribution(
                 &info,
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::package_tier(),
+                ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
             )
             .await?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline

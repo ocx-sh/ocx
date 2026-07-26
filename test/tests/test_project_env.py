@@ -24,8 +24,10 @@ CLI (``ocx run --env KEY[:TYPE]=VALUE``):
   test_env_flag_relative_path_resolves_against_cwd
   test_env_flag_rejects_unknown_and_empty_type_exits_64
   test_env_flag_reserved_key_rejected_with_type_qualifier_exits_64
-  test_env_flag_absent_on_env_subcommand
-  test_env_flag_absent_on_package_exec_subcommand
+  test_env_flag_on_env_subcommand_matches_what_run_executes
+  test_env_flag_on_direnv_export_reaches_the_exported_lines
+  test_group_flag_on_direnv_export_selects_group_env
+  test_direnv_export_rejects_unknown_group_exits_64
 
 Precedence:
   test_ambient_value_loses_to_project_env
@@ -130,6 +132,31 @@ def _published_tool(
     tag = "1.0.0"
     make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, env=env)
     return repo, tag
+
+
+def _export_value(lines: str, key: str) -> str | None:
+    """Return the effective value of ``export KEY="value"`` in a shell block.
+
+    Two deliberate choices:
+
+    * Reads the value rather than matching the whole line, so a change in the
+      emitter's quoting style does not fail tests that are about composition.
+    * Returns the **last** assignment, not the first. The export block is a
+      replay of the composed entry vector — a constant declared at a later
+      stage is emitted as a second ``export`` line, and a shell evaluating the
+      block top to bottom keeps the last one. Reading the first would report a
+      value the sourced environment never has.
+    """
+    prefix = f"export {key}="
+    effective: str | None = None
+    for line in lines.splitlines():
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix) :]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        effective = value
+    return effective
 
 
 def _env_value(dump: str, key: str) -> str | None:
@@ -422,26 +449,129 @@ def test_env_flag_reserved_key_rejected_with_type_qualifier_exits_64(
         )
 
 
-def test_env_flag_absent_on_env_subcommand(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``--env`` does not exist on ``ocx env`` — ``run``-only in v1 (L3)."""
-    result = _run(ocx, tmp_path, "env", "--env", "FOO=bar")
-    assert result.returncode == EXIT_USAGE, (
-        f"ocx env --env must be rejected as an unrecognized flag, exit {EXIT_USAGE}; "
-        f"got {result.returncode}\nstderr:\n{result.stderr}"
-    )
+def test_env_flag_on_env_subcommand_matches_what_run_executes(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx env --env`` prints exactly what ``ocx run --env`` executes with.
 
-
-def test_env_flag_absent_on_package_exec_subcommand(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``--env`` does not exist on ``ocx package exec`` — the OCI-tier exec
-    command; the ambient shell is the caller's own concern there (L3).
+    This is the whole point of the flag existing on an export surface: OCX is
+    a backend tool for tools, and a caller that builds an argv array must be
+    able to *export* the environment it would otherwise *execute* in. A test
+    asserting each side independently would pass even if the two composed
+    different environments, so this asserts the two against each other.
     """
-    fake_id = f"{ocx.registry}/does-not-exist:1.0.0"
-    result = _run(
-        ocx, tmp_path, "package", "exec", "--env", "FOO=bar", fake_id, "--", "true"
+    repo, tag = _published_tool(ocx, tmp_path, "exportparity")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+
+[env]
+FROM_FILE = "file-value"
+""",
     )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    overrides = ["--env", "FROM_FLAG=flag-value", "--env", "FROM_FILE=flag-wins"]
+
+    executed = _run(ocx, project, "run", *overrides, "--", "env")
+    assert executed.returncode == EXIT_SUCCESS, executed.stderr
+
+    exported = _run(ocx, project, "env", *overrides, "--shell=bash")
+    assert exported.returncode == EXIT_SUCCESS, exported.stderr
+
+    for key, expected in (
+        ("FROM_FLAG", "flag-value"),
+        ("FROM_FILE", "flag-wins"),
+    ):
+        assert _env_value(executed.stdout, key) == expected, (
+            f"ocx run --env must apply {key}={expected}; stdout:\n{executed.stdout}"
+        )
+        assert _export_value(exported.stdout, key) == expected, (
+            f"ocx env --env must export the same {key}={expected} that ocx run "
+            f"applies; export lines:\n{exported.stdout}"
+        )
+
+
+def test_env_flag_on_direnv_export_reaches_the_exported_lines(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx direnv export --env`` emits the override, so a hand-edited
+    ``.envrc`` can carry one.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    result = _run(ocx, project, "direnv", "export", "--env", "DIRENV_FLAG=on")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert _export_value(result.stdout, "DIRENV_FLAG") == "on", (
+        f"--env must reach the exported lines; stdout:\n{result.stdout}"
+    )
+
+
+def test_group_flag_on_direnv_export_selects_group_env(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx direnv export -g <group>`` composes that group's ``[env]``.
+
+    Without ``-g`` the command exports the default group only, so a group's
+    ``[env]`` was previously unreachable from an ``.envrc`` at all.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        """\
+[tools]
+
+[env]
+ALWAYS = "base"
+
+[group.ci.env]
+CI_ONLY = "ci-value"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    default_scope = _run(ocx, project, "direnv", "export")
+    assert default_scope.returncode == EXIT_SUCCESS, default_scope.stderr
+    assert _export_value(default_scope.stdout, "ALWAYS") == "base"
+    assert _export_value(default_scope.stdout, "CI_ONLY") is None, (
+        f"the ci group's [env] must not leak into the default scope; "
+        f"stdout:\n{default_scope.stdout}"
+    )
+
+    ci_scope = _run(ocx, project, "direnv", "export", "-g", "ci")
+    assert ci_scope.returncode == EXIT_SUCCESS, ci_scope.stderr
+    assert _export_value(ci_scope.stdout, "CI_ONLY") == "ci-value", (
+        f"-g ci must compose [group.ci.env]; stdout:\n{ci_scope.stdout}"
+    )
+
+
+def test_direnv_export_rejects_unknown_group_exits_64(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A ``-g`` naming no declared group is an argv typo in a hand-edited
+    ``.envrc``, so it fails loudly rather than silently exporting nothing.
+
+    The never-fail-the-prompt contract covers transient toolchain state (a
+    missing lock, an unmaterialised tool), not a misspelled argument.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    result = _run(ocx, project, "direnv", "export", "-g", "nope")
     assert result.returncode == EXIT_USAGE, (
-        f"ocx package exec --env must be rejected as an unrecognized flag, "
-        f"exit {EXIT_USAGE}; got {result.returncode}\nstderr:\n{result.stderr}"
+        f"an unknown -g must exit {EXIT_USAGE}; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
     )
 
 

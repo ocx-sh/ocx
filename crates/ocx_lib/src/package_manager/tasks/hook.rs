@@ -34,13 +34,18 @@ pub struct AppliedSet {
     pub infos: Vec<Arc<InstallInfo>>,
     /// Per-info applied-set entry suitable for fingerprint computation.
     pub entries: Vec<AppliedEntry>,
-    /// Names of locked tools (in the default group) that resolve to no
+    /// Names of locked tools (in the selected groups) that resolve to no
     /// content in the object store.
     pub missing: Vec<String>,
 }
 
-/// Walk `lock.tools` filtered to the default group, resolve each tool
+/// Walk `lock.tools` filtered to the selected groups, resolve each tool
 /// through `manager`, and partition the results.
+///
+/// `groups` is the already-expanded selection (post `all` expansion). An
+/// empty slice means the default group alone — the same "omitted `-g` means
+/// the default group, not everything" rule the toolchain commands use, kept
+/// here so a caller that has no group selector at all keeps its behavior.
 ///
 /// `platform` is the requested platform (typically
 /// `oci::Platform::current().unwrap_or_else(oci::Platform::any)` from the
@@ -55,13 +60,14 @@ pub async fn collect_applied(
     manager: &PackageManager,
     lock: &ProjectLock,
     platform: &oci::Platform,
+    groups: &[String],
 ) -> crate::Result<AppliedSet> {
     let mut infos = Vec::new();
     let mut entries = Vec::new();
     let mut missing = Vec::new();
 
     for tool in &lock.tools {
-        if tool.group != DEFAULT_GROUP {
+        if !group_selected(groups, &tool.group) {
             continue;
         }
 
@@ -103,4 +109,16 @@ pub async fn collect_applied(
         entries,
         missing,
     })
+}
+
+/// Whether a locked tool's group is in the caller's selection.
+///
+/// An empty selection means the default group alone, so a caller with no
+/// group selector keeps the historical behavior without having to synthesize
+/// a `vec![DEFAULT_GROUP]` at every site.
+fn group_selected(groups: &[String], group: &str) -> bool {
+    if groups.is_empty() {
+        return group == DEFAULT_GROUP;
+    }
+    groups.iter().any(|selected| selected == group)
 }
