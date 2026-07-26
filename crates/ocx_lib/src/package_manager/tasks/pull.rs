@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tracing::info_span;
 
 use crate::{
-    MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
+    MEDIA_TYPE_PACKAGE_V1, file_structure, log, oci,
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
     package_manager::{self, composer, concurrency::Concurrency, error::PackageErrorKind},
     prelude::SerdeExt,
@@ -395,8 +395,14 @@ async fn setup_owned_impl(
     // Validate manifest before any extraction work. Zero layers is valid —
     // the package is a config-only artifact whose `content/` is the empty
     // directory and whose metadata is the only carried payload.
-    media_type_select_some(&manifest.artifact_type, &[MEDIA_TYPE_PACKAGE_V1])
-        .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
+    if manifest.artifact_type.as_deref() != Some(MEDIA_TYPE_PACKAGE_V1) {
+        return Err(PackageErrorKind::from(
+            oci::client::error::ClientError::UnexpectedArtifactType {
+                expected: MEDIA_TYPE_PACKAGE_V1.to_string(),
+                actual: manifest.artifact_type.clone(),
+            },
+        ));
+    }
 
     // Wrap the temp directory in a PackageDir so all sibling-file accesses
     // use the canonical accessors instead of hardcoded strings.
@@ -961,4 +967,174 @@ fn link_layers_in_temp(
         crate::symlink::create(&layer_content, &link_path).map_err(PackageErrorKind::Internal)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SetupGroups, setup_owned};
+    use crate::{
+        cli::{ExitCode, classify_error},
+        file_structure::{FileStructure, IndexStore},
+        oci::{
+            self,
+            index::{ChainMode, Index, LocalConfig, LocalIndex},
+        },
+        package::metadata::{
+            Metadata,
+            bundle::{Bundle, Version},
+            dependency::Dependencies,
+            entrypoint::Entrypoints,
+            env::Env,
+        },
+        package_manager::{
+            PackageManager,
+            error::PackageErrorKind,
+            tasks::resolve::{ChainBlob, ChainRole, ResolvedChain},
+        },
+    };
+
+    /// Drives `setup_owned` against a leaf that is a perfectly valid OCI
+    /// artifact but not an OCX package, and returns the refusal.
+    ///
+    /// `provided_metadata` selects which of the two gates trips first, and the
+    /// two differ in more than sequencing:
+    ///
+    /// - `Some(..)` short-circuits the config-blob fetch, so the manifest
+    ///   `artifactType` gate is first.
+    /// - `None` — the shape `ocx install` / `ocx pull` actually take — reaches
+    ///   `load_config_metadata`, whose config media-type gate fires *before*
+    ///   the artifact-type gate ever runs.
+    ///
+    /// Both must exit 65. Covering only the `Some(..)` shape certifies a fix
+    /// on a path the real install never walks.
+    async fn refuse_foreign_leaf_artifact(provided_metadata: Option<Metadata>) -> PackageErrorKind {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        // No client: nothing in this path may reach the registry.
+        let manager = PackageManager::new(file_structure, index, None, "example.com");
+
+        let digest = oci::Digest::Sha256("d".repeat(64));
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry("test/foreign", "example.com")
+                .clone_with_tag("1.0.0")
+                .clone_with_digest(digest.clone()),
+        )
+        .expect("pinned identifier");
+
+        let platform = oci::Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        };
+
+        // A leaf manifest that is a perfectly valid OCI artifact — just not an
+        // OCX package.
+        let final_manifest = oci::ImageManifest {
+            artifact_type: Some("application/vnd.example.other.v1".to_string()),
+            config: oci::Descriptor {
+                media_type: "application/vnd.example.other.config.v1+json".to_string(),
+                digest: digest.to_string(),
+                size: 2,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            ..Default::default()
+        };
+
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: pinned.clone(),
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest,
+            platform: platform.clone(),
+        };
+
+        setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            platform,
+            SetupGroups::new(),
+            None,
+            provided_metadata,
+        )
+        .await
+        .expect_err("a foreign leaf artifact type must be refused")
+    }
+
+    fn bundle_metadata() -> Metadata {
+        Metadata::Bundle(Bundle {
+            binaries: None,
+            version: Version::V1,
+            strip_components: None,
+            env: Env::default(),
+            dependencies: Dependencies::default(),
+            entrypoints: Entrypoints::default(),
+        })
+    }
+
+    /// Bug 20 / F1: the leaf artifact-type gate used to wrap a media-type
+    /// error in `ClientError::Internal`, whose terminal `Failure` arm ends the
+    /// chain walk — so installing a non-OCX artifact exited 1 while every
+    /// sibling artifact-type gate exits 65.
+    ///
+    /// The assertion is deliberately on the **classified exit code**, not the
+    /// error variant: `ClientError::UnexpectedArtifactType` already classified
+    /// as `DataError` before the fix. A variant-only assertion would have
+    /// passed against the bug.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unexpected_leaf_artifact_type_exits_data_error() {
+        let error = refuse_foreign_leaf_artifact(Some(bundle_metadata())).await;
+
+        assert_eq!(
+            classify_error(&error),
+            ExitCode::DataError,
+            "the artifact-type gate must exit 65 like every sibling gate; got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("application/vnd.sh.ocx.package.v1"),
+            "the error must name the expected type: {message}"
+        );
+        assert!(
+            message.contains("application/vnd.example.other.v1"),
+            "the error must name the actual type: {message}"
+        );
+    }
+
+    /// The path `ocx install docker.io/library/alpine:3` actually takes:
+    /// `provided_metadata` is `None`, so `load_config_metadata`'s config
+    /// media-type gate fires before the artifact-type gate. That gate used to
+    /// wrap `crate::Error::UnsupportedMediaType` — which classifies as 65 on
+    /// its own — in `ClientError::internal`, whose terminal `Failure` arm
+    /// stops the chain walk at exit 1.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unexpected_leaf_config_media_type_exits_data_error() {
+        let error = refuse_foreign_leaf_artifact(None).await;
+
+        assert_eq!(
+            classify_error(&error),
+            ExitCode::DataError,
+            "the config media-type gate must exit 65 on the real install path; got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("application/vnd.example.other.config.v1+json"),
+            "the error must name the offending config media type: {message}"
+        );
+    }
 }

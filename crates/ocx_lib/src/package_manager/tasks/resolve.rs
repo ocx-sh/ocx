@@ -2181,7 +2181,7 @@ mod spec_tests {
     /// can recover a LEAF platform manifest — a leaf is never locally cached
     /// (A3), so an offline-only pre-seeded fixture cannot answer a `resolve()`
     /// call for content that names one; this fake source drives the same
-    /// AbsentLeaf-recovery path a live registry would.
+    /// absent-dispatch recovery path a live registry would.
     #[derive(Clone, Default)]
     struct FakeManifestSource {
         entries: std::collections::HashMap<String, (Vec<u8>, Digest, oci::Manifest)>,

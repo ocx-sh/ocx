@@ -384,7 +384,7 @@ mod tests {
     /// recover a LEAF platform manifest for a single-platform dependency. A
     /// leaf is never locally cached (A3), so an offline-only pre-seeded
     /// fixture cannot answer a resolve for content that names one; this fake
-    /// source drives the same AbsentLeaf-recovery path a live registry would.
+    /// source drives the same absent-dispatch recovery path a live registry would.
     #[derive(Clone)]
     struct FlatManifestSource {
         repo: String,

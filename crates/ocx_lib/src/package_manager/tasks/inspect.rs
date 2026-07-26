@@ -1212,7 +1212,7 @@ mod spec_tests {
     /// separate `digest -> bytes` map for opaque config blobs (`fetch_blob`,
     /// a distinct seam from manifest resolution). Used with
     /// `ChainMode::Default` so `PackageManager::inspect` can recover content
-    /// through the same AbsentLeaf-recovery path a live registry would — a
+    /// through the same absent-dispatch recovery path a live registry would — a
     /// leaf platform manifest is never locally cached (A3), so an
     /// offline-only pre-seeded fixture cannot answer a lookup for one.
     #[derive(Clone, Default)]
@@ -2557,7 +2557,7 @@ mod spec_tests {
         let dep_config_digest = Algorithm::Sha256.hash(dep_config.as_bytes());
         let dep_manifest = closure_manifest_json(&dep_config_digest, &dep_config);
         // The staged manifest is read back through the content store
-        // (`recover_absent_leaf`'s `digest_matches`, A4) — unlike the
+        // (`recover_absent_dispatch`'s `digest_matches`, A4) — unlike the
         // flat-leaf deps registered via `register_closure_node` (never
         // digest-verified, see that helper's doc), the identity here must be
         // the real hash of `dep_manifest`, not an arbitrary `cdigest` fixture.

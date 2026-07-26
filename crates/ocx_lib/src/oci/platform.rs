@@ -12,7 +12,7 @@ pub use operating_system::OperatingSystem;
 use serde::{Deserialize, Serialize};
 
 use super::native;
-use crate::Result;
+use crate::{Result, log};
 
 const ANY_STR: &str = "any";
 
@@ -118,18 +118,49 @@ impl Platform {
         Self::Any
     }
 
-    /// Extracts all platforms from an OCI Image Index manifest.
+    /// The platform an image-index descriptor offers, or `None` when the
+    /// descriptor is not a platform candidate at all. Never an error.
     ///
-    /// Each entry in the index references a platform-specific image manifest.
-    /// Returns an error if any entry's platform uses an OS or architecture
-    /// that OCX does not support.
-    pub fn from_image_index(manifest: &native::ImageIndex) -> Result<Vec<Self>> {
-        let mut platforms = Vec::with_capacity(manifest.manifests.len());
-        for entry in &manifest.manifests {
-            let platform = Self::try_from(entry.platform.clone())?;
-            platforms.push(platform);
-        }
-        Ok(platforms)
+    /// A published index carries descriptors that are not packages for a
+    /// platform — attestation and referrer entries, which the OCI spec has them
+    /// mark either by omitting `platform` entirely or by declaring the
+    /// placeholder `unknown/unknown`. Neither is a fault in the document and
+    /// neither is selectable, so both are simply not candidates:
+    ///
+    /// - **No `platform` key** — `TryFrom<Option<..>>` would answer
+    ///   `Platform::Any`, and an `Any` *offer* satisfies **every** requirement
+    ///   (`adr_platform_model_unification.md` D1). One such descriptor becomes a
+    ///   universal match; two make every selection ambiguous.
+    /// - **A platform OCX cannot represent** (`unknown/unknown`, an unsupported
+    ///   OS or architecture) — propagating the `TryFrom` error would abort the
+    ///   whole enumeration over one descriptor nobody asked to select.
+    ///
+    /// One predicate, both enumerations ([`Index::fetch_candidates`](crate::oci::Index::fetch_candidates)
+    /// for selection, [`Self::from_image_index`] for `ocx index list --platforms`):
+    /// they got this wrong in opposite directions, and a single shared rule is
+    /// smaller than two guards that must agree forever.
+    pub fn candidate_from_descriptor(entry: &native::ImageIndexEntry) -> Option<Self> {
+        let declared = entry.platform.as_ref()?;
+        Self::try_from(declared.clone()).ok()
+    }
+
+    /// Extracts the selectable platforms from an OCI Image Index manifest.
+    ///
+    /// Descriptors that are not platform candidates — attestation entries and
+    /// entries naming a platform OCX does not support — are skipped, never
+    /// listed and never an error (see [`Self::candidate_from_descriptor`]).
+    pub fn from_image_index(manifest: &native::ImageIndex) -> Vec<Self> {
+        manifest
+            .manifests
+            .iter()
+            .filter_map(|entry| {
+                let candidate = Self::candidate_from_descriptor(entry);
+                if candidate.is_none() {
+                    log::debug!("skipping non-candidate image-index descriptor {}", entry.digest);
+                }
+                candidate
+            })
+            .collect()
     }
 
     /// Extracts platforms from any OCI manifest type.
@@ -137,9 +168,9 @@ impl Platform {
     /// Dispatches to [`from_image_manifest`](Self::from_image_manifest) for
     /// single images or [`from_image_index`](Self::from_image_index) for
     /// multi-platform indexes.
-    pub fn from_manifest(manifest: &native::Manifest) -> Result<Vec<Self>> {
+    pub fn from_manifest(manifest: &native::Manifest) -> Vec<Self> {
         match manifest {
-            native::Manifest::Image(image_manifest) => Ok(vec![Self::from_image_manifest(image_manifest)]),
+            native::Manifest::Image(image_manifest) => vec![Self::from_image_manifest(image_manifest)],
             native::Manifest::ImageIndex(image_index) => Self::from_image_index(image_index),
         }
     }
@@ -1376,69 +1407,132 @@ mod tests {
         assert!(Platform::from_image_manifest(&manifest).is_any());
     }
 
-    #[test]
-    fn from_image_index_extracts_platforms() {
-        let index = native::ImageIndex {
-            schema_version: 2,
-            media_type: None,
-            manifests: vec![
-                native::ImageIndexEntry {
-                    media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-                    digest: "sha256:aaa".to_string(),
-                    size: 100,
-                    platform: Some(native::Platform {
-                        os: native::Os::Linux,
-                        architecture: native::Arch::Amd64,
-                        variant: None,
-                        features: None,
-                        os_version: None,
-                        os_features: None,
-                    }),
-                    artifact_type: None,
-                    annotations: None,
-                },
-                native::ImageIndexEntry {
-                    media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-                    digest: "sha256:bbb".to_string(),
-                    size: 200,
-                    platform: None,
-                    artifact_type: None,
-                    annotations: None,
-                },
-            ],
+    /// Build an image-index descriptor with an optional platform.
+    fn descriptor(digest: &str, platform: Option<native::Platform>) -> native::ImageIndexEntry {
+        native::ImageIndexEntry {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            digest: digest.to_string(),
+            size: 100,
+            platform,
             artifact_type: None,
             annotations: None,
-        };
-        let platforms = Platform::from_image_index(&index).unwrap();
-        assert_eq!(platforms.len(), 2);
-        assert_eq!(platforms[0].to_string(), "linux/amd64");
-        assert!(platforms[1].is_any());
+        }
+    }
+
+    fn native_platform(os: native::Os, architecture: native::Arch) -> native::Platform {
+        native::Platform {
+            os,
+            architecture,
+            variant: None,
+            features: None,
+            os_version: None,
+            os_features: None,
+        }
+    }
+
+    fn image_index(manifests: Vec<native::ImageIndexEntry>) -> native::ImageIndex {
+        native::ImageIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests,
+            artifact_type: None,
+            annotations: None,
+        }
     }
 
     #[test]
-    fn from_image_index_rejects_unsupported_platform() {
-        let index = native::ImageIndex {
-            schema_version: 2,
-            media_type: None,
-            manifests: vec![native::ImageIndexEntry {
-                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-                digest: "sha256:ccc".to_string(),
-                size: 100,
-                platform: Some(native::Platform {
-                    os: native::Os::FreeBSD,
-                    architecture: native::Arch::Amd64,
-                    variant: None,
-                    features: None,
-                    os_version: None,
-                    os_features: None,
-                }),
-                artifact_type: None,
-                annotations: None,
-            }],
-            artifact_type: None,
-            annotations: None,
-        };
-        assert!(Platform::from_image_index(&index).is_err());
+    fn from_image_index_extracts_platforms() {
+        let index = image_index(vec![
+            descriptor(
+                "sha256:aaa",
+                Some(native_platform(native::Os::Linux, native::Arch::Amd64)),
+            ),
+            descriptor(
+                "sha256:bbb",
+                Some(native_platform(native::Os::Darwin, native::Arch::ARM64)),
+            ),
+        ]);
+        let platforms = Platform::from_image_index(&index);
+        assert_eq!(platforms.len(), 2);
+        assert_eq!(platforms[0].to_string(), "linux/amd64");
+        assert_eq!(platforms[1].to_string(), "darwin/arm64");
+    }
+
+    #[test]
+    fn platform_from_image_index_does_not_abort_on_an_unsupported_descriptor() {
+        // N-15: an attestation descriptor declares the placeholder
+        // `unknown/unknown`, which `TryFrom<native::Platform>` refuses
+        // (`ANY_STR` is "any", so `unknown` never reaches the `Any` arm).
+        // Propagating that refusal aborted the WHOLE listing for the package —
+        // one descriptor nobody asked to select made `ocx index list
+        // --platforms` fail outright. It is skipped, not raised.
+        let index = image_index(vec![
+            descriptor(
+                "sha256:aaa",
+                Some(native_platform(native::Os::Linux, native::Arch::Amd64)),
+            ),
+            descriptor("sha256:att", Some(native_platform("unknown".into(), "unknown".into()))),
+            descriptor(
+                "sha256:bsd",
+                Some(native_platform(native::Os::FreeBSD, native::Arch::Amd64)),
+            ),
+        ]);
+        let platforms = Platform::from_image_index(&index);
+        assert_eq!(
+            platforms.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["linux/amd64".to_string()],
+            "the real platform is listed; the unsupported descriptors are skipped, not raised"
+        );
+    }
+
+    #[test]
+    fn index_list_platforms_skips_attestation_and_platformless_descriptors() {
+        // The exact enumeration `ocx index list --platforms` drives
+        // (`command/index_list.rs` -> `Platform::from_manifest`). A descriptor
+        // with NO `platform` key used to render as a platform row via
+        // `TryFrom<Option<..>>`'s `Ok(Self::default())`; it is not a platform at
+        // all, so it is not listed.
+        let manifest = native::Manifest::ImageIndex(image_index(vec![
+            descriptor(
+                "sha256:aaa",
+                Some(native_platform(native::Os::Linux, native::Arch::Amd64)),
+            ),
+            descriptor("sha256:att", Some(native_platform("unknown".into(), "unknown".into()))),
+            descriptor("sha256:none", None),
+        ]));
+        let rows: Vec<String> = Platform::from_manifest(&manifest)
+            .into_iter()
+            .map(|platform| platform.to_string())
+            .collect();
+        assert_eq!(rows, vec!["linux/amd64".to_string()]);
+        assert!(
+            !rows.iter().any(|row| row == "any"),
+            "a platform-less descriptor must not render as a platform row"
+        );
+    }
+
+    #[test]
+    fn candidate_from_descriptor_refuses_both_non_candidate_shapes() {
+        assert!(
+            Platform::candidate_from_descriptor(&descriptor("sha256:none", None)).is_none(),
+            "no platform key -> not a candidate (an `Any` OFFER would satisfy every requirement)"
+        );
+        assert!(
+            Platform::candidate_from_descriptor(&descriptor(
+                "sha256:att",
+                Some(native_platform("unknown".into(), "unknown".into()))
+            ))
+            .is_none(),
+            "unknown/unknown -> not a candidate"
+        );
+        assert_eq!(
+            Platform::candidate_from_descriptor(&descriptor(
+                "sha256:aaa",
+                Some(native_platform(native::Os::Linux, native::Arch::Amd64))
+            ))
+            .map(|platform| platform.to_string()),
+            Some("linux/amd64".to_string())
+        );
     }
 
     // --- Serde ---

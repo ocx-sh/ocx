@@ -227,7 +227,7 @@ impl BlobStore {
     /// be removed before a re-fetch: [`Self::write_blob`]'s check-first fast
     /// path would otherwise re-accept the corrupt file untouched. Callers that
     /// discover corruption on a digest-verified read heal by remove-then-refetch
-    /// — the chain's leaf recovery ([`ChainedIndex::recover_absent_leaf`](crate::oci::index))
+    /// — the chain's dispatch recovery ([`ChainedIndex::recover_absent_dispatch`](crate::oci::index))
     /// and the install-staging shortcut (`stage_and_link_chain_blobs`).
     ///
     /// Removes only the `data` file — the write path stores no sibling `digest`

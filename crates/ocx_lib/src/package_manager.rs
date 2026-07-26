@@ -580,7 +580,7 @@ impl PackageManager {
         // Attach the machine-global blob store so a lock-pinned tool's leaf
         // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
         // never the local index, A3) resolves offline with zero network: an
-        // `AbsentLeaf` is recovered from the blob store before the (absent)
+        // an absent dispatch object is recovered from the blob store before the (absent)
         // source chain (`adr_index_indirection.md` A3 step 2 / B2). Without this
         // the global-toolchain / direnv exporters silently omit every installed
         // tool whose leaf is not in `o/`.

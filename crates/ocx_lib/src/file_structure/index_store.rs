@@ -239,9 +239,9 @@ impl IndexStore {
 //   c/index.json (+ .etag)            — published indices only — catalog and
 //                                        conditional-GET validator
 //   p/{ns}/{pkg}.json                 — root doc
-//   p/{ns}/{pkg}/o/{algo}/{hex}.json  — dispatch object CAS (obs object /
-//                                        image index only, never a leaf
-//                                        platform manifest — A3)
+//   p/{ns}/{pkg}/o/{algo}/{hex}.json  — dispatch object CAS (the OCI image
+//                                        index a tag resolved to, verbatim;
+//                                        never a leaf platform manifest — A3)
 // ```
 //
 // Locks are NOT sidecars in this tree: an index home may be a read-only shipped
@@ -361,7 +361,7 @@ impl IndexStore {
     ///
     /// Carries a `.json` extension and lives under the repository's own
     /// `p/{ns}/{pkg}/` directory — the object store holds **dispatch objects
-    /// only** (an observation object or an image index); a leaf platform
+    /// only** (the OCI image index a tag resolved to, verbatim); a leaf platform
     /// manifest is never written here (A3).
     pub fn dispatch_object_path(&self, source: &str, repository: &str, digest: &Digest) -> PathBuf {
         self.wire_source_dir(source)
@@ -976,13 +976,31 @@ mod wire_grammar_tests {
 
     /// Builds minimal root-document bytes matching `test/src/static_index.py`'s
     /// `write_package()` shape: a `repository` pointer and one tag whose
-    /// `content` names `obs_digest`.
-    fn minimal_root_bytes(repository: &str, obs_digest: &Digest) -> Vec<u8> {
+    /// `content` names `dispatch_digest`.
+    fn minimal_root_bytes(repository: &str, dispatch_digest: &Digest) -> Vec<u8> {
         serde_json::json!({
             "repository": repository,
             "tags": {
-                "latest": { "content": obs_digest.to_string(), "observed": "2026-07-18T09:00:00Z" }
+                "latest": { "content": dispatch_digest.to_string(), "observed": "2026-07-18T09:00:00Z" }
             }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// A real minimal OCI image index — the shape a dispatch object actually
+    /// holds (A3): `schemaVersion` + `mediaType` + one child manifest
+    /// descriptor. Never the deleted `{"platforms":[...]}` projection.
+    fn minimal_dispatch_object_bytes() -> Vec<u8> {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:aa",
+                "size": 42,
+                "platform": { "architecture": "amd64", "os": "linux" }
+            }]
         })
         .to_string()
         .into_bytes()
@@ -1222,9 +1240,9 @@ mod wire_grammar_tests {
         // The guard must not over-reject a legitimate `<ns>/<pkg>` repository.
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let payload = b"{\"platforms\":[]}";
-        let digest = crate::oci::Algorithm::Sha256.hash(payload);
-        s.write_dispatch_object("ocx.sh", "kitware/cmake", &digest, payload)
+        let payload = minimal_dispatch_object_bytes();
+        let digest = crate::oci::Algorithm::Sha256.hash(&payload);
+        s.write_dispatch_object("ocx.sh", "kitware/cmake", &digest, &payload)
             .await
             .expect("a normal nested repository must be accepted");
     }
@@ -1340,9 +1358,9 @@ mod wire_grammar_tests {
         // one slugify rewrites (a colon-bearing host:port).
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let payload = b"{\"platforms\":[]}";
-        let digest = crate::oci::Algorithm::Sha256.hash(payload);
-        s.write_dispatch_object("localhost:5000", "kitware/cmake", &digest, payload)
+        let payload = minimal_dispatch_object_bytes();
+        let digest = crate::oci::Algorithm::Sha256.hash(&payload);
+        s.write_dispatch_object("localhost:5000", "kitware/cmake", &digest, &payload)
             .await
             .expect("a normal source name must be accepted");
     }
@@ -1380,11 +1398,10 @@ mod wire_grammar_tests {
     async fn write_then_read_dispatch_object_round_trips_verbatim_bytes_at_dot_json_path() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let payload =
-            b"{\"platforms\":[{\"platform\":{\"os\":\"linux\",\"architecture\":\"amd64\"},\"digest\":\"sha256:aa\"}]}";
-        let digest = crate::oci::Algorithm::Sha256.hash(payload);
+        let payload = minimal_dispatch_object_bytes();
+        let digest = crate::oci::Algorithm::Sha256.hash(&payload);
 
-        s.write_dispatch_object("ocx.sh", "kitware/cmake", &digest, payload)
+        s.write_dispatch_object("ocx.sh", "kitware/cmake", &digest, &payload)
             .await
             .unwrap();
 
@@ -1582,16 +1599,15 @@ mod wire_grammar_tests {
     async fn write_order_dispatch_then_root_then_catalog_all_cohere_after_commit() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let obs_payload =
-            b"{\"platforms\":[{\"platform\":{\"os\":\"linux\",\"architecture\":\"amd64\"},\"digest\":\"sha256:aa\"}]}";
-        let obs_digest = crate::oci::Algorithm::Sha256.hash(obs_payload);
+        let dispatch_payload = minimal_dispatch_object_bytes();
+        let dispatch_digest = crate::oci::Algorithm::Sha256.hash(&dispatch_payload);
 
         // Step 1 (F1): dispatch object into o/ first.
-        s.write_dispatch_object("ocx.sh", "kitware/cmake", &obs_digest, obs_payload)
+        s.write_dispatch_object("ocx.sh", "kitware/cmake", &dispatch_digest, &dispatch_payload)
             .await
             .unwrap();
 
-        let root_bytes = minimal_root_bytes("oci://ghcr.io/kitware/cmake", &obs_digest);
+        let root_bytes = minimal_root_bytes("oci://ghcr.io/kitware/cmake", &dispatch_digest);
 
         // Steps 2+3 (F1): root, then the catalog entry, via one transaction.
         let mut txn = s.begin_catalog_transaction("ocx.sh").await.unwrap();
@@ -1599,7 +1615,7 @@ mod wire_grammar_tests {
         txn.commit(None).await.unwrap();
 
         assert!(
-            tokio::fs::try_exists(s.dispatch_object_path("ocx.sh", "kitware/cmake", &obs_digest))
+            tokio::fs::try_exists(s.dispatch_object_path("ocx.sh", "kitware/cmake", &dispatch_digest))
                 .await
                 .unwrap(),
             "dispatch object must exist after the write-order sequence"

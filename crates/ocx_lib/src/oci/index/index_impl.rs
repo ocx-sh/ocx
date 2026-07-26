@@ -11,10 +11,12 @@ use super::IndexOperation;
 pub trait IndexImpl: Send + Sync {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
 
-    /// List all user-visible tags for the given identifier.
+    /// List all tags for the given identifier.
     ///
-    /// Internal tags ([`Tag::Internal`](crate::package::tag::Tag::Internal)) must be
-    /// filtered out by every implementation.
+    /// Implementations return the source's tags as recorded; reserved tags
+    /// ([`Tag::is_reserved`](crate::package::tag::Tag::is_reserved) — the
+    /// `__ocx` namespace and `sha256.<hex>` digest aliases) are filtered
+    /// once, in [`Index::list_tags`](super::Index::list_tags).
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>>;
 
     /// Fetch the manifest for the given identifier.
@@ -110,8 +112,8 @@ pub trait IndexImpl: Send + Sync {
     /// Whether this source is the authoritative resolver for `identifier`'s
     /// namespace.
     ///
-    /// An authoritative source's **refusal** (a yanked tag without opt-in, an
-    /// observation-object tamper, a fail-closed format mismatch) must stop the
+    /// An authoritative source's **refusal** (a yanked tag without opt-in, a
+    /// dispatch-object tamper, a fail-closed format mismatch) must stop the
     /// chain walk — it must never fall through to a lower source that could
     /// answer the same name and both bypass the refusal and leak the
     /// induced-error traffic to that source. The default returns `false`; only
@@ -124,9 +126,13 @@ pub trait IndexImpl: Send + Sync {
     /// This source's provenance (`adr_index_indirection.md` A2/H — the "two
     /// ifs" that distinguish a published copy from a derived one).
     ///
-    /// A cheap, synchronous, no-I/O classification — `ChainedIndex` calls it to
-    /// pick [`super::local_index::SourceKind`] for local dispatch-object reads
-    /// and AbsentLeaf recovery routing, without needing to contact the source.
+    /// A cheap, synchronous, no-I/O classification with exactly two jobs, both
+    /// about who authored the local copy's root document: the root-read catalog
+    /// cross-check (`c/index.json` for a published copy, none for a derived one)
+    /// and root authorship on growth (verbatim copy vs OCX-authored field-wise).
+    /// Recovery routing is **not** one of them — an absent dispatch object is
+    /// fetched by digest regardless of provenance. `ChainedIndex` calls this to
+    /// pick [`super::local_index::SourceKind`] without contacting the source.
     /// The default is [`super::local_index::SourceKind::Derived`] (an OCI
     /// registry publishes no index of its own); only [`super::OcxIndex`]
     /// overrides it (`Published`).
@@ -138,7 +144,7 @@ pub trait IndexImpl: Send + Sync {
 
     /// A view that resolves identically but writes **nothing** into the local
     /// index — no dispatch object, no root-document tag pointer, no
-    /// AbsentLeaf self-heal. Content-addressed blob writes (leaf manifests,
+    /// absent-dispatch self-heal. Content-addressed blob writes (leaf manifests,
     /// config blobs) still happen: the blob store is the GC-able content
     /// cache, distinct from the permanent local index. Used by read-only
     /// views (`ocx package inspect`) so merely looking at a package never
