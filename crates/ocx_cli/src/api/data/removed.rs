@@ -48,7 +48,8 @@ impl RemovedEntry {
 
 /// Results of an uninstall or deselect operation.
 ///
-/// Plain format: three-column table (Package | Status | Path).
+/// Plain format: two-column table (Package | Status). `path` has no column:
+/// every value it holds is the path of something that no longer exists.
 ///
 /// JSON format: array of `{ package, status, path }` objects.
 pub struct Removed {
@@ -69,20 +70,13 @@ impl Serialize for Removed {
 
 impl Printable for Removed {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
-        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());
             rows[1].push(entry.status.to_string());
-            rows[2].push(
-                entry
-                    .path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or("-".into()),
-            );
         }
         printer.print_table(
-            &["Package".into(), "Status".into(), "Path".into()],
+            &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
     }

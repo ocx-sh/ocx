@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use ocx_lib::cli::Cell;
+use ocx_lib::oci::PinnedIdentifier;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -29,6 +30,11 @@ impl fmt::Display for PullStatus {
 
 /// A single dry-run preview row.
 ///
+/// `package` is held typed rather than pre-formatted so plain and JSON can
+/// render it differently: `PinnedIdentifier`'s `Serialize` is its `Display`,
+/// so JSON keeps the pinned `…@sha256:<64hex>` form, while the plain table
+/// drops the digest.
+///
 /// `path` is `Some` for cached entries (the package root directory,
 /// parent of `content/` and `entrypoints/`) and `None` for `WouldFetch`
 /// rows where nothing has been materialised yet. Mirrors the contract
@@ -37,20 +43,23 @@ impl fmt::Display for PullStatus {
 /// `<path>/entrypoints/` for generated launchers.
 #[derive(Serialize)]
 pub struct DryRunEntry {
-    pub package: String,
+    pub package: PinnedIdentifier,
     pub status: PullStatus,
     pub path: Option<PathBuf>,
 }
 
 impl DryRunEntry {
-    pub fn new(package: String, status: PullStatus, path: Option<PathBuf>) -> Self {
+    pub fn new(package: PinnedIdentifier, status: PullStatus, path: Option<PathBuf>) -> Self {
         Self { package, status, path }
     }
 }
 
 /// Preview of what `ocx pull` would do without writing to the store.
 ///
-/// Plain format: three-column table (Package | Status | Path).
+/// Plain format: two-column table (Package | Status), the package pinned to a
+/// 12-hex short digest. `path` has no column: it is populated only for `cached`
+/// rows and is a dash for exactly the `would-fetch` rows this command exists to
+/// surface.
 ///
 /// JSON format: array of `{ package, status, path }` objects, preserving
 /// lock-file order.
@@ -72,20 +81,22 @@ impl Serialize for PullDryRun {
 
 impl Printable for PullDryRun {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
-        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
-            rows[0].push(entry.package.clone());
+            // A locked leaf carries no tag (`LockedTool::repository` is bare
+            // registry/repo coordinates), so dropping the digest outright would
+            // leave the row with no version at all. Shorten it instead: 12 hex
+            // still discriminates two leaves of the same repo, at a quarter the
+            // width. JSON keeps the full pin.
+            rows[0].push(format!(
+                "{}@{}",
+                entry.package.without_digest(),
+                entry.package.digest().to_short_string()
+            ));
             rows[1].push(entry.status.to_string());
-            rows[2].push(
-                entry
-                    .path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or("-".into()),
-            );
         }
         printer.print_table(
-            &["Package".into(), "Status".into(), "Path".into()],
+            &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
     }

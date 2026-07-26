@@ -9,9 +9,11 @@ use crate::api::Printable;
 
 /// Result of a successful `ocx package announce`.
 ///
-/// Plain format: a one-row table (`Package`, `Status`, `Pull Request`,
-/// `Fork`, `Written Paths`, `Dropped Tags`) — a dash marks a field the mode did
-/// not produce.
+/// Plain format: a one-row table (`Package`, `Status`, `Pull Request`, `Fork`,
+/// `Written Paths`) — a dash marks a field the mode did not produce, and
+/// `Written Paths` is how many were written, not the list (it is unbounded by
+/// construction: one path per tag). Dropped reserved tags have no column; the
+/// command warns about them on stderr when there are any.
 ///
 /// JSON format:
 /// `{ "package", "status", "pull_request_url", "pull_request_number", "fork",
@@ -74,7 +76,6 @@ impl Printable for AnnounceReport {
                 "Pull Request".into(),
                 "Fork".into(),
                 "Written Paths".into(),
-                "Dropped Tags".into(),
             ],
             &[
                 vec![Cell::from(self.package.clone())],
@@ -86,12 +87,7 @@ impl Printable for AnnounceReport {
                 vec![Cell::from(if self.written_paths.is_empty() {
                     "-".to_string()
                 } else {
-                    self.written_paths.join(",")
-                })],
-                vec![Cell::from(if self.reserved_tags_dropped.is_empty() {
-                    "-".to_string()
-                } else {
-                    self.reserved_tags_dropped.join(",")
+                    self.written_paths.len().to_string()
                 })],
             ],
         );

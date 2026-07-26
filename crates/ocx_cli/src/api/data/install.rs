@@ -25,7 +25,8 @@ pub struct InstallEntry {
 
 /// Installed or selected packages keyed by the user-supplied identifier string.
 ///
-/// Plain format: three-column table (Package | Version | Path).
+/// Plain format: three-column table (Package | Version | Path). `Version`
+/// renders the identifier without its digest; the pinned form stays in JSON.
 ///
 /// JSON format: object keyed by package identifier, each value an
 /// `{ identifier, metadata, path }` object.
@@ -51,7 +52,10 @@ impl Printable for Installs {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
-            rows[1].push(theme.of(&entry.identifier));
+            // `Identifier::Display` always appends `@sha256:<64hex>`, which alone
+            // is 71 columns — it widens every row of the most-run command for a
+            // value the user already pinned. JSON keeps the full form.
+            rows[1].push(theme.of(&entry.identifier.without_digest()));
             rows[2].push(
                 entry
                     .path
