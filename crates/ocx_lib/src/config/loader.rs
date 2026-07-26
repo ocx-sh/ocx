@@ -25,6 +25,14 @@ use crate::log;
 /// accidentally pointing `--config` at a multi-megabyte file.
 const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 
+/// Test-only seam redirecting [`ConfigLoader::system_path`] away from
+/// `/etc/ocx/config.toml`, so the SYSTEM-scope lock path is exercisable
+/// without root. Gated per the `__OCX_*` seam convention in
+/// `subsystem-tests.md` — absent from release builds, never forwarded to
+/// child processes, not user-facing configuration.
+#[cfg(any(test, feature = "__testing"))]
+pub const SYSTEM_CONFIG_OVERRIDE: &str = "__OCX_TESTING_SYSTEM_CONFIG";
+
 /// Inputs to config discovery — captures all caller-provided context so the
 /// loader never reads ambient state directly.
 pub struct ConfigInputs<'a> {
@@ -111,18 +119,20 @@ impl ConfigLoader {
     /// Top-level entry: build the ordered path list, load, and merge.
     ///
     /// Layering (lowest → highest precedence):
-    /// 1. compiled-in defaults ([`Self::builtin_defaults`])
-    /// 2. system / user / `$OCX_HOME` tiers — skipped when `OCX_NO_CONFIG=1`
+    /// 1. compiled-in defaults ([`Self::builtin_defaults`]) — never pruned
+    /// 2. system / user / `$OCX_HOME` tiers — under `OCX_NO_CONFIG=1` the user
+    ///    and `$OCX_HOME` tiers are skipped and the system tier is reduced to
+    ///    its locked sections (see [`Self::retain_system_locked_sections`])
     /// 3. managed-config snapshot (identity-gated; also suppressed by
     ///    `OCX_NO_CONFIG=1`)
     /// 4. `OCX_CONFIG` — if set and non-empty
     /// 5. `--config FILE` (via [`ConfigInputs::explicit_path`])
     ///
     /// Explicit paths (both env-var and CLI) always load if set; they layer
-    /// on top of the discovered chain (or on top of nothing, if
-    /// `OCX_NO_CONFIG=1` pruned it). Empty `OCX_CONFIG=""` is treated
-    /// as unset — an escape hatch so users can disable ambient env-var
-    /// config without unsetting it.
+    /// on top of the discovered chain (or on top of an operator lock, or on
+    /// top of nothing, if `OCX_NO_CONFIG=1` pruned it). Empty `OCX_CONFIG=""`
+    /// is treated as unset — an escape hatch so users can disable ambient
+    /// env-var config without unsetting it.
     ///
     /// All filesystem I/O uses [`tokio::fs`] so the loader can run inside
     /// the async runtime without blocking a worker thread.
@@ -154,10 +164,13 @@ impl ConfigLoader {
         // project-config schema lands.
         let _project_path = Self::project_path(inputs.cwd, inputs.explicit_project_path).await?;
 
+        // `OCX_NO_CONFIG=1` prunes ambient configuration, not operator policy:
+        // the system file still loads so its locked sections survive, and is
+        // filtered to exactly those sections below.
         let discovered: Vec<PathBuf> = if no_config {
-            Vec::new()
+            Self::existing_candidates(vec![Self::system_path()]).await?
         } else {
-            Self::discover_paths().await
+            Self::discover_paths().await?
         };
         let mut explicit_paths: Vec<PathBuf> = Vec::new();
         if let Some(env_path) = env_config_file {
@@ -174,8 +187,16 @@ impl ConfigLoader {
         // applied to both views; merging is per-section last-wins, so folding
         // the overlay as one pre-merged `Config` is equivalent to folding its
         // files individually.
+        // The filter applies to the discovered file tiers only: the compiled-in
+        // tier is not ambient host state, so `OCX_NO_CONFIG` does not prune it
+        // (see `builtin_defaults`) — and its entry is unlocked, so folding it in
+        // first would hand it to the filter to drop.
+        let mut discovered_config = Self::load_and_merge(&discovered).await?;
+        if no_config {
+            Self::retain_system_locked_sections(&mut discovered_config);
+        }
         let mut base = Self::builtin_defaults();
-        base.merge(Self::load_and_merge(&discovered).await?);
+        base.merge(discovered_config);
         let overlay = Self::load_and_merge(&explicit_paths).await?;
 
         let mut local_only = base.clone();
@@ -194,13 +215,16 @@ impl ConfigLoader {
         // A-13: the candidate list, not the surviving one — `discover_paths`
         // filtered out every tier file that does not exist, and a grant added
         // to one of those is exactly the change the watch set must notice.
+        //
+        // Under `OCX_NO_CONFIG=1` that list is the system tier alone, matching
+        // what the flag now actually reads: the user and `$OCX_HOME` tiers are
+        // pruned, but `/etc/ocx/config.toml` still loads for its locked
+        // sections, so an operator adding one there changes the resolved config
+        // and must expire a cached verdict like any other watched file.
         let mut config_tier_paths: Vec<PathBuf> = if no_config {
-            Vec::new()
+            vec![Self::system_path()]
         } else {
-            [Some(Self::system_path()), Self::user_path(), Self::home_path()]
-                .into_iter()
-                .flatten()
-                .collect()
+            Self::tier_candidates()
         };
         config_tier_paths.extend(explicit_paths);
 
@@ -552,7 +576,26 @@ impl ConfigLoader {
     /// but an unreadable `~/.ocx/config.toml` should at least be
     /// *diagnosable*. A race between discovery and read surfaces later as
     /// [`Error::Io`] during [`Self::load_and_merge`].
-    pub async fn discover_paths() -> Vec<PathBuf> {
+    ///
+    /// **The SYSTEM candidate is the exception, and best-effort is exactly
+    /// wrong for it**: it carries operator policy (every section
+    /// [`Self::apply_system_locks`] clamps), so skipping the file skips the
+    /// policy with it — silently, on every invocation. A symlinked or otherwise
+    /// unreadable `/etc/ocx/config.toml` is therefore
+    /// [`Error::SystemConfig`] (exit 78) rather than a warning. Absence stays
+    /// silent there too: no system file is the ordinary case.
+    ///
+    /// # Errors
+    /// Returns [`Error::SystemConfig`] when the SYSTEM candidate exists but
+    /// cannot be consulted.
+    pub async fn discover_paths() -> std::result::Result<Vec<PathBuf>, Error> {
+        Self::existing_candidates(Self::tier_candidates()).await
+    }
+
+    /// The ordered discovered-tier candidate list (lowest precedence first),
+    /// before any filesystem check. Pure so the tier order is testable without
+    /// touching `/etc`.
+    fn tier_candidates() -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         candidates.push(Self::system_path());
         if let Some(user) = Self::user_path() {
@@ -561,32 +604,65 @@ impl ConfigLoader {
         if let Some(home) = Self::home_path() {
             candidates.push(home);
         }
+        candidates
+    }
+
+    /// Filesystem half of [`Self::discover_paths`]: drop candidates that do
+    /// not exist, are symlinks, or are unreadable — except the SYSTEM one,
+    /// where everything but absence is fatal (see [`Self::discover_paths`]).
+    /// Split out so the `OCX_NO_CONFIG` path can run the same checks over the
+    /// system candidate alone — that path exists so a locked section survives
+    /// the flag, which it cannot do if the candidate is dropped first.
+    ///
+    /// # Errors
+    /// Returns [`Error::SystemConfig`] when the SYSTEM candidate exists but
+    /// cannot be consulted.
+    async fn existing_candidates(candidates: Vec<PathBuf>) -> std::result::Result<Vec<PathBuf>, Error> {
         // join_all preserves input order, so the precedence semantics of the
         // candidate list (system → user → $OCX_HOME) are unchanged. Running
         // the symlink_metadata calls concurrently shaves two sequential
         // filesystem round-trips on startup. We use `symlink_metadata` rather
         // than `try_exists` (which follows symlinks) so the symlink-rejection
         // branch can observe the link itself without dereferencing it.
+        let system = Self::system_path();
         let checks = join_all(candidates.iter().map(tokio::fs::symlink_metadata)).await;
-        candidates
-            .into_iter()
-            .zip(checks)
-            .filter_map(|(path, result)| match result {
+        let mut kept = Vec::with_capacity(candidates.len());
+        for (path, result) in candidates.into_iter().zip(checks) {
+            // The SYSTEM candidate is the operator's, and skipping it skips
+            // every section `apply_system_locks` would have clamped — so for
+            // that one path, anything but plain absence is fatal. Compared the
+            // same way `load_and_merge` decides to apply the locks, so the two
+            // cannot disagree about which file that is.
+            let is_system = path == system;
+            match result {
                 Ok(meta) if meta.file_type().is_symlink() => {
+                    if is_system {
+                        return Err(Error::SystemConfig {
+                            path,
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "system config file must not be a symlink",
+                            ),
+                        });
+                    }
                     log::warn!(
                         "skipping symlinked config candidate {} (discovered-tier config files must not be symlinks)",
                         path.display()
                     );
-                    None
                 }
-                Ok(_) => Some(path),
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Ok(_) => kept.push(path),
+                // Absence stays silent on every tier: no `/etc/ocx/config.toml`
+                // is the ordinary case on nearly every host.
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => {
+                    if is_system {
+                        return Err(Error::SystemConfig { path, source });
+                    }
                     log::warn!("skipping unreadable config candidate {}: {source}", path.display());
-                    None
                 }
-            })
-            .collect()
+            }
+        }
+        Ok(kept)
     }
 
     /// Resolve the project-tier `ocx.toml` path.
@@ -926,7 +1002,7 @@ impl ConfigLoader {
     /// ignores all lower-tier overrides (including an untrusted
     /// managed-config payload).
     ///
-    /// Covers all six lockable sections: `[patches]` (lock is conditional
+    /// Covers all seven lockable sections: `[patches]` (lock is conditional
     /// inside `PatchConfig::lock_as_system`), `[registry]` (unconditional),
     /// each `[registries.<name>]` entry (unconditional, per name — closes
     /// the indirection `resolved_default_registry` resolves through), each
@@ -936,11 +1012,15 @@ impl ConfigLoader {
     /// (required-gated inside `ManagedConfig::lock_as_system`, like
     /// `[patches]` — a system-scope `required = true` seed must not be
     /// loosenable/clearable by the home tier's fence; ADR Decision G,
-    /// criterion 13), and `[trust]` (unconditional, per `[[trust.policy]]`
+    /// criterion 13), `[trust]` (unconditional, per `[[trust.policy]]`
     /// entry — a locked policy pins the specificity level for the scopes it
     /// matches, so a lower tier may only join its ANY-of set at equal
-    /// specificity, never outbid it with a narrower scope). Extracted so the
-    /// section coverage is unit-testable without writing to `/etc`.
+    /// specificity, never outbid it with a narrower scope), and `[records]`
+    /// (unconditional, and binary per block — a system-scope section clamps
+    /// `dir`, `name` and `required` together, which is what makes recording a
+    /// fleet property rather than a wrapper-script convention; a system file
+    /// with no `[records]` clamps nothing). Extracted so the section coverage
+    /// is unit-testable without writing to `/etc`.
     fn apply_system_locks(parsed: &mut Config) {
         if let Some(patches) = parsed.patches.as_mut() {
             patches.lock_as_system();
@@ -963,6 +1043,9 @@ impl ConfigLoader {
         }
         if let Some(trust) = parsed.trust.as_mut() {
             trust.lock_as_system();
+        }
+        if let Some(records) = parsed.records.as_mut() {
+            records.lock_as_system();
         }
     }
 
@@ -1300,7 +1383,7 @@ impl ConfigLoader {
     }
 
     /// Fold a project-tier contribution into `accumulator`, without its
-    /// `[shell]` section (C-033).
+    /// `[shell]` or `[records]` sections (C-033).
     ///
     /// **The single entry point for any project-tier fold.** `[shell]` carries
     /// consent, and consent read from a repository's own `ocx.toml` would let a
@@ -1309,11 +1392,23 @@ impl ConfigLoader {
     /// refuses a `[shell]` block today only through its `deny_unknown_fields`,
     /// whose own docstring calls it a typo detector; a security property must
     /// not rest on a typo detector nobody records the coupling of.
+    ///
+    /// `[records]` is stripped for the mirrored reason: the sink is the
+    /// operator's, and a repository that could name it could redirect an audit
+    /// trail into a directory it also controls — or, by naming an unwritable
+    /// one under a `required` posture, refuse every launch inside the checkout.
+    /// A cloned repository is untrusted input; where records go is not its call.
     pub fn fold_project_tier(accumulator: &mut Config, mut project_contribution: Config) {
         if project_contribution.shell.take().is_some() {
             log::warn!(
                 "a project-tier config declared [shell]; stripped before merge (shell integration and its activation \
                  consent are configured in config.toml, never in a project file)"
+            );
+        }
+        if project_contribution.records.take().is_some() {
+            log::warn!(
+                "a project-tier config declared [records]; stripped before merge (the execution-record sink is \
+                 operator configuration in config.toml, never a repository's to redirect)"
             );
         }
         accumulator.merge(project_contribution);
@@ -1327,12 +1422,18 @@ impl ConfigLoader {
     /// process working directory — a config read by a daemon, a CI runner and
     /// an interactive shell must name the same file.
     ///
-    /// Two keys participate today: `[trust.sigstore] trusted_root`, and each
-    /// `[[trust.policy]]` signer's `file:`-form `key`. Both name a file the
-    /// operator put beside their own config, so both anchor the same way and
-    /// through the same seam — a second anchoring site is how the two would
-    /// drift into resolving differently. Every other path-valued key in the tree
-    /// is either already absolute by contract or resolved by its own consumer.
+    /// Three keys participate today: `[trust.sigstore] trusted_root`, each
+    /// `[[trust.policy]]` signer's `file:`-form `key`, and `[records] dir`. Each
+    /// names a location the operator chose beside their own config, so all three
+    /// anchor the same way and through the same seam — a second anchoring site
+    /// is how they would drift into resolving differently. Every other
+    /// path-valued key in the tree is either already absolute by contract or
+    /// resolved by its own consumer.
+    ///
+    /// `--records-dir` and `OCX_RECORDS_DIR` stay **CWD-relative** and never
+    /// reach here: a flag and an env var are typed by whoever is standing in a
+    /// directory, and anchoring those at a config file's directory would resolve
+    /// them somewhere the caller cannot see.
     ///
     /// The **project `ocx.toml`** tier does not pass through here. Its trust
     /// policies are read by `trust::policies_from_ocx_toml`, which takes the
@@ -1343,6 +1444,12 @@ impl ConfigLoader {
         let Some(dir) = config_path.parent() else {
             return;
         };
+        if let Some(records) = parsed.records.as_mut()
+            && let Some(sink) = records.dir.as_ref()
+            && sink.is_relative()
+        {
+            records.dir = Some(dir.join(sink));
+        }
         let Some(trust) = parsed.trust.as_mut() else {
             return;
         };
@@ -1354,8 +1461,90 @@ impl ConfigLoader {
         }
     }
 
+    /// The `OCX_NO_CONFIG=1` counterpart to [`Self::apply_system_locks`]: keep
+    /// only the sections the lock pass actually clamped, drop the rest.
+    ///
+    /// `OCX_NO_CONFIG=1` means "ignore ambient configuration", not "ignore
+    /// operator policy". Pruning the system tier wholesale made an operator
+    /// lock defeatable by one environment variable — a CI job setting the flag
+    /// for hermeticity dropped out of a SYSTEM-locked `[records]` sink with
+    /// exit 0 and no warning, and, since the flag is not forwarded to child
+    /// processes, the two frames of one launch chain could resolve two
+    /// different `[records]` policies. This is an integrity control, not a
+    /// containment one (ADR `adr_exec_resolution_record.md`, "the lock
+    /// protects against error, not malice") — whoever sets `OCX_NO_CONFIG`
+    /// could equally not run ocx at all. What it buys is that the accident
+    /// stops being silent.
+    ///
+    /// Everything the system file declares WITHOUT a lock is ordinary
+    /// configuration and is pruned along with the user and `$OCX_HOME` tiers,
+    /// so the flag keeps its hermetic intent. Explicit tiers (`OCX_CONFIG`,
+    /// `--config`) are unaffected: they load as before and merge on top, where
+    /// a locked section still ignores them.
+    ///
+    /// `[managed]` is dropped even when locked. `OCX_NO_CONFIG` suppresses the
+    /// snapshot read too ([`Self::managed_snapshot_candidate`]), so a retained
+    /// seed could never be satisfied: a `required` tier — the default — would
+    /// fail every hermetic invocation rather than enforce anything. The tier
+    /// stays fully suppressed, exactly as before this filter existed.
+    fn retain_system_locked_sections(config: &mut Config) {
+        // Exhaustive destructure on purpose: a section added to `Config` cannot
+        // reach the SYSTEM tier without a decision here, the same coverage
+        // guarantee `apply_system_locks_covers_every_lockable_section` gives the
+        // lock pass — except enforced by the compiler rather than by a test.
+        let Config {
+            registry,
+            registries,
+            mirrors,
+            patches,
+            managed,
+            trust,
+            shell,
+            records,
+        } = config;
+
+        *patches = patches.take().filter(|patches| patches.system_locked);
+        *registry = registry.take().filter(|registry| registry.system_locked);
+        *records = records.take().filter(|records| records.system_locked);
+        *managed = None;
+        // `[shell]` is the one section `apply_system_locks` clamps nothing in,
+        // so nothing in it survives: the hook/completions toggles and the
+        // activation consent whitelist are ambient host configuration, and the
+        // flag prunes them with the user and `$OCX_HOME` tiers.
+        *shell = None;
+        if let Some(entries) = registries.as_mut() {
+            entries.retain(|_, entry| entry.system_locked);
+        }
+        *registries = registries.take().filter(|entries| !entries.is_empty());
+        if let Some(entries) = mirrors.as_mut() {
+            // Per-role lock: `MirrorConfig::lock_as_system` locks every role the
+            // entry declares, so an entry with neither role locked declares
+            // nothing that survives.
+            entries.retain(|_, mirror| mirror.registry_system_locked || mirror.index_system_locked);
+        }
+        *mirrors = mirrors.take().filter(|entries| !entries.is_empty());
+        // `[trust]` locks per `[[trust.policy]]` entry rather than per section,
+        // because policies array-append across tiers and the section itself does
+        // not survive the fold; `[trust.sigstore]` locks as a whole table.
+        if let Some(declared) = trust.as_mut() {
+            declared.policy.retain(|policy| policy.system_locked);
+            declared.sigstore = declared.sigstore.take().filter(|sigstore| sigstore.system_locked);
+        }
+        *trust = trust
+            .take()
+            .filter(|declared| !declared.policy.is_empty() || declared.sigstore.is_some());
+    }
+
     /// System config: `/etc/ocx/config.toml`.
+    ///
+    /// Redirectable through [`SYSTEM_CONFIG_OVERRIDE`] in test builds only —
+    /// the SYSTEM tier is the one tier no test can write to, and every
+    /// system-lock behaviour would otherwise be unreachable end to end.
     pub fn system_path() -> PathBuf {
+        #[cfg(any(test, feature = "__testing"))]
+        if let Some(path) = crate::env::var(SYSTEM_CONFIG_OVERRIDE) {
+            return PathBuf::from(path);
+        }
         PathBuf::from("/etc/ocx/config.toml")
     }
 
@@ -1410,6 +1599,24 @@ mod tests {
         let path = dir.path().join(filename);
         std::fs::write(&path, content).expect("write test config");
         path
+    }
+
+    /// Point the SYSTEM tier at a path that does not exist.
+    ///
+    /// `OCX_NO_CONFIG=1` no longer prunes the system tier (its locked sections
+    /// survive the flag), so a developer machine that happens to carry a real
+    /// `/etc/ocx/config.toml` would otherwise leak into every hermetic-mode
+    /// assertion below. Same rationale as `EnvLock::isolate_project_home`.
+    fn without_system_config(env: &crate::test::env::EnvLock) {
+        env.set(SYSTEM_CONFIG_OVERRIDE, "/nonexistent/ocx-test-system/config.toml");
+    }
+
+    /// Point the SYSTEM tier at `content` written into `dir`, so the
+    /// `lock_as_system` pass runs against it exactly as it does for
+    /// `/etc/ocx/config.toml`.
+    fn with_system_config(env: &crate::test::env::EnvLock, dir: &TempDir, content: &str) {
+        let path = write_config(dir, "system-config.toml", content);
+        env.set(SYSTEM_CONFIG_OVERRIDE, path.to_str().expect("temp path is utf-8"));
     }
 
     // ── load_and_merge tests (Step 3.3) ──────────────────────────────────────
@@ -1598,6 +1805,7 @@ mod tests {
     async fn load_with_no_config_returns_default() {
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         let inputs = ConfigInputs {
             explicit_path: None,
@@ -1620,6 +1828,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "hermetic.toml", "[registry]\ndefault = \"hermetic.example\"");
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         let inputs = ConfigInputs {
             explicit_path: Some(&path),
@@ -1647,6 +1856,7 @@ mod tests {
             "[registry]\ndefault = \"env-hermetic.example\"",
         );
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.set("OCX_CONFIG", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
@@ -1668,6 +1878,7 @@ mod tests {
         // OCX_CONFIG="" is the escape hatch — treated as unset, not an error.
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.set("OCX_CONFIG", "");
         let inputs = ConfigInputs {
             explicit_path: None,
@@ -1684,6 +1895,7 @@ mod tests {
     async fn load_with_nonexistent_explicit_path_errors() {
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         let nonexistent = PathBuf::from("/tmp/ocx-test-nonexistent-config-99999.toml");
         let inputs = ConfigInputs {
@@ -1706,6 +1918,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.set("OCX_CONFIG", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
@@ -1728,6 +1941,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.set("OCX_CONFIG", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
@@ -1757,6 +1971,7 @@ mod tests {
         let env_file = write_config(&dir, "env.toml", "[registry]\ndefault = \"env.example\"");
         let explicit_file = write_config(&dir, "explicit.toml", "[registry]\ndefault = \"explicit.example\"");
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.set("OCX_CONFIG", env_file.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: Some(&explicit_file),
@@ -2044,6 +2259,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn system_path_is_etc_ocx_config_toml() {
+        // Holds the env lock so a concurrently-running test cannot have the
+        // `SYSTEM_CONFIG_OVERRIDE` seam set while this asserts the real path.
+        let env = crate::test::env::lock();
+        env.remove(SYSTEM_CONFIG_OVERRIDE);
         let path = ConfigLoader::system_path();
         assert_eq!(path, PathBuf::from("/etc/ocx/config.toml"));
     }
@@ -2101,10 +2320,13 @@ mod tests {
         std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         env.set("OCX_HOME", locked_home.to_str().unwrap());
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         env.remove("OCX_NO_CONFIG");
 
-        let paths = ConfigLoader::discover_paths().await;
+        let paths = ConfigLoader::discover_paths()
+            .await
+            .expect("an unreadable candidate outside the SYSTEM tier is skipped, never fatal");
 
         // Restore permissions so TempDir::drop can clean up even if the
         // assertion below panics.
@@ -2135,14 +2357,153 @@ mod tests {
         std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
 
         env.set("OCX_HOME", home.to_str().unwrap());
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         env.remove("OCX_NO_CONFIG");
 
-        let paths = ConfigLoader::discover_paths().await;
+        let paths = ConfigLoader::discover_paths()
+            .await
+            .expect("a symlinked candidate outside the SYSTEM tier is skipped, never fatal");
 
         assert!(
             !paths.contains(&symlink_path),
             "symlinked candidate must be skipped, got: {paths:?}"
+        );
+    }
+
+    // ── the SYSTEM candidate is not best-effort ──────────────────────────────
+    //
+    // The user and `$OCX_HOME` tiers carry a caller's own preferences, so a
+    // candidate that cannot be read is skipped with a warning and discovery
+    // continues. The SYSTEM tier carries operator **policy**: dropping it drops
+    // every locked section with it, silently, on every invocation. An operator
+    // who symlinks `/etc/ocx/config.toml` at a config-managed fleet file — an
+    // ordinary move — would otherwise take the whole fleet out of a locked
+    // `[records]` sink with exit 0 and a warning nobody reads.
+
+    /// The exit code a fatal SYSTEM candidate must carry: the operator fixes it
+    /// by editing a file, not by clearing an I/O condition.
+    #[cfg(unix)]
+    fn assert_system_config_error(error: &crate::Error, path: &Path) {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        assert!(
+            matches!(error, crate::Error::Config(Error::SystemConfig { path: named, .. }) if named == path),
+            "expected a fatal system-config error naming {}, got: {error:?}",
+            path.display()
+        );
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_system_config_is_fatal() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let target = write_config(&dir, "fleet.toml", "[records]\ndir = \"/var/log/ocx/records\"\n");
+        let link = dir.path().join("system-config.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        env.set(SYSTEM_CONFIG_OVERRIDE, link.to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+
+        let error = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect_err("a symlinked SYSTEM candidate must not be skipped with a warning");
+        assert_system_config_error(&error, &link);
+    }
+
+    /// The same refusal on the `OCX_NO_CONFIG=1` path, which runs the checks
+    /// over the system candidate alone: that flag exists so a locked section
+    /// survives it, which it cannot do if the candidate is dropped first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_system_config_is_fatal_under_no_config() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let target = write_config(&dir, "fleet.toml", "[records]\ndir = \"/var/log/ocx/records\"\n");
+        let link = dir.path().join("system-config.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        env.set(SYSTEM_CONFIG_OVERRIDE, link.to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+
+        let error = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect_err("the hermetic path checks the same candidate and must refuse it the same way");
+        assert_system_config_error(&error, &link);
+    }
+
+    /// Anything other than `NotFound` is fatal too, not only a symlink: an
+    /// unreadable `/etc/ocx/config.toml` is a policy file that exists and could
+    /// not be consulted. `ENOTDIR` stands in for the class — it needs no
+    /// permission games, which a container running as root would defeat.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_system_config_is_fatal() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let not_a_dir = write_config(&dir, "not-a-dir", "");
+        let candidate = not_a_dir.join("config.toml");
+        env.set(SYSTEM_CONFIG_OVERRIDE, candidate.to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+
+        let error = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect_err("a SYSTEM candidate that cannot be stat'd must not be skipped with a warning");
+        assert_system_config_error(&error, &candidate);
+    }
+
+    /// The discriminator on the other side: no `/etc/ocx/config.toml` at all is
+    /// the ordinary case on nearly every host, and must stay silent.
+    #[tokio::test]
+    async fn an_absent_system_config_is_not_fatal() {
+        let env = crate::test::env::lock();
+        without_system_config(&env);
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+
+        ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("an absent system config is the ordinary case, not an error");
+    }
+
+    /// And the discriminator on the tier axis: the user and `$OCX_HOME` tiers
+    /// keep today's best-effort discovery. Only the SYSTEM candidate is fatal,
+    /// so the same symlink that refuses above is merely skipped here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_non_system_candidate_is_still_skipped() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        without_system_config(&env);
+        let target = write_config(&dir, "target.toml", "[registry]\ndefault = \"symlinked.example\"");
+        let link = dir.path().join("user-config.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let kept = ConfigLoader::existing_candidates(vec![ConfigLoader::system_path(), link.clone()])
+            .await
+            .expect("a symlinked user-tier candidate is skipped, never fatal");
+        assert!(
+            !kept.contains(&link),
+            "the candidate must still be dropped, just not fatally; got: {kept:?}"
         );
     }
 
@@ -3474,6 +3835,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         env.set("OCX_HOME", dir.path().to_str().unwrap());
         env.set("OCX_NO_CONFIG", "1");
+        without_system_config(&env);
         env.remove("OCX_CONFIG");
         env.set("OCX_MANAGED_CONFIG", "registry.test/managed-config:v1");
 
@@ -3709,6 +4071,7 @@ mod tests {
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
             "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
             "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
+            "[records]\ndir = \"/var/log/ocx/records\"\nrequired = true\n",
         ))
         .unwrap();
 
@@ -3738,6 +4101,288 @@ mod tests {
         assert!(
             config.trust.unwrap().policy.iter().all(|policy| policy.system_locked),
             "every [[trust.policy]] entry must lock"
+        );
+        assert!(
+            config.records.unwrap().system_locked,
+            "[records] must lock — a system-scope sink is what makes recording a fleet property"
+        );
+    }
+
+    // ── OCX_NO_CONFIG vs. the SYSTEM lock ───────────────────────────────────
+    //
+    // `OCX_NO_CONFIG=1` prunes ambient configuration, not operator policy. The
+    // pair of directions below is what makes that claim testable: the locked
+    // section must survive the flag, and everything else must still be pruned
+    // by it — without the second half these tests would pass against a loader
+    // that simply stopped honouring `OCX_NO_CONFIG`.
+
+    /// A sink path this host's `Path::is_absolute` agrees with.
+    ///
+    /// A POSIX `/var/log/...` is only *root-relative* on Windows, so the
+    /// anchoring seam rewrites it there — correctly, but it then stops being the
+    /// "operator spelled it out in full" case these tests are about.
+    fn absolute_sink(tail: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:/{tail}"))
+        } else {
+            PathBuf::from(format!("/{tail}"))
+        }
+    }
+
+    /// The published guarantee (`reference/execution-records.md`): "no caller
+    /// can opt out of a sink the operator has locked at system scope."
+    /// `OCX_NO_CONFIG=1` is a caller, and used to be the one way out.
+    #[tokio::test]
+    async fn no_config_keeps_a_system_locked_records_policy() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set("OCX_HOME", home.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        let sink = absolute_sink("var/log/ocx/records");
+        with_system_config(
+            &env,
+            &dir,
+            &format!(
+                "[records]\ndir = \"{}\"\nname = \"{{time}}.json\"\nrequired = true\n",
+                sink.display()
+            ),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("OCX_NO_CONFIG=1 must still succeed");
+
+        let records = config
+            .records
+            .expect("a SYSTEM-locked [records] must survive OCX_NO_CONFIG=1");
+        assert!(records.system_locked, "the clamp must reach the resolver");
+        assert_eq!(records.dir, Some(sink));
+        assert_eq!(records.name.as_deref(), Some("{time}.json"));
+        assert_eq!(records.required, Some(true));
+    }
+
+    /// The lock outranks the explicit tiers under the flag too — `--config` is
+    /// the loudest caller channel there is, and a locked block still wins.
+    #[tokio::test]
+    async fn no_config_system_locked_records_beats_an_explicit_config_file() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set("OCX_HOME", home.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        let sink = absolute_sink("var/log/ocx/records");
+        with_system_config(
+            &env,
+            &dir,
+            &format!("[records]\ndir = \"{}\"\nrequired = true\n", sink.display()),
+        );
+        let caller = write_config(
+            &dir,
+            "caller.toml",
+            "[records]\ndir = \"/tmp/caller\"\nrequired = false\n",
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: Some(&caller),
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        let records = config.records.expect("locked [records] must be present");
+        assert_eq!(
+            records.dir,
+            Some(sink),
+            "an explicit --config file must not redirect a locked sink"
+        );
+        assert_eq!(records.required, Some(true), "nor loosen the posture");
+    }
+
+    /// Discriminator #1: an *unlocked* `[records]` — one that reached the
+    /// config from the `$OCX_HOME` tier rather than from system scope — is
+    /// still pruned by the flag, exactly as before.
+    #[tokio::test]
+    async fn no_config_prunes_an_unlocked_home_tier_records_section() {
+        let env = crate::test::env::lock();
+        let home = TempDir::new().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[records]\ndir = \"/tmp/home-tier-records\"\n",
+        )
+        .unwrap();
+        env.set("OCX_HOME", home.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        without_system_config(&env);
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert!(
+            config.records.is_none(),
+            "OCX_NO_CONFIG=1 must still prune an unlocked $OCX_HOME [records] section"
+        );
+    }
+
+    /// Discriminator #2: the SYSTEM file is filtered, not loaded wholesale.
+    /// `[patches] required = false` is the operator explicitly declining to
+    /// enforce, so it does not lock — it is ordinary configuration and the flag
+    /// still prunes it, while the `[records]` block in the same file survives.
+    #[tokio::test]
+    async fn no_config_prunes_system_sections_that_did_not_lock() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set("OCX_HOME", home.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        with_system_config(
+            &env,
+            &dir,
+            concat!(
+                "[patches]\nregistry = \"patches.corp.example\"\nrequired = false\n",
+                "[records]\ndir = \"/var/log/ocx/records\"\n",
+            ),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert!(
+            config.patches.is_none(),
+            "an unlocked system [patches] is ordinary configuration and must still be pruned"
+        );
+        assert!(
+            config.records.is_some(),
+            "the locked [records] block in the same file must survive"
+        );
+    }
+
+    /// `[managed]` stays fully suppressed under the flag even though it locks:
+    /// `OCX_NO_CONFIG` also suppresses the snapshot read, so a retained seed
+    /// could never be satisfied and a `required` tier (the default) would fail
+    /// every hermetic invocation instead of enforcing anything.
+    #[tokio::test]
+    async fn no_config_still_suppresses_a_system_managed_tier() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set("OCX_HOME", home.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        with_system_config(
+            &env,
+            &dir,
+            "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert!(
+            config.managed.is_none(),
+            "a system [managed] seed must stay suppressed under OCX_NO_CONFIG=1"
+        );
+    }
+
+    /// Every section the lock pass clamps survives the filter (and nothing
+    /// else does). The compile-time gate is the exhaustive destructure inside
+    /// `retain_system_locked_sections`; this pins the runtime half.
+    #[test]
+    fn retain_system_locked_sections_keeps_every_locked_section() {
+        let mut config: crate::config::Config = toml::from_str(concat!(
+            "[patches]\nregistry = \"patches.corp.example\"\nrequired = true\n",
+            "[registry]\ndefault = \"corp\"\n",
+            "[registries.corp]\nindex = \"https://registry.corp.example\"\n",
+            "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
+            "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
+            "[records]\ndir = \"/var/log/ocx/records\"\nrequired = true\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
+            "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
+            "[shell]\nhook = true\n",
+        ))
+        .unwrap();
+
+        ConfigLoader::apply_system_locks(&mut config);
+        ConfigLoader::retain_system_locked_sections(&mut config);
+
+        assert!(config.patches.is_some(), "locked [patches] must survive");
+        assert!(config.registry.is_some(), "locked [registry] must survive");
+        assert!(config.registries.is_some(), "locked [registries.<name>] must survive");
+        assert!(config.mirrors.is_some(), "locked [mirrors.\"<host>\"] must survive");
+        assert!(config.records.is_some(), "locked [records] must survive");
+        assert!(
+            config.trust.is_some_and(|trust| trust.policy.len() == 1),
+            "a locked [[trust.policy]] entry must survive"
+        );
+        assert!(config.managed.is_none(), "[managed] is dropped even when locked");
+        assert!(
+            config.shell.is_none(),
+            "[shell] locks nothing, so the flag prunes it like any ambient tier"
+        );
+    }
+
+    /// The filter is lock-driven, not section-driven: the same sections parsed
+    /// from a NON-system file (no lock pass) are all pruned.
+    #[test]
+    fn retain_system_locked_sections_drops_everything_unlocked() {
+        let mut config: crate::config::Config = toml::from_str(concat!(
+            "[patches]\nregistry = \"patches.corp.example\"\nrequired = true\n",
+            "[registry]\ndefault = \"corp\"\n",
+            "[registries.corp]\nindex = \"https://registry.corp.example\"\n",
+            "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
+            "[records]\ndir = \"/var/log/ocx/records\"\nrequired = true\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
+            "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
+        ))
+        .unwrap();
+
+        ConfigLoader::retain_system_locked_sections(&mut config);
+
+        assert!(config.patches.is_none());
+        assert!(config.registry.is_none());
+        assert!(config.registries.is_none(), "an emptied table collapses to None");
+        assert!(config.mirrors.is_none(), "an emptied table collapses to None");
+        assert!(config.records.is_none());
+        assert!(config.trust.is_none(), "an emptied policy list collapses to None");
+    }
+
+    /// The other half of the `[records]` clamp: a SYSTEM file that declares no
+    /// `[records]` section locks nothing, so an operator who never opted in
+    /// does not silently freeze every lower tier out of configuring a sink.
+    #[test]
+    fn apply_system_locks_leaves_absent_records_section_unlocked() {
+        let mut config: crate::config::Config = toml::from_str("[registry]\ndefault = \"corp\"\n").unwrap();
+
+        ConfigLoader::apply_system_locks(&mut config);
+
+        assert!(
+            config.records.is_none(),
+            "a system file with no [records] must not synthesize a locked section"
         );
     }
 
@@ -3820,6 +4465,39 @@ mod tests {
             anchored.display()
         );
         assert_eq!(anchored, dir.path().join("sigstore").join("trusted-root.json"));
+    }
+
+    /// `[records] dir` rides the same anchoring seam, and its bug is the same
+    /// shape: a relative sink in `/etc/ocx/config.toml` would otherwise resolve
+    /// against the process working directory, so an operator's fleet-wide sink
+    /// would land in a different place for every directory a build runs from —
+    /// scattered records, no error, and a collector reading an empty tree.
+    ///
+    /// The tempdir is deliberately NOT the CWD: a test run from inside it would
+    /// pass either way. An absolute sink is asserted unchanged in the same test,
+    /// because the anchoring must not rewrite what the operator fully specified.
+    #[tokio::test]
+    async fn a_relative_records_dir_anchors_to_the_declaring_config_dir_not_the_cwd() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(&dir, "config.toml", "[records]\ndir = \"audit/records\"\n");
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let sink = config.records.expect("records").dir.expect("dir");
+        assert!(sink.is_absolute(), "anchored to an absolute path: {}", sink.display());
+        assert_eq!(sink, dir.path().join("audit").join("records"));
+
+        let spelled_out = absolute_sink("var/log/ocx-records");
+        let absolute = write_config(
+            &dir,
+            "absolute.toml",
+            &format!("[records]\ndir = \"{}\"\n", spelled_out.display()),
+        );
+        let config = ConfigLoader::load_and_merge(&[absolute]).await.expect("load");
+        assert_eq!(
+            config.records.expect("records").dir.expect("dir"),
+            spelled_out,
+            "an absolute sink is the operator's final word and must pass through untouched"
+        );
     }
 
     /// The signer-key twin of the test above, riding the same seam. Its bug is
@@ -4104,6 +4782,45 @@ mod tests {
             merged.shell.is_none(),
             "a project tier must never contribute [shell] — consent read from a repo's own file lets a clone consent \
              to itself"
+        );
+        assert_eq!(
+            merged.resolved_default_registry(),
+            Some("ocx.sh"),
+            "everything a project tier IS allowed to set must still merge"
+        );
+    }
+
+    /// The `[records]` twin of the strip above, and the same class of defect: a
+    /// repository that could contribute `[records]` could redirect an audit
+    /// trail into a directory it also controls, or point a `required` posture at
+    /// an unwritable one and refuse every launch inside the checkout. Where
+    /// records go is the operator's call, and a clone is untrusted input.
+    ///
+    /// Red state: delete the `take()` for `records` in
+    /// [`ConfigLoader::fold_project_tier`] and `merged.records` carries the
+    /// repository's sink.
+    #[test]
+    fn a_project_tier_fold_cannot_contribute_records() {
+        let mut merged: Config = toml::from_str("[records]\ndir = \"/var/log/ocx-records\"\n").expect("base parses");
+        let project: Config = toml::from_str(
+            "[records]\ndir = \"./.ocx/records\"\nrequired = true\n\n[registry]\ndefault = \"ocx.sh\"\n",
+        )
+        .expect("a project-tier contribution parses as a Config");
+        assert!(
+            project.records.is_some(),
+            "the fixture must actually carry [records], or the strip is untested"
+        );
+
+        ConfigLoader::fold_project_tier(&mut merged, project);
+
+        assert_eq!(
+            merged
+                .records
+                .as_ref()
+                .expect("the operator's own section survives")
+                .dir,
+            Some(std::path::PathBuf::from("/var/log/ocx-records")),
+            "a project tier must never redirect the execution-record sink"
         );
         assert_eq!(
             merged.resolved_default_registry(),
@@ -4951,7 +5668,16 @@ mod tests {
     /// exactly the change an `inert` cache has to expire on.
     #[tokio::test]
     async fn a13_records_every_config_tier_candidate_including_absent_ones() {
+        // The env lock, and a SYSTEM candidate this test names itself: the
+        // loader reads `SYSTEM_CONFIG_OVERRIDE`, `OCX_CONFIG` and
+        // `OCX_NO_CONFIG` from the ambient environment, so without both it
+        // could observe a sibling's fixture mid-run — the symlinked system
+        // config two tests over turns this into a fatal load, intermittently.
+        let env = crate::test::env::lock();
         let dir = TempDir::new().expect("tempdir");
+        without_system_config(&env);
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
         let explicit = write_config(&dir, "explicit.toml", "[shell]\nhook = true\n");
 
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
@@ -4974,6 +5700,147 @@ mod tests {
             loaded.config_tier_paths.last(),
             Some(&explicit),
             "the list is in fold order, so the highest-precedence tier is last"
+        );
+    }
+
+    /// A-13 under `OCX_NO_CONFIG=1`: the recorded list narrows to what the flag
+    /// still reads. The system tier stays — it loads for its locked sections, so
+    /// an operator adding one changes the resolved config — while the user and
+    /// `$OCX_HOME` tiers, which the flag genuinely prunes, drop out.
+    #[tokio::test]
+    async fn a13_under_no_config_records_the_system_tier_and_nothing_below_it() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().expect("tempdir");
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.set("OCX_NO_CONFIG", "1");
+        env.remove("OCX_CONFIG");
+        without_system_config(&env);
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load");
+
+        assert_eq!(
+            loaded.config_tier_paths,
+            vec![ConfigLoader::system_path()],
+            "the system tier is still read under the flag, so it is still watched — and it is the only one"
+        );
+    }
+
+    /// Same contract as `managed_snapshot_cannot_override_system_locked_registry`,
+    /// for `[records]`. A system-scope `[records]` is what lets an operator make
+    /// recording a fleet property instead of a wrapper-script convention, so the
+    /// managed tier — a payload fetched from a registry, i.e. the one tier that
+    /// is not a local file the operator wrote — must be able to neither redirect
+    /// the sink nor loosen the fail posture. The clamp is binary and per-block:
+    /// `dir`, `name` and `required` are pinned together.
+    #[tokio::test]
+    async fn managed_snapshot_cannot_override_system_locked_records() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[records]\ndir = \"/tmp/attacker-sink\"\nrequired = false\n",
+        );
+
+        // Simulate an accumulator that already folded a locked SYSTEM tier
+        // (in production: `/etc/ocx/config.toml` via `load_and_merge`'s
+        // `apply_system_locks` branch) plus a home tier whose `[managed].source`
+        // matches the snapshot above.
+        let mut records = crate::record::RecordsOptions {
+            dir: Some(PathBuf::from("/var/log/ocx/records")),
+            required: Some(true),
+            ..Default::default()
+        };
+        records.lock_as_system();
+        let accumulator = crate::config::Config {
+            records: Some(records),
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("registry.test/managed-config:v1".to_string()),
+                required: Some(false),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed even against a locked accumulator");
+
+        let folded_records = folded.records.expect("[records] must survive the fold");
+        assert_eq!(
+            folded_records.dir,
+            Some(PathBuf::from("/var/log/ocx/records")),
+            "a system-locked [records] sink must survive a managed-payload redirection attempt"
+        );
+        assert_eq!(
+            folded_records.required,
+            Some(true),
+            "a system-locked [records] fail posture must not be loosened by a managed payload"
+        );
+    }
+
+    /// The discriminating half of the pair above. Without a `[records]` arm in
+    /// `Config::merge` the payload's section is dropped on the floor, so the
+    /// locked-tier test would pass for the wrong reason — the clamp would look
+    /// enforced while nothing was ever merged. This pins that an UNLOCKED
+    /// `[records]` genuinely folds, which is what makes the locked case a
+    /// statement about the lock rather than about a missing merge arm.
+    #[tokio::test]
+    async fn managed_snapshot_overrides_unlocked_records() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[records]\ndir = \"/var/log/ocx/fleet\"\n",
+        );
+
+        let accumulator = crate::config::Config {
+            records: Some(crate::record::RecordsOptions {
+                dir: Some(PathBuf::from("/home/dev/records")),
+                required: Some(true),
+                ..Default::default()
+            }),
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("registry.test/managed-config:v1".to_string()),
+                required: Some(false),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed");
+
+        let folded_records = folded.records.expect("[records] must survive the fold");
+        assert_eq!(
+            folded_records.dir,
+            Some(PathBuf::from("/var/log/ocx/fleet")),
+            "an unlocked [records] must let the higher managed tier redirect the sink"
+        );
+        assert_eq!(
+            folded_records.required,
+            Some(true),
+            "a field the payload leaves unset must not be clobbered"
         );
     }
 }

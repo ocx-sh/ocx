@@ -1,0 +1,22 @@
+# subset of open-telemetry/semantic-conventions v1.36.0 model/host/registry.yaml
+- id: host.arch
+  type:
+    members:
+      - id: amd64
+        value: 'amd64'
+      - id: arm32
+        value: 'arm32'
+      - id: arm64
+        value: 'arm64'
+      - id: ia64
+        value: 'ia64'
+      - id: ppc32
+        value: 'ppc32'
+      - id: ppc64
+        value: 'ppc64'
+      - id: s390x
+        value: 's390x'
+      - id: x86
+        value: 'x86'
+  stability: development
+  brief: The CPU architecture the host system is running on.

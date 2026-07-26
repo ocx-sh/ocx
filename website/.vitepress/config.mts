@@ -121,6 +121,7 @@ export default defineConfig({
             { text: "Script Host API", link: "/docs/reference/script-host-api" },
             { text: "Configuration", link: "/docs/reference/configuration" },
             { text: "Environment", link: "/docs/reference/environment" },
+            { text: "Execution Records", link: "/docs/reference/execution-records" },
             { text: "Metadata", link: "/docs/reference/metadata" },
             { text: "Platforms", link: "/docs/reference/platforms" },
             { text: "mirror.yml ↗", link: "https://ocx-sh.github.io/ocx-mirror/reference/mirror-yml/" },

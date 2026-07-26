@@ -209,6 +209,12 @@ strsim = "0.11.1"
 regex = "1.12.3"
 chrono = "0.4.44"
 schemars = "1.2.1"
+# Package URL rendering for execution-record descriptors (`pkg:oci/...`), so an
+# SBOM or policy engine joins on a standard identifier instead of learning an
+# OCX-specific grammar. Vetted: its encode set excludes `:` so a `sha256:<hex>`
+# version round-trips unencoded, and every transitive dep already resolves to a
+# version in Cargo.lock (zero new crate versions, all MIT/Apache-2.0).
+packageurl = "0.7.0"
 
 # Terminal / UI
 console = "0.16.3"

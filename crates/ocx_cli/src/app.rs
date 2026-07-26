@@ -443,6 +443,75 @@ mod tests {
     use super::{should_check_for_update, should_check_managed_config_refresh, should_enforce_managed_config_required};
     use crate::command::{self, self_group, version};
 
+    // ── Record frame vocabulary ──────────────────────────────────────────────
+
+    /// Every `FrameCommand` an execution record can carry names its command
+    /// **exactly** as [`canonical_command_name`] does.
+    ///
+    /// Two ocx-authored JSON documents describe the same invocation — the v1
+    /// error envelope and the execution record — and a consumer joining them on
+    /// the command has to be able to grep one string. This is the binding: not a
+    /// pair of restated literals like the shim wire token (which spans a crate
+    /// `ocx_lib` cannot depend on), but a real comparison, because this crate
+    /// links both sides.
+    ///
+    /// The mapping is checked **per variant** rather than as a set, so swapping
+    /// two spellings cannot pass. The `Cli` parse is what names the arm: a hand
+    /// written `Command` value would let a future rename drift the arm and the
+    /// spelling together without reding.
+    ///
+    /// Red state: change any `#[serde(rename = …)]` on `FrameCommand`, or any of
+    /// the four arms in `canonical_command_name`, and its row fails.
+    #[test]
+    fn every_record_frame_command_matches_the_canonical_cli_name() {
+        use clap::Parser as _;
+        use ocx_lib::record::FrameCommand;
+
+        // The deprecated `ocx run` is deliberately absent: it reports `"run"`
+        // through the error envelope (a released binary already emitted that)
+        // while its record says `"exec"`. The record states what executed, and
+        // both spellings execute the project tier.
+        let rows: [(FrameCommand, &[&str]); 4] = [
+            (FrameCommand::Exec, &["ocx", "exec", "--", "true"]),
+            (
+                FrameCommand::PackageExec,
+                &["ocx", "package", "exec", "cmake", "--", "true"],
+            ),
+            (
+                FrameCommand::LauncherExec,
+                &["ocx", "launcher", "exec", "/pkg", "--", "cmake"],
+            ),
+            (
+                FrameCommand::LauncherShim,
+                &[
+                    "ocx",
+                    "launcher",
+                    "shim",
+                    "index.ocx.sh/ocx/cmake@sha256:3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0",
+                    "--",
+                    "cmake",
+                ],
+            ),
+        ];
+
+        for (frame, argv) in rows {
+            let cli =
+                super::Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            let command = cli.command.expect("the fixture names a subcommand");
+            let wire = serde_json::to_value(frame)
+                .expect("a unit enum variant serializes")
+                .as_str()
+                .expect("FrameCommand serializes as a string")
+                .to_owned();
+            assert_eq!(
+                wire,
+                super::canonical_command_name(&command),
+                "the record and the error envelope must name `{}` identically",
+                argv.join(" ")
+            );
+        }
+    }
+
     // ── Exit-code classification ─────────────────────────────────────────────
 
     /// [#343](https://github.com/ocx-sh/ocx/issues/343) — moving the two

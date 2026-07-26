@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
+use ocx_lib::launch::{self, ExemptionReason, Launch};
 use ocx_lib::utility::child_process;
 use ocx_lib::utility::fs as ocx_fs;
 use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
@@ -152,7 +153,7 @@ impl PackageTest {
         // a) --output DIR: validate same-filesystem + empty; keep it (no delete).
         // b) --keep: auto temp dir, do not delete, print path to stderr.
         // c) default: auto temp dir; delete explicitly before exec (RAII cannot be
-        //    used because `child_process::exec` diverges on Unix — the process is
+        //    used because `launch::exec` diverges on Unix — the process is
         //    replaced and Drop never runs). Errors before exec rely on the RAII
         //    guard to clean up; the guard is manually consumed (closed) just before
         //    the exec call in step 7.
@@ -280,6 +281,16 @@ impl PackageTest {
         // Ok(ExitCode) so main.rs::classify_error is bypassed (ADR Exit Code
         // Scheme). The non-script path below is byte-identical to before.
         if let Some(script_path) = &self.script {
+            // The script host spawns its own children through `ocx.run`, never
+            // through `Launch`, so the exemption bound that `Launch::exempt`
+            // applies to the trailing-command branch would not reach them.
+            // Checked here, before the interpreter starts, so a fail-closed
+            // policy refuses the preview outright rather than letting the
+            // script run an arbitrary number of unrecorded children.
+            launch::exemption_allowed(
+                &context.records(ocx_lib::record::RecordsOptions::default())?,
+                ExemptionReason::PackageTest,
+            )?;
             // Read the script source. `-` reads the SOURCE from stdin (R1);
             // any other value is a filesystem path. A missing path file →
             // Usage/64; a stdin stream that errors → Io/74 (distinct: reading
@@ -399,11 +410,19 @@ impl PackageTest {
         //    intentionally kept or written to a caller-owned path). Use execvp
         //    for the cleaner "no extra process" semantic. `td_guard` is None
         //    in this branch.
+        // A maintainer preview over a locally materialized, unpublished package:
+        // there is no registry identity and the digest is synthetic, so a record
+        // would describe something that was never published. The exclusion is
+        // declared rather than implicit — see `ExemptionReason`.
+        //
+        // It is also bounded by the operator's posture: `Launch::exempt` refuses
+        // under `required = true`, so the policy is resolved here and handed to
+        // it rather than the exemption being taken for granted.
+        let policy = context.records(ocx_lib::record::RecordsOptions::default())?;
         if td_guard.is_some() {
             // Bare invocation: spawn child, await exit, drop tempdir, propagate.
-            let status = child_process::spawn_and_wait(&resolved, args, process_env)
-                .await
-                .map_err(|e| anyhow::Error::from(e).context(format!("failed to run '{}'", resolved.display())))?;
+            let launch = Launch::exempt(process_env, &resolved, args, ExemptionReason::PackageTest, &policy)?;
+            let status = launch::spawn_and_wait(launch).await.map_err(anyhow::Error::from)?;
 
             // Drop the tempdir guard now that the child has exited — this
             // deletes the materialized package directory (success or failure).
@@ -414,8 +433,8 @@ impl PackageTest {
             // --keep or --output path: directory persists; use execvp which
             // diverges on Unix (Drop never runs, but that's fine here because
             // td_guard is None).
-            let err = child_process::exec(&resolved, args, process_env);
-            Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
+            let launch = Launch::exempt(process_env, &resolved, args, ExemptionReason::PackageTest, &policy)?;
+            Err(anyhow::Error::from(launch::exec(launch).await))
         }
     }
 }

@@ -1,0 +1,30 @@
+# subset of open-telemetry/semantic-conventions v1.36.0 model/os/registry.yaml
+- id: os.type
+  type:
+    members:
+      - id: windows
+        value: 'windows'
+      - id: linux
+        value: 'linux'
+      - id: darwin
+        value: 'darwin'
+      - id: freebsd
+        value: 'freebsd'
+      - id: netbsd
+        value: 'netbsd'
+      - id: openbsd
+        value: 'openbsd'
+      - id: dragonflybsd
+        value: 'dragonflybsd'
+      - id: hpux
+        value: 'hpux'
+      - id: aix
+        value: 'aix'
+      - id: solaris
+        value: 'solaris'
+      - id: z_os
+        value: 'z_os'
+      - id: zos
+        value: 'zos'
+  brief: "The operating system type."
+  stability: development

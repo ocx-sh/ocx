@@ -1,0 +1,13 @@
+# subset of elastic/ecs v9.1.0 schemas/host.yml
+- name: host
+  fields:
+    - name: name
+      level: core
+      type: keyword
+      short: "Name of the host."
+      description: "Name of the host. It can contain what hostname returns on Unix systems, the fully qualified domain name (FQDN), or a name specified by the user. The recommended value is the lowercase FQDN of the host."
+    - name: architecture
+      level: core
+      type: keyword
+      short: "Operating system architecture."
+      example: "x86_64"

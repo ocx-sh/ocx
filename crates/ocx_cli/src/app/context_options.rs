@@ -184,6 +184,13 @@ impl ContextOptions {
             // from `OCX_PATCH_SNAPSHOT` (or a future `--patch-snapshot` flag)
             // and populated on the returned view; the parser tier starts empty.
             patch_snapshot: None,
+            // The resolved `[records]` block is not derivable from
+            // `ContextOptions` alone — `--records-dir` / `--records-name` are
+            // per-command flags on `run` and `package exec`, not root flags, and
+            // the config and `OCX_RECORDS_*` tiers fold in above them.
+            // `Context::try_init` resolves the block and populates this field on
+            // the returned view; the parser tier starts empty.
+            records: ocx_lib::record::RecordsOptions::default(),
             // The effective managed-config source (flag > env > seed) is not
             // derivable from `ContextOptions` alone; `Context::try_init` will
             // populate this field once the managed-config tier is wired in
@@ -194,6 +201,10 @@ impl ContextOptions {
             // and populates this field on the returned view; the parser tier
             // starts as the env-unset default.
             no_verify: false,
+            // `OCX_NO_CONFIG` is a pure env opt-in with no root flag, read at
+            // the loader seam. `Context::try_init` populates this field on the
+            // returned view; the parser tier starts as the env-unset default.
+            no_config: false,
         }
     }
 }

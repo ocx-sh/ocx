@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args;
+use ocx_lib::launch::{self, ExemptionReason, Launch};
 use ocx_lib::utility::child_process;
 use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
 
@@ -231,6 +232,14 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
 
     // ── Step 7: Dispatch on --script / trailing command / print env. ──
     if let Some(script_path) = &args.script {
+        // Same bound as the trailing-command branch below, applied before the
+        // interpreter starts: the script host's `ocx.run` spawns outside
+        // `Launch`, so a fail-closed policy would otherwise never see those
+        // children. See `launch::exemption_allowed`.
+        launch::exemption_allowed(
+            &context.records(ocx_lib::record::RecordsOptions::default())?,
+            ExemptionReason::PatchTest,
+        )?;
         // Read the script source and provision the engine sandbox, then delegate
         // to the shared script runner (also used by `ocx package test`).
         let source = tokio::fs::read_to_string(script_path).await.map_err(|e| {
@@ -262,9 +271,20 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     } else if !args.command.is_empty() {
         let (command, command_args) = args.command.split_first().expect("non-empty command checked above");
         let resolved = process_env.resolve_test_command(command)?;
-        let status = child_process::spawn_and_wait(&resolved, command_args, process_env)
-            .await
-            .map_err(|e| anyhow::Error::from(e).context(format!("failed to run '{}'", resolved.display())))?;
+        // A maintainer preview composing a local, unpublished descriptor onto a
+        // base: nothing here has a published identity to record, so the launch
+        // declares its exclusion rather than leaving it implicit — and the
+        // resolved posture bounds it, since `Launch::exempt` grants no exemption
+        // under `required = true`.
+        let policy = context.records(ocx_lib::record::RecordsOptions::default())?;
+        let launch = Launch::exempt(
+            process_env,
+            &resolved,
+            command_args,
+            ExemptionReason::PatchTest,
+            &policy,
+        )?;
+        let status = launch::spawn_and_wait(launch).await.map_err(anyhow::Error::from)?;
         Ok(child_process::propagate_exit_code(status))
     } else {
         // Print the composed companion env entries, annotating each overlay entry

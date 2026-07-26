@@ -197,7 +197,7 @@ where
 /// Blocking — `NamedTempFile` is synchronous; call from `spawn_blocking` inside
 /// async code.
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, target, Existing::Replaced)
+    persist_with_retry(tmp, |tmp| tmp.persist(target).map(|_| ()))
 }
 
 /// [`persist_temp_file`], except that an already-present `target` is left
@@ -219,37 +219,134 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
 ///
 /// Blocking, same as [`persist_temp_file`].
 pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, target, Existing::Kept)
+    persist_with_retry(tmp, |tmp| tmp.persist_noclobber(target).map(|_| ()))
 }
 
-/// What a publish does when `target` already exists at rename time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Existing {
-    /// Replace it (`NamedTempFile::persist`).
-    Replaced,
-    /// Keep it and fail (`NamedTempFile::persist_noclobber`).
-    Kept,
+/// Outcome of a no-clobber publish attempt — see [`persist_temp_file_noclobber`].
+#[derive(Debug)]
+#[must_use]
+pub enum PersistOutcome {
+    /// The temp file now lives at the target path.
+    Published,
+
+    /// Something already occupies the target, which was left untouched. The temp
+    /// file comes back unconsumed so the caller can retry under a different name
+    /// without re-writing its content.
+    Occupied(tempfile::NamedTempFile),
 }
 
-/// The one publish implementation behind [`persist_temp_file`] and
-/// [`persist_temp_file_if_absent`], carrying the Windows transient-retry
-/// schedule both share.
-fn persist_with_retry(
+/// Publish a written [`tempfile::NamedTempFile`] to `target` **without replacing**
+/// an existing file there, reporting an occupied target as a *value*.
+///
+/// The counterpart to [`persist_temp_file`] for append-only destinations — an
+/// audit trail, an execution-record sink — where the target name is *chosen*
+/// rather than content-addressed, so a replacing publish would let one write
+/// silently destroy another. `persist_temp_file` remains correct for a mutable
+/// destination whose whole point is to be overwritten.
+///
+/// An occupied target is [`PersistOutcome::Occupied`], not an error: the caller
+/// draws a fresh name and calls again, and gets its unconsumed temp file back to
+/// do it with. Only genuine I/O failures return `Err`. That is the whole
+/// difference from [`persist_temp_file_if_absent`], which reports the same
+/// collision as an `AlreadyExists` error for a caller that converges on the
+/// winner instead of renaming around it.
+///
+/// # The NFS lost-reply case
+///
+/// `persist_noclobber` publishes with `renameat2(RENAME_NOREPLACE)` where the
+/// kernel supports it and falls back to `link` + `unlink` on `ENOSYS`/`EINVAL`.
+/// The Linux NFS client rejects `renameat2` flags with `EINVAL`, so **NFS is
+/// exactly the hardlink path** — and there `link()` is atomic server-side but a
+/// lost reply plus a client retry reports `EEXIST` even though the first attempt
+/// succeeded. On `EEXIST` this therefore compares the *identity* of the file now
+/// at `target` with the temp file's: same device and inode means the occupant is
+/// our own link under that very name, so the result is
+/// [`PersistOutcome::Published`] and the temp file is *dropped*, taking the link
+/// count 2 → 1 and leaving only the published name. Keeping it would strand a
+/// `.tmp*` in the caller's directory on every spurious report.
+///
+/// Identity, not link count, is what makes [`PersistOutcome::Published`] name a
+/// path this call actually wrote — and on a shared sink the difference is a lost
+/// record, not a cosmetic one. A count says only that *some* second link to the
+/// temp file exists, which two ordinary situations produce without the target
+/// being ours: a caller retrying under fresh names after a stale attribute cache
+/// under-reported an earlier landing, and another same-UID process hardlinking
+/// our visible `.tmp` under a name of its own. Either way `nlink == 2` would
+/// report a publish over a foreign occupant, drop the temp path, and leave the
+/// caller believing a record landed that did not. A device+inode match cannot
+/// say that. On the `renameat2` path the check is inert, because a genuine
+/// `EEXIST` there leaves a foreign file at `target`. Windows has no comparable
+/// identity in `Metadata` and gets no such check.
+///
+/// The Windows transient-lock backoff of [`persist_temp_file`] applies here too:
+/// without it, a Defender lock would surface as a hard publish failure rather
+/// than the retry it is.
+///
+/// Blocking — `NamedTempFile` is synchronous; call from `spawn_blocking` inside
+/// async code.
+pub fn persist_temp_file_noclobber(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
-    existing: Existing,
-) -> std::io::Result<()> {
-    fn publish(
-        tmp: tempfile::NamedTempFile,
-        target: &std::path::Path,
-        existing: Existing,
-    ) -> Result<(), tempfile::PersistError> {
-        match existing {
-            Existing::Replaced => tmp.persist(target).map(|_| ()),
-            Existing::Kept => tmp.persist_noclobber(target).map(|_| ()),
-        }
-    }
+) -> std::io::Result<PersistOutcome> {
+    persist_with_retry(tmp, |tmp| attempt_noclobber(tmp, target))
+}
 
+/// One no-clobber publish attempt, resolving the NFS lost-reply case.
+fn attempt_noclobber(
+    tmp: tempfile::NamedTempFile,
+    target: &std::path::Path,
+) -> Result<PersistOutcome, tempfile::PersistError> {
+    match tmp.persist_noclobber(target) {
+        Ok(_) => Ok(PersistOutcome::Published),
+        Err(persist_err) if persist_err.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if published_at(target, &persist_err.file) {
+                // Our own link landed under this name and only the reply was
+                // lost. Returning WITHOUT `keep()` drops the temp path here,
+                // leaving just the published name behind.
+                Ok(PersistOutcome::Published)
+            } else {
+                Ok(PersistOutcome::Occupied(persist_err.file))
+            }
+        }
+        Err(persist_err) => Err(persist_err),
+    }
+}
+
+/// Whether the file occupying `target` *is* the file `tmp` holds — the one
+/// answer that makes a `Published` outcome name a path this call wrote.
+///
+/// Meaningful only on the `link` + `unlink` fallback, which is the NFS path; see
+/// [`persist_temp_file_noclobber`]. `symlink_metadata` deliberately does not
+/// follow: a symlink standing at `target` is never the hardlink we just made.
+#[cfg(unix)]
+fn published_at(target: &std::path::Path, tmp: &tempfile::NamedTempFile) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(ours) = tmp.as_file().metadata() else {
+        return false;
+    };
+    std::fs::symlink_metadata(target).is_ok_and(|there| there.dev() == ours.dev() && there.ino() == ours.ino())
+}
+
+/// Windows `Metadata` exposes no device/inode pair, so an `AlreadyExists` there
+/// is always treated as a genuine collision.
+#[cfg(not(unix))]
+fn published_at(_target: &std::path::Path, _tmp: &tempfile::NamedTempFile) -> bool {
+    false
+}
+
+/// The one publish implementation behind [`persist_temp_file`],
+/// [`persist_temp_file_if_absent`] and [`persist_temp_file_noclobber`], carrying
+/// the Windows transient-retry schedule all three share.
+///
+/// Generic over what an attempt yields, because the third caller needs its temp
+/// file back: `persist_temp_file_noclobber` reports an occupied target as a
+/// value rather than an error, and only `PersistError` hands the unconsumed file
+/// over. A retry therefore republishes the same content instead of re-writing it.
+fn persist_with_retry<Published>(
+    tmp: tempfile::NamedTempFile,
+    mut publish: impl FnMut(tempfile::NamedTempFile) -> Result<Published, tempfile::PersistError>,
+) -> std::io::Result<Published> {
     #[cfg(windows)]
     {
         let mut tmp_opt = Some(tmp);
@@ -260,8 +357,8 @@ fn persist_with_retry(
                 std::thread::sleep(jittered_backoff(backoff));
             }
             let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
-            match publish(temp_file, target, existing) {
-                Ok(()) => return Ok(()),
+            match publish(temp_file) {
+                Ok(published) => return Ok(published),
                 Err(persist_err) => {
                     if is_transient_windows_error(&persist_err.error) {
                         tmp_opt = Some(persist_err.file);
@@ -280,7 +377,7 @@ fn persist_with_retry(
     }
     #[cfg(not(windows))]
     {
-        publish(tmp, target, existing).map_err(|e| e.error)
+        publish(tmp).map_err(|e| e.error)
     }
 }
 
@@ -336,7 +433,9 @@ pub fn write_bytes_atomic(target: &std::path::Path, bytes: &[u8]) -> std::io::Re
 mod tests {
     use std::io::Write as _;
 
-    use super::{persist_temp_file, rename_with_windows_retry, write_bytes_atomic};
+    use super::{
+        PersistOutcome, persist_temp_file, persist_temp_file_noclobber, rename_with_windows_retry, write_bytes_atomic,
+    };
 
     /// Baseline (all platforms): a written tempfile is published to the target.
     #[test]
@@ -489,5 +588,136 @@ mod tests {
             "first attempt must fail against the held handle, second must win"
         );
         assert_eq!(std::fs::read(destination.join("held.bin")).unwrap(), b"payload");
+    }
+
+    /// Baseline (all platforms): an absent target accepts the publish.
+    #[test]
+    fn persist_noclobber_publishes_to_an_absent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("record.json");
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"payload").unwrap();
+
+        match persist_temp_file_noclobber(tmp, &target).unwrap() {
+            PersistOutcome::Published => {}
+            PersistOutcome::Occupied(_) => panic!("an absent target must accept the publish"),
+        }
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    /// The defect this primitive exists for (all platforms): an occupied target
+    /// is left byte-for-byte alone, and the caller gets its content back to
+    /// publish elsewhere — so no record can be destroyed by another record
+    /// landing on its name.
+    #[test]
+    fn persist_noclobber_leaves_an_occupied_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("record.json");
+        std::fs::write(&target, b"first-record").unwrap();
+
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"second-record").unwrap();
+
+        let returned = match persist_temp_file_noclobber(tmp, &target).unwrap() {
+            PersistOutcome::Occupied(returned) => returned,
+            PersistOutcome::Published => panic!("an occupied target must never be replaced"),
+        };
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"first-record",
+            "the occupant must survive untouched"
+        );
+
+        // The unconsumed temp file still carries its content, so a retry under a
+        // fresh name loses nothing.
+        let second = dir.path().join("record-2.json");
+        match persist_temp_file_noclobber(returned, &second).unwrap() {
+            PersistOutcome::Published => {}
+            PersistOutcome::Occupied(_) => panic!("the fresh name is free"),
+        }
+        assert_eq!(std::fs::read(&second).unwrap(), b"second-record");
+        assert_eq!(std::fs::read(&target).unwrap(), b"first-record");
+    }
+
+    /// The NFS lost-reply case: `link()` landed server-side but the client never
+    /// heard, so the retry reports `EEXIST` over a target that is *our own*
+    /// content. Hard-linking the temp file into place reproduces that exact
+    /// on-disk state — two links to one inode — on any Unix. The publish must
+    /// count as done, and the temp name must be dropped rather than kept, or a
+    /// `.tmp*` is stranded in the operator's sink on every spurious report.
+    #[cfg(unix)]
+    #[test]
+    fn persist_noclobber_treats_our_own_landed_link_as_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("record.json");
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        std::fs::hard_link(tmp.path(), &target).unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        match persist_temp_file_noclobber(tmp, &target).unwrap() {
+            PersistOutcome::Published => {}
+            PersistOutcome::Occupied(_) => panic!("our own landed link must count as published"),
+        }
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+        assert!(
+            !tmp_path.exists(),
+            "the temp name must be dropped, never kept: {} still present",
+            tmp_path.display()
+        );
+    }
+
+    /// Discriminates the check above from "any `EEXIST` is ours": a *foreign*
+    /// occupant has one link, so it stays `Occupied` and survives.
+    #[cfg(unix)]
+    #[test]
+    fn persist_noclobber_does_not_mistake_a_foreign_occupant_for_its_own_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("record.json");
+        std::fs::write(&target, b"someone-elses-record").unwrap();
+
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"ours").unwrap();
+
+        match persist_temp_file_noclobber(tmp, &target).unwrap() {
+            PersistOutcome::Occupied(_) => {}
+            PersistOutcome::Published => panic!("a single-link occupant is not our landed link"),
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone-elses-record");
+    }
+
+    /// A second link on the temp file plus a foreign occupant at the target is
+    /// the case a link *count* gets wrong, and getting it wrong loses a record.
+    ///
+    /// The count reads 2 here and would report `Published`, dropping the temp
+    /// path — while the target still holds someone else's record and ours
+    /// survives, if at all, only under whatever name made the second link. Two
+    /// provenances produce this same on-disk state: our own earlier attempt
+    /// landed under a name a stale attribute cache under-reported, or another
+    /// same-UID process on a shared sink hardlinked our visible `.tmp`. Neither
+    /// makes the target ours, and file identity is what says so.
+    #[cfg(unix)]
+    #[test]
+    fn persist_noclobber_never_reports_a_publish_it_did_not_make() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"ours").unwrap();
+        // A second link on our temp file, under a name that is NOT the target.
+        let elsewhere = dir.path().join("linked-by-someone-else.json");
+        std::fs::hard_link(tmp.path(), &elsewhere).unwrap();
+
+        let target = dir.path().join("record.json");
+        std::fs::write(&target, b"someone-elses-record").unwrap();
+
+        let returned = match persist_temp_file_noclobber(tmp, &target).unwrap() {
+            PersistOutcome::Occupied(returned) => returned,
+            PersistOutcome::Published => panic!("a name we never wrote must never be reported as published"),
+        };
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone-elses-record");
+        // The record is not lost: it comes back to be published under a fresh
+        // name, which is the failure mode this primitive promises.
+        assert_eq!(std::fs::read(returned.path()).unwrap(), b"ours");
     }
 }

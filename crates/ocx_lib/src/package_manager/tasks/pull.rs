@@ -299,12 +299,15 @@ pub async fn setup_owned(
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
 ) -> Result<InstallInfo, PackageErrorKind> {
-    // Stamp the resolved platform exactly once, at the single boundary every
-    // returned `InstallInfo` passes through, so the candidate-symlink gate can
-    // suppress foreign-platform installs (issue #179). Threading it as a wrapper
-    // (rather than at each `return`) makes it structurally impossible for a new
-    // early return in `setup_owned_impl` to forget the stamp.
+    // Stamp what the resolution learned exactly once, at the single boundary
+    // every returned `InstallInfo` passes through: the platform, so the
+    // candidate-symlink gate can suppress foreign-platform installs (issue
+    // #179), and the registry the content came from, which under index
+    // indirection is not the registry the identifier names. Threading them as a
+    // wrapper (rather than at each `return`) makes it structurally impossible
+    // for a new early return in `setup_owned_impl` to forget the stamp.
     let resolved_platform = resolved.platform.clone();
+    let transport_registry = resolved.transport_pinned.registry().to_string();
     setup_owned_impl(
         mgr,
         pinned,
@@ -315,7 +318,10 @@ pub async fn setup_owned(
         provided_metadata,
     )
     .await
-    .map(|info| info.with_platform(resolved_platform))
+    .map(|info| {
+        info.with_platform(resolved_platform)
+            .with_transport_registry(transport_registry)
+    })
 }
 
 async fn setup_owned_impl(

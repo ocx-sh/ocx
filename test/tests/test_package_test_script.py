@@ -1147,3 +1147,63 @@ def test_nonexecutable_package_binary_fails_script(
     assert "not executable" in combined, (
         f"the failure must say the shipped file is not executable, got:\n{combined}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The maintainer-preview exemption is bounded by the recording posture
+# ---------------------------------------------------------------------------
+
+
+def test_script_host_cannot_run_unrecorded_under_a_required_policy(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    tmp_path: Path,
+) -> None:
+    """A fail-closed `[records]` policy refuses the script branch outright.
+
+    `ocx package test` is a sanctioned non-recording frame, but the Starlark
+    host's `ocx.run` spawns its children directly (`script/ocx_module.rs`,
+    allowlisted in `no_process_spawn_outside_launch`) and so never reaches a
+    `Launch`. The bound `Launch::exempt` applies to the trailing-command branch
+    therefore could not reach the script branch at all: under an operator's
+    `required = true` a script was free to run an arbitrary number of unrecorded
+    children. Both branches now call `launch::exemption_allowed` — the script
+    one before the interpreter starts.
+    """
+    bundle, meta, pkg = script_test_package
+    sink = tmp_path / "sink"
+    sink.mkdir()
+    config = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config.write_text(
+        f"[records]\ndir = {json.dumps(str(sink))}\nrequired = true\n"
+    )
+    script = _write_script(tmp_path, "run.star", 'ocx.run("shtool", "--version")\n')
+
+    try:
+        result = _run_script(ocx, bundle, meta, pkg, script=script)
+
+        assert result.returncode == 74, (
+            "a fail-closed posture and a preview exemption are a contradiction, "
+            f"resolved in the operator's favour; rc={result.returncode}\n"
+            f"stderr: {result.stderr}"
+        )
+        assert "records" in result.stderr.lower(), (
+            f"the policy that refused it must be named; stderr={result.stderr!r}"
+        )
+        assert list(sink.glob("*.json")) == [], (
+            "the refusal is a refusal, not a silent downgrade to recording the "
+            f"preview; sink holds {[p.name for p in sink.glob('*.json')]}"
+        )
+
+        # The discriminator: the same script under a warn-only policy still
+        # runs, so the rule bounds the exemption rather than deleting it.
+        config.write_text(
+            f"[records]\ndir = {json.dumps(str(sink))}\nrequired = false\n"
+        )
+        warn_only = _run_script(ocx, bundle, meta, pkg, script=script)
+        assert warn_only.returncode == 0, (
+            "a maintainer preview still runs when no policy demands recording; "
+            f"rc={warn_only.returncode}\nstderr: {warn_only.stderr}"
+        )
+    finally:
+        config.unlink(missing_ok=True)

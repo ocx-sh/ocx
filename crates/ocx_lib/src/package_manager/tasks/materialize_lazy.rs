@@ -27,10 +27,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::lazy::LazyReport;
-use crate::package::install_info::InstallInfo;
 use crate::package::metadata::BinaryName;
 use crate::package_manager::concurrency::Concurrency;
 use crate::package_manager::error::{Error, PackageError, PackageErrorKind};
+use crate::package_manager::tasks::find_or_install::FoundPackage;
 use crate::{log, oci};
 
 use super::super::PackageManager;
@@ -146,6 +146,12 @@ impl PackageManager {
     /// the full `lazy-report` ladder and consumed here, the one place that
     /// knows when the transfer starts and ends.
     ///
+    /// Returns the [`FoundPackage`] rather than the bare install, because a
+    /// shim's caller has to report `resolution.autoInstalled`: a first
+    /// invocation pulls, a second one finds the same package already in the
+    /// store, and only the [`Arrival`](super::find_or_install::Arrival) tells
+    /// the two apart.
+    ///
     /// Neither arm inherits the ambient manager. A shim runs *inside* another
     /// tool's process tree, so its stderr belongs to whatever invoked it —
     /// `make`, a build step, a wrapper script — and is the wrong channel in
@@ -165,7 +171,7 @@ impl PackageManager {
         package: &oci::PinnedIdentifier,
         platform: oci::Platform,
         report: LazyReport,
-    ) -> Result<InstallInfo, Error> {
+    ) -> Result<FoundPackage, Error> {
         let progress = match report {
             LazyReport::Silent => crate::cli::progress::ProgressManager::disabled(),
             LazyReport::Progress => crate::cli::progress::ProgressManager::controlling_terminal().await,
@@ -174,12 +180,12 @@ impl PackageManager {
 
         let identifier = package.as_identifier().clone();
         let installed = manager
-            .find_or_install_all(vec![identifier.clone()], platform, Concurrency::cores())
+            .find_or_install_all(std::slice::from_ref(&identifier), platform, Concurrency::cores())
             .await?;
         installed.into_iter().next().ok_or_else(|| {
             // `find_or_install_all` returns one entry per input identifier, in
             // input order, so a one-element request either failed above or
-            // yields exactly one info. Unreachable — an error rather than a
+            // yields exactly one entry. Unreachable — an error rather than a
             // panic so a future change to that contract degrades instead of
             // aborting a user's tool invocation.
             Error::FindFailed(vec![PackageError::new(identifier, PackageErrorKind::NotFound)])

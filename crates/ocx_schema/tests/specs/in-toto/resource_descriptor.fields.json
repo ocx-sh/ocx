@@ -1,0 +1,42 @@
+{
+  "package": "in-toto-attestation",
+  "version": "0.9.3",
+  "message": "in_toto_attestation.v1.resource_descriptor_pb2.ResourceDescriptor",
+  "fields": [
+    {
+      "name": "name",
+      "json_name": "name",
+      "type": 9
+    },
+    {
+      "name": "uri",
+      "json_name": "uri",
+      "type": 9
+    },
+    {
+      "name": "digest",
+      "json_name": "digest",
+      "type": 11
+    },
+    {
+      "name": "content",
+      "json_name": "content",
+      "type": 12
+    },
+    {
+      "name": "download_location",
+      "json_name": "downloadLocation",
+      "type": 9
+    },
+    {
+      "name": "media_type",
+      "json_name": "mediaType",
+      "type": 9
+    },
+    {
+      "name": "annotations",
+      "json_name": "annotations",
+      "type": 11
+    }
+  ]
+}

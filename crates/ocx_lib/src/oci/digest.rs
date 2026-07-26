@@ -218,16 +218,25 @@ impl std::fmt::Display for Digest {
 impl TryFrom<&str> for Digest {
     type Error = DigestError;
 
+    /// Parse `<algorithm>:<hex>`, normalizing the hex to lowercase.
+    ///
+    /// `is_ascii_hexdigit` accepts either case, so uppercase input parses — and
+    /// is then folded down once, here, rather than stored verbatim. Two digests
+    /// naming the same bytes must not compare unequal, and every consumer that
+    /// renders one (the `algorithm → bare lowercase hex` record map, a purl
+    /// version, a store path) publishes the lowercase form; a digest that kept
+    /// its input casing would make those disagree with each other.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         for algorithm in Algorithm::ALL {
             if let Some(hex) = value.strip_prefix(algorithm.prefix()).and_then(|s| s.strip_prefix(':')) {
                 if hex.len() != algorithm.hex_len() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                     return Err(DigestError::Invalid(value.to_owned()));
                 }
+                let hex = hex.to_ascii_lowercase();
                 return Ok(match algorithm {
-                    Algorithm::Sha256 => Digest::Sha256(hex.to_string()),
-                    Algorithm::Sha384 => Digest::Sha384(hex.to_string()),
-                    Algorithm::Sha512 => Digest::Sha512(hex.to_string()),
+                    Algorithm::Sha256 => Digest::Sha256(hex),
+                    Algorithm::Sha384 => Digest::Sha384(hex),
+                    Algorithm::Sha512 => Digest::Sha512(hex),
                 });
             }
         }
@@ -302,6 +311,25 @@ mod tests {
         let digest_str = "sha512:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d943567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
         let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha512(_)));
+    }
+
+    /// Uppercase hex parses — `is_ascii_hexdigit` takes either case — and is
+    /// folded to lowercase on the way in, so the stored hex is the one every
+    /// consumer publishes. Otherwise a record's purl version and its
+    /// `digest_map` entry, which lowercases independently, could disagree over
+    /// one and the same digest.
+    #[test]
+    fn uppercase_hex_is_normalised_to_lowercase_at_parse() {
+        let hex = "43567C07F1A6B07B5E8DC052108C9D4C4A32130E18BCBD8A78C53AF3E90325D9";
+        let digest = Digest::try_from(format!("sha256:{hex}").as_str()).expect("uppercase hex is accepted");
+
+        assert_eq!(digest.hex(), hex.to_ascii_lowercase());
+        assert_eq!(digest.to_string(), format!("sha256:{}", hex.to_ascii_lowercase()));
+        assert_eq!(
+            digest,
+            Digest::try_from(format!("sha256:{}", hex.to_ascii_lowercase()).as_str()).expect("lowercase parses"),
+            "two spellings of one digest must not compare unequal",
+        );
     }
 
     #[test]

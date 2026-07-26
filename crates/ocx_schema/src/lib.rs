@@ -11,6 +11,7 @@ use ocx_lib::Config;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::patch::PatchDescriptor;
 use ocx_lib::project::{ProjectConfig, ProjectLock};
+use ocx_lib::record::ExecutionRecord;
 use schemars::generate::SchemaSettings;
 
 pub mod reports;
@@ -21,11 +22,19 @@ pub mod reports;
 /// Mirrors the user-guide locking-subsection callout.
 const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across OCX versions — do not hand-edit";
 
+/// Top-level `$comment` injected into the execution-record schema. Names what
+/// the document is — output ocx writes, not input anyone authors — so a
+/// consumer that finds one in a sink knows it is describing a launch that
+/// already happened, and knows the record's own `schemaVersion` moves with
+/// this URL's version.
+const EXECUTION_RECORD_COMMENT: &str =
+    "machine-generated; one record per tool launch, written before the launch — not an authored document";
+
 /// Generate a JSON Schema for the given schema kind.
 ///
 /// Returns `Some(json_string)` for known kinds and `None` for unknown kinds.
 /// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`,
-/// `reports`.
+/// `reports`, `execution-record`.
 ///
 /// The output JSON has its `$id` set to the canonical published URL
 /// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
@@ -37,6 +46,12 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// `ocx patch publish --descriptor` (and carried in the `__ocx.patch`
 /// OCI artifact layer); the `[patches]` config tier itself is covered by the
 /// `config` schema.
+///
+/// The `execution-record` schema describes the pre-exec resolution record
+/// written per tool launch. Its URL version and the record's own in-band
+/// `schemaVersion` move in lockstep — the first incompatible change bumps
+/// both. The `[records]` config section that designates the sink is covered by
+/// the `config` schema, mirroring the `patch` / `[patches]` split above.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         // Per-layer strip/prefix layout lives in manifest layer-descriptor annotations
@@ -53,19 +68,32 @@ pub fn schema_for(kind: &str) -> Option<String> {
         "metadata" => Some(generate_schema::<AuthoringMetadata>(
             "https://ocx.sh/schemas/metadata/v1.json",
             None,
+            Shape::Deserialized,
         )),
-        "config" => Some(generate_schema::<Config>("https://ocx.sh/schemas/config/v1.json", None)),
+        "config" => Some(generate_schema::<Config>(
+            "https://ocx.sh/schemas/config/v1.json",
+            None,
+            Shape::Deserialized,
+        )),
         "project" => Some(generate_schema::<ProjectConfig>(
             "https://ocx.sh/schemas/project/v1.json",
             None,
+            Shape::Deserialized,
         )),
         "project-lock" => Some(generate_schema::<ProjectLock>(
             "https://ocx.sh/schemas/project-lock/v3.json",
             Some(PROJECT_LOCK_COMMENT),
+            Shape::Deserialized,
         )),
         "patch" => Some(generate_schema::<PatchDescriptor>(
             "https://ocx.sh/schemas/patch/v1.json",
             None,
+            Shape::Deserialized,
+        )),
+        "execution-record" => Some(generate_schema::<ExecutionRecord>(
+            "https://ocx.sh/schemas/execution-record/v1.json",
+            Some(EXECUTION_RECORD_COMMENT),
+            Shape::Serialized,
         )),
         // Not a `generate_schema` call: the report contract is 48 roots over a
         // shared `$defs` bag, and its `required` sets are corrected against
@@ -75,7 +103,25 @@ pub fn schema_for(kind: &str) -> Option<String> {
     }
 }
 
-fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>) -> String {
+/// Whether a generated schema describes a document ocx **reads** or one it
+/// **writes**.
+///
+/// The distinction is not cosmetic: schemars renders an `Option<T>` field as
+/// nullable-and-required, which is right for a document being parsed and wrong
+/// for one being written with `skip_serializing_if` — there the key is absent,
+/// never `null`. Only the writing side gets the correction.
+enum Shape {
+    /// Parsed by ocx (`config`, `metadata`, `project`, `project-lock`,
+    /// `patch`). schemars' own rendering is already what the reader accepts.
+    Deserialized,
+    /// Written by ocx. Every `skip_serializing_if` field carries the
+    /// `x-ocx-absent-when-none` marker, and [`reports::normalize`] rewrites
+    /// `required` and strips the `null` alternative off each one — the same
+    /// pass the reports schema runs, on the same marker.
+    Serialized,
+}
+
+fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>, shape: Shape) -> String {
     let mut settings = SchemaSettings::draft2020_12();
     settings.meta_schema = Some("https://json-schema.org/draft/2020-12/schema".into());
 
@@ -87,6 +133,9 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>) -> 
     // for it. Any failure here would be a bug in schemars, not user input.
     let mut value =
         serde_json::to_value(&schema).expect("schemars RootSchema is always serializable to serde_json::Value");
+    if matches!(shape, Shape::Serialized) {
+        reports::normalize(&mut value);
+    }
     if let Some(obj) = value.as_object_mut() {
         obj.insert("$id".to_owned(), serde_json::Value::String(id.to_owned()));
         if let Some(c) = comment {
@@ -101,6 +150,8 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// The metadata schema is the published wire form plus exactly one
@@ -439,5 +490,83 @@ mod tests {
                 "`{runtime_only}` is runtime provenance and must never be published as a config key"
             );
         }
+    }
+
+    /// The execution-record schema is the published half of a two-channel
+    /// version contract: this URL and the in-band `schemaVersion` move in
+    /// lockstep, so the first incompatible change bumps both. Records are
+    /// consumed by policy engines keyed on exact field names, so the wire
+    /// spellings are pinned here: the OCX-owned envelope is lowerCamelCase, the
+    /// in-toto style this document borrows, and a blanket `rename_all` in either
+    /// direction would rewrite them silently.
+    #[test]
+    fn execution_record_schema_pins_id_and_wire_key_spellings() {
+        let schema = schema_for("execution-record").expect("execution-record schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+
+        assert_eq!(
+            value.get("$id").and_then(|v| v.as_str()),
+            Some("https://ocx.sh/schemas/execution-record/v1.json"),
+            "the published URL must move in lockstep with the in-band schemaVersion"
+        );
+
+        let required: Vec<&str> = value
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("schema has a `required` array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for key in ["schemaVersion", "kind", "recordedAt", "packages"] {
+            assert!(
+                required.contains(&key),
+                "`{key}` must be a required top-level key: {required:?}"
+            );
+        }
+
+        // `packages[]` is an in-toto `ResourceDescriptor` and stays one: four
+        // published keys, no OCX-specific sibling beside them. Anything OCX
+        // needs to add per package goes inside `annotations` under `sh.ocx.*`.
+        let descriptor = value
+            .pointer("/$defs/ResourceDescriptor/properties")
+            .and_then(|properties| properties.as_object())
+            .expect("the schema defines a package descriptor");
+        let published: BTreeSet<&str> = descriptor.keys().map(String::as_str).collect();
+        assert_eq!(
+            published,
+            BTreeSet::from(["name", "uri", "digest", "annotations"]),
+            "a key added beside the in-toto four breaks descriptor compatibility"
+        );
+
+        let resolution = value
+            .pointer("/$defs/Resolution/properties")
+            .and_then(|properties| properties.as_object())
+            .expect("the schema defines the resolution block");
+        for key in ["insecureRegistries", "patchSnapshot"] {
+            assert!(resolution.contains_key(key), "`resolution.{key}` must be published");
+        }
+    }
+
+    /// `[records]` rides the `config` schema transitively — there is no separate
+    /// arm for `RecordsOptions`. Its `system_locked` flag is runtime provenance
+    /// set by the loader on `/etc/ocx/config.toml`, never authored, so it must
+    /// not appear in the published schema and invite operators to write it.
+    #[test]
+    fn config_schema_documents_records_without_the_loader_only_lock_flag() {
+        let schema = schema_for("config").expect("config schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+
+        assert!(
+            value.pointer("/properties/records").is_some(),
+            "the config schema must document the [records] section"
+        );
+
+        let records = value
+            .pointer("/$defs/RecordsOptions")
+            .expect("config schema defines RecordsOptions");
+        assert!(
+            records.pointer("/properties/system_locked").is_none(),
+            "`system_locked` is loader-set provenance and must stay out of the published schema"
+        );
     }
 }

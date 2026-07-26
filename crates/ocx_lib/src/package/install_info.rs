@@ -81,11 +81,16 @@ pub struct InstallInfo {
     dir: PackageDir,
     /// The platform the install resolved to, when known.
     ///
-    /// Set by the install/pull path from the resolution chain; `None` on paths
-    /// that build an `InstallInfo` without platform context (e.g. `find_symlink`,
-    /// composer test fixtures). Consumed by the candidate-symlink gate to avoid
-    /// pointing a host's `candidates/{tag}` slot at a foreign-platform root
-    /// (issue #179).
+    /// Set from the resolution chain by every path that has one — `pull`'s
+    /// `setup_owned` and `find` alike, so a package reached from the store and
+    /// the same package freshly pulled describe themselves identically. `None`
+    /// only on paths that resolve nothing (e.g. `find_symlink`, composer test
+    /// fixtures).
+    ///
+    /// Consumed by the candidate-symlink gate, to avoid pointing a host's
+    /// `candidates/{tag}` slot at a foreign-platform root (issue #179), and by
+    /// the execution record, which reports it as the package's *selected*
+    /// platform — distinct from the platform the invocation requested.
     platform: Option<oci::Platform>,
 
     /// Set iff this root is a **deferred** tool — composed onto `PATH` with no
@@ -98,6 +103,27 @@ pub struct InstallInfo {
     /// shim has not created yet is a dangling install (C-021 keeps
     /// `--lazy-mode` off `install`/`select` for the same reason).
     deferred: Option<Arc<DeferredComposition>>,
+
+    /// The registry this install's content is fetched from, when known.
+    ///
+    /// Distinct from [`identifier`](Self::identifier)'s registry, which is the
+    /// *logical* namespace the package is named by. Index indirection separates
+    /// the two: an `ocx.sh` index root can point at `ghcr.io/acme/tool`, and
+    /// then the logical name says `ocx.sh` while every byte comes from
+    /// `ghcr.io`. This field is that second half — the host the transport
+    /// addressed, before any `[mirrors]` rewrite of it.
+    ///
+    /// Set from `ResolvedChain::transport_pinned` by the paths that resolve
+    /// through the index — `pull`'s `setup_owned` and `find` alike, so a package
+    /// reached from the store and the same package freshly pulled describe
+    /// themselves identically. `None` on paths that resolve nothing
+    /// (`find_symlink`, `install_info_from_package_root`, composer fixtures),
+    /// where no provenance is in hand to record.
+    ///
+    /// Consumed by the execution record's `resolution.registries`, which answers
+    /// "where did the content come from" and must not answer with the logical
+    /// namespace instead.
+    transport_registry: Option<String>,
 }
 
 impl InstallInfo {
@@ -114,6 +140,7 @@ impl InstallInfo {
             dir,
             platform: None,
             deferred: None,
+            transport_registry: None,
         }
     }
 
@@ -143,10 +170,24 @@ impl InstallInfo {
         self
     }
 
+    /// Records the registry this install's content is fetched from, returning
+    /// `self` for chaining after [`new`](Self::new).
+    #[must_use]
+    pub fn with_transport_registry(mut self, registry: impl Into<String>) -> Self {
+        self.transport_registry = Some(registry.into());
+        self
+    }
+
     /// The platform this install resolved to, or `None` when the constructing
     /// path had no platform context.
     pub fn platform(&self) -> Option<&oci::Platform> {
         self.platform.as_ref()
+    }
+
+    /// The registry this install's content is fetched from, or `None` when the
+    /// constructing path resolved nothing through the index.
+    pub fn transport_registry(&self) -> Option<&str> {
+        self.transport_registry.as_deref()
     }
 
     /// Whether this install's resolved platform is runnable on the current host.
