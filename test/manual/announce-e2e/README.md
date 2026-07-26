@@ -117,11 +117,14 @@ request.
 branch is **per-package, not per-tag** (`ANNOUNCE_BRANCH` in `scripts/env.sh`
 is `indexbot-announce-<ns>-<pkg>`). A fresh tag therefore reuses the same branch
 and lands on the **same open pull request** if one is still open. The drivers
-no longer *mis-measure* that: every poll carries a freshness floor taken before
-the push, so a pull request or workflow run from an earlier rehearsal is never
+no longer *mis-measure* that: every poll carries a freshness floor — the highest
+pull-request number and workflow-run id GitHub had already issued, read before
+the push — so a pull request or workflow run from an earlier rehearsal is never
 mistaken for this run's. It shows up as a **timeout** instead — the driver waits
-for a pull request created after it acted, and an updated older one never
-qualifies. Confirm no announce pull request is open for the package first:
+for a number above the floor, and an updated older pull request never qualifies.
+The floor is a server-side counter and never a timestamp, so a local clock
+running behind GitHub's cannot make stale data look fresh. Confirm no announce
+pull request is open for the package first:
 
 ```sh
 gh pr list --repo ocx-sh/index --state open \
@@ -232,14 +235,18 @@ writes a registry digest at all; the `1.0.4` run is the only thing that can
 prove that.
 
 **So does artifact identity.** `./scripts/selfcheck_identity.sh` sources
-`env.sh` with `gh` stubbed on `PATH` and drives `_run_concluded` and
-`pr_number` against recorded `gh` JSON: the freshness floor on both, newest-wins
-when several observations survive it, the polling gate that keeps an
-unconcluded run from reading as a verdict, and the head-repository and branch
-guards. Both matchers used to be able to answer with an earlier rehearsal's run
-or pull request, which is how a driver reports green off stale data — run this
-after any edit to either. It needs `jq` (test-only: it replays the drivers' own
-`--jq` programs offline, and `gh` embeds its own engine at run time).
+`env.sh` with `gh` stubbed on `PATH` and drives `run_floor`, `pr_floor`,
+`_run_concluded` and `pr_number` against recorded `gh` JSON: how the floor is
+read, the floor on both matchers, newest-wins when several observations survive
+it, the polling gate that keeps an unconcluded run from reading as a verdict,
+and the head-repository and branch guards. Two cases give a stale artifact a
+creation time *after* the driver's own `date -u` — what a backward-skewed local
+clock produces — and require it to stay excluded, which is why the floor is a
+counter and not a timestamp. Both matchers used to be able to answer with an
+earlier rehearsal's run or pull request, which is how a driver reports green off
+stale data — run this after any edit to either. It needs `jq` (test-only: it
+replays the drivers' own `--jq` programs offline, and `gh` embeds its own engine
+at run time).
 
 ## Idempotency Proof
 

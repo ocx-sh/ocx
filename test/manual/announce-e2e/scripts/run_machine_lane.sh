@@ -36,12 +36,17 @@ _serves_tag() {
 main() {
     local tag="${1:?usage: run_machine_lane.sh <tag>}"
     local checkout sha t0 pr merge_line merged_at lane latency_merge latency_serve t_serve
+    local publish_floor pr_base
     local secret_args=()
 
     checkout="$(publisher_checkout)"
 
     ocx_step "pushing new tag $tag to $GH_REPO_PUBLISHER"
+    # Read before the push: GitHub's own counters, so nothing this per-package
+    # branch already carries can answer for this run. t0 is latency only.
     t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    publish_floor="$(run_floor "$GH_REPO_PUBLISHER" e2e-publish "$tag")"
+    pr_base="$(pr_floor)"
     git -C "$checkout" fetch origin
     git -C "$checkout" tag "$tag" origin/main ||
         ocx_fail "tag $tag already exists — pick a new one, or retract it per README 'Cleaning up a rehearsal'"
@@ -49,13 +54,13 @@ main() {
     sha="$(git -C "$checkout" rev-parse "refs/tags/$tag^{commit}")"
 
     ocx_step "waiting for the publisher's announce at ${sha:0:7}"
-    poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$t0" >/dev/null ||
+    poll_run "$GH_REPO_PUBLISHER" e2e-publish "$tag" "$sha" "$publish_floor" >/dev/null ||
         fail_proof "publisher CI did not conclude successfully for tag $tag"
 
-    # $t0 predates the push, so nothing an earlier rehearsal left on this
+    # $pr_base predates the push, so nothing an earlier rehearsal left on this
     # per-package branch can answer — including its merged pull request, which
     # this driver would otherwise take the merge latency and lane verdict off.
-    pr="$(poll_pr "$t0")" || fail_proof "no pull request appeared on $ANNOUNCE_BRANCH for tag $tag"
+    pr="$(poll_pr "$pr_base")" || fail_proof "no pull request appeared on $ANNOUNCE_BRANCH for tag $tag"
     ocx_step "waiting for PR #$pr to auto-merge — take no action, that is the proof"
     merge_line="$(poll_merge "$pr")" ||
         fail_proof "PR #$pr did not auto-merge within ${POLL_DEADLINE_SECONDS}s — see PLAYBOOKS.md playbook 3"

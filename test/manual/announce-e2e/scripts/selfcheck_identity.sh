@@ -9,13 +9,20 @@
 # driven here against recorded `gh` JSON, with `gh` stubbed on `PATH` — the
 # pattern selfcheck_g2.sh established for `curl`.
 #
-# Covered: the freshness floor on both matchers, newest-wins when several
-# observations survive it, the polling gate (an unconcluded run is not a
-# verdict), and the head-repository/branch guards on the pull-request side.
+# Covered: the freshness floor on both matchers, how the floor itself is read,
+# newest-wins when several observations survive it, the polling gate (an
+# unconcluded run is not a verdict), and the head-repository/branch guards on
+# the pull-request side.
 #
-# NOT covered — deliberately: whether `gh` really returns these fields, GitHub's
-# clock, and whether announce opens a pull request at all. Only the selection
-# logic is under test, never the transport.
+# The floor is a GitHub-issued counter, never a timestamp, so every fixture
+# below carries a `createdAt` the matchers must ignore: the cases marked
+# "backward-skewed clock" hand a stale artifact a *fresh-looking* creation time
+# — what a WSL clock running behind GitHub's produces after a resume — and
+# require it to stay excluded anyway.
+#
+# NOT covered — deliberately: whether `gh` really returns these fields, and
+# whether announce opens a pull request at all. Only the selection logic is
+# under test, never the transport.
 #
 # Needs `jq` to evaluate the drivers' own `--jq` programs offline (`gh` embeds
 # its own). Test-only: no driver gains a jq dependency.
@@ -73,9 +80,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 CASES=0
 FAILURES=0
 
-# The three timestamps every case is written against: the driver's own t0, one
-# observation from before it acted, one from after.
-T0="2026-01-01T00:00:00Z"
+# The floors the driver would have read before acting: the highest run id and
+# pull-request number GitHub had already issued. Everything at or below them
+# belongs to an earlier rehearsal.
+RUN_FLOOR="100"
+PR_FLOOR="141"
+
+# Creation times, present only so the cases can prove they are not consulted.
 BEFORE="2025-12-31T23:59:00Z"
 AFTER="2026-01-01T00:00:30Z"
 SHA="0123456789abcdef0123456789abcdef01234567"
@@ -144,75 +155,108 @@ run_record() {
 }
 
 main_selfcheck() {
-    # --- Bug (a): a run older than the push can never be this run's. ---
+    # --- The floors themselves: what the driver reads before it acts. ---
+
+    fixture
+    expect "floor — a repository with no run yet floors at 0" "0" \
+        run_floor stub/repo e2e-publish 1.0.5
+
+    fixture "$(run_obj 200 "$SHA" "$AFTER" success https://run/older)" \
+        "$(run_obj 300 "$SHA" "$AFTER" success https://run/newest)"
+    expect "floor — the run floor is the highest id, not the first listed" "300" \
+        run_floor stub/repo e2e-publish 1.0.5
+
+    fixture
+    expect "floor — a branch with no pull request yet floors at 0" "0" \
+        pr_floor
+
+    fixture "$(pr_obj 142 "$AFTER" MERGED "$ANNOUNCE_BRANCH" stub)" \
+        "$(pr_obj 143 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)"
+    expect "floor — the pull-request floor is the highest number, not the first listed" "143" \
+        pr_floor
+
+    fixture "$(pr_obj 142 "$AFTER" OPEN "$ANNOUNCE_BRANCH" someone-else)" \
+        "$(pr_obj 143 "$AFTER" OPEN indexbot-announce-ns-other stub)"
+    expect "floor — foreign forks and other packages do not raise the floor" "0" \
+        pr_floor
+
+    # --- Bug (a): a run at or below the floor can never be this run's. ---
 
     fixture "$(run_obj 100 "$SHA" "$BEFORE" success https://run/old)"
-    expect "run — a concluded run from before the push is not a verdict" "" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+    expect "run — a run the floor already counted is not a verdict" "" \
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
+
+    fixture "$(run_obj 100 "$SHA" "$AFTER" success https://run/STALE)"
+    expect "run — backward-skewed clock: a stale run dated after t0 is still stale" "" \
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 100 "$SHA" "$BEFORE" success https://run/old)" \
         "$(run_obj 200 "$SHA" "$AFTER" '' https://run/new)"
     expect "run — retracted-and-repushed tag: poll the new run, not the old verdict" "" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 100 "$SHA" "$BEFORE" success https://run/old)" \
         "$(run_obj 200 "$SHA" "$AFTER" failure https://run/new)"
     expect "run — the new run's own conclusion is the verdict" "failure|https://run/new" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 200 "$SHA" "$AFTER" success https://run/new)"
     expect "run — a fresh concluded run is read whole" "success|https://run/new" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
-    fixture "$(run_obj 300 "$SHA" "$AFTER" success https://run/newest)" \
-        "$(run_obj 200 "$SHA" "$AFTER" failure https://run/older)"
+    fixture "$(run_obj 200 "$SHA" "$AFTER" failure https://run/older)" \
+        "$(run_obj 300 "$SHA" "$AFTER" success https://run/newest)"
     expect "run — several fresh runs: newest databaseId wins, not list order" \
         "success|https://run/newest" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture "$(run_obj 200 "$OTHER_SHA" "$AFTER" success https://run/other)"
     expect "run — another commit's run never matches" "" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
     fixture
     expect "run — no run yet is a poll, not a failure" "" \
-        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$T0"
+        run_record stub/repo e2e-publish 1.0.5 "$SHA" "$RUN_FLOOR"
 
-    # --- Bug (b): a pull request older than the announce is a rehearsal's. ---
+    # --- Bug (b): a pull request at or below the floor is a rehearsal's. ---
 
-    fixture "$(pr_obj 41 "$BEFORE" CLOSED "$ANNOUNCE_BRANCH" stub)"
+    fixture "$(pr_obj 141 "$BEFORE" CLOSED "$ANNOUNCE_BRANCH" stub)"
     expect "pr — an earlier rehearsal's closed pull request never wins" "" \
-        pr_number "$T0"
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 41 "$BEFORE" MERGED "$ANNOUNCE_BRANCH" stub)"
+    fixture "$(pr_obj 141 "$BEFORE" MERGED "$ANNOUNCE_BRANCH" stub)"
     expect "pr — an earlier rehearsal's merged pull request never wins" "" \
-        pr_number "$T0"
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 41 "$BEFORE" MERGED "$ANNOUNCE_BRANCH" stub)" \
-        "$(pr_obj 42 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)"
-    expect "pr — this run's pull request wins over the rehearsal it follows" "42" \
-        pr_number "$T0"
+    fixture "$(pr_obj 141 "$AFTER" MERGED "$ANNOUNCE_BRANCH" stub)"
+    expect "pr — backward-skewed clock: a stale pull request dated after t0 is still stale" "" \
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 42 "$AFTER" MERGED "$ANNOUNCE_BRANCH" stub)"
-    expect "pr — the machine lane's own pull request is found after it auto-merged" "42" \
-        pr_number "$T0"
+    fixture "$(pr_obj 141 "$BEFORE" MERGED "$ANNOUNCE_BRANCH" stub)" \
+        "$(pr_obj 142 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)"
+    expect "pr — this run's pull request wins over the rehearsal it follows" "142" \
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 42 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)" \
-        "$(pr_obj 43 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)"
-    expect "pr — a second fresh pull request is seen (C4 breakage is detectable)" "43" \
-        pr_number "$T0"
+    fixture "$(pr_obj 142 "$AFTER" MERGED "$ANNOUNCE_BRANCH" stub)"
+    expect "pr — the machine lane's own pull request is found after it auto-merged" "142" \
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 42 "$AFTER" OPEN "$ANNOUNCE_BRANCH" someone-else)"
+    fixture "$(pr_obj 142 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)" \
+        "$(pr_obj 143 "$AFTER" OPEN "$ANNOUNCE_BRANCH" stub)"
+    expect "pr — a second fresh pull request is seen (C4 breakage is detectable)" "143" \
+        pr_number "$PR_FLOOR"
+
+    fixture "$(pr_obj 142 "$AFTER" OPEN "$ANNOUNCE_BRANCH" someone-else)"
     expect "pr — a same-named branch on another fork is another pull request" "" \
-        pr_number "$T0"
+        pr_number "$PR_FLOOR"
 
-    fixture "$(pr_obj 42 "$AFTER" OPEN indexbot-announce-ns-other stub)"
+    fixture "$(pr_obj 142 "$AFTER" OPEN indexbot-announce-ns-other stub)"
     expect "pr — another package's announce branch never matches" "" \
-        pr_number "$T0"
+        pr_number "$PR_FLOOR"
 
     fixture
     expect "pr — no pull request yet is a poll, not a failure" "" \
-        pr_number "$T0"
+        pr_number "$PR_FLOOR"
 
     printf '\n%d cases, %d failures\n' "$CASES" "$FAILURES"
     ((FAILURES == 0))
