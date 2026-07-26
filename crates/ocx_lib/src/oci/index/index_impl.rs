@@ -89,6 +89,12 @@ pub trait IndexImpl: Send + Sync {
     /// the default returns `None` — its root is OCX-authored field-wise instead
     /// (`LocalIndex::commit_root_tag`, A2/H). `Ok(None)` = this source serves no
     /// verbatim root for `identifier`.
+    ///
+    /// `Ok(None)` never means "outside jurisdiction" — that outcome has its own
+    /// type ([`super::Jurisdiction`]) on its own method, consulted before a
+    /// source is asked, precisely so
+    /// [`LocalIndex::refresh_tags`](super::LocalIndex::refresh_tags)'s
+    /// derived-source switch on this return value cannot misread it.
     async fn fetch_root_document(&self, identifier: &oci::Identifier) -> Result<Option<(Vec<u8>, super::IndexRoot)>> {
         let _ = identifier;
         Ok(None)
@@ -109,17 +115,41 @@ pub trait IndexImpl: Send + Sync {
         Ok(None)
     }
 
-    /// Whether this source is the authoritative resolver for `identifier`'s
-    /// namespace.
+    /// Whether this source will answer for `identifier`, and what its silence
+    /// means — asked **before** the source is fetched from.
     ///
-    /// An authoritative source's **refusal** (a yanked tag without opt-in, a
-    /// dispatch-object tamper, a fail-closed format mismatch) must stop the
-    /// chain walk — it must never fall through to a lower source that could
-    /// answer the same name and both bypass the refusal and leak the
-    /// induced-error traffic to that source. The default returns `false`; only
-    /// [`super::OcxIndex`] overrides it (true for its own namespace).
-    fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
+    /// An [`Authoritative`](super::Jurisdiction::Authoritative) source's
+    /// **refusal** (a yanked tag without opt-in, a dispatch-object tamper, a
+    /// fail-closed format mismatch) and its clean miss both stop the chain walk
+    /// — neither may fall through to a lower source that could answer the same
+    /// name and both bypass the refusal and leak the induced-error traffic to
+    /// that source. An [`Outside`](super::Jurisdiction::Outside) source is
+    /// skipped entirely: it has declared it cannot express the name, so it is
+    /// never asked and its silence decides nothing.
+    ///
+    /// Async because the declaration lives in the source's published
+    /// `config.json`; it rides the fetch the resolve would have made anyway.
+    /// The default is [`FallThrough`](super::Jurisdiction::FallThrough) (a
+    /// plain registry claims nothing); only [`super::OcxIndex`] and
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) override it.
+    async fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
         let _ = identifier;
+        super::Jurisdiction::FallThrough
+    }
+
+    /// Whether this source is the configured owner of `registry` — a cheap,
+    /// no-I/O ownership test, deliberately distinct from the per-name
+    /// [`Self::jurisdiction`].
+    ///
+    /// Ownership decides local-subtree *layout* (a published source's
+    /// `c/index.json` catalog vs a derived source's `p/` enumeration), which is
+    /// per-source and never per-name — so every name under an owned registry
+    /// reports that source's [`Self::source_kind`], grammar notwithstanding.
+    /// The default returns `false`; only [`super::OcxIndex`] (its own
+    /// namespace) and [`ChainedIndex`](super::chained_index::ChainedIndex) (any
+    /// of its sources) override it.
+    fn serves_registry(&self, registry: &str) -> bool {
+        let _ = registry;
         false
     }
 

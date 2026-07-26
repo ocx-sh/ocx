@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::local_index::{DispatchResolution, SourceKind};
-use super::{ChainMode, Index, IndexOperation, LocalIndex, index_impl};
+use super::{ChainMode, Index, IndexOperation, Jurisdiction, LocalIndex, index_impl};
 use crate::file_structure::BlobStore;
 use crate::utility::singleflight;
 use crate::{Result, log, oci};
@@ -211,28 +211,52 @@ impl ChainedIndex {
         self
     }
 
-    /// Provenance for `identifier`'s namespace (`adr_index_indirection.md`
-    /// A2/H) — the configured source authoritative for it, if any, asked for
-    /// its cheap, synchronous [`Index::source_kind`]. No configured source
-    /// claims the namespace (e.g. `--offline`, where `self.sources` is empty
-    /// by construction) defaults to [`SourceKind::Derived`]: the uncatalogued
-    /// read shares the exact root-document path with the catalogued one and
-    /// only skips the catalog cross-check/self-heal, never resolution
-    /// correctness.
-    fn kind_for(&self, identifier: &oci::Identifier) -> SourceKind {
+    /// Provenance for `registry` (`adr_index_indirection.md` A2/H) — the
+    /// configured source that owns it, if any, asked for its cheap, synchronous
+    /// [`Index::source_kind`]. No configured source claims the registry (e.g.
+    /// `--offline`, where `self.sources` is empty by construction) defaults to
+    /// [`SourceKind::Derived`]: the uncatalogued read shares the exact
+    /// root-document path with the catalogued one and only skips the catalog
+    /// cross-check/self-heal, never resolution correctness.
+    ///
+    /// Keyed on the registry, not a name: the local subtree layout
+    /// (`c/index.json` catalog vs `p/` enumeration) is per-source and never
+    /// per-name, so a name the owning index's grammar cannot express still
+    /// reports that source's provenance. Routing it through per-name
+    /// jurisdiction instead would flip such a name to `Derived` and silently
+    /// drop the published root's catalog cross-check.
+    fn kind_for_registry(&self, registry: &str) -> SourceKind {
         self.sources
             .iter()
-            .find(|source| source.is_authoritative_for(identifier))
+            .find(|source| source.serves_registry(registry))
             .map(Index::source_kind)
             .unwrap_or(SourceKind::Derived)
     }
 
-    /// [`Self::kind_for`] for a bare registry (no repository) —
-    /// `list_repositories`'s namespace-only query. `is_authoritative_for`
-    /// inspects only `.registry()`, so the placeholder repository segment is
-    /// never actually read.
-    fn kind_for_registry(&self, registry: &str) -> SourceKind {
-        self.kind_for(&oci::Identifier::new_registry("_", registry))
+    /// [`Self::kind_for_registry`] for an identifier — provenance is per
+    /// registry, so this is a pure delegation with no placeholder identifier
+    /// anywhere in the path.
+    fn kind_for(&self, identifier: &oci::Identifier) -> SourceKind {
+        self.kind_for_registry(identifier.registry())
+    }
+
+    /// The sources that have **not** declared themselves unable to express
+    /// `identifier`, each paired with whether its refusal (or clean miss) stops
+    /// the chain.
+    ///
+    /// One place asks the jurisdiction question, so a source that declined a
+    /// name is never fetched from — the declaration is honoured before any
+    /// request, not after a 404 has already been read as a terminal stop.
+    async fn candidate_sources(&self, identifier: &oci::Identifier) -> Vec<(&Index, bool)> {
+        let mut candidates = Vec::with_capacity(self.sources.len());
+        for source in &self.sources {
+            match source.jurisdiction(identifier).await {
+                Jurisdiction::Authoritative => candidates.push((source, true)),
+                Jurisdiction::FallThrough => candidates.push((source, false)),
+                Jurisdiction::Outside => {}
+            }
+        }
+        candidates
     }
 
     /// Policy probe for no-resolve modes: an unpinned identifier whose
@@ -499,7 +523,7 @@ impl ChainedIndex {
         grow_root: bool,
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         let mut last_error: Option<crate::Error> = None;
-        for source in &self.sources {
+        for (source, authoritative) in self.candidate_sources(identifier).await {
             // `ReadOnly` fetches + decodes the dispatch object WITHOUT staging
             // it into `o/` — a read-only view never grows the local index. Every
             // other policy persists the dispatch object as usual (an image index
@@ -576,7 +600,7 @@ impl ChainedIndex {
                     // the `Err` arm's authoritative-stop just below; a
                     // non-authoritative source's miss keeps the fall-through
                     // behaviour so foreign-namespace routing is unaffected.
-                    if source.is_authoritative_for(identifier) {
+                    if authoritative {
                         log::debug!("Authoritative source has no '{}' — stopping.", identifier);
                         return Ok(None);
                     }
@@ -589,7 +613,7 @@ impl ChainedIndex {
                     // bypass the refusal and leak induced-error traffic to it
                     // (`adr_index_indirection.md` F3). Transient errors from a
                     // non-authoritative source keep the fall-through behaviour.
-                    if source.is_authoritative_for(identifier) {
+                    if authoritative {
                         log::warn!("Authoritative source refused '{}': {e}", identifier);
                         return Err(e);
                     }
@@ -626,13 +650,13 @@ impl ChainedIndex {
         identifier: &oci::Identifier,
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         let mut last_error: Option<crate::Error> = None;
-        for source in &self.sources {
+        for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest(identifier, IndexOperation::Query).await {
                 Ok(Some(result)) => return Ok(Some(result)),
                 // Same authoritative-stop as `fetch_and_persist_chain`: a clean
                 // miss from the namespace's one authoritative source is
                 // terminal, never a fall-through to the `OciIndex` catch-all.
-                Ok(None) if source.is_authoritative_for(identifier) => return Ok(None),
+                Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest failed for '{}': {e}", identifier);
@@ -647,11 +671,11 @@ impl ChainedIndex {
     /// read-through-without-persist contract.
     async fn query_sources_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         let mut last_error: Option<crate::Error> = None;
-        for source in &self.sources {
+        for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_digest(identifier, IndexOperation::Query).await {
                 Ok(Some(digest)) => return Ok(Some(digest)),
                 // Same authoritative-stop as `query_sources_manifest`.
-                Ok(None) if source.is_authoritative_for(identifier) => return Ok(None),
+                Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Remote-mode fetch_manifest_digest failed for '{}': {e}", identifier);
@@ -709,7 +733,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         // from callers and break retry policy.
         if self.mode == ChainMode::Remote {
             let mut last_error: Option<crate::Error> = None;
-            for source in &self.sources {
+            for (source, _) in self.candidate_sources(identifier).await {
                 match source.list_tags(identifier).await {
                     Ok(Some(tags)) => return Ok(Some(tags)),
                     Ok(None) => {}
@@ -957,7 +981,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         // this boundary. Propagate last error if every source erred (trust
         // boundary).
         let mut last_error: Option<crate::Error> = None;
-        for source in &self.sources {
+        for (source, _) in self.candidate_sources(blob_ref.as_identifier()).await {
             match source.fetch_blob(blob_ref).await {
                 Ok(Some(bytes)) => {
                     if !digest_matches(&bytes, &digest) {
@@ -1011,7 +1035,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             return Ok(None);
         }
         let mut last_error: Option<crate::Error> = None;
-        for source in &self.sources {
+        for (source, _) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_raw_bytes(identifier).await {
                 Ok(Some(result)) => return Ok(Some(result)),
                 Ok(None) => {}
@@ -1027,7 +1051,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
         // Delegate to the sources in priority order; the first that maps the
         // identifier to a physical location wins (only `OcxIndex` does).
-        for source in &self.sources {
+        for (source, _) in self.candidate_sources(identifier).await {
             if let Some(physical) = source.physical_reference(identifier).await? {
                 return Ok(Some(physical));
             }
@@ -1035,10 +1059,25 @@ impl index_impl::IndexImpl for ChainedIndex {
         Ok(None)
     }
 
-    fn is_authoritative_for(&self, identifier: &oci::Identifier) -> bool {
-        self.sources
-            .iter()
-            .any(|source| source.is_authoritative_for(identifier))
+    async fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
+        // Fold the chain: one authoritative source makes the whole chain
+        // authoritative; otherwise any source that would still be asked makes it
+        // a fall-through. `Outside` needs EVERY source to have declined — in
+        // production the chain always ends with the `OciIndex` catch-all, which
+        // declines nothing, so a chain is never `Outside`.
+        let mut jurisdiction = Jurisdiction::Outside;
+        for source in &self.sources {
+            match source.jurisdiction(identifier).await {
+                Jurisdiction::Authoritative => return Jurisdiction::Authoritative,
+                Jurisdiction::FallThrough => jurisdiction = Jurisdiction::FallThrough,
+                Jurisdiction::Outside => {}
+            }
+        }
+        jurisdiction
+    }
+
+    fn serves_registry(&self, registry: &str) -> bool {
+        self.sources.iter().any(|source| source.serves_registry(registry))
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1073,7 +1112,7 @@ mod chain_refs_tests {
     use crate::{
         Result,
         file_structure::{BlobStore, IndexStore},
-        oci::index::{ChainMode, Index, IndexOperation, LocalConfig, LocalIndex, index_impl},
+        oci::index::{ChainMode, Index, IndexOperation, Jurisdiction, LocalConfig, LocalIndex, index_impl},
         oci::{Algorithm, Digest, Identifier, ImageManifest, Manifest},
     };
 
@@ -2585,7 +2624,7 @@ mod chain_refs_tests {
 
     // ── corrupt-known recovery must never re-grow an already-known root ────
 
-    /// A fake PUBLISHED-kind source (`is_authoritative_for` claims `REGISTRY`,
+    /// A fake PUBLISHED-kind source (authoritative over `REGISTRY`,
     /// `source_kind() == Published`) serving a fixed dispatch object for
     /// `TAG`. Records `fetch_root_document` calls so a test can assert
     /// corrupt-object recovery never re-fetches/re-copies an already-known
@@ -2639,8 +2678,15 @@ mod chain_refs_tests {
             *self.fetch_root_document_calls.lock().unwrap() += 1;
             Ok(None)
         }
-        fn is_authoritative_for(&self, identifier: &Identifier) -> bool {
-            identifier.registry() == REGISTRY
+        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
         }
         fn source_kind(&self) -> super::super::local_index::SourceKind {
             super::super::local_index::SourceKind::Published
@@ -2648,6 +2694,56 @@ mod chain_refs_tests {
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
         }
+    }
+
+    // ── provenance is per REGISTRY, never per name (R3) ──────────────────────
+
+    /// A published source's provenance decides the LOCAL subtree layout
+    /// (`c/index.json` catalog vs `p/` enumeration), which is per-source and
+    /// never per-name. Routing it through per-name jurisdiction would flip a
+    /// name the index's grammar cannot express to `Derived`, silently dropping
+    /// the published root's catalog cross-check for it.
+    #[tokio::test]
+    async fn kind_for_reports_published_for_every_name_under_a_published_registry() {
+        let dir = TempDir::new().unwrap();
+        let chained = super::ChainedIndex::new(
+            make_local_index(&dir),
+            vec![Index::from_impl(PublishedSource {
+                fetch_root_document_calls: Arc::new(Mutex::new(0)),
+            })],
+            ChainMode::Default,
+        );
+
+        for repository in ["cmake", "kitware/cmake", "deeply/nested/name"] {
+            assert_eq!(
+                chained.kind_for(&Identifier::new_registry(repository, REGISTRY)),
+                super::SourceKind::Published,
+                "'{repository}' lives under a published registry whatever its shape"
+            );
+        }
+        assert_eq!(
+            chained.kind_for(&Identifier::new_registry("cmake", "other.io")),
+            super::SourceKind::Derived,
+            "a registry nobody configured falls back to the uncatalogued read"
+        );
+    }
+
+    /// The provenance primitive takes a bare registry — there is no placeholder
+    /// identifier anywhere in the path to encode an assumption about a
+    /// predicate's shape.
+    #[tokio::test]
+    async fn kind_for_registry_takes_a_registry_and_no_placeholder_identifier() {
+        let dir = TempDir::new().unwrap();
+        let chained = super::ChainedIndex::new(
+            make_local_index(&dir),
+            vec![Index::from_impl(PublishedSource {
+                fetch_root_document_calls: Arc::new(Mutex::new(0)),
+            })],
+            ChainMode::Default,
+        );
+
+        assert_eq!(chained.kind_for_registry(REGISTRY), super::SourceKind::Published);
+        assert_eq!(chained.kind_for_registry("other.io"), super::SourceKind::Derived);
     }
 
     /// Regression for a Block finding: a corrupt-but-known dispatch object
@@ -3031,7 +3127,7 @@ mod chain_refs_tests {
     // ── authoritative-stop on a clean miss (no silent fallthrough) ─────────
 
     /// A fake source claiming authoritative ownership of `REGISTRY`'s
-    /// namespace (mirrors `OcxIndex::is_authoritative_for`) but reporting a
+    /// namespace (mirrors `OcxIndex::jurisdiction`) but reporting a
     /// clean miss for every identifier — the case where the one configured
     /// ocx-index for a namespace genuinely has no such package.
     #[derive(Clone)]
@@ -3054,8 +3150,15 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        fn is_authoritative_for(&self, identifier: &Identifier) -> bool {
-            identifier.registry() == REGISTRY
+        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
