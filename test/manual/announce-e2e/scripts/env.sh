@@ -146,10 +146,30 @@ publisher_checkout() {
 
 # The pull requests that are candidates at all: head repository owner and
 # branch. A same-named branch on another fork is a different pull request.
-# Shared by pr_floor and pr_number so the two cannot drift — a floor computed
-# over a wider set than it filters would sit too high and hang the driver.
+# Shared by every caller — pr_floor, pr_number, run_idempotency's pr_count — so
+# the predicate cannot drift: a floor computed over a wider set than it filters
+# would sit too high and hang the driver, and a count on a looser predicate
+# would report a foreign fork's pull request as movement.
 E2E_PR_SELECT=".headRefName == \"$ANNOUNCE_BRANCH\"
            and .headRepositoryOwner.login == \"${INDEX_FORK%%/*}\""
+
+# Run <jq-program> over the announce branch's pull requests. Args: <jq-program>.
+#
+# One shared invocation because the window and the predicate have to agree.
+# `--head` makes GitHub apply the branch filter *before* --limit, so the 20 are
+# 20 pull requests on this branch — without it they are the newest 20 in the
+# whole index repository, and a repository busy enough to issue 20 newer pull
+# requests hides ours entirely: pr_floor reads 0, the announce updates an older
+# pull request that is still open instead of opening a new one, and pr_number
+# then polls a window that will never contain it.
+#
+# `--head` takes a bare branch name — `owner:branch` is documented unsupported
+# — so it cannot distinguish two forks carrying the same branch name. The
+# fork-owner half of the identity therefore stays in E2E_PR_SELECT.
+pr_list() {
+    gh pr list --repo "$GH_REPO_INDEX" --head "$ANNOUNCE_BRANCH" --state all \
+        --limit 20 --json number,headRefName,headRepositoryOwner --jq "$1"
+}
 
 # The highest pull-request number the announce branch already carries, or 0.
 # Call it BEFORE triggering the announce: it is the freshness floor pr_number
@@ -162,9 +182,7 @@ E2E_PR_SELECT=".headRefName == \"$ANNOUNCE_BRANCH\"
 # the driver certifies against it. Numbers issued by the same server that
 # issues the ones being filtered involve no clock on either side.
 pr_floor() {
-    gh pr list --repo "$GH_REPO_INDEX" --state all --limit 20 \
-        --json number,headRefName,headRepositoryOwner \
-        --jq "[.[] | select($E2E_PR_SELECT)] | max_by(.number).number // 0"
+    pr_list "[.[] | select($E2E_PR_SELECT)] | max_by(.number).number // 0"
 }
 
 # Echo the number of the pull request *this run's* announce put on the fork's
@@ -188,9 +206,7 @@ pr_floor() {
 # the right direction to fail: a red run, never a green one off stale data.
 pr_number() {
     local floor="$1" number
-    number="$(gh pr list --repo "$GH_REPO_INDEX" --state all --limit 20 \
-        --json number,headRefName,headRepositoryOwner \
-        --jq "[.[] | select($E2E_PR_SELECT and .number > $floor)] |
+    number="$(pr_list "[.[] | select($E2E_PR_SELECT and .number > $floor)] |
               max_by(.number) | .number // empty")"
     [[ -n $number ]] || return 1
     printf '%s\n' "$number"
