@@ -9,7 +9,9 @@
 //!
 //! Phase 10 specification scope (per plan_project_toolchain.md lines 859–873):
 //! * `project` schema must publish at `https://ocx.sh/schemas/project/v1.json`
-//!   and expose object-typed `tools` and `groups` properties.
+//!   and expose object-typed `tools` and `group` properties (the wire key
+//!   for the named-groups surface — see the assertion below for why it
+//!   differs from the Rust field name).
 //! * `project-lock` schema must publish at
 //!   `https://ocx.sh/schemas/project-lock/v1.json`, carry a top-level
 //!   `$comment` flagging the format as machine-generated and subject to
@@ -19,8 +21,8 @@
 //!
 //! Tests that hold today (the structural pieces already wired by the stub
 //! phase — `$id`, `lock_version` enum) ensure no regression at the implement
-//! gate. Tests that fail today (the architect's `$comment` requirement and
-//! the `groups` rename) drive the implement-phase deliverable.
+//! gate. Tests that fail today (the architect's `$comment` requirement)
+//! drive the implement-phase deliverable.
 
 use serde_json::Value;
 
@@ -46,7 +48,7 @@ fn project_schema_publishes_at_canonical_id() {
 }
 
 #[test]
-fn project_schema_exposes_tools_and_groups_objects() {
+fn project_schema_exposes_tools_and_group_objects() {
     let schema = parse("project");
     let properties = schema
         .get("properties")
@@ -63,18 +65,16 @@ fn project_schema_exposes_tools_and_groups_objects() {
         "`properties.tools.type` must be `object`"
     );
 
-    // The named-groups field. The plan's spec calls this surface `groups`,
-    // but the Rust source `rename`s to `group` in TOML/JSON via
-    // `#[serde(rename = "group")]`. Accept either spelling so the
-    // implement phase can decide whether to rename the JSON key or document
-    // the discrepancy. Failing here means BOTH are missing — a real
-    // regression.
-    let groups = properties.get("groups").or_else(|| properties.get("group"));
-    let groups = groups.unwrap_or_else(|| {
+    // The named-groups field. `ProjectConfig::groups` carries
+    // `#[serde(rename = "group")]` (singular) — deliberate, per ADR
+    // `adr_project_env_declaration.md` S9b#1: the Rust field is plural
+    // (it holds a map of groups) but the TOML table syntax is singular
+    // per-entry (`[group.<name>]`), so the wire key mirrors the table
+    // header, not the field name. The wire key must NOT be renamed.
+    let groups = properties.get("group").unwrap_or_else(|| {
         panic!(
-            "project schema must declare a named-groups property — \
-             expected `properties.groups` (per plan spec) or \
-             `properties.group` (per current `rename = \"group\"` source). \
+            "project schema must declare `properties.group` (the wire key \
+             for the named-groups surface, per `rename = \"group\"`). \
              Properties present: {:?}",
             properties.keys().collect::<Vec<_>>()
         )
@@ -179,8 +179,8 @@ fn project_schema_group_body_is_closed_to_tools_and_env() {
     let schema = parse("project");
     let groups = schema
         .get("properties")
-        .and_then(|p| p.get("groups").or_else(|| p.get("group")))
-        .expect("project schema must declare a named-groups property");
+        .and_then(|p| p.get("group"))
+        .expect("project schema must declare `properties.group` (the named-groups wire key)");
     let group = groups
         .get("additionalProperties")
         .map(|node| resolve(&schema, node))
