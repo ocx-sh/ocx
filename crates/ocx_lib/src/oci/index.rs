@@ -16,8 +16,8 @@ pub use ocx_index::{
     CatalogSyncOutcome, DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig,
     ReqwestIndexTransport, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
 };
-pub use wire::{CatalogIndex, IndexRoot, Observation, ObservationPlatform, RootTag, YankMarker};
-pub use wire_writer::{serialize_observation, serialize_root};
+pub use wire::{CatalogIndex, IndexRoot, RootTag, YankMarker};
+pub use wire_writer::serialize_root;
 
 mod chained_index;
 mod index_impl;
@@ -195,8 +195,8 @@ impl Index {
     }
 
     /// Like [`Self::from_chained`], but attaches the machine-global blob store
-    /// (`$OCX_HOME/blobs`) so an `AbsentLeaf` recovers its leaf platform
-    /// manifest from installed content before any source walk
+    /// (`$OCX_HOME/blobs`) so an absent dispatch object recovers its content
+    /// from installed blobs before any source walk
     /// (`adr_index_indirection.md` A3 step 2 / B2). This is the production
     /// construction (`context.rs`); the blob store is opt-in here so the
     /// signature-stable [`Self::from_chained`] keeps every unit-test caller
@@ -242,14 +242,15 @@ impl Index {
 
     /// List all tags available for the given identifier.
     ///
-    /// Internal tags (prefixed with `__ocx.`) are automatically filtered out.
-    /// Returns `None` when the package is not known to this index.
+    /// Reserved tags — the `__ocx` namespace and `sha256.<hex>` digest aliases
+    /// ([`Tag::is_reserved`]) — are automatically filtered out. Returns `None`
+    /// when the package is not known to this index.
     pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
         log::debug!("Listing tags for '{}'.", identifier);
         self.inner.list_tags(identifier).await.map(|opt| {
             opt.map(|tags| {
                 tags.into_iter()
-                    .filter(|t| !Tag::is_internal_str(t))
+                    .filter(|t| !Tag::is_reserved_str(t))
                     .collect::<Vec<_>>()
                     .sorted()
             })
@@ -366,28 +367,22 @@ impl Index {
             )])),
             oci::Manifest::ImageIndex(index) => {
                 let mut candidates = Vec::with_capacity(index.manifests.len());
-                for manifest in index.manifests {
-                    let digest = manifest.digest.try_into()?;
-                    let candidate = identifier.clone_with_digest(digest);
-                    let platform = match manifest.platform {
-                        Some(platform) => match oci::Platform::try_from(platform) {
-                            Ok(platform) => platform,
-                            Err(error) => {
-                                // A foreign or corrupted image index may carry an
-                                // entry OCX cannot represent (unsupported os/arch,
-                                // malformed fields). Skip it rather than failing
-                                // the whole candidate list — the remaining
-                                // entries are still selectable.
-                                log::warn!(
-                                    "skipping image-index entry for '{}' with unparseable platform: {error}",
-                                    candidate
-                                );
-                                continue;
-                            }
-                        },
-                        None => oci::Platform::any(),
+                for entry in index.manifests {
+                    // One shared eligibility rule (see
+                    // `oci::Platform::candidate_from_descriptor`): a descriptor
+                    // that names no platform, or one OCX cannot represent, is
+                    // an attestation/referrer entry — not a fault, and not
+                    // something a `--platform` request can ever mean.
+                    let Some(platform) = oci::Platform::candidate_from_descriptor(&entry) else {
+                        log::debug!(
+                            "skipping non-candidate image-index descriptor {} for '{}'",
+                            entry.digest,
+                            identifier
+                        );
+                        continue;
                     };
-                    candidates.push((candidate, platform));
+                    let digest = entry.digest.try_into()?;
+                    candidates.push((identifier.clone_with_digest(digest), platform));
                 }
                 log::debug!(
                     "Found {} candidate(s) for identifier '{}'.",
@@ -538,6 +533,11 @@ mod tests {
     }
 
     impl MultiLibcIndex {
+        /// Serve an arbitrary pre-built image index through the same mock.
+        fn from_manifest(manifest: oci::ImageIndex) -> Self {
+            Self { manifest }
+        }
+
         /// Build a mock image index with three linux/amd64 entries:
         ///   entry 0 — libc.glibc (digest sha256:glibc_entry…)
         ///   entry 1 — libc.musl  (digest sha256:musl_entry…)
@@ -1233,5 +1233,124 @@ mod tests {
             SelectResult::Found(id) => panic!("expected NotFound, got Found({id})"),
             SelectResult::Ambiguous(ids) => panic!("expected NotFound, got Ambiguous({ids:?})"),
         }
+    }
+
+    // ── N-2: descriptor eligibility at the SELECTION boundary ────────────────
+
+    #[tokio::test]
+    async fn attestation_descriptor_is_not_a_selection_candidate() {
+        // Under D1 the index stores the registry's own image index, so
+        // published sources now carry attestation and referrer descriptors for
+        // the first time. Such a descriptor omits `platform` entirely; mapping
+        // that to `Platform::any()` made it a UNIVERSAL candidate (an `Any`
+        // OFFER satisfies every requirement), so one of them matched anything
+        // and two made every selection `Ambiguous`.
+        fn descriptor(fill: char, platform: Option<oci::native::Platform>) -> oci::ImageIndexEntry {
+            oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", fill.to_string().repeat(64)),
+                size: 100,
+                platform,
+                artifact_type: None,
+                annotations: None,
+            }
+        }
+        let real = oci::native::Platform {
+            os: oci::native::Os::Linux,
+            architecture: oci::native::Arch::Amd64,
+            variant: None,
+            features: None,
+            os_version: None,
+            os_features: Some(vec!["libc.glibc".to_string()]),
+        };
+        let index = Index::from_impl(MultiLibcIndex::from_manifest(oci::ImageIndex {
+            schema_version: oci::INDEX_SCHEMA_VERSION,
+            media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+            artifact_type: None,
+            manifests: vec![
+                descriptor('a', Some(real)),
+                descriptor('b', None),
+                descriptor('c', None),
+            ],
+            annotations: None,
+        }));
+
+        let candidates = index
+            .fetch_candidates(&test_id(), IndexOperation::Query)
+            .await
+            .unwrap()
+            .expect("the mock always answers");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "only the descriptor that names a platform is a candidate, got {:?}",
+            candidates
+                .iter()
+                .map(|(id, p)| (id.to_string(), p.to_string()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(candidates[0].1.to_string(), "linux/amd64+libc.glibc");
+
+        // Two platform-less descriptors used to make this Ambiguous.
+        match index
+            .select(&test_id(), &glibc_host_platform(), IndexOperation::Query)
+            .await
+            .unwrap()
+        {
+            SelectResult::Found(_) => {}
+            other => panic!(
+                "two attestation descriptors must not make selection ambiguous, got {}",
+                match other {
+                    SelectResult::Ambiguous(ids) => format!("Ambiguous({ids:?})"),
+                    SelectResult::NotFound => "NotFound".to_string(),
+                    _ => "FeatureMismatch".to_string(),
+                }
+            ),
+        }
+    }
+
+    // ── D7 at the WRAPPER listing boundary ───────────────────────────────────
+
+    /// A source that reports every tag it knows, reserved names included — the
+    /// shape a foreign or older `IndexImpl` can legitimately have. The wrapper
+    /// filter is what guarantees `ocx index list` never shows one.
+    struct UnfilteredTagSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for UnfilteredTagSource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(vec![
+                "3.28".to_string(),
+                "latest".to_string(),
+                "__ocx.desc".to_string(),
+                "__OCX.future".to_string(),
+                format!("sha256.{}", "a".repeat(64)),
+            ]))
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(UnfilteredTagSource)
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tags_filters_reserved_tags() {
+        let tags = Index::from_impl(UnfilteredTagSource)
+            .list_tags(&test_id())
+            .await
+            .unwrap()
+            .expect("the mock answers");
+        assert_eq!(tags, vec!["3.28".to_string(), "latest".to_string()]);
     }
 }

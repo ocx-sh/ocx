@@ -13,12 +13,12 @@ pub enum Error {
     MissingDigest(String),
 
     /// Bytes read from (or about to be written to) a content-addressed
-    /// snapshot object did not hash to the digest that named them — a
+    /// dispatch object did not hash to the digest that named them — a
     /// trust-boundary check (CWE-345) that fires on write (source-served
     /// bytes disagree with their claimed digest) and on read (an on-disk
     /// object was tampered with after being written). See
     /// `adr_index_indirection.md` Decision A3.
-    #[error("snapshot object digest mismatch: claimed '{claimed}', computed '{computed}'")]
+    #[error("dispatch object digest mismatch: claimed '{claimed}', computed '{computed}'")]
     DigestMismatch {
         /// The digest the caller claimed (write) or the on-disk filename encodes (read).
         claimed: crate::oci::Digest,

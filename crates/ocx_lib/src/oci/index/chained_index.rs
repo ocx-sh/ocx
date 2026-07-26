@@ -43,7 +43,7 @@ fn is_local_status_refusal(err: &crate::Error) -> bool {
 /// (see its own doc comment's "Trust" section) — so every caller reading
 /// content out of it is responsible for checking the bytes against the digest
 /// that names them (CWE-345 trust-boundary check). Shared by
-/// [`ChainedIndex::recover_absent_leaf`] (leaf-manifest recovery) and
+/// [`ChainedIndex::recover_absent_dispatch`] (dispatch-object recovery) and
 /// [`index_impl::IndexImpl::fetch_blob`] (config-blob cache-first read and
 /// post-fetch verify) so the recompute logic lives in exactly one place.
 fn digest_matches(bytes: &[u8], digest: &oci::Digest) -> bool {
@@ -89,7 +89,7 @@ fn digest_matches(bytes: &[u8], digest: &oci::Digest) -> bool {
 ///   canonical. The update-verb family (`ocx update`), see
 ///   `adr_toolchain_update_family.md`.
 /// - [`ReadOnly`](LocalWritePolicy::ReadOnly) — write nothing at all: no
-///   dispatch object, no tag pointer, no AbsentLeaf self-heal. A read-only
+///   dispatch object, no tag pointer, no AbsentDispatch self-heal. A read-only
 ///   view (`ocx package inspect`) resolves content-addressed (index -> blobs ->
 ///   source) and warms the blob cache, but never grows the permanent index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +126,7 @@ pub struct ChainedIndex {
     /// the local index, which holds resolution **dispatch** only
     /// (`adr_index_indirection.md` B2). A leaf platform manifest is never
     /// written into the local index (A3), but it is cached here at install time
-    /// (`stage_and_link_chain_blobs`), so a [`DispatchResolution::AbsentLeaf`]
+    /// (`stage_and_link_chain_blobs`), so a [`DispatchResolution::AbsentDispatch`]
     /// (content absent from `o/`) is recovered from this store **before** any
     /// source walk — the step that makes offline exec of an installed tool
     /// resolve with zero network (A3 step 2). `None` for constructions that
@@ -175,7 +175,7 @@ impl ChainedIndex {
     }
 
     /// A read-only clone of `self` that writes nothing into the local index
-    /// (no dispatch object, no tag pointer, no AbsentLeaf self-heal) — the
+    /// (no dispatch object, no tag pointer, no AbsentDispatch self-heal) — the
     /// [`LocalWritePolicy::ReadOnly`] policy. Shares the same sources and
     /// content store; only the write policy differs.
     ///
@@ -198,7 +198,7 @@ impl ChainedIndex {
         }
     }
 
-    /// Attach the machine-global blob store so an [`DispatchResolution::AbsentLeaf`]
+    /// Attach the machine-global blob store so an [`DispatchResolution::AbsentDispatch`]
     /// recovers its leaf platform manifest from `$OCX_HOME/blobs` before any
     /// source walk (`adr_index_indirection.md` A3 step 2 / B2). Consuming
     /// builder — keeps the `new` / `from_chained` signatures unchanged so the
@@ -242,7 +242,7 @@ impl ChainedIndex {
     /// `Frozen` (all unpinned paths). Each mode decides what to do after
     /// the probe returns `Ok(())` — Offline early-returns; Frozen falls
     /// through to the source walk. A dispatch object being present is not
-    /// required — [`DispatchResolution::AbsentLeaf`] still names a known
+    /// required — [`DispatchResolution::AbsentDispatch`] still names a known
     /// digest, so it counts as locally resolvable too; only a genuinely
     /// unknown root/tag (`Ok(None)`) is a policy block.
     async fn ensure_locally_resolvable(&self, identifier: &oci::Identifier) -> Result<()> {
@@ -258,12 +258,12 @@ impl ChainedIndex {
         Ok(())
     }
 
-    /// Recover an [`DispatchResolution::AbsentLeaf`]'s `content` from the
+    /// Recover an [`DispatchResolution::AbsentDispatch`]'s `content` from the
     /// machine-global blob store (`adr_index_indirection.md` A3 step 2 / B2).
     ///
     /// A leaf platform manifest is never written into the local index (A3), so a
-    /// tag/digest whose `content` is absent from `o/` reports `AbsentLeaf`. That
-    /// content is not lost: it was cached into `$OCX_HOME/blobs` at install time
+    /// tag/digest whose `content` is absent from `o/` reports `AbsentDispatch`.
+    /// That content is not lost: it was cached into `$OCX_HOME/blobs` at install time
     /// (`stage_and_link_chain_blobs`, `ChainRole::Manifest`). This read is tried
     /// **before** the source walk so an installed tool resolves offline with
     /// zero network — the "installed-tool offline exec is unaffected by A3"
@@ -286,7 +286,7 @@ impl ChainedIndex {
     ///
     /// Returns `Ok(None)` when no blob store is attached (unit fakes, the
     /// lock-scoped update index) or the content is not cached locally.
-    async fn recover_absent_leaf(
+    async fn recover_absent_dispatch(
         &self,
         identifier: &oci::Identifier,
         content: &oci::Digest,
@@ -298,9 +298,7 @@ impl ChainedIndex {
             return Ok(None);
         };
         // Digest-verify the recovered bytes against the content digest they are
-        // keyed by (A4). A published-source AbsentLeaf names an observation-object
-        // digest that no registry blob endpoint serves, so this store misses for
-        // it (returns above) — the leaf-trap the ADR warns against cannot fire here.
+        // keyed by (A4).
         if !digest_matches(&bytes, content) {
             log::warn!(
                 "blob-store manifest for '{content}' failed digest verification (recomputed {}); \
@@ -323,10 +321,10 @@ impl ChainedIndex {
         let manifest: oci::Manifest = match serde_json::from_slice(&bytes) {
             Ok(manifest) => manifest,
             Err(error) => {
-                // Not an OCI manifest — e.g. a published-source obs digest that
-                // happens to name a cached blob of another shape. Not a leaf
-                // recovery; fall through so the source-kind-routed walk decides.
-                log::debug!("blob-store object for '{content}' is not an OCI manifest ({error}); not a leaf recovery");
+                // Not an OCI manifest — a content digest that happens to name a
+                // cached blob of another shape. Not a recovery; fall through so
+                // the source walk decides.
+                log::debug!("blob-store object for '{content}' is not an OCI manifest ({error}); not a recovery");
                 return Ok(None);
             }
         };
@@ -356,11 +354,11 @@ impl ChainedIndex {
     /// a genuinely unknown root/tag (`true` — the walk also grows the local
     /// copy, symmetric across published/derived) versus an already-known
     /// root whose dispatch object is merely absent
-    /// ([`DispatchResolution::AbsentLeaf`], `false` — recovery only, the
+    /// ([`DispatchResolution::AbsentDispatch`], `false` — recovery only, the
     /// root is never re-copied). Invariant 1 (a published root is never
     /// auto-refreshed under Default) is preserved because `grow_root` is
     /// only ever `true` on a genuine first-time miss, never on an
-    /// AbsentLeaf recovery of an already-present root.
+    /// AbsentDispatch recovery of an already-present root.
     ///
     /// Returns `Ok(Some((digest, manifest)))` when one source successfully
     /// resolved the identifier — the manifest is returned directly, not
@@ -528,7 +526,7 @@ impl ChainedIndex {
                     // `adr_toolchain_update_family.md`) and `ReadOnly` views
                     // (`ocx package inspect`) both leave the tag pointer untouched.
                     // `grow_root` further gates on the miss shape the caller
-                    // observed locally — an AbsentLeaf recovery of an
+                    // observed locally — an AbsentDispatch recovery of an
                     // already-known root must never re-copy it (Invariant 1).
                     if grow_root
                         && self.write_policy == LocalWritePolicy::Full
@@ -545,8 +543,20 @@ impl ChainedIndex {
                                     self.local_index.persist_published_root(identifier, &root_bytes).await?;
                                 }
                             }
+                            // The same gate the update path applies
+                            // (`LocalIndex::refresh_derived`), on the same rule:
+                            // a tag that resolves to a bare manifest writes
+                            // nothing to `o/`, and a reserved tag is not a
+                            // version. Neither may become a root entry — and
+                            // neither write path consults `list_tags`, so the
+                            // listing filters cannot catch it downstream.
                             SourceKind::Derived => {
-                                self.local_index.commit_root_tag(identifier, &digest).await?;
+                                let tag = identifier
+                                    .tag()
+                                    .expect("grow branch is gated on identifier.tag().is_some()");
+                                if super::local_index::records_root_tag(tag, &manifest) {
+                                    self.local_index.commit_root_tag(identifier, &digest).await?;
+                                }
                             }
                         }
                     }
@@ -763,21 +773,21 @@ impl index_impl::IndexImpl for ChainedIndex {
             None
         };
         // A locally-cached dispatch object answers the read directly; an
-        // `AbsentLeaf` (the digest/tag is known but its bytes are not
+        // `AbsentDispatch` (the digest/tag is known but its bytes are not
         // locally cached, A3) falls through to source recovery below, same
         // as a genuine local miss.
-        if let Some(DispatchResolution::Dispatch { content, manifest }) = local {
-            return Ok(Some((content, *manifest)));
+        if let Some(DispatchResolution::Dispatch { content, index }) = local {
+            return Ok(Some((content, oci::Manifest::ImageIndex(*index))));
         }
         // Order: local index dispatch → blob store → sources
-        // (`adr_index_indirection.md` A3 step 2). An `AbsentLeaf` names a known
+        // (`adr_index_indirection.md` A3 step 2). An `AbsentDispatch` names a known
         // `content` digest whose bytes are absent from `o/` — a leaf platform
         // manifest, which is CONTENT cached into `$OCX_HOME/blobs` at install
         // (B2), never the local index. Consult that store before any source
         // walk so an installed tool resolves offline with zero network. A miss
         // (or no attached store) falls through unchanged.
-        if let Some(DispatchResolution::AbsentLeaf { content }) = &local
-            && let Some(recovered) = self.recover_absent_leaf(identifier, content).await?
+        if let Some(DispatchResolution::AbsentDispatch { content }) = &local
+            && let Some(recovered) = self.recover_absent_dispatch(identifier, content).await?
         {
             return Ok(Some(recovered));
         }
@@ -795,13 +805,13 @@ impl index_impl::IndexImpl for ChainedIndex {
         match op {
             IndexOperation::Query => Ok(None),
             IndexOperation::Resolve => {
-                // `AbsentLeaf` or a recoverable corrupt object both mean the
+                // `AbsentDispatch` or a recoverable corrupt object both mean the
                 // root/tag is already known locally — recover ONLY the
                 // dispatch content (`grow_root = false`, Invariant 1: never
                 // re-copy an already-present published root). Only a genuine
                 // miss (`None`, no corruption) grows the local root on
                 // success (C2 policy).
-                let grow_root = !corrupt_known && !matches!(local, Some(DispatchResolution::AbsentLeaf { .. }));
+                let grow_root = !corrupt_known && !matches!(local, Some(DispatchResolution::AbsentDispatch { .. }));
                 self.walk_chain(identifier, grow_root).await
             }
         }
@@ -822,22 +832,22 @@ impl index_impl::IndexImpl for ChainedIndex {
             match self.local_index.resolve_dispatch(identifier, kind).await {
                 Ok(Some(DispatchResolution::Dispatch { content, .. })) => return Ok(Some(content)),
                 // Unlike `fetch_manifest`, a TAG-addressed digest read is
-                // answerable from `AbsentLeaf` too — the root lookup already
+                // answerable from `AbsentDispatch` too — the root lookup already
                 // confirmed the tag exists and names this content, only the
-                // dispatch bytes are uncached. A DIGEST-addressed `AbsentLeaf`
+                // dispatch bytes are uncached. A DIGEST-addressed `AbsentDispatch`
                 // is just the caller's own input echoed back with no existence
                 // confirmation, so it needs the object locally present, a
                 // cached leaf blob, or a source to confirm existence.
-                Ok(Some(DispatchResolution::AbsentLeaf { content })) if !is_digest_addressed => {
+                Ok(Some(DispatchResolution::AbsentDispatch { content })) if !is_digest_addressed => {
                     return Ok(Some(content));
                 }
-                // A DIGEST-addressed `AbsentLeaf`: confirm existence from the
+                // A DIGEST-addressed `AbsentDispatch`: confirm existence from the
                 // machine-global blob store (installed content, A3 step 2 / B2)
                 // before falling through to the source walk, so an offline
                 // digest query resolves with zero network when the leaf is
                 // cached. A miss falls through unchanged.
-                Ok(Some(DispatchResolution::AbsentLeaf { content })) => {
-                    if let Some((digest, _)) = self.recover_absent_leaf(identifier, &content).await? {
+                Ok(Some(DispatchResolution::AbsentDispatch { content })) => {
+                    if let Some((digest, _)) = self.recover_absent_dispatch(identifier, &content).await? {
                         return Ok(Some(digest));
                     }
                 }
@@ -869,7 +879,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         }
         match op {
             IndexOperation::Query => Ok(None),
-            // Reaches the walk either on a genuine local miss (`AbsentLeaf`
+            // Reaches the walk either on a genuine local miss (`AbsentDispatch`
             // already answered above for the tag-addressed case) or a
             // recoverable corrupt object — root growth applies only for the
             // former (C2 policy); a corrupt-object recovery must not re-grow
@@ -983,7 +993,7 @@ impl index_impl::IndexImpl for ChainedIndex {
 
     /// Fetches verbatim manifest bytes straight from the source chain —
     /// never through the local dispatch-object cache. That cache holds
-    /// bytes only for dispatch-shaped digests (image index / observation
+    /// bytes only for dispatch-shaped digests (an image index
     /// object); a leaf platform manifest is never copied into it
     /// (`adr_index_indirection.md` A3/B2 — leaf manifests are content,
     /// fetched on demand). The trait default re-serialises the parsed
@@ -1633,7 +1643,7 @@ mod chain_refs_tests {
             let cache = make_local_index(&cache_dir);
 
             // Seed only the root's tag pointer — skip `persist_dispatch` so the
-            // dispatch object is never written (the AbsentLeaf shape).
+            // dispatch object is never written (the AbsentDispatch shape).
             // `commit_root_tag` is `pub(super)` and accessible here because
             // `chain_refs_tests` lives in the same `index` parent module.
             cache.commit_root_tag(&tagged_id(), &digest_a()).await.unwrap();
@@ -2761,17 +2771,21 @@ mod chain_refs_tests {
 
     const FLAT_MANIFEST_JSON: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
 
-    /// Warn-tier coverage: a flat (single-platform) tag never gains a
-    /// dispatch object (A3/B2) but its root still grows with `content` set
-    /// to the leaf manifest digest itself (Default mode); Offline mode
-    /// policy-blocks an unknown flat-manifest tag before ever consulting the
-    /// source.
+    /// A flat (single-platform) tag never gains a dispatch object (A3/B2) —
+    /// and therefore never gains a root tag entry either (D2). The resolve
+    /// still succeeds and hands the manifest to the caller; only the local
+    /// write is excluded. Offline mode policy-blocks an unknown flat-manifest
+    /// tag before ever consulting the source.
+    ///
+    /// This test previously asserted the opposite for the root — that the tag
+    /// entry grew with `content` set to the leaf digest — which is exactly the
+    /// tag-without-an-object absence D2 abolishes.
     #[tokio::test(flavor = "multi_thread")]
     async fn flat_manifest_tag_routing() {
         let flat_digest = Algorithm::Sha256.hash(FLAT_MANIFEST_JSON);
 
-        // (a) + (b): Default-mode Resolve writes nothing to `o/` but grows
-        // the root with `content` = the leaf digest.
+        // (a) + (b): Default-mode Resolve writes nothing to `o/` and, because
+        // nothing landed there, nothing to the root either.
         {
             let cache_dir = TempDir::new().unwrap();
             let cache = make_local_index(&cache_dir);
@@ -2801,12 +2815,9 @@ mod chain_refs_tests {
                 "a single-platform tag must write nothing to the dispatch object CAS (A3/B2)"
             );
 
-            let root_bytes = std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap();
-            let root: serde_json::Value = serde_json::from_slice(&root_bytes).unwrap();
-            assert_eq!(
-                root["tags"][TAG]["content"].as_str(),
-                Some(flat_digest.to_string()).as_deref(),
-                "the root's tag content must be the leaf manifest digest itself"
+            assert!(
+                !store.root_document_path(REGISTRY, REPO).exists(),
+                "a tag that wrote nothing to `o/` must not be recorded in the root (D2)"
             );
         }
 
@@ -2836,14 +2847,14 @@ mod chain_refs_tests {
     //
     // A leaf platform manifest is never written into the local index (A3); it
     // is CONTENT cached into `$OCX_HOME/blobs` at install (B2). These tests pin
-    // the regression: an `AbsentLeaf` (content absent from `o/`) is recovered
+    // the regression: an `AbsentDispatch` (content absent from `o/`) is recovered
     // from the machine-global blob store BEFORE any source walk, so an
     // installed tool resolves offline with zero network — the regression that
     // left `test_offline.py` / `test_pinned_offline.py` red.
 
     /// A flat single-platform (leaf) image manifest and the digest its bytes
     /// hash to. A leaf is never written to the dispatch-object CAS (A3), so a
-    /// tag or digest pointing at it reports `DispatchResolution::AbsentLeaf`;
+    /// tag or digest pointing at it reports `DispatchResolution::AbsentDispatch`;
     /// the bytes live only in the machine-global blob store (B2).
     fn leaf_manifest_bytes() -> (Vec<u8>, Digest) {
         let manifest = Manifest::Image(ImageManifest::default());
@@ -2861,18 +2872,18 @@ mod chain_refs_tests {
         blobs
     }
 
-    /// Regression (#215-family, `test_offline.py`): a tag-addressed `AbsentLeaf`
+    /// Regression (#215-family, `test_offline.py`): a tag-addressed `AbsentDispatch`
     /// resolves offline from the blob store with zero sources. The tag pointer
     /// is locally known (root committed), the leaf is absent from `o/`, and its
     /// bytes sit in `$OCX_HOME/blobs` — exactly the post-install offline-exec
     /// state.
     #[tokio::test(flavor = "multi_thread")]
-    async fn offline_tag_absent_leaf_recovers_from_blob_store() {
+    async fn offline_tag_absent_dispatch_recovers_from_blob_store() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
         // Root tag → leaf content; a single-platform tag writes nothing to `o/`
-        // (AbsentLeaf).
+        // (AbsentDispatch).
         cache.commit_root_tag(&tagged_id(), &leaf_digest).await.unwrap();
         let blobs = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
 
@@ -2882,16 +2893,16 @@ mod chain_refs_tests {
             .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
             .await
             .unwrap()
-            .expect("offline AbsentLeaf must recover the leaf manifest from the blob store");
+            .expect("offline AbsentDispatch must recover the leaf manifest from the blob store");
         assert_eq!(digest, leaf_digest);
         assert!(matches!(manifest, Manifest::Image(_)), "recovered a flat leaf manifest");
     }
 
-    /// A digest-addressed `AbsentLeaf` (a pinned pull's leaf) recovers offline
+    /// A digest-addressed `AbsentDispatch` (a pinned pull's leaf) recovers offline
     /// from the blob store through both `fetch_manifest` and
     /// `fetch_manifest_digest` (`test_pinned_offline.py`).
     #[tokio::test(flavor = "multi_thread")]
-    async fn offline_digest_absent_leaf_recovers_from_blob_store() {
+    async fn offline_digest_absent_dispatch_recovers_from_blob_store() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
@@ -2915,11 +2926,11 @@ mod chain_refs_tests {
     }
 
     /// The blob-store recovery is opt-in: without an attached content store
-    /// (the `from_chained` seam every unit test uses), an offline `AbsentLeaf`
+    /// (the `from_chained` seam every unit test uses), an offline `AbsentDispatch`
     /// stays a clean `None` — proving the fix changes nothing for the
     /// no-content-store construction and cannot mask a genuine offline miss.
     #[tokio::test(flavor = "multi_thread")]
-    async fn offline_absent_leaf_without_content_store_returns_none() {
+    async fn offline_absent_dispatch_without_content_store_returns_none() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
@@ -2934,12 +2945,12 @@ mod chain_refs_tests {
             .unwrap();
         assert!(
             result.is_none(),
-            "no content store → offline AbsentLeaf stays a clean None"
+            "no content store → offline AbsentDispatch stays a clean None"
         );
     }
 
     /// The blob-store recovery must NOT mask the no-resolve policy block: an
-    /// unindexed tag (no root → a genuine `None` miss, not `AbsentLeaf`) still
+    /// unindexed tag (no root → a genuine `None` miss, not `AbsentDispatch`) still
     /// exits with `PolicyResolutionBlocked` under Offline even with a blob store
     /// attached, and never contacts a source. Pins the pre-C2 policy contract
     /// against the new content-store seam (`test_frozen.py` /

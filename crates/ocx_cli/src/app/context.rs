@@ -242,7 +242,8 @@ impl Context {
         // Attach the machine-global blob store so an installed tool's leaf
         // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
         // never the local index, A3) resolves offline with zero network: an
-        // `AbsentLeaf` is recovered from the blob store before any source walk
+        // an absent dispatch object is recovered from the blob store before any
+        // source walk
         // (`adr_index_indirection.md` A3 step 2 / B2).
         let selected_index = index::Index::from_chained_with_content_store(
             local_index.clone(),

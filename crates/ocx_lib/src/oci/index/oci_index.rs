@@ -52,7 +52,7 @@ impl index_impl::IndexImpl for OciIndex {
             .list_tags(identifier.clone())
             .await?
             .into_iter()
-            .filter(|t| !Tag::is_internal_str(t))
+            .filter(|t| !Tag::is_reserved_str(t))
             .collect();
 
         self.cache.set_tags(identifier.clone(), tags.clone()).await;
@@ -101,5 +101,36 @@ impl index_impl::IndexImpl for OciIndex {
             client: self.client.clone(),
             cache: self.cache.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+    /// D7 at the DERIVED listing boundary. This is the site where a
+    /// `sha256.<hex>` tag actually enters — `ocx package push` writes one per
+    /// platform manifest by default — and it also seeds the tag cache, so a
+    /// missed filter here poisons the cache for the rest of the invocation.
+    #[tokio::test]
+    async fn list_tags_filters_reserved_tags() {
+        let data = StubTransportData::new();
+        data.write().tags = vec![vec![
+            "3.28".to_string(),
+            "latest".to_string(),
+            "__ocx.desc".to_string(),
+            "__OCX.future".to_string(),
+            format!("sha256.{}", "a".repeat(64)),
+        ]];
+        let index = OciIndex::new(OciIndexConfig {
+            client: oci::Client::with_transport(Box::new(StubTransport::new(data))),
+        });
+
+        let tags = index_impl::IndexImpl::list_tags(&index, &oci::Identifier::new_registry("ns/pkg", "example.com"))
+            .await
+            .unwrap()
+            .expect("the stub answers");
+        assert_eq!(tags, vec!["3.28".to_string(), "latest".to_string()]);
     }
 }

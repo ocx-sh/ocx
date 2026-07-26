@@ -68,7 +68,7 @@ mod tests {
     use super::*;
     use crate::file_structure::IndexStore;
     use crate::oci::index::{IndexImpl, IndexOperation, LocalConfig};
-    use crate::oci::{Algorithm, ImageManifest, Manifest};
+    use crate::oci::{Algorithm, Manifest};
 
     const REGISTRY: &str = "registry.example";
     const REPOSITORY: &str = "repo";
@@ -83,10 +83,38 @@ mod tests {
         }))
     }
 
-    /// Minimal fake serving one tag as a flat image manifest — just enough
-    /// for `refresh_package` to reach `LocalIndex::refresh_tags`'s write
-    /// path. Kept local to this module (DAMP) rather than reusing
-    /// `local_index`'s own richer fixture.
+    /// A minimal single-platform OCI image index — the shape a tag must resolve
+    /// to for the root to record it (D2: the root never points at a bare
+    /// manifest, so a bare-manifest fixture records nothing and the delegation
+    /// this module asserts would be untestable).
+    fn fake_index() -> Manifest {
+        Manifest::ImageIndex(oci::ImageIndex {
+            schema_version: oci::INDEX_SCHEMA_VERSION,
+            media_type: Some(oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
+            artifact_type: None,
+            manifests: vec![oci::ImageIndexEntry {
+                media_type: oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 11,
+                platform: Some(oci::native::Platform {
+                    os: oci::native::Os::Linux,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: None,
+                }),
+                artifact_type: None,
+                annotations: None,
+            }],
+            annotations: None,
+        })
+    }
+
+    /// Minimal fake serving one tag as an image index — just enough for
+    /// `refresh_package` to reach `LocalIndex::refresh_tags`'s write path.
+    /// Kept local to this module (DAMP) rather than reusing `local_index`'s
+    /// own richer fixture.
     #[derive(Clone)]
     struct FakeSource;
 
@@ -103,7 +131,7 @@ mod tests {
             _identifier: &oci::Identifier,
             _op: IndexOperation,
         ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-            let manifest = Manifest::Image(ImageManifest::default());
+            let manifest = fake_index();
             let bytes = serde_json::to_vec(&manifest)?;
             let digest = Algorithm::Sha256.hash(&bytes);
             Ok(Some((digest, manifest)))
@@ -113,8 +141,7 @@ mod tests {
             _identifier: &oci::Identifier,
             _op: IndexOperation,
         ) -> Result<Option<oci::Digest>> {
-            let manifest = Manifest::Image(ImageManifest::default());
-            let bytes = serde_json::to_vec(&manifest)?;
+            let bytes = serde_json::to_vec(&fake_index())?;
             Ok(Some(Algorithm::Sha256.hash(&bytes)))
         }
         async fn fetch_blob(&self, _blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {

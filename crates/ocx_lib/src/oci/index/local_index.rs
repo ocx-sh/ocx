@@ -118,7 +118,7 @@ impl LocalIndex {
     ///
     /// - **Published** (an `index.ocx.sh` copy — [`super::Index::fetch_root_document`]
     ///   returns the verbatim root): copy the root byte-for-byte through
-    ///   [`Self::persist_published_root`] and persist each referenced observation
+    ///   [`Self::persist_published_root`] and persist each referenced dispatch
     ///   object.
     /// - **Derived** (a plain OCI registry — no verbatim root to copy): OCX
     ///   authors the root field-wise through [`Self::commit_root_tag`], bumping
@@ -141,7 +141,7 @@ impl LocalIndex {
     }
 
     /// Published-source refresh (`adr_index_indirection.md` A2/F1): persist each
-    /// referenced observation object, then copy the verbatim root document.
+    /// referenced dispatch object, then copy the verbatim root document.
     ///
     /// F1 write order — dispatch objects first (harmless orphans if interrupted),
     /// then the root plus its catalog entry — so a crash never leaves a root
@@ -154,13 +154,14 @@ impl LocalIndex {
         root: &super::wire::IndexRoot,
     ) -> Result<()> {
         // The full published root is persisted below (copy-a-mirror, A2), so
-        // EVERY distinct observation object it references must travel with the
+        // EVERY distinct dispatch object it references must travel with the
         // copy — not only the named tag's (B2). A tag-scoped update
         // (`ocx index update pkg:1.0`) still writes the whole root, so a sibling
-        // tag left pointing at an obs absent from `o/` could not resolve offline.
-        // Dedup by content digest (an obs is content-addressed) so tags a re-push
-        // aliased onto one observation fetch it once — one representative tag per
-        // distinct obs is enough, since `persist_dispatch` fetches the obs by tag.
+        // tag left pointing at an object absent from `o/` could not resolve
+        // offline. Dedup by content digest (a dispatch object is
+        // content-addressed) so tags a re-push aliased onto one index fetch it
+        // once — one representative tag per distinct digest is enough, since
+        // `persist_dispatch` fetches the object by tag.
         let mut seen: std::collections::HashSet<oci::Digest> = std::collections::HashSet::new();
         let tags: Vec<String> = root
             .tags
@@ -169,7 +170,7 @@ impl LocalIndex {
             .map(|(tag, _)| tag.clone())
             .collect();
 
-        // Persist each distinct tag's observation object concurrently — each is a
+        // Persist each distinct tag's dispatch object concurrently — each is a
         // latency-bound fetch + a CAS write to a distinct `o/` path, so the burst
         // is capped at `TAG_REFRESH_CONCURRENCY` (issue #154's polite-citizen
         // contract, carried forward).
@@ -207,6 +208,22 @@ impl LocalIndex {
             return Err(super::error::Error::RemoteManifestNotFound(identifier.to_string()).into());
         }
 
+        // D7's half of `records_root_tag`, hoisted: whether a name is reserved is
+        // decidable from the name alone. Left downstream it costs a fetch AND
+        // stages an image index into `o/` that no root ever names — an orphan in
+        // a store outside the GC graph. The bare-manifest half cannot move: that
+        // verdict needs the fetched manifest's shape.
+        let tags: Vec<String> = tags
+            .into_iter()
+            .filter(|tag| {
+                let indexable = !Tag::is_reserved_str(tag);
+                if !indexable {
+                    log::debug!("Tag '{tag}' is reserved and is never a version — not fetched.");
+                }
+                indexable
+            })
+            .collect();
+
         // Fan the per-tag dispatch persists out concurrently (issue #154); each
         // returns `(tag, content)`. The commit step below serializes on the root
         // file lock, so the concurrency lives here, on the fetches.
@@ -217,7 +234,9 @@ impl LocalIndex {
                 async move {
                     log::debug!("Refreshing derived tag '{}' for identifier '{}'.", tag, identifier);
                     match this.persist_dispatch(source, &tagged).await? {
-                        Some((content, _manifest)) => Ok::<_, crate::Error>(Some((tag, content))),
+                        Some((content, manifest)) => {
+                            Ok::<_, crate::Error>(records_root_tag(&tag, &manifest).then_some((tag, content)))
+                        }
                         None => {
                             log::debug!("Source has no manifest for tag '{}' — skipping.", tag);
                             Ok(None)
@@ -231,10 +250,12 @@ impl LocalIndex {
             .await?;
 
         if fetched.is_empty() {
-            // Every requested tag resolved to no manifest at the source — nothing
-            // was persisted. Same per-identifier not-found signal as the
-            // empty-tags case above.
-            return Err(super::error::Error::RemoteManifestNotFound(identifier.to_string()).into());
+            // There WERE candidate tags; none could carry a version — each
+            // resolved to no manifest, was reserved (filtered above), or was a
+            // bare manifest (`records_root_tag`). Same per-identifier not-found
+            // exit as the empty-tags case above, but a distinct cause and so a
+            // distinct message: "no indexable tag" is not "package absent".
+            return Err(super::error::Error::NoIndexableTag(identifier.to_string()).into());
         }
 
         // Author the derived root's tag pointers in ONE lock acquisition + ONE
@@ -400,13 +421,12 @@ impl LocalIndex {
     /// - [`oci::Manifest::ImageIndex`] ⇒ write the verbatim bytes into the
     ///   dispatch-object CAS (`IndexStore::write_dispatch_object`, which
     ///   recompute-and-verifies the digest against the source-claimed one, A4).
-    ///   The bytes are the source's dispatch object — an OCI image index (a
-    ///   derived / OCI-registry source) or an observation object (a published
-    ///   `index.ocx.sh` source, which [`decode_index_manifest`] presents as a
-    ///   synthetic image index). When the caller has ALREADY fetched the bytes
-    ///   (a [`DispatchResolution::AbsentLeaf`] recovery that decoded as an image
-    ///   index), it self-heals via [`Self::stage_dispatch_bytes`] instead, to
-    ///   avoid the double fetch this method would perform.
+    ///   The bytes are the OCI image index the tag resolved to, identical in
+    ///   shape whether the source is a plain registry or a published
+    ///   `index.ocx.sh` copy of one. When the caller has ALREADY fetched the
+    ///   bytes (a [`DispatchResolution::AbsentDispatch`] recovery that decoded as
+    ///   an image index), it self-heals via [`Self::stage_dispatch_bytes`]
+    ///   instead, to avoid the double fetch this method would perform.
     /// - [`oci::Manifest::Image`] ⇒ write **nothing** to `o/`; a single-platform
     ///   tag's `content` is the leaf manifest digest itself, and a leaf platform
     ///   manifest is never copied into the local index (A3/B2) — it is fetched on
@@ -416,7 +436,7 @@ impl LocalIndex {
     /// with its decoded shape, or the leaf manifest's own digest with the leaf
     /// itself — or `Ok(None)` when the source has no manifest for `identifier`.
     /// Callers that only need the digest for root growth (`refresh_published`,
-    /// `refresh_derived`) discard the manifest; `ChainedIndex`'s AbsentLeaf
+    /// `refresh_derived`) discard the manifest; `ChainedIndex`'s AbsentDispatch
     /// recovery returns it directly to the caller instead of attempting a
     /// doomed local-storage read-back (a leaf is never written to `o/`, A3).
     pub async fn persist_dispatch(
@@ -428,11 +448,10 @@ impl LocalIndex {
             return Ok(None);
         };
         // Dispatch on the decoded manifest shape — NEVER walk child manifests (A3):
-        //  - image index (an OCI multi-platform index, or an observation object
-        //    decoded to a synthetic index) ⇒ the dispatch object; self-heal it
-        //    verbatim into `o/` via `stage_dispatch_bytes` (recompute-and-verified
-        //    against the source-claimed digest, A4) — the bytes are already in
-        //    hand, so this never double-fetches.
+        //  - image index ⇒ the dispatch object; write it verbatim into `o/` via
+        //    `stage_dispatch_bytes` (recompute-and-verified against the
+        //    source-claimed digest, A4) — the bytes are already in hand, so this
+        //    never double-fetches.
         //  - single-platform image manifest ⇒ its own digest IS the tag's
         //    `content`, and a leaf platform manifest is never copied into the
         //    local index (A3/B2) — write nothing.
@@ -599,11 +618,11 @@ impl LocalIndex {
     /// root-doc counterpart to [`Self::get_manifest`] / [`Self::get_tags`]).
     ///
     /// - **Digest-addressed** `identifier` — look the digest up directly in `o/`
-    ///   (`IndexStore::read_dispatch_object`): present ⇒
-    ///   [`DispatchResolution::Dispatch`] (decoded via
-    ///   [`decode_index_manifest`]); absent ⇒
-    ///   [`DispatchResolution::AbsentLeaf`], whose recovery is
-    ///   **source-kind-routed** (see that variant — never an unconditional leaf).
+    ///   (`IndexStore::read_dispatch_object`): present and decodable as an image
+    ///   index ⇒ [`DispatchResolution::Dispatch`] (via
+    ///   [`decode_index_manifest`]); otherwise ⇒
+    ///   [`DispatchResolution::AbsentDispatch`], recovered by fetching `content`
+    ///   by digest (see that variant).
     /// - **Tag-addressed** `identifier` — read the root document per `kind`:
     ///   `IndexStore::read_root` for [`SourceKind::Published`] (cross-checks
     ///   the `c/index.json` catalog entry) or `IndexStore::read_root_uncatalogued`
@@ -614,8 +633,8 @@ impl LocalIndex {
     ///   the `o/` lookup exactly as the digest case.
     ///
     /// The absent-object case is a **typed outcome, never an error and never a
-    /// bare miss**, so `ChainedIndex` can drive the source-kind-routed recovery
-    /// ([`DispatchResolution::AbsentLeaf`]). Returns `Ok(None)` only when the
+    /// bare miss**, so `ChainedIndex` can drive the fetch-by-digest recovery
+    /// ([`DispatchResolution::AbsentDispatch`]). Returns `Ok(None)` only when the
     /// root document or the requested tag is unknown locally — the clean miss the
     /// caller turns into a chain walk.
     pub(super) async fn resolve_dispatch(
@@ -653,25 +672,24 @@ impl LocalIndex {
             }
         };
 
-        // Dispatch on the `o/` lookup: present ⇒ decode to the dispatch manifest;
-        // absent ⇒ `AbsentLeaf` (a leaf platform manifest is never stored in the
-        // local index — A3/B2 — so the caller drives the source-kind-routed
-        // recovery).
+        // Dispatch on the `o/` lookup: present ⇒ decode the image index; absent
+        // ⇒ `AbsentDispatch` (a leaf platform manifest is never stored in the
+        // local index — A3/B2 — so the caller fetches `content` by digest).
         match self
             .index_store
             .read_dispatch_object(source, repository, &content)
             .await?
         {
-            Some(bytes) => match decode_index_manifest(&bytes)? {
-                Some(manifest) => Ok(Some(DispatchResolution::Dispatch {
+            // Present but not an image index: a recoverable state, routed as a
+            // fetch-by-digest recovery rather than surfaced as corruption.
+            Some(bytes) => Ok(Some(match decode_index_manifest(&bytes) {
+                Some(index) => DispatchResolution::Dispatch {
                     content,
-                    manifest: Box::new(manifest),
-                })),
-                // Present but neither codec: a recoverable state, routed as a
-                // fetch-by-digest recovery rather than surfaced as corruption.
-                None => Ok(Some(DispatchResolution::AbsentLeaf { content })),
-            },
-            None => Ok(Some(DispatchResolution::AbsentLeaf { content })),
+                    index: Box::new(index),
+                },
+                None => DispatchResolution::AbsentDispatch { content },
+            })),
+            None => Ok(Some(DispatchResolution::AbsentDispatch { content })),
         }
     }
 
@@ -769,7 +787,7 @@ impl LocalIndex {
     /// Stage already-fetched dispatch-object bytes into the wire-grammar object
     /// CAS under the object's own digest — the no-double-fetch self-heal write
     /// (`adr_index_indirection.md` A3). When [`ChainedIndex`](super::chained_index::ChainedIndex)
-    /// already holds the bytes of a [`DispatchResolution::AbsentLeaf`] recovery
+    /// already holds the bytes of a [`DispatchResolution::AbsentDispatch`] recovery
     /// that decoded as an image index (an incomplete snapshot), it heals `o/`
     /// here instead of re-fetching through [`Self::persist_dispatch`]. The store
     /// recompute-and-verifies the digest before the write commits (A4);
@@ -801,7 +819,7 @@ impl LocalIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceKind {
     /// A published ocx-index (`index.ocx.sh` or a mirror of it): roots and
-    /// observation objects are copied verbatim, and the source carries a
+    /// dispatch objects are copied verbatim, and the source carries a
     /// `c/index.json` catalog, so a root read cross-checks its catalog entry
     /// (`CatalogEntryStatus::Consistent` / `CatalogEntryStatus::Recovered`).
     Published,
@@ -819,60 +837,77 @@ pub(crate) enum SourceKind {
 /// in the local index (A3/B2).
 #[derive(Debug)]
 pub(super) enum DispatchResolution {
-    /// `content` names a dispatch object present in `o/`: an image index
-    /// (derived source) or an observation object (published source), decoded to
-    /// an [`oci::Manifest::ImageIndex`]. `content` is the head digest the root
-    /// tag pointed at. The manifest is boxed so this variant does not dwarf the
-    /// digest-only [`Self::AbsentLeaf`] (clippy `large_enum_variant`).
+    /// `content` names a dispatch object present in `o/`: the OCI image index
+    /// the observed tag referenced, verbatim as the registry served it. `content`
+    /// is the head digest the root tag pointed at. The manifest is boxed so this
+    /// variant does not dwarf the digest-only [`Self::AbsentDispatch`] (clippy
+    /// `large_enum_variant`).
     Dispatch {
         content: oci::Digest,
-        manifest: Box<oci::Manifest>,
+        index: Box<oci::ImageIndex>,
     },
-    /// `content` is absent from `o/`. Recovery is **source-kind-routed** — this
-    /// variant asserts nothing about what `content` names; the caller decides by
-    /// [`SourceKind`]:
+    /// `content` is absent from `o/`. Recovery is the same for every source:
+    /// fetch `content` by digest — from the machine-global blob store first
+    /// (installed content, A3 step 2 / B2), then the physical registry.
     ///
-    /// - [`SourceKind::Published`] — an obs object that should have traveled with
-    ///   the copy is missing (a damaged or incomplete copy). Re-fetch it from the
-    ///   index site (the `OcxIndex` remote, via
-    ///   [`super::Index::fetch_manifest_raw_bytes`]), verify `sha256`, and
-    ///   self-heal it into `o/` ([`LocalIndex::stage_dispatch_bytes`]). **Never**
-    ///   a physical-registry fetch-by-digest — an obs digest is not a registry
-    ///   manifest digest, so that would 404 (the leaf-trap).
-    /// - [`SourceKind::Derived`] — `content` names a leaf platform manifest the
-    ///   local index does not hold (A3/B2). Fetch it by digest from the blob
-    ///   store or the physical registry.
-    /// - **Either kind** — if the fetched bytes decode as an image index (an
-    ///   incomplete snapshot rather than a leaf), self-heal it into `o/`
-    ///   ([`LocalIndex::stage_dispatch_bytes`]) and continue dispatch.
-    AbsentLeaf { content: oci::Digest },
+    /// Both shapes `content` can name are digest-addressable at the registry:
+    /// a leaf platform manifest the local index never copies (A3/B2), or an
+    /// image index whose `o/` copy is missing from an incomplete snapshot. In
+    /// the latter case the fetched bytes self-heal back into `o/`
+    /// ([`LocalIndex::stage_dispatch_bytes`]) and dispatch continues.
+    AbsentDispatch { content: oci::Digest },
 }
 
-/// Decodes a verified dispatch object into an [`oci::Manifest`], dispatching on
-/// the per-source payload codec (`adr_index_indirection.md` A2).
+/// Whether `tag` may be recorded as a version in an OCX-authored derived root
+/// (`adr_index_indirection.md` D2/D7). The two write paths — the update path
+/// ([`LocalIndex::refresh_derived`]) and the resolve path
+/// (`ChainedIndex::fetch_and_persist_chain`'s grow branch) — both bypass
+/// [`super::Index::list_tags`] when the identifier already carries a tag, so the
+/// listing filters cannot stand in for this: without it a violating entry is
+/// committed and then *hidden* by the listing filter, which is invisible rather
+/// than absent.
 ///
-/// Exactly two object kinds are ever written to the dispatch-object CAS:
-/// verbatim OCI manifests (registry sources) and `index.ocx.sh` observation
-/// objects (native codec). The untagged [`oci::Manifest`] requires
-/// `schemaVersion`, which an observation object lacks, so the OCI parse fails
-/// cleanly for an observation and the fall-through is unambiguous. An
-/// observation is decoded to the same synthetic image index a live
-/// [`super::OcxIndex`] presents, so an offline resolve walks the local index
-/// first without re-fetching.
+/// Two rules, one gate, exclude rather than refuse (an unusable tag is not a
+/// reason to fail the other tags of the same package):
 ///
-/// `Ok(None)` = the bytes are neither codec (corruption → recoverable cache
-/// miss); `Err` = a well-formed observation carrying a malformed leaf digest
-/// (a trust-boundary data error, not silently swallowed).
-fn decode_index_manifest(bytes: &[u8]) -> Result<Option<oci::Manifest>> {
-    if let Ok(manifest) = serde_json::from_slice::<oci::Manifest>(bytes) {
-        return Ok(Some(manifest));
+/// - **D2 — the root must never point at a bare manifest.** A tag whose
+///   `content` is a leaf platform-manifest digest writes nothing to `o/`
+///   ([`LocalIndex::persist_dispatch`]), so recording it would create exactly
+///   the tag-without-an-object absence D1 abolished.
+/// - **D7 — a reserved tag is not a version.** The `__ocx` namespace and
+///   `sha256.<hex>` digest aliases ([`Tag::is_reserved_str`]) are not version
+///   pointers and must never appear as ones.
+pub(super) fn records_root_tag(tag: &str, manifest: &oci::Manifest) -> bool {
+    if !matches!(manifest, oci::Manifest::ImageIndex(_)) {
+        log::debug!("tag '{tag}' resolves to a bare manifest, not an image index — not recorded in the root");
+        return false;
     }
-    match serde_json::from_slice::<super::wire::Observation>(bytes) {
-        Ok(observation) => Ok(Some(oci::Manifest::ImageIndex(super::ocx_index::observation_to_index(
-            &observation,
-        )?))),
-        Err(_) => Ok(None),
+    if Tag::is_reserved_str(tag) {
+        log::debug!("tag '{tag}' is reserved and is never a version — not recorded in the root");
+        return false;
     }
+    true
+}
+
+/// Decodes a verified dispatch object into the OCI image index it is
+/// (`adr_index_indirection.md` A2, `adr_oci_index_only_dispatch.md` D1).
+///
+/// One shape is ever written to the dispatch-object CAS: the OCI image index
+/// the observed tag referenced, byte-for-byte as the registry served it. There
+/// is no second codec and no fallback — the index has no business defining
+/// object shapes of its own, so the only parse is the OCI one.
+///
+/// `None` = the bytes are not an image index. That is the fail-closed shape:
+/// [`oci::ImageIndex`] requires `schemaVersion` and `manifests`, so a leaf
+/// platform manifest, a truncated file, or any other payload is refused here
+/// and surfaced as [`DispatchResolution::AbsentDispatch`] — a recoverable cache
+/// miss the caller heals by fetching `content` by digest, never a silent load
+/// of the wrong shape. Unknown sibling fields (`subject`, keys a newer writer
+/// adds) are tolerated: the fleet reads one another's documents, and the bytes
+/// are stored verbatim and never re-serialised, so nothing is lost by ignoring
+/// them (A4 is load-bearing exactly here).
+fn decode_index_manifest(bytes: &[u8]) -> Option<oci::ImageIndex> {
+    serde_json::from_slice::<oci::ImageIndex>(bytes).ok()
 }
 
 #[async_trait]
@@ -898,7 +933,7 @@ impl index_impl::IndexImpl for LocalIndex {
         Ok(self
             .list_local_tags(identifier, SourceKind::Derived)
             .await?
-            .map(|tags| tags.into_iter().filter(|t| !Tag::is_internal_str(t)).collect()))
+            .map(|tags| tags.into_iter().filter(|t| !Tag::is_reserved_str(t)).collect()))
     }
 
     async fn fetch_manifest(
@@ -908,12 +943,14 @@ impl index_impl::IndexImpl for LocalIndex {
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         log::trace!("Fetching manifest for identifier '{}'.", identifier);
         match self.resolve_dispatch(identifier, SourceKind::Derived).await? {
-            Some(DispatchResolution::Dispatch { content, manifest }) => Ok(Some((content, *manifest))),
+            Some(DispatchResolution::Dispatch { content, index }) => {
+                Ok(Some((content, oci::Manifest::ImageIndex(*index))))
+            }
             // The digest/tag is known but its bytes are not locally cached
             // (a leaf platform manifest, A3) — a bare local read cannot
             // produce it; `ChainedIndex` drives the source-kind-routed
             // recovery instead.
-            Some(DispatchResolution::AbsentLeaf { .. }) | None => Ok(None),
+            Some(DispatchResolution::AbsentDispatch { .. }) | None => Ok(None),
         }
     }
 
@@ -924,10 +961,9 @@ impl index_impl::IndexImpl for LocalIndex {
     ) -> Result<Option<oci::Digest>> {
         match self.resolve_dispatch(identifier, SourceKind::Derived).await? {
             // The digest is known regardless of whether the dispatch bytes
-            // are locally cached — `AbsentLeaf` still carries it.
-            Some(DispatchResolution::Dispatch { content, .. }) | Some(DispatchResolution::AbsentLeaf { content }) => {
-                Ok(Some(content))
-            }
+            // are locally cached — `AbsentDispatch` still carries it.
+            Some(DispatchResolution::Dispatch { content, .. })
+            | Some(DispatchResolution::AbsentDispatch { content }) => Ok(Some(content)),
             None => Ok(None),
         }
     }
@@ -989,10 +1025,44 @@ mod tests {
         (bytes, digest)
     }
 
-    /// A minimal fake source: serves one tag → a verbatim flat image manifest
-    /// whose bytes hash to the returned digest. Because it overrides
-    /// `fetch_manifest_raw_bytes` with matching `(bytes, digest)`, the index
-    /// store's A3 verify accepts the persisted objects.
+    /// Verbatim registry bytes for an OCI image index over `leaves`
+    /// (`(architecture, leaf-manifest digest)` pairs), plus their own digest.
+    ///
+    /// **Deliberately NOT the canonical serde encoding of what it parses to.**
+    /// The document is pretty-printed and carries a `subject` field
+    /// `oci::ImageIndex` does not model. A fixture that served exactly
+    /// `serde_json::to_vec(&parsed)` could not tell a byte-copying
+    /// implementation from a re-serialising one, so every verbatim-bytes and
+    /// digest-stability assertion built on it would be vacuous — the whole
+    /// point of storing registry bytes verbatim (D1/A4) would be pinned by
+    /// nothing.
+    fn image_index_bytes(leaves: &[(&str, &oci::Digest)]) -> (Vec<u8>, oci::Digest) {
+        let manifests = leaves
+            .iter()
+            .map(|(architecture, digest)| {
+                format!(
+                    "    {{ \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\", \"digest\": \"{digest}\", \
+                     \"size\": 42, \"platform\": {{ \"architecture\": \"{architecture}\", \"os\": \"linux\" }} }}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let subject = leaves[0].1;
+        let json = format!(
+            "{{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n  \
+             \"subject\": {{ \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\", \"digest\": \"{subject}\", \
+             \"size\": 3 }},\n  \"manifests\": [\n{manifests}\n  ]\n}}\n"
+        );
+        let bytes = json.into_bytes();
+        let digest = Algorithm::Sha256.hash(&bytes);
+        (bytes, digest)
+    }
+
+    /// A minimal fake DERIVED source: one tag → the verbatim OCI image index a
+    /// registry would serve for it, and any digest → the flat platform manifest
+    /// that index names. Because it overrides `fetch_manifest_raw_bytes` with
+    /// matching `(bytes, digest)`, the index store's A3 verify accepts the
+    /// persisted objects.
     #[derive(Clone)]
     struct FakeSource {
         tag: String,
@@ -1008,16 +1078,69 @@ mod tests {
         }
         async fn fetch_manifest(
             &self,
-            _identifier: &oci::Identifier,
+            identifier: &oci::Identifier,
             _op: IndexOperation,
         ) -> Result<Option<(oci::Digest, Manifest)>> {
-            let (bytes, digest) = image_manifest_bytes();
-            let manifest = serde_json::from_slice(&bytes).unwrap();
-            Ok(Some((digest, manifest)))
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, manifest)| (digest, manifest)))
         }
-        async fn fetch_manifest_digest(&self, _: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
-            let (_, digest) = image_manifest_bytes();
-            Ok(Some(digest))
+        async fn fetch_manifest_digest(&self, id: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            id: &oci::Identifier,
+        ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
+            let (bytes, digest) = if id.digest().is_some() {
+                // The physical platform-manifest leaf.
+                image_manifest_bytes()
+            } else {
+                index_bytes()
+            };
+            let manifest = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, digest, manifest)))
+        }
+        fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn source_for_tag(tag: &str) -> super::super::Index {
+        super::super::Index::from_impl(FakeSource { tag: tag.to_string() })
+    }
+
+    /// A derived source whose tag resolves to a BARE platform manifest — the
+    /// shape D2 refuses to record as a root version.
+    #[derive(Clone)]
+    struct BareManifestSource {
+        tag: String,
+    }
+
+    #[async_trait]
+    impl super::super::index_impl::IndexImpl for BareManifestSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(vec![self.tag.clone()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &oci::Identifier,
+            _op: IndexOperation,
+        ) -> Result<Option<(oci::Digest, Manifest)>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(id)
+                .await?
+                .map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(&self, id: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
         }
         async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
@@ -1035,17 +1158,17 @@ mod tests {
         }
     }
 
-    fn source_for_tag(tag: &str) -> super::super::Index {
-        super::super::Index::from_impl(FakeSource { tag: tag.to_string() })
+    fn bare_manifest_source_for_tag(tag: &str) -> super::super::Index {
+        super::super::Index::from_impl(BareManifestSource { tag: tag.to_string() })
     }
 
     // ── derived source authors a root document (A2/A3) ───────────────────────
     //
-    // `refresh_tags` grows the hosted wire grammar. A registry (derived)
-    // source resolves the tag to a single-platform image MANIFEST, so
-    // `refresh_tags` authors a root document with `tag → content` and writes
-    // NOTHING to the dispatch object CAS (a leaf manifest is never copied,
-    // A3/B2).
+    // `refresh_tags` grows the hosted wire grammar. A registry (derived) source
+    // resolves the tag to the OCI image index the registry serves, so
+    // `refresh_tags` authors a root document with `tag → content` AND writes
+    // that index verbatim into the dispatch object CAS. The platform manifests
+    // it names are never copied (A3/B2).
 
     /// Read the authored root document for `(REGISTRY, REPO)` as a JSON value.
     fn read_root_value(dir: &TempDir) -> serde_json::Value {
@@ -1060,7 +1183,8 @@ mod tests {
 
         index.refresh_tags(&tagged_id("3.28"), &source).await.unwrap();
 
-        let (_, digest) = image_manifest_bytes();
+        let (object_bytes, content) = index_bytes();
+        let (_, leaf) = image_manifest_bytes();
         let root = read_root_value(&dir);
         assert_eq!(
             root["repository"].as_str(),
@@ -1069,13 +1193,20 @@ mod tests {
         );
         assert_eq!(
             root["tags"]["3.28"]["content"].as_str(),
-            Some(digest.to_string().as_str()),
-            "the refreshed tag's content is the resolved manifest digest"
+            Some(content.to_string().as_str()),
+            "the refreshed tag's content is the image index the tag resolved to"
         );
-        // A single-platform tag copies no leaf manifest into the dispatch CAS.
+        // The index travels with the pointer, verbatim (D1) — that is what makes
+        // a hosted subtree copy-pasteable into a local index.
+        assert_eq!(
+            std::fs::read(store(&dir).dispatch_object_path(REGISTRY, REPO, &content)).unwrap(),
+            object_bytes,
+            "the dispatch object must be the registry's own bytes, not a re-serialisation"
+        );
+        // The platform manifests it names are never copied (A3/B2).
         assert!(
-            !store(&dir).dispatch_object_path(REGISTRY, REPO, &digest).exists(),
-            "a single-platform tag must write nothing to the dispatch object CAS (A3/B2)"
+            !store(&dir).dispatch_object_path(REGISTRY, REPO, &leaf).exists(),
+            "a leaf platform manifest must never enter the dispatch object CAS (A3/B2)"
         );
     }
 
@@ -1143,11 +1274,11 @@ mod tests {
             _: &oci::Identifier,
             _: IndexOperation,
         ) -> Result<Option<(oci::Digest, Manifest)>> {
-            let (bytes, digest) = image_manifest_bytes();
+            let (bytes, digest) = index_bytes();
             Ok(Some((digest, serde_json::from_slice(&bytes).unwrap())))
         }
         async fn fetch_manifest_digest(&self, _: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
-            let (_, digest) = image_manifest_bytes();
+            let (_, digest) = index_bytes();
             Ok(Some(digest))
         }
         async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
@@ -1157,7 +1288,7 @@ mod tests {
             &self,
             _: &oci::Identifier,
         ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
-            let (bytes, digest) = image_manifest_bytes();
+            let (bytes, digest) = index_bytes();
             let manifest = serde_json::from_slice(&bytes).unwrap();
             Ok(Some((bytes, digest, manifest)))
         }
@@ -1208,20 +1339,16 @@ mod tests {
         );
     }
 
-    // ── published refresh fans distinct sibling observations into o/ (B2) ─────
+    // ── published refresh fans distinct sibling dispatch objects into o/ (B2) ─
 
-    /// A single-platform observation pointing at `leaf`, plus its own digest.
-    /// Varying `leaf` yields a DISTINCT observation (distinct obs digest).
-    fn observation_for_leaf(leaf: &oci::Digest) -> (Vec<u8>, oci::Digest) {
-        let json =
-            format!(r#"{{"platforms":[{{"platform":{{"architecture":"amd64","os":"linux"}},"digest":"{leaf}"}}]}}"#);
-        let bytes = json.into_bytes();
-        let digest = Algorithm::Sha256.hash(&bytes);
-        (bytes, digest)
+    /// A single-platform image index naming `leaf`, plus its own digest.
+    /// Varying `leaf` yields a DISTINCT index (distinct dispatch digest).
+    fn index_for_leaf(leaf: &oci::Digest) -> (Vec<u8>, oci::Digest) {
+        image_index_bytes(&[("amd64", leaf)])
     }
 
     /// A PUBLISHED source serving a verbatim root document whose two tags point
-    /// at two DISTINCT observation objects — so `refresh_published`'s fan-out
+    /// at two DISTINCT dispatch objects — so `refresh_published`'s fan-out
     /// (deduped by content digest) keeps and persists both.
     #[derive(Clone)]
     struct PublishedTwoTagSource;
@@ -1251,24 +1378,23 @@ mod tests {
             &self,
             id: &oci::Identifier,
         ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
-            // Each tag resolves to a DISTINCT single-platform observation.
+            // Each tag resolves to a DISTINCT single-platform image index.
             let leaf_char = match id.tag() {
                 Some("1.0") => "a",
                 Some("2.0") => "b",
                 _ => return Ok(None),
             };
             let leaf = oci::Digest::Sha256(leaf_char.repeat(64));
-            let (bytes, digest) = observation_for_leaf(&leaf);
-            let observation: super::super::wire::Observation = serde_json::from_slice(&bytes).unwrap();
-            let index = super::super::ocx_index::observation_to_index(&observation).unwrap();
-            Ok(Some((bytes, digest, Manifest::ImageIndex(index))))
+            let (bytes, digest) = index_for_leaf(&leaf);
+            let manifest = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, digest, manifest)))
         }
         async fn fetch_root_document(
             &self,
             _: &oci::Identifier,
         ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
-            let (_, obs1) = observation_for_leaf(&oci::Digest::Sha256("a".repeat(64)));
-            let (_, obs2) = observation_for_leaf(&oci::Digest::Sha256("b".repeat(64)));
+            let (_, obs1) = index_for_leaf(&oci::Digest::Sha256("a".repeat(64)));
+            let (_, obs2) = index_for_leaf(&oci::Digest::Sha256("b".repeat(64)));
             let bytes = format!(
                 r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"1.0":{{"content":"{obs1}"}},"2.0":{{"content":"{obs2}"}}}}}}"#
             )
@@ -1282,27 +1408,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn refresh_published_persists_both_distinct_sibling_observations() {
+    async fn refresh_published_persists_both_distinct_sibling_dispatch_objects() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
         let source = super::super::Index::from_impl(PublishedTwoTagSource);
 
         index.refresh_tags(&repo_id(), &source).await.unwrap();
 
-        // The root's two tags name two DISTINCT observation digests, so the
+        // The root's two tags name two DISTINCT dispatch digests, so the
         // content-digest dedup keeps both — each must land as its own o/ object
         // (a sibling tag pointing at an obs absent from o/ could not resolve
         // offline, B2).
-        let (_, obs1) = observation_for_leaf(&oci::Digest::Sha256("a".repeat(64)));
-        let (_, obs2) = observation_for_leaf(&oci::Digest::Sha256("b".repeat(64)));
-        assert_ne!(obs1, obs2, "prerequisite: the two observations must be distinct");
+        let (_, obs1) = index_for_leaf(&oci::Digest::Sha256("a".repeat(64)));
+        let (_, obs2) = index_for_leaf(&oci::Digest::Sha256("b".repeat(64)));
+        assert_ne!(obs1, obs2, "prerequisite: the two dispatch objects must be distinct");
         assert!(
             store(&dir).dispatch_object_path(REGISTRY, REPO, &obs1).exists(),
-            "the first tag's observation object must be persisted under o/"
+            "the first tag's dispatch object must be persisted under o/"
         );
         assert!(
             store(&dir).dispatch_object_path(REGISTRY, REPO, &obs2).exists(),
-            "the second tag's distinct observation object must be persisted under o/"
+            "the second tag's distinct dispatch object must be persisted under o/"
         );
     }
 
@@ -1361,11 +1487,11 @@ mod tests {
             _: &oci::Identifier,
             _: IndexOperation,
         ) -> Result<Option<(oci::Digest, Manifest)>> {
-            let (bytes, digest) = image_manifest_bytes();
+            let (bytes, digest) = index_bytes();
             Ok(Some((digest, serde_json::from_slice(&bytes).unwrap())))
         }
         async fn fetch_manifest_digest(&self, _: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
-            let (_, digest) = image_manifest_bytes();
+            let (_, digest) = index_bytes();
             Ok(Some(digest))
         }
         async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
@@ -1375,7 +1501,7 @@ mod tests {
             &self,
             _: &oci::Identifier,
         ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
-            let (bytes, digest) = image_manifest_bytes();
+            let (bytes, digest) = index_bytes();
             let manifest = serde_json::from_slice(&bytes).unwrap();
             // Block until every concurrent persist reaches this point. Releases
             // only if `refresh` fans the persists out in parallel.
@@ -1422,9 +1548,9 @@ mod tests {
     async fn root_and_dispatch_land_under_the_wire_grammar_home() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        // ObservationSource resolves the tag to a multi-platform observation (an
-        // image index), so a dispatch object IS written alongside the root.
-        let source = super::super::Index::from_impl(ObservationSource);
+        // The derived source resolves the tag to an OCI image index, so a
+        // dispatch object IS written alongside the root.
+        let source = source_for_tag("3.28");
         index.refresh_tags(&tagged_id("3.28"), &source).await.unwrap();
 
         let home = dir.path().join("index");
@@ -1433,11 +1559,13 @@ mod tests {
             home.join(REGISTRY).join("p").join(format!("{REPO}.json")).exists(),
             "the derived root document must land under the wire-grammar home"
         );
-        // The observation object lands at <home>/<source>/p/<repo>/o/sha256/<hex>.json.
-        let (_, obs_digest) = observation_bytes();
+        // The dispatch object lands at <home>/<source>/p/<repo>/o/sha256/<hex>.json.
+        let (_, dispatch_digest) = index_bytes();
         assert!(
-            store(&dir).dispatch_object_path(REGISTRY, REPO, &obs_digest).exists(),
-            "the multi-platform observation must be persisted as a dispatch object under the home"
+            store(&dir)
+                .dispatch_object_path(REGISTRY, REPO, &dispatch_digest)
+                .exists(),
+            "the multi-platform image index must be persisted as a dispatch object under the home"
         );
     }
 
@@ -1462,7 +1590,7 @@ mod tests {
     async fn chained_fetch_manifest_persists_object_into_local_index() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
-        let source = super::super::Index::from_impl(ObservationSource);
+        let source = source_for_tag("3.28");
         let id = tagged_id("3.28");
 
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
@@ -1475,8 +1603,8 @@ mod tests {
             "chained fetch must resolve via the source and persist"
         );
 
-        let (_, obs_digest) = observation_bytes();
-        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &obs_digest);
+        let (_, dispatch_digest) = index_bytes();
+        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &dispatch_digest);
         assert!(
             dispatch_path.exists(),
             "chained fetch_manifest must persist the dispatch object at {dispatch_path:?}"
@@ -1490,18 +1618,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
         let id = tagged_id("3.28");
-        let (_, obs_digest) = observation_bytes();
+        let (_, dispatch_digest) = index_bytes();
 
         // Seed only the root's tag pointer; leave the dispatch object absent.
-        cache.commit_root_tag(&id, &obs_digest).await.unwrap();
-        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &obs_digest);
+        cache.commit_root_tag(&id, &dispatch_digest).await.unwrap();
+        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &dispatch_digest);
         assert!(!dispatch_path.exists(), "prerequisite: dispatch object must be absent");
 
-        let chained = super::super::Index::from_chained(
-            cache,
-            vec![super::super::Index::from_impl(ObservationSource)],
-            super::super::ChainMode::Default,
-        );
+        let chained =
+            super::super::Index::from_chained(cache, vec![source_for_tag("3.28")], super::super::ChainMode::Default);
         let result = chained
             .fetch_manifest(&id, super::IndexOperation::Resolve)
             .await
@@ -1510,7 +1635,7 @@ mod tests {
             result.is_some(),
             "tag cached but dispatch object missing must re-fetch via the chain and return Some"
         );
-        assert_eq!(result.unwrap().0, obs_digest);
+        assert_eq!(result.unwrap().0, dispatch_digest);
         assert!(
             dispatch_path.exists(),
             "the chain walk must have re-persisted the dispatch object"
@@ -1527,21 +1652,21 @@ mod tests {
     async fn seed_then_tamper_object(dir: &TempDir) -> oci::Digest {
         let index = make_index(dir);
         let id = tagged_id("3.28");
-        let source = super::super::Index::from_impl(ObservationSource);
+        let source = source_for_tag("3.28");
         let (head, _manifest) = index
             .persist_dispatch(&source, &id)
             .await
             .unwrap()
             .expect("source has a manifest to persist");
         index.commit_root_tag(&id, &head).await.unwrap();
-        let (_, obs_digest) = observation_bytes();
-        let dispatch_path = store(dir).dispatch_object_path(REGISTRY, REPO, &obs_digest);
+        let (_, dispatch_digest) = index_bytes();
+        let dispatch_path = store(dir).dispatch_object_path(REGISTRY, REPO, &dispatch_digest);
         assert!(
             dispatch_path.exists(),
             "prerequisite: the dispatch object must be persisted"
         );
         std::fs::write(&dispatch_path, b"tampered garbage").unwrap();
-        obs_digest
+        dispatch_digest
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1577,7 +1702,7 @@ mod tests {
         // resolution succeeds and the object is correct on disk again.
         let chained = super::super::Index::from_chained(
             make_index(&dir),
-            vec![super::super::Index::from_impl(ObservationSource)],
+            vec![source_for_tag("3.28")],
             super::super::ChainMode::Default,
         );
         let result = chained
@@ -1587,7 +1712,7 @@ mod tests {
         assert!(result.is_some(), "healed Resolve must return the manifest");
 
         let healed = std::fs::read(store(&dir).dispatch_object_path(REGISTRY, REPO, &digest)).unwrap();
-        let (expected, _) = observation_bytes();
+        let (expected, _) = index_bytes();
         assert_eq!(healed, expected, "the walk must have re-persisted the correct bytes");
     }
 
@@ -1654,134 +1779,91 @@ mod tests {
         assert!(
             matches!(
                 tagged,
-                Err(crate::Error::OciIndex(
-                    super::super::error::Error::RemoteManifestNotFound(_)
-                ))
+                Err(crate::Error::OciIndex(super::super::error::Error::NoIndexableTag(_)))
             ),
             "tagged nonexistent package must report not-found, got {tagged:?}"
         );
     }
 
-    // ── per-source payload codec: index.ocx.sh observation read-back (A2) ────
+    // ── dispatch-object decode: one OCI parse, fail-closed (D1) ──────────────
 
-    /// Build a valid observation document pointing at the flat image manifest's
-    /// digest, returning its verbatim bytes and their digest.
-    fn observation_bytes() -> (Vec<u8>, oci::Digest) {
+    /// The verbatim image index a derived source serves for its tag: one
+    /// descriptor naming the flat image manifest, plus the index's own digest.
+    fn index_bytes() -> (Vec<u8>, oci::Digest) {
         let (_, leaf) = image_manifest_bytes();
-        let json =
-            format!(r#"{{"platforms":[{{"platform":{{"architecture":"amd64","os":"linux"}},"digest":"{leaf}"}}]}}"#);
-        let bytes = json.into_bytes();
-        let digest = Algorithm::Sha256.hash(&bytes);
-        (bytes, digest)
+        index_for_leaf(&leaf)
     }
 
     #[test]
-    fn decode_index_manifest_dispatches_oci_and_observation() {
-        // OCI manifest bytes → parsed manifest (the registry-source codec).
-        let (manifest_bytes, _) = image_manifest_bytes();
-        assert!(matches!(
-            decode_index_manifest(&manifest_bytes).unwrap(),
-            Some(oci::Manifest::Image(_))
-        ));
-
-        // Observation bytes (no schemaVersion) → synthetic image index.
-        let (obs_bytes, _) = observation_bytes();
-        match decode_index_manifest(&obs_bytes).unwrap() {
-            Some(oci::Manifest::ImageIndex(index)) => assert_eq!(index.manifests.len(), 1),
-            other => panic!("observation must decode to a synthetic image index, got {other:?}"),
-        }
-
-        // Neither codec → recoverable cache miss, not an error.
-        assert!(decode_index_manifest(b"not a manifest at all").unwrap().is_none());
+    fn decode_index_manifest_returns_the_image_index_it_was_given() {
+        let (index_object_bytes, _) = index_bytes();
+        let index = decode_index_manifest(&index_object_bytes).expect("an image index must decode");
+        assert_eq!(index.manifests.len(), 1);
     }
 
-    /// A fake source shaped like [`super::super::OcxIndex`]: a tag resolves to
-    /// a verbatim observation (bytes hash to the obs digest) whose single leaf is
-    /// the flat image manifest; a digest resolves to that physical manifest.
-    #[derive(Clone)]
-    struct ObservationSource;
-
-    #[async_trait]
-    impl super::super::index_impl::IndexImpl for ObservationSource {
-        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
-            Ok(Vec::new())
-        }
-        async fn list_tags(&self, _: &oci::Identifier) -> Result<Option<Vec<String>>> {
-            Ok(Some(vec!["3.28".to_string()]))
-        }
-        async fn fetch_manifest(
-            &self,
-            id: &oci::Identifier,
-            _: IndexOperation,
-        ) -> Result<Option<(oci::Digest, Manifest)>> {
-            Ok(self
-                .fetch_manifest_raw_bytes(id)
-                .await?
-                .map(|(_, digest, manifest)| (digest, manifest)))
-        }
-        async fn fetch_manifest_digest(&self, id: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
-            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
-        }
-        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest_raw_bytes(
-            &self,
-            id: &oci::Identifier,
-        ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
-            if id.digest().is_some() {
-                // The physical platform-manifest leaf.
-                let (bytes, digest) = image_manifest_bytes();
-                let manifest = serde_json::from_slice(&bytes).unwrap();
-                return Ok(Some((bytes, digest, manifest)));
-            }
-            // The tag: verbatim observation bytes + the synthetic index the
-            // persist recursion walks over.
-            let (bytes, digest) = observation_bytes();
-            let observation: super::super::wire::Observation = serde_json::from_slice(&bytes).unwrap();
-            let index = super::super::ocx_index::observation_to_index(&observation).unwrap();
-            Ok(Some((bytes, digest, Manifest::ImageIndex(index))))
-        }
-        fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
-            Box::new(self.clone())
-        }
+    #[test]
+    fn decode_index_manifest_returns_none_for_non_oci_bytes() {
+        // Fail-closed, by type: there is no second codec and no `Err` arm. A
+        // bare platform manifest, a `{"platforms":[...]}` projection,
+        // and plain garbage are all simply "not a dispatch object" — surfaced
+        // as `AbsentDispatch` and healed by a fetch-by-digest, never loaded as
+        // something they are not.
+        let (manifest_bytes, _) = image_manifest_bytes();
+        assert!(
+            decode_index_manifest(&manifest_bytes).is_none(),
+            "a bare platform manifest is not a dispatch object"
+        );
+        assert!(
+            decode_index_manifest(br#"{"platforms":[]}"#).is_none(),
+            "a document with no schemaVersion and no manifests is not a dispatch object"
+        );
+        assert!(decode_index_manifest(b"not a manifest at all").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn observation_chain_persists_and_resolves_offline() {
+    async fn dispatch_object_chain_persists_and_resolves_offline() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
         let id = tagged_id("3.28");
-        let source = super::super::Index::from_impl(ObservationSource);
+        let source = source_for_tag("3.28");
 
-        // Persist the dispatch (observation) object and author the tag →
-        // obs-digest root pointer, exactly as a chain walk would.
+        // Persist the dispatch object and author the tag → content root pointer,
+        // exactly as a chain walk would.
         let (head, _manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
-        let (_, obs_digest) = observation_bytes();
+        let (object_bytes, content) = index_bytes();
         assert_eq!(
-            head, obs_digest,
-            "persist_dispatch returns the observation's own digest"
+            head, content,
+            "persist_dispatch returns the dispatch object's own digest"
         );
-        index.commit_root_tag(&id, &obs_digest).await.unwrap();
+        index.commit_root_tag(&id, &content).await.unwrap();
 
-        // Fresh index resolves the tag offline through the local index: the obs
-        // object decodes to the synthetic image index.
+        // The stored object is the registry's bytes, not a re-serialisation of
+        // the parse — the copy-pasteable property (D1/A4). The fixture is
+        // pretty-printed and carries a field `oci::ImageIndex` does not model,
+        // so a `serde_json::to_vec(&manifest)` write cannot pass this.
+        assert_eq!(
+            std::fs::read(store(&dir).dispatch_object_path(REGISTRY, REPO, &content)).unwrap(),
+            object_bytes,
+            "the dispatch object must be the verbatim bytes the source served"
+        );
+
+        // Fresh index resolves the tag offline through the local index.
         let fresh = make_index(&dir);
         let (digest, manifest) = fresh
             .fetch_manifest(&id, IndexOperation::Query)
             .await
             .unwrap()
-            .expect("tag resolves from the persisted observation");
-        assert_eq!(digest, obs_digest, "the resolved digest is the observation digest");
+            .expect("tag resolves from the persisted dispatch object");
+        assert_eq!(digest, content, "the resolved digest is the dispatch-object digest");
         match manifest {
             Manifest::ImageIndex(index) => assert_eq!(index.manifests.len(), 1),
-            other => panic!("expected a synthetic image index from the observation, got {other:?}"),
+            other => panic!("expected the stored image index, got {other:?}"),
         }
 
         // The physical leaf is never copied into the local index (A3/B2) — a
         // digest-addressed query for it is a clean local miss, not an error;
         // fetching it is a registry concern, covered by
-        // `resolve_dispatch_returns_absent_leaf_when_object_missing`.
+        // `resolve_dispatch_returns_absent_dispatch_when_object_missing`.
         let (_, leaf) = image_manifest_bytes();
         let leaf_manifest = fresh
             .fetch_manifest(&id.clone_with_digest(leaf), IndexOperation::Query)
@@ -1807,18 +1889,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A two-platform observation as verbatim wire bytes, paired with its
-    /// digest — an index.ocx.sh-style DISPATCH object (decodes to a synthetic
-    /// image index, never a bare leaf manifest).
-    fn two_platform_observation() -> (Vec<u8>, oci::Digest) {
-        let leaf_a = format!("sha256:{}", "a".repeat(64));
-        let leaf_b = format!("sha256:{}", "b".repeat(64));
-        let json = format!(
-            r#"{{"platforms":[{{"platform":{{"architecture":"amd64","os":"linux"}},"digest":"{leaf_a}"}},{{"platform":{{"architecture":"arm64","os":"linux"}},"digest":"{leaf_b}"}}]}}"#
-        );
-        let bytes = json.into_bytes();
-        let digest = Algorithm::Sha256.hash(&bytes);
-        (bytes, digest)
+    /// A two-platform image index as verbatim registry bytes, paired with its
+    /// digest — a DISPATCH object, never a bare leaf manifest.
+    fn two_platform_index() -> (Vec<u8>, oci::Digest) {
+        let leaf_a = oci::Digest::Sha256("a".repeat(64));
+        let leaf_b = oci::Digest::Sha256("b".repeat(64));
+        image_index_bytes(&[("amd64", &leaf_a), ("arm64", &leaf_b)])
     }
 
     /// Root-document bytes (wire grammar) that point tag `3.28` at `content` and
@@ -1831,9 +1907,9 @@ mod tests {
         .into_bytes()
     }
 
-    /// A fetch-counting source: a tag resolves to a verbatim two-platform
-    /// observation decoded as a synthetic image index (an index.ocx.sh dispatch
-    /// object). Every `fetch_manifest_raw_bytes` bumps a shared counter, so a
+    /// A fetch-counting source: a tag resolves to a verbatim two-platform OCI
+    /// image index (a dispatch object). Every `fetch_manifest_raw_bytes` bumps
+    /// a shared counter, so a
     /// test can prove `persist_dispatch` fetches exactly once — never walking
     /// child manifests (A3).
     #[derive(Clone)]
@@ -1877,10 +1953,9 @@ mod tests {
                 let manifest = serde_json::from_slice(&bytes).unwrap();
                 return Ok(Some((bytes, digest, manifest)));
             }
-            let (bytes, digest) = two_platform_observation();
-            let observation: super::super::wire::Observation = serde_json::from_slice(&bytes).unwrap();
-            let index = super::super::ocx_index::observation_to_index(&observation).unwrap();
-            Ok(Some((bytes, digest, Manifest::ImageIndex(index))))
+            let (bytes, digest) = two_platform_index();
+            let manifest = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, digest, manifest)))
         }
         fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -1900,9 +1975,9 @@ mod tests {
         });
 
         let (head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
-        let (obs_bytes, obs_digest) = two_platform_observation();
+        let (dispatch_bytes, dispatch_digest) = two_platform_index();
         assert_eq!(
-            head, obs_digest,
+            head, dispatch_digest,
             "persist_dispatch returns the dispatch object's own digest"
         );
         assert!(
@@ -1911,14 +1986,14 @@ mod tests {
         );
 
         // Exactly ONE dispatch object, at the `.json` wire path, byte-identical.
-        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &obs_digest);
+        let dispatch_path = store(&dir).dispatch_object_path(REGISTRY, REPO, &dispatch_digest);
         assert!(
             dispatch_path.exists(),
             "the dispatch object must exist at {dispatch_path:?}"
         );
         assert_eq!(
             std::fs::read(&dispatch_path).unwrap(),
-            obs_bytes,
+            dispatch_bytes,
             "the dispatch object's bytes must be written verbatim"
         );
 
@@ -1943,8 +2018,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
         let id = tagged_id("3.28");
-        // FakeSource resolves the tag to a flat single-platform image MANIFEST.
-        let source = source_for_tag("3.28");
+        // A source whose tag resolves to a flat single-platform image MANIFEST.
+        let source = bare_manifest_source_for_tag("3.28");
 
         let (head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
         let (_, manifest_digest) = image_manifest_bytes();
@@ -1968,6 +2043,171 @@ mod tests {
             !object_dir.exists() || std::fs::read_dir(object_dir).unwrap().next().is_none(),
             "the dispatch object directory must be absent or empty for a single-platform tag"
         );
+    }
+
+    /// D7 at the LOCAL listing boundary. `commit_root_tags` is a pure writer —
+    /// the callers enforce D7, not it — so a root that already carries a
+    /// reserved entry (an older copy, a hand-edited shipped tree) must still
+    /// never surface one as a version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_tags_filters_reserved_tags() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let content = oci::Digest::Sha256("a".repeat(64));
+        for tag in [
+            "3.28",
+            "latest",
+            "__ocx.desc",
+            "__OCX.future",
+            &format!("sha256.{}", "a".repeat(64)),
+        ] {
+            index.commit_root_tag(&tagged_id(tag), &content).await.unwrap();
+        }
+
+        let mut tags = IndexImpl::list_tags(&index, &repo_id()).await.unwrap().unwrap();
+        tags.sort();
+        assert_eq!(
+            tags,
+            vec!["3.28".to_string(), "latest".to_string()],
+            "reserved tags must never be listed as versions"
+        );
+    }
+
+    // ── D2/D7 at BOTH derived write boundaries (F2, N-1, N-16) ───────────────
+    //
+    // The three `list_tags` filters cannot stand in for these: both write paths
+    // bypass `list_tags` entirely when the identifier already carries a tag, so
+    // a violating entry used to be committed and then merely HIDDEN by the
+    // listing filter — invisible, not absent. Every assertion below is on the
+    // COMMITTED ROOT for exactly that reason.
+
+    /// The root document's tag map, or an empty map when no root was written.
+    fn root_tag_names(dir: &TempDir) -> Vec<String> {
+        let path = store(dir).root_document_path(REGISTRY, REPO);
+        if !path.exists() {
+            return Vec::new();
+        }
+        let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        root["tags"]
+            .as_object()
+            .map(|tags| tags.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// F2 — the UPDATE path. A tag resolving to a bare manifest writes nothing
+    /// to `o/` (`persist_dispatch`), so recording it would create exactly the
+    /// tag-without-an-object absence D2 abolishes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn derived_refresh_skips_a_bare_manifest_tag() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = bare_manifest_source_for_tag("3.28");
+
+        // Nothing indexable: the refresh reports not-found rather than
+        // committing a pointer to an object that does not exist.
+        let result = index.refresh_tags(&tagged_id("3.28"), &source).await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::Error::OciIndex(super::super::error::Error::NoIndexableTag(_)))
+            ),
+            "a bare-manifest-only refresh records nothing, got {result:?}"
+        );
+        assert!(
+            root_tag_names(&dir).is_empty(),
+            "no root tag entry may be committed for a bare-manifest tag"
+        );
+    }
+
+    /// N-16 — the UPDATE path, reserved-tag half. The tag resolves to a genuine
+    /// IMAGE INDEX, so the kind gate above passes and only the reserved verdict
+    /// can exclude it. A `sha256.<hex>` or `__ocx*` name is not a version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn derived_refresh_skips_a_reserved_tag() {
+        for reserved in ["__ocxfoo", "__OCX.future", &format!("sha256.{}", "a".repeat(64))] {
+            let dir = TempDir::new().unwrap();
+            let index = make_index(&dir);
+            let source = source_for_tag(reserved);
+
+            let result = index.refresh_tags(&tagged_id(reserved), &source).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::Error::OciIndex(super::super::error::Error::NoIndexableTag(_)))
+                ),
+                "reserved tag {reserved} must record nothing, got {result:?}"
+            );
+            assert!(
+                root_tag_names(&dir).is_empty(),
+                "reserved tag {reserved} must not appear in the committed root"
+            );
+            // D7's hoisted pre-filter (`refresh_derived`) exists to avoid
+            // fetching AND staging an orphan image index into `o/` for a name
+            // that is never a version — prove the directory stays empty, not
+            // just the root tag map.
+            let object_dir = store(&dir)
+                .dispatch_object_path(REGISTRY, REPO, &oci::Digest::Sha256("0".repeat(64)))
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            assert!(
+                !object_dir.exists() || std::fs::read_dir(&object_dir).unwrap().next().is_none(),
+                "reserved tag {reserved} must not stage any dispatch object into o/"
+            );
+        }
+    }
+
+    /// N-1 — the RESOLVE path, the more common one. A Default-mode
+    /// `Op::Resolve` of `cmake:1.0` against a plain registry serving a bare
+    /// manifest persisted nothing to `o/` yet still committed
+    /// `tags["1.0"].content = <leaf digest>`. Fixing only the update path left
+    /// this wide open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_grow_skips_a_bare_manifest_tag() {
+        let dir = TempDir::new().unwrap();
+        let id = tagged_id("1.0");
+        let chained = super::super::Index::from_chained(
+            make_index(&dir),
+            vec![bare_manifest_source_for_tag("1.0")],
+            super::super::ChainMode::Default,
+        );
+
+        // The resolve itself still succeeds — the manifest is returned to the
+        // caller; only the root write is refused (exclude, never refuse).
+        let resolved = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .expect("the resolve must succeed");
+        assert!(resolved.is_some(), "the bare manifest is still resolved for the caller");
+        assert!(
+            root_tag_names(&dir).is_empty(),
+            "the grow branch must not commit a root tag pointing at a bare manifest"
+        );
+    }
+
+    /// N-16 — the RESOLVE path, reserved-tag half. Both tags resolve to a
+    /// genuine image index, so the kind gate passes and the reserved verdict is
+    /// the only thing that can exclude them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_grow_skips_a_reserved_tag() {
+        for reserved in ["__ocxfoo", "__OCX.future", &format!("sha256.{}", "a".repeat(64))] {
+            let dir = TempDir::new().unwrap();
+            let chained = super::super::Index::from_chained(
+                make_index(&dir),
+                vec![source_for_tag(reserved)],
+                super::super::ChainMode::Default,
+            );
+
+            let resolved = chained
+                .fetch_manifest(&tagged_id(reserved), super::IndexOperation::Resolve)
+                .await
+                .expect("the resolve must succeed");
+            assert!(resolved.is_some(), "the index is still resolved for the caller");
+            assert!(
+                root_tag_names(&dir).is_empty(),
+                "reserved tag {reserved} must not be committed into the OCX-authored root"
+            );
+        }
     }
 
     // ── commit_root_tag (A2/F1): OCX-authored derived root ────────────────────
@@ -2107,29 +2347,29 @@ mod tests {
         );
     }
 
-    // ── resolve_dispatch (A3 read path): typed Dispatch / AbsentLeaf / None ──
+    // ── resolve_dispatch (A3 read path): typed Dispatch / AbsentDispatch / None ──
 
-    /// Seed a wire-grammar root doc (tag `3.28` → `obs_digest`) plus its
+    /// Seed a wire-grammar root doc (tag `3.28` → `dispatch_digest`) plus its
     /// dispatch object directly on disk, so `resolve_dispatch` (the method under
     /// test) is the only code exercised.
     async fn seed_root_and_dispatch(dir: &TempDir) -> oci::Digest {
         let store = store(dir);
-        let (obs_bytes, obs_digest) = two_platform_observation();
+        let (dispatch_bytes, dispatch_digest) = two_platform_index();
         store
-            .write_dispatch_object(REGISTRY, REPO, &obs_digest, &obs_bytes)
+            .write_dispatch_object(REGISTRY, REPO, &dispatch_digest, &dispatch_bytes)
             .await
             .unwrap();
         let root_path = store.root_document_path(REGISTRY, REPO);
         std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
-        std::fs::write(&root_path, root_bytes_for(&obs_digest)).unwrap();
-        obs_digest
+        std::fs::write(&root_path, root_bytes_for(&dispatch_digest)).unwrap();
+        dispatch_digest
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_dispatch_returns_dispatch_for_derived_and_never_creates_catalog() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        let obs_digest = seed_root_and_dispatch(&dir).await;
+        let dispatch_digest = seed_root_and_dispatch(&dir).await;
 
         let root_path = store(&dir).root_document_path(REGISTRY, REPO);
         let root_before = std::fs::read(&root_path).unwrap();
@@ -2140,14 +2380,15 @@ mod tests {
             .unwrap()
             .expect("a present root + dispatch object resolves");
         match resolution {
-            DispatchResolution::Dispatch { content, manifest } => {
-                assert_eq!(content, obs_digest, "Dispatch carries the tag's content digest");
-                assert!(
-                    matches!(&*manifest, oci::Manifest::ImageIndex(_)),
-                    "a dispatch object decodes to an image index"
+            DispatchResolution::Dispatch { content, index } => {
+                assert_eq!(content, dispatch_digest, "Dispatch carries the tag's content digest");
+                assert_eq!(
+                    index.manifests.len(),
+                    2,
+                    "a dispatch object decodes to the image index it is"
                 );
             }
-            DispatchResolution::AbsentLeaf { .. } => panic!("expected Dispatch, got AbsentLeaf"),
+            DispatchResolution::AbsentDispatch { .. } => panic!("expected Dispatch, got AbsentDispatch"),
         }
 
         // Derived resolve routes through read_root_uncatalogued (A2 "two ifs"):
@@ -2165,11 +2406,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn resolve_dispatch_returns_absent_leaf_when_object_missing() {
+    async fn resolve_dispatch_returns_absent_dispatch_when_object_missing() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
         // Seed only the root (tag → content), NOT the dispatch object.
-        let (_, content) = two_platform_observation();
+        let (_, content) = two_platform_index();
         let root_path = store(&dir).root_document_path(REGISTRY, REPO);
         std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
         std::fs::write(&root_path, root_bytes_for(&content)).unwrap();
@@ -2180,11 +2421,11 @@ mod tests {
             .unwrap()
             .expect("a present root resolves to a typed outcome, never a bare miss");
         match resolution {
-            DispatchResolution::AbsentLeaf { content: resolved } => assert_eq!(
+            DispatchResolution::AbsentDispatch { content: resolved } => assert_eq!(
                 resolved, content,
-                "AbsentLeaf preserves the tag's content digest for source-kind-routed recovery"
+                "AbsentDispatch preserves the tag's content digest for source-kind-routed recovery"
             ),
-            DispatchResolution::Dispatch { .. } => panic!("expected AbsentLeaf (object absent), got Dispatch"),
+            DispatchResolution::Dispatch { .. } => panic!("expected AbsentDispatch (object absent), got Dispatch"),
         }
     }
 
@@ -2247,7 +2488,7 @@ mod tests {
 
         // Opting in (OCX_ALLOW_YANKED, threaded via with_allow_yanked) passes the
         // surface check — the tag resolves (its dispatch object is unseeded, so
-        // AbsentLeaf), never refused.
+        // AbsentDispatch), never refused.
         let allowing = make_index(&dir).with_allow_yanked(true);
         let resolution = allowing
             .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
@@ -2255,8 +2496,8 @@ mod tests {
             .expect("allow_yanked must not refuse a yanked tag")
             .expect("a present root resolves to a typed outcome");
         assert!(
-            matches!(resolution, DispatchResolution::AbsentLeaf { content: c } if c == content),
-            "allow_yanked must resolve the yanked tag's content as AbsentLeaf (its object is unseeded)"
+            matches!(resolution, DispatchResolution::AbsentDispatch { content: c } if c == content),
+            "allow_yanked must resolve the yanked tag's content as AbsentDispatch (its object is unseeded)"
         );
     }
 
@@ -2264,7 +2505,7 @@ mod tests {
     async fn resolve_dispatch_published_crosschecks_catalog() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        let obs_digest = seed_root_and_dispatch(&dir).await;
+        let dispatch_digest = seed_root_and_dispatch(&dir).await;
         // No c/index.json seeded — a Published read cross-checks the catalog and
         // self-heals a missing entry (F1), so a published resolve MUST create
         // c/index.json. That materialization is the observable difference from a
@@ -2280,7 +2521,7 @@ mod tests {
             .unwrap()
             .expect("a published root + dispatch object resolves");
         assert!(
-            matches!(resolution, DispatchResolution::Dispatch { ref content, .. } if *content == obs_digest),
+            matches!(resolution, DispatchResolution::Dispatch { ref content, .. } if *content == dispatch_digest),
             "a published resolve returns the dispatch object"
         );
         assert!(
@@ -2295,49 +2536,54 @@ mod tests {
     async fn resolve_dispatch_digest_addressed_present_object_is_dispatch() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        let (obs_bytes, obs_digest) = two_platform_observation();
+        let (dispatch_bytes, dispatch_digest) = two_platform_index();
         store(&dir)
-            .write_dispatch_object(REGISTRY, REPO, &obs_digest, &obs_bytes)
+            .write_dispatch_object(REGISTRY, REPO, &dispatch_digest, &dispatch_bytes)
             .await
             .unwrap();
 
         // A digest-addressed identifier looks the digest up directly in `o/`,
         // never reading a root document — so the source kind is irrelevant.
-        let id = repo_id().clone_with_digest(obs_digest.clone());
+        let id = repo_id().clone_with_digest(dispatch_digest.clone());
         let resolution = index
             .resolve_dispatch(&id, SourceKind::Derived)
             .await
             .unwrap()
             .expect("a present dispatch object resolves");
         match resolution {
-            DispatchResolution::Dispatch { content, manifest } => {
-                assert_eq!(content, obs_digest, "Dispatch carries the addressed digest");
-                assert!(
-                    matches!(&*manifest, oci::Manifest::ImageIndex(_)),
-                    "a dispatch object decodes to an image index"
+            DispatchResolution::Dispatch { content, index } => {
+                assert_eq!(content, dispatch_digest, "Dispatch carries the addressed digest");
+                assert_eq!(
+                    index.manifests.len(),
+                    2,
+                    "a dispatch object decodes to the image index it is"
                 );
             }
-            DispatchResolution::AbsentLeaf { .. } => panic!("expected Dispatch for a present digest-addressed object"),
+            DispatchResolution::AbsentDispatch { .. } => {
+                panic!("expected Dispatch for a present digest-addressed object")
+            }
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn resolve_dispatch_digest_addressed_absent_object_is_absent_leaf() {
+    async fn resolve_dispatch_digest_addressed_absent_object_is_absent_dispatch() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        let (_, digest) = two_platform_observation();
+        let (_, digest) = two_platform_index();
 
         // Nothing on disk — the digest-addressed lookup misses in `o/` and
-        // surfaces a typed AbsentLeaf, never a bare None (A3).
+        // surfaces a typed AbsentDispatch, never a bare None (A3).
         let id = repo_id().clone_with_digest(digest.clone());
         let resolution = index
             .resolve_dispatch(&id, SourceKind::Derived)
             .await
             .unwrap()
-            .expect("a digest-addressed miss is a typed AbsentLeaf, never a bare miss");
+            .expect("a digest-addressed miss is a typed AbsentDispatch, never a bare miss");
         match resolution {
-            DispatchResolution::AbsentLeaf { content } => assert_eq!(content, digest),
-            DispatchResolution::Dispatch { .. } => panic!("expected AbsentLeaf for an absent digest-addressed object"),
+            DispatchResolution::AbsentDispatch { content } => assert_eq!(content, digest),
+            DispatchResolution::Dispatch { .. } => {
+                panic!("expected AbsentDispatch for an absent digest-addressed object")
+            }
         }
     }
 
@@ -2405,21 +2651,21 @@ mod tests {
     async fn stage_dispatch_bytes_writes_verified_object() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
-        let (obs_bytes, obs_digest) = two_platform_observation();
+        let (dispatch_bytes, dispatch_digest) = two_platform_index();
 
         index
-            .stage_dispatch_bytes(&repo_id(), &obs_digest, &obs_bytes)
+            .stage_dispatch_bytes(&repo_id(), &dispatch_digest, &dispatch_bytes)
             .await
             .unwrap();
 
-        let path = store(&dir).dispatch_object_path(REGISTRY, REPO, &obs_digest);
+        let path = store(&dir).dispatch_object_path(REGISTRY, REPO, &dispatch_digest);
         assert!(
             path.exists(),
             "the staged dispatch object must land at the wire .json path"
         );
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            obs_bytes,
+            dispatch_bytes,
             "the staged bytes must be verbatim"
         );
     }

@@ -4,46 +4,56 @@
 //! `index.ocx.sh`-style static-file index source (`adr_index_indirection.md`
 //! Decision F).
 //!
-//! A pointer index, **not** a registry: no `/v2`, no blobs. OCX resolves a
-//! logical reference through two verified HTTP hops and then fetches the
-//! physical manifest/layers from the registry the index points at — the OCI
-//! image-index hop is bypassed entirely (Decision C1):
+//! A pointer index, **not** a registry: no `/v2`, no blobs. An index is a
+//! catalog of OCI artifacts and defines no object shapes of its own, so a
+//! logical reference resolves through two verified HTTP hops — a root document
+//! that locks a floating tag, and the OCI image index that tag resolved to,
+//! served back byte-for-byte as the registry produced it
+//! (`adr_oci_index_only_dispatch.md` D1):
 //!
 //! ```text
 //! logical id (ocx.sh/<ns>/<pkg>[:tag])
-//!   → GET /p/<ns>/<pkg>.json              root   → tags[tag].content = obs digest
-//!   → GET /p/<ns>/<pkg>/o/sha256/<hex>.json obs  → VERIFY sha256(bytes)==hex
-//!                                                → platforms[] = [(Platform, manifest-digest)]
-//!   → select_best(host, platforms)        → leaf platform-manifest digest
-//!   → root.repository (oci://…)           → physical fetch through the mirror seam
+//!   → GET /p/<ns>/<pkg>.json                root  → tags[tag].content = image-index digest
+//!   → GET /p/<ns>/<pkg>/o/sha256/<hex>.json index → VERIFY sha256(bytes)==hex
+//!                                                 → manifests[] = OCI descriptors
+//!   → select_best(host, platforms)          → leaf platform-manifest digest
+//!   → root.repository (oci://…)             → physical fetch through the mirror seam
 //! ```
 //!
-//! Only the ● frozen wire shapes in the ADR's Data Model are contract; the obs
-//! object's `platforms[].digest` leaves are already the doctrine-correct
+//! Only the ● frozen wire shapes in the ADR's Data Model are contract; the
+//! image index's `manifests[].digest` leaves are already the doctrine-correct
 //! platform-manifest digests, each OCI-CAS-verified when its manifest is
 //! fetched from the physical registry (Decision D).
 //!
+//! ## Why the index and not the manifest is snapshotted
+//!
+//! A manifest is immutable by digest, and keeping it reachable is the registry
+//! operator's and the publisher's concern. An **image index** has neither
+//! property: adding a platform mints a new index, the tag moves to it, and the
+//! previous index becomes unreferenced in the ordinary course of correct
+//! publishing. So the thing that can disappear is the thing that is copied.
+//!
 //! ## Trust anchor
 //!
-//! The observation-object verify (`sha256(bytes) == <hex>`) is the one place
-//! OCX re-derives a digest it did not mint, so it is the trust boundary of the
-//! whole index path (F1). A mismatch is a hard [`DataError`](crate::cli::ExitCode::DataError),
-//! never a silent load.
+//! The dispatch-object verify (`sha256(bytes) == <hex>`) is the one place OCX
+//! re-derives a digest it did not mint, so it is the trust boundary of the
+//! whole index path (F1). A mismatch is a hard
+//! [`DataError`](crate::cli::ExitCode::DataError), never a silent load. The
+//! bytes are publisher-controlled, so `annotations` and `artifactType` ride
+//! through stored but never rendered.
 //!
 //! ## Snapshot integration
 //!
 //! This source is a live [`IndexImpl`](super::index_impl::IndexImpl) chain source
 //! (like [`OciIndex`](super::OciIndex)). Its
 //! [`fetch_manifest_raw_bytes`](OcxIndex::fetch_manifest_raw_bytes) returns the
-//! verbatim observation bytes (which hash to the observation digest, A3-valid)
-//! paired with the synthetic image index, so [`LocalIndex::persist_dispatch`](super::LocalIndex)
-//! writes the observation object under its own digest as the dispatch object
-//! — the physical platform-manifest leaf it names is fetched on demand, never
-//! copied into the local index (A3/B2). The read-back
-//! (`decode_index_manifest` in `local_index`) dispatches on the per-source
-//! payload codec (A2): an object that is not an OCI manifest is decoded as an
-//! observation via [`observation_to_index`], so an offline resolve walks the
-//! local index without re-fetching.
+//! verbatim image-index bytes (which hash to its digest, A3-valid) paired with
+//! the parsed index, so [`LocalIndex::persist_dispatch`](super::LocalIndex)
+//! writes them under that digest as the dispatch object — the physical
+//! platform-manifest leaf it names is fetched on demand, never copied into the
+//! local index (A3/B2). The read-back (`decode_index_manifest` in
+//! `local_index`) is the same single OCI parse, so a hosted index subtree
+//! copy-pasted into a machine's local index just works.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,17 +62,17 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::wire::{CatalogIndex, IndexRoot, Observation, RootTag};
+use super::wire::{CatalogIndex, IndexRoot, RootTag};
 use super::{IndexOperation, index_impl};
 use crate::{Result, log, oci};
 
 // ── Frozen wire shapes (● contract) ──────────────────────────────────────────
 //
-// `IndexRoot` / `RootTag` / `Observation` / `ObservationPlatform` /
-// `CatalogIndex` live in `oci::index::wire` (`adr_index_indirection.md`
-// §Data Model) — the frozen grammar shared verbatim by this remote client
-// and the local store (`crate::file_structure::IndexStore`), imported
-// above.
+// `IndexRoot` / `RootTag` / `CatalogIndex` live in `oci::index::wire`
+// (`adr_index_indirection.md` §Data Model) — the frozen grammar shared
+// verbatim by this remote client and the local store
+// (`crate::file_structure::IndexStore`), imported above. What a tag points at
+// is an `oci::ImageIndex`, whose shape is the OCI image spec's, not ours.
 
 /// `config.json` — the version pin (● `{"format_version": 1}`).
 ///
@@ -77,12 +87,7 @@ pub struct IndexFormatConfig {
 /// rejected (`adr_index_indirection.md` F1).
 pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
 
-/// Hard cap on an index-document body (CWE-400). Root, observation, config, and
-/// catalog documents are all small; a misbehaving or hostile endpoint must not
-/// be able to stream an unbounded body into memory. The public catalog is the
-/// largest legitimate shape (one `<ns>/<pkg> -> digest` line per package), and
-/// 32 MiB covers hundreds of thousands of packages with headroom.
-const MAX_INDEX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+use crate::oci::client::MAX_INDEX_DOCUMENT_BYTES;
 
 /// Connect-phase timeout for an index document fetch (CWE-400). A dead or
 /// slow-to-accept endpoint must not stall a resolve indefinitely.
@@ -380,16 +385,13 @@ pub const DEFAULT_INDEX_BASE_URL: &str = "https://index.ocx.sh";
 /// In-memory caches shared across [`OcxIndex`] clones (per-invocation).
 ///
 /// Roots are volatile but cheap to re-read within one resolution (the tag →
-/// obs → physical hops all need the same root); observations are immutable, so
-/// caching them by their observed digest is cache-forever (F1). This is the
-/// same "shared cache across clones" model [`OciIndex`](super::OciIndex)
-/// uses — it is not the committed local index.
+/// dispatch → physical hops all need the same root). This is the same "shared
+/// cache across clones" model [`OciIndex`](super::OciIndex) uses — it is not
+/// the committed local index.
 #[derive(Default)]
 struct SourceCacheInner {
     /// repository → root document.
     roots: BTreeMap<String, Arc<IndexRoot>>,
-    /// observation hex → observation object.
-    observations: BTreeMap<String, Arc<Observation>>,
     /// Set once `config.json`'s `format_version` has been confirmed supported
     /// this invocation, so a repeat call skips the fetch (F1 "read once").
     /// Never set on a served-but-unsupported version (a re-checked hard error,
@@ -613,24 +615,35 @@ impl OcxIndex {
         Ok(Some(root))
     }
 
-    // ── observation (F1 immutable, VERIFIED) ─────────────────────────────────
+    // ── dispatch object (F1 immutable, VERIFIED) ─────────────────────────────
 
-    /// Fetches, verifies, and caches the observation object for
-    /// `(repository, obs_digest)`, returning its verbatim bytes and parsed form.
+    /// Fetches and verifies the dispatch object for `(repository, digest)` —
+    /// the OCI image index the tag resolved to — returning its verbatim bytes
+    /// alongside the parsed index.
     ///
-    /// Verifies `sha256(bytes) == obs_digest` before parsing — the index path's
-    /// trust anchor (F1). `Ok(None)` on a 404 miss.
-    async fn resolve_observation(
+    /// Verifies `sha256(bytes) == digest` before parsing — the index path's
+    /// trust anchor (F1). The bytes travel with the parsed form because they,
+    /// not a re-serialisation of it, are what the local copy stores: an
+    /// unmodelled key a newer writer added must survive the round trip
+    /// (`adr_oci_index_only_dispatch.md` A4). `Ok(None)` on a 404 miss.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DispatchObjectDigestMismatch`](super::error::Error::DispatchObjectDigestMismatch)
+    /// when the served bytes do not hash to the digest the root claimed;
+    /// [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
+    /// when they are not an OCI image index.
+    async fn resolve_index_object(
         &self,
         repository: &str,
-        obs_digest: &oci::Digest,
-    ) -> Result<Option<(Vec<u8>, Arc<Observation>)>> {
+        digest: &oci::Digest,
+    ) -> Result<Option<(Vec<u8>, oci::ImageIndex)>> {
         let url = format!(
             "{}/p/{}/o/{}/{}.json",
             self.base_url,
             repository,
-            obs_digest.algorithm().prefix(),
-            obs_digest.hex()
+            digest.algorithm().prefix(),
+            digest.hex()
         );
         let bytes = match self.transport.get(&url, None).await? {
             IndexFetch::Found { bytes, .. } => bytes,
@@ -638,22 +651,21 @@ impl OcxIndex {
         };
 
         // Trust boundary: re-derive the digest OCX did not mint and compare.
-        let computed = obs_digest.algorithm().hash(&bytes);
-        if &computed != obs_digest {
-            return Err(super::error::Error::ObservationDigestMismatch {
-                claimed: obs_digest.clone(),
+        let computed = digest.algorithm().hash(&bytes);
+        if &computed != digest {
+            return Err(super::error::Error::DispatchObjectDigestMismatch {
+                claimed: digest.clone(),
                 computed,
             }
             .into());
         }
 
-        let observation: Arc<Observation> = Arc::new(parse_document(&bytes, &url)?);
-        self.cache
-            .write()
-            .await
-            .observations
-            .insert(obs_digest.hex().to_string(), observation.clone());
-        Ok(Some((bytes, observation)))
+        // Admission is on document KIND only: this must be an image index. It
+        // deliberately does NOT inspect `artifactType` — nothing in ocx reads an
+        // image index's artifact type, and gating on it would refuse or warn
+        // about documents that are structurally exactly what we asked for.
+        let index: oci::ImageIndex = parse_document(&bytes, &url)?;
+        Ok(Some((bytes, index)))
     }
 
     /// Surfaces the human-governed status lane (F3) for a live tag resolve —
@@ -664,12 +676,12 @@ impl OcxIndex {
         surface_root_status(identifier, root, tag, self.allow_yanked)
     }
 
-    /// Resolves a tag-addressed identifier to its observation object: root →
-    /// tag → status surfacing → obs digest → fetch + verify.
+    /// Resolves a tag-addressed identifier to its dispatch object: root → tag →
+    /// status surfacing → content digest → fetch + verify.
     ///
     /// `Ok(None)` when the package or tag is absent. Errors on a yanked refusal
-    /// or an obs digest mismatch.
-    async fn resolve_tag(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, Arc<Observation>)>> {
+    /// or a dispatch-object digest mismatch.
+    async fn resolve_tag(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::ImageIndex)>> {
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
@@ -679,11 +691,11 @@ impl OcxIndex {
         };
         self.surface_status(identifier, &root, tag_entry)?;
 
-        let obs_digest = tag_entry.content.clone();
-        let Some((_, observation)) = self.resolve_observation(identifier.repository(), &obs_digest).await? else {
+        let content = tag_entry.content.clone();
+        let Some((_, index)) = self.resolve_index_object(identifier.repository(), &content).await? else {
             return Ok(None);
         };
-        Ok(Some((obs_digest, observation)))
+        Ok(Some((content, index)))
     }
 
     /// Builds the physical [`oci::Identifier`] for `identifier` by dereferencing
@@ -763,43 +775,6 @@ impl OcxIndex {
             }
         }
     }
-}
-
-/// Builds a synthetic [`oci::ImageIndex`] from an observation's `platforms[]`
-/// so the existing `fetch_candidates` → `select_best` pipeline consumes it
-/// unchanged. This is an **in-memory resolution view only** — it is never
-/// persisted (that would invent a digest namespace, Rejected Alternative R4);
-/// the leaf digests it carries are the real platform-manifest digests.
-///
-/// Shared with [`LocalIndex`](super::LocalIndex)'s dispatch-object read-back so
-/// an offline resolve through a persisted observation presents the identical
-/// candidate set as a live source (A2 native codec).
-pub(super) fn observation_to_index(observation: &Observation) -> Result<oci::ImageIndex> {
-    let mut manifests = Vec::with_capacity(observation.platforms.len());
-    for entry in &observation.platforms {
-        // `entry.digest` is already a validated `oci::Digest` — `Observation`
-        // deserialize fails the whole document on a malformed leaf digest
-        // (`adr_index_indirection.md` amendment 2026-07-19), so there is
-        // nothing left to re-validate here.
-        let leaf = &entry.digest;
-        manifests.push(oci::ImageIndexEntry {
-            media_type: oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
-            digest: leaf.to_string(),
-            // Size is unknown from the obs object and unused by candidate
-            // selection (only digest + platform matter).
-            size: 0,
-            platform: Some(entry.platform.clone()),
-            artifact_type: None,
-            annotations: None,
-        });
-    }
-    Ok(oci::ImageIndex {
-        schema_version: oci::INDEX_SCHEMA_VERSION,
-        media_type: Some(oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
-        artifact_type: None,
-        manifests,
-        annotations: None,
-    })
 }
 
 /// Surfaces the human-governed status lane of a resolved tag (F3): warns on
@@ -897,13 +872,12 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(Some(self.client.fetch_manifest(&physical).await?));
         }
 
-        // Tag-addressed: resolve the observation and present its platforms[] as
-        // a synthetic image index for `fetch_candidates` / `select_best`.
-        let Some((obs_digest, observation)) = self.resolve_tag(identifier).await? else {
+        // Tag-addressed: resolve the image index the tag was locked to and hand
+        // it straight to `fetch_candidates` / `select_best`.
+        let Some((content, index)) = self.resolve_tag(identifier).await? else {
             return Ok(None);
         };
-        let index = observation_to_index(&observation)?;
-        Ok(Some((obs_digest, oci::Manifest::ImageIndex(index))))
+        Ok(Some((content, oci::Manifest::ImageIndex(index))))
     }
 
     async fn fetch_manifest_digest(
@@ -918,7 +892,7 @@ impl index_impl::IndexImpl for OcxIndex {
         if let Some(digest) = identifier.digest() {
             return Ok(Some(digest));
         }
-        // Tag-addressed: the observation digest is what the tag points at.
+        // Tag-addressed: the dispatch-object digest is what the tag points at.
         Ok(self.resolve_tag(identifier).await?.map(|(digest, _)| digest))
     }
 
@@ -952,11 +926,10 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(self.client.fetch_manifest_raw_bytes(&physical).await?);
         }
 
-        // Tag: the verbatim observation bytes (which hash to the observation
-        // digest — A3-valid) paired with the synthetic index the persist path
-        // recurses over. Bytes and parsed manifest deliberately differ in
-        // shape: the persist layer writes the bytes and only inspects the
-        // manifest kind to decide recursion.
+        // Tag: the verbatim image-index bytes (which hash to the dispatch-object
+        // digest — A3-valid) paired with the parsed index. The persist layer
+        // writes the BYTES, not a re-serialisation of the parse, so a key this
+        // client does not model survives into the local copy.
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
@@ -965,12 +938,11 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(None);
         };
         self.surface_status(identifier, &root, tag_entry)?;
-        let obs_digest = tag_entry.content.clone();
-        let Some((bytes, observation)) = self.resolve_observation(identifier.repository(), &obs_digest).await? else {
+        let content = tag_entry.content.clone();
+        let Some((bytes, index)) = self.resolve_index_object(identifier.repository(), &content).await? else {
             return Ok(None);
         };
-        let index = observation_to_index(&observation)?;
-        Ok(Some((bytes, obs_digest, oci::Manifest::ImageIndex(index))))
+        Ok(Some((bytes, content, oci::Manifest::ImageIndex(index))))
     }
 
     async fn fetch_root_document(&self, identifier: &oci::Identifier) -> Result<Option<(Vec<u8>, IndexRoot)>> {
@@ -1165,7 +1137,7 @@ mod tests {
     fn root_url() -> String {
         format!("{BASE}/p/{REPO}.json")
     }
-    fn obs_url(digest: &oci::Digest) -> String {
+    fn dispatch_url(digest: &oci::Digest) -> String {
         format!(
             "{BASE}/p/{REPO}/o/{}/{}.json",
             digest.algorithm().prefix(),
@@ -1179,35 +1151,53 @@ mod tests {
         oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_tag("3.28")
     }
 
-    /// A two-platform observation (glibc + musl leaves) as verbatim wire bytes.
-    fn glibc_musl_observation() -> &'static [u8] {
+    /// A two-platform OCI image index (glibc + musl leaves) as the verbatim
+    /// bytes a registry served.
+    ///
+    /// **Deliberately NOT the canonical serde encoding of what it parses to.**
+    /// It is pretty-printed and carries a `subject` field `oci::ImageIndex` does
+    /// not model, so a re-serialising implementation cannot reproduce these
+    /// bytes — which is the only way the verbatim-storage and digest-stability
+    /// assertions downstream can fail when the property is broken.
+    fn glibc_musl_index() -> &'static [u8] {
         concat!(
-            r#"{"platforms":[{"platform":{"architecture":"amd64","os":"linux","os.features":["libc.glibc"]},"#,
-            r#""digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"#,
-            r#"{"platform":{"architecture":"amd64","os":"linux","os.features":["libc.musl"]},"#,
-            r#""digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}"#
+            "{\n",
+            "  \"schemaVersion\": 2,\n",
+            "  \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n",
+            "  \"artifactType\": \"application/vnd.sh.ocx.package.v1\",\n",
+            "  \"subject\": { \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\", ",
+            "\"digest\": \"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\", \"size\": 7 },\n",
+            "  \"manifests\": [\n",
+            "    { \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\", ",
+            "\"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"size\": 11, ",
+            "\"platform\": { \"architecture\": \"amd64\", \"os\": \"linux\", \"os.features\": [\"libc.glibc\"] } },\n",
+            "    { \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\", ",
+            "\"digest\": \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"size\": 12, ",
+            "\"platform\": { \"architecture\": \"amd64\", \"os\": \"linux\", \"os.features\": [\"libc.musl\"] } }\n",
+            "  ]\n",
+            "}\n"
         )
         .as_bytes()
     }
 
-    /// Seeds config + root (tag `3.28` → obs) + observation, returning the obs
-    /// digest and its verbatim bytes. `yanked` toggles the per-tag marker
+    /// Seeds config + root (tag `3.28` → dispatch object) + that image index,
+    /// returning its digest. `yanked` toggles the per-tag marker
     /// (wire object `{"reason": "...", "at": "..."}`, omitted when `false`).
     fn seed_package(transport: &StubIndexTransport, yanked: bool) -> oci::Digest {
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        let obs_bytes = glibc_musl_observation();
-        let obs_digest = Algorithm::Sha256.hash(obs_bytes);
+        let dispatch_bytes = glibc_musl_index();
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
         let yanked_field = if yanked {
             r#","yanked":{"reason":"critical security issue","at":"2026-02-01T00:00:00Z"}"#
         } else {
             ""
         };
         let root = format!(
-            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{obs_digest}"{yanked_field}}}}}}}"#
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{dispatch_digest}"{yanked_field}}}}}}}"#
         );
         transport.insert(&root_url(), root.as_bytes());
-        transport.insert(&obs_url(&obs_digest), obs_bytes);
-        obs_digest
+        transport.insert(&dispatch_url(&dispatch_digest), dispatch_bytes);
+        dispatch_digest
     }
 
     // ── redact_url (CWE-532) ──────────────────────────────────────────────────
@@ -1260,11 +1250,19 @@ mod tests {
             })
         );
 
-        let observation: Observation = serde_json::from_slice(glibc_musl_observation()).unwrap();
-        assert_eq!(observation.platforms.len(), 2);
+        let dispatch: oci::ImageIndex = serde_json::from_slice(glibc_musl_index()).unwrap();
+        assert_eq!(dispatch.manifests.len(), 2);
         assert_eq!(
-            observation.platforms[0].platform.os_features.as_deref(),
+            dispatch.manifests[0]
+                .platform
+                .as_ref()
+                .and_then(|platform| platform.os_features.as_deref()),
             Some(["libc.glibc".to_string()].as_slice())
+        );
+        assert_eq!(
+            dispatch.artifact_type.as_deref(),
+            Some("application/vnd.sh.ocx.package.v1"),
+            "artifactType is stored and never rendered — but it must survive the parse"
         );
 
         let catalog: CatalogIndex =
@@ -1272,10 +1270,10 @@ mod tests {
         assert_eq!(catalog.get("kitware/cmake").map(String::as_str), Some("sha256:root1"));
     }
 
-    // ── select_best over obs platforms ───────────────────────────────────────
+    // ── select_best over dispatch platforms ──────────────────────────────────
 
     #[tokio::test]
-    async fn resolve_tag_synthesizes_index_and_select_picks_host_platform() {
+    async fn resolve_tag_parses_index_and_select_picks_host_platform() {
         let transport = StubIndexTransport::new();
         seed_package(&transport, false);
         let index = super::super::Index::from_impl(make_source(transport, false));
@@ -1290,7 +1288,7 @@ mod tests {
             super::super::SelectResult::Found(id) => assert_eq!(
                 id.digest().map(|d| d.to_string()),
                 Some(format!("sha256:{}", "a".repeat(64))),
-                "glibc host must select the libc.glibc obs leaf"
+                "glibc host must select the libc.glibc dispatch leaf"
             ),
             super::super::SelectResult::Ambiguous(_) => panic!("expected Found(glibc leaf), got Ambiguous"),
             super::super::SelectResult::NotFound => panic!("expected Found(glibc leaf), got NotFound"),
@@ -1301,9 +1299,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_manifest_returns_synthetic_index_with_obs_digest() {
+    async fn fetch_manifest_returns_parsed_index_with_dispatch_digest() {
         let transport = StubIndexTransport::new();
-        let obs_digest = seed_package(&transport, false);
+        let dispatch_digest = seed_package(&transport, false);
         let source = make_source(transport, false);
 
         let (digest, manifest) = source
@@ -1312,12 +1310,12 @@ mod tests {
             .unwrap()
             .expect("tag resolves");
         assert_eq!(
-            digest, obs_digest,
-            "the resolved digest is the observation digest (the CAS root)"
+            digest, dispatch_digest,
+            "the resolved digest is the dispatch-object digest (the CAS root)"
         );
         match manifest {
             oci::Manifest::ImageIndex(index) => assert_eq!(index.manifests.len(), 2),
-            other => panic!("expected a synthesized image index, got {other:?}"),
+            other => panic!("expected a parsed image index, got {other:?}"),
         }
     }
 
@@ -1432,33 +1430,77 @@ mod tests {
         );
     }
 
-    // ── observation verify (trust anchor) ────────────────────────────────────
+    // ── dispatch-object verify (trust anchor) ────────────────────────────────
 
+    /// The format's only client-side trust anchor: `o/` now holds
+    /// publisher-controlled bytes, and the recompute is the one place OCX
+    /// re-derives a digest it did not mint.
+    ///
+    /// The tampered payload is a **structurally valid image index** — a
+    /// substitution an attacker would actually attempt, and one that parses
+    /// cleanly. Only the digest comparison can refuse it, so an implementation
+    /// that dropped the recompute could not pass by failing the parse instead.
     #[tokio::test]
-    async fn observation_digest_mismatch_is_hard_error() {
+    async fn dispatch_object_digest_mismatch_is_a_hard_error() {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        let obs_bytes = glibc_musl_observation();
-        let honest_digest = Algorithm::Sha256.hash(obs_bytes);
-        // Root points at the honest digest, but the served obs URL holds
-        // tampered bytes — the verify must catch it.
+        let honest_digest = Algorithm::Sha256.hash(glibc_musl_index());
+        // Root points at the honest digest, but the served object URL holds a
+        // DIFFERENT, perfectly well-formed image index — the verify must catch
+        // it before anything is loaded.
         let root = format!(
             r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{honest_digest}"}}}}}}"#,
         );
         transport.insert(&root_url(), root.as_bytes());
-        transport.insert(&obs_url(&honest_digest), br#"{"platforms":[]}"#);
+        let substituted =
+            br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        assert!(
+            serde_json::from_slice::<oci::ImageIndex>(substituted).is_ok(),
+            "the substituted payload must parse, or the digest check is not what refuses it"
+        );
+        transport.insert(&dispatch_url(&honest_digest), substituted);
 
         let source = make_source(transport, false);
         let error = source
             .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
             .await
-            .expect_err("tampered obs bytes must not load");
+            .expect_err("substituted dispatch-object bytes must not load");
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::ObservationDigestMismatch { .. })
+                crate::Error::OciIndex(super::super::error::Error::DispatchObjectDigestMismatch { .. })
             ),
-            "expected ObservationDigestMismatch, got {error:?}"
+            "expected DispatchObjectDigestMismatch, got {error:?}"
+        );
+    }
+
+    /// A dispatch object whose bytes hash correctly but are not an image index
+    /// is refused as a malformed document — the admission gate is on document
+    /// KIND, and on nothing else. It does **not** inspect `artifactType`:
+    /// nothing in ocx reads an image index's artifact type, and gating on it
+    /// would refuse documents that are structurally exactly what was asked for.
+    #[tokio::test]
+    async fn resolve_index_object_rejects_a_non_index_body() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let body = br#"{"platforms":[{"platform":{"architecture":"amd64","os":"linux"},"digest":"sha256:aa"}]}"#;
+        let digest = Algorithm::Sha256.hash(body);
+        let root = format!(
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{digest}"}}}}}}"#,
+        );
+        transport.insert(&root_url(), root.as_bytes());
+        transport.insert(&dispatch_url(&digest), body);
+
+        let error = make_source(transport, false)
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("a body that is not an image index must not resolve");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::MalformedIndexDocument { .. })
+            ),
+            "expected MalformedIndexDocument, got {error:?}"
         );
     }
 
@@ -1499,7 +1541,7 @@ mod tests {
 
     #[tokio::test]
     async fn absent_config_refuses_valid_root_and_never_fetches_it() {
-        // Fail-closed (F1): a base that serves a fully valid root + observation
+        // Fail-closed (F1): a base that serves a fully valid root + dispatch object
         // but NO config.json is not a version-pinned OCX index. The root must
         // never be consumed — an absent config.json must not degrade to a clean
         // pass that lets a valid-looking root resolve against an unversioned
@@ -1507,13 +1549,13 @@ mod tests {
         // short-circuits before the root GET.
         let transport = StubIndexTransport::new();
         // Deliberately DO NOT insert config.json — serve an otherwise-valid tree.
-        let obs_bytes = glibc_musl_observation();
-        let obs_digest = Algorithm::Sha256.hash(obs_bytes);
+        let dispatch_bytes = glibc_musl_index();
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
         let root = format!(
-            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{obs_digest}"}}}}}}"#,
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{dispatch_digest}"}}}}}}"#,
         );
         transport.insert(&root_url(), root.as_bytes());
-        transport.insert(&obs_url(&obs_digest), obs_bytes);
+        transport.insert(&dispatch_url(&dispatch_digest), dispatch_bytes);
         let source = make_source(transport.clone(), false);
 
         let result = source
@@ -1869,7 +1911,7 @@ mod tests {
     #[tokio::test]
     async fn physical_identifier_dereferences_root_pointer() {
         let transport = StubIndexTransport::new();
-        let obs_digest = seed_package(&transport, false);
+        let dispatch_digest = seed_package(&transport, false);
         let source = make_source(transport, false);
 
         // A resolved leaf: logical id carrying the physical manifest digest.
@@ -1887,21 +1929,23 @@ mod tests {
             Some(leaf),
             "the leaf digest is carried onto the physical location"
         );
-        let _ = obs_digest; // silence unused in this path
+        let _ = dispatch_digest; // silence unused in this path
     }
 
     // ── catalog sync orchestration: diff → re-snapshot → persist on disk ─────
 
     #[tokio::test]
     async fn local_index_sync_catalog_persists_and_snapshots_moved_package() {
-        // A moved package whose observation declares no platforms — so the
-        // re-snapshot writes the observation object without a physical leaf
+        // A moved package whose image index declares no platforms — so the
+        // re-snapshot writes the dispatch object without a physical leaf
         // fetch (no OCI client needed).
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        let obs_bytes = br#"{"platforms":[]}"#;
-        let obs_digest = Algorithm::Sha256.hash(obs_bytes);
-        let root = format!(r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"1.0":{{"content":"{obs_digest}"}}}}}}"#,);
+        let dispatch_bytes =
+            br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
+        let root =
+            format!(r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"1.0":{{"content":"{dispatch_digest}"}}}}}}"#,);
         transport.insert(&format!("{BASE}/p/ns/pkg.json"), root.as_bytes());
         // The remote catalog entry IS sha256 of the root bytes (F1) — so the
         // second, unchanged sync sees no diff. A mock literal that disagreed with
@@ -1915,10 +1959,10 @@ mod tests {
         transport.insert(
             &format!(
                 "{BASE}/p/ns/pkg/o/{}/{}.json",
-                obs_digest.algorithm().prefix(),
-                obs_digest.hex()
+                dispatch_digest.algorithm().prefix(),
+                dispatch_digest.hex()
             ),
-            obs_bytes,
+            dispatch_bytes,
         );
         let source = make_source(transport, false);
 
@@ -1958,15 +2002,17 @@ mod tests {
         );
 
         // The moved package is re-snapshotted through the published grow path: its
-        // verbatim root document plus the referenced observation dispatch object
+        // verbatim root document plus the referenced dispatch object
         // land in the wire grammar, so a subsequent offline resolve walks the copy.
         assert!(
             snapshot.root_document_path(NAMESPACE, "ns/pkg").exists(),
             "the re-snapshot must write the verbatim root document for the moved package"
         );
         assert!(
-            snapshot.dispatch_object_path(NAMESPACE, "ns/pkg", &obs_digest).exists(),
-            "the re-snapshot must persist the observation as a dispatch object"
+            snapshot
+                .dispatch_object_path(NAMESPACE, "ns/pkg", &dispatch_digest)
+                .exists(),
+            "the re-snapshot must persist the image index as a dispatch object"
         );
 
         // A second sync with the catalog unchanged re-snapshots nothing.
@@ -1987,7 +2033,7 @@ mod tests {
             &catalog_url(),
             format!(r#"{{"moved/pkg":"{WRONG_CLAIM}","unmoved/pkg":"sha256:oldunmoved"}}"#).as_bytes(),
         );
-        seed_empty_obs(&transport, "moved/pkg", "1.0");
+        seed_empty_index(&transport, "moved/pkg", "1.0");
         let source = make_source(transport, false);
 
         let dir = tempfile::tempdir().unwrap();
@@ -2088,24 +2134,26 @@ mod tests {
 
     // ── chain ordering: index BEFORE registry (HIGH, Codex R3) ────────────────
 
-    /// Seed config + root (`tag` → an empty-platform observation) + observation
-    /// at `repo`, returning the observation digest. Empty platforms keep the
-    /// persist recursion off the physical (OCI client) path.
-    fn seed_empty_obs(transport: &StubIndexTransport, repo: &str, tag: &str) -> oci::Digest {
+    /// Seed config + root (`tag` → an empty image index) + that index at
+    /// `repo`, returning its digest. An empty `manifests[]` keeps the persist
+    /// recursion off the physical (OCI client) path.
+    fn seed_empty_index(transport: &StubIndexTransport, repo: &str, tag: &str) -> oci::Digest {
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        let obs_bytes = br#"{"platforms":[]}"#;
-        let obs_digest = Algorithm::Sha256.hash(obs_bytes);
-        let root = format!(r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"{tag}":{{"content":"{obs_digest}"}}}}}}"#,);
+        let dispatch_bytes =
+            br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
+        let root =
+            format!(r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"{tag}":{{"content":"{dispatch_digest}"}}}}}}"#,);
         transport.insert(&format!("{BASE}/p/{repo}.json"), root.as_bytes());
         transport.insert(
             &format!(
                 "{BASE}/p/{repo}/o/{}/{}.json",
-                obs_digest.algorithm().prefix(),
-                obs_digest.hex()
+                dispatch_digest.algorithm().prefix(),
+                dispatch_digest.hex()
             ),
-            obs_bytes,
+            dispatch_bytes,
         );
-        obs_digest
+        dispatch_digest
     }
 
     /// Pre-seed `repo` as a MATERIALIZED local root carrying a stale digest, so a
@@ -2200,7 +2248,7 @@ mod tests {
     #[tokio::test]
     async fn chained_index_first_resolves_ocx_sh_through_index() {
         let transport = StubIndexTransport::new();
-        let obs_digest = seed_empty_obs(&transport, "ns/pkg", "1.0");
+        let dispatch_digest = seed_empty_index(&transport, "ns/pkg", "1.0");
         let source = make_source(transport, false);
         let registry = RegistryStub::new();
 
@@ -2222,7 +2270,7 @@ mod tests {
             .unwrap()
             .expect("the ocx.sh package resolves");
         assert_eq!(
-            digest, obs_digest,
+            digest, dispatch_digest,
             "an ocx.sh package must resolve through the verified index, not the registry"
         );
         assert_eq!(
@@ -2433,7 +2481,7 @@ mod tests {
         // different package skips the re-fetch.
         let transport = StubIndexTransport::new();
         seed_package(&transport, false);
-        let second_obs = glibc_musl_observation();
+        let second_obs = glibc_musl_index();
         let second_digest = Algorithm::Sha256.hash(second_obs);
         let second_root = format!(
             r#"{{"repository":"oci://ghcr.io/ocx-contrib/other","tags":{{"1.0":{{"content":"{second_digest}"}}}}}}"#,
@@ -2480,7 +2528,7 @@ mod tests {
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:root"}"#, "etag-1");
         // Serve the moved package so the first sync can re-snapshot it.
-        seed_empty_obs(&transport, "ns/pkg", "1.0");
+        seed_empty_index(&transport, "ns/pkg", "1.0");
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();
@@ -2526,7 +2574,7 @@ mod tests {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:root"}"#, WEAK_ETAG);
-        seed_empty_obs(&transport, "ns/pkg", "1.0");
+        seed_empty_index(&transport, "ns/pkg", "1.0");
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();

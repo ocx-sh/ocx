@@ -139,7 +139,7 @@ impl IndexList {
         let mut platforms_report = HashMap::new();
         for (package, identifier, tags) in resolved {
             // A digest-pinned identifier resolves straight to that one artifact's
-            // platform set (the observation object under its digest) — no tag
+            // platform set (the image index under its digest) — no tag
             // filtering, and no yank check (a digest pin bypasses the tag lane).
             let target = if identifier.digest().is_some() {
                 identifier.clone()
@@ -161,7 +161,7 @@ impl IndexList {
                 .fetch_manifest(&target, IndexOperation::Query)
                 .await?
             {
-                Some((_, manifest)) => oci::Platform::from_manifest(&manifest)?
+                Some((_, manifest)) => oci::Platform::from_manifest(&manifest)
                     .into_iter()
                     .map(|p| p.to_string())
                     .collect(),

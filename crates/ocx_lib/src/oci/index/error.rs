@@ -12,6 +12,17 @@ pub enum Error {
     #[error("remote manifest not found for '{0}' during index update")]
     RemoteManifestNotFound(String),
 
+    /// A refresh had candidate tags but none could become a version pointer:
+    /// each resolved to no manifest, to a bare (single-platform) image manifest,
+    /// or carried a reserved name. Distinct from [`Self::RemoteManifestNotFound`],
+    /// which means the source listed no tags at all — the same "nothing to
+    /// install" verdict, so the same exit code, but a different cause and so a
+    /// different message.
+    #[error(
+        "no indexable tag for '{0}' — every candidate tag resolved to no manifest, a bare manifest, or a reserved name"
+    )]
+    NoIndexableTag(String),
+
     /// A chained-index source walk failed. Carries the original typed error
     /// inside an [`ArcError`] so it can be cloned for singleflight broadcast
     /// to waiters while preserving the full error chain. The leader and
@@ -51,12 +62,12 @@ pub enum Error {
     #[error("index.ocx.sh config format_version {version} is not supported")]
     UnsupportedIndexFormat { version: u64 },
 
-    /// A fetched observation object's bytes did not hash to the digest the
-    /// root pointed at. This is the one place OCX re-derives a digest it did
-    /// not mint, so a mismatch is the index path's trust-boundary failure
+    /// A fetched dispatch object's bytes did not hash to the digest the root
+    /// pointed at. This is the one place OCX re-derives a digest it did not
+    /// mint, so a mismatch is the index path's trust-boundary failure
     /// (`adr_index_indirection.md` F1, CWE-345) — never a silent load.
-    #[error("observation object digest mismatch: root claims {claimed}, bytes hash to {computed}")]
-    ObservationDigestMismatch {
+    #[error("dispatch object digest mismatch: root claims {claimed}, bytes hash to {computed}")]
+    DispatchObjectDigestMismatch {
         claimed: crate::oci::Digest,
         computed: crate::oci::Digest,
     },
@@ -95,8 +106,8 @@ pub enum Error {
         found: String,
     },
 
-    /// A static-file index document (root, observation object, or catalog)
-    /// could not be parsed as the expected frozen wire shape.
+    /// A static-file index document (root, dispatch object, or catalog) could
+    /// not be parsed as the expected frozen wire shape.
     #[error("malformed index document at {url}")]
     MalformedIndexDocument {
         url: String,
@@ -154,7 +165,10 @@ pub enum Error {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            Self::RemoteManifestNotFound(_) => ExitCode::NotFound,
+            // Both mean "nothing here to install" to a wrapper: no tags at all,
+            // or no tag that could carry a version. An exit code is a coarse
+            // contract — the message is what disambiguates the two.
+            Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) => ExitCode::NotFound,
             Self::NestedImageIndex { .. } => ExitCode::DataError,
             // Delegate to the full chain walker on the wrapped typed error,
             // not just a single-hop `classify()` on the inner `Error`. Mirrors
@@ -169,7 +183,7 @@ impl ClassifyExitCode for Error {
             // Malformed / untrusted static-file index input at a trust
             // boundary — the OCI data-error class (65).
             Self::UnsupportedIndexFormat { .. }
-            | Self::ObservationDigestMismatch { .. }
+            | Self::DispatchObjectDigestMismatch { .. }
             | Self::YankedRefused { .. }
             | Self::MalformedPhysicalRef { .. }
             | Self::RootRepositoryMismatch { .. }
