@@ -287,7 +287,9 @@ impl LocalIndex {
     ///    [`IndexStore::begin_catalog_transaction`](crate::file_structure::IndexStore::begin_catalog_transaction)
     ///    re-reads the on-disk map first, then the fetched entries are merged in
     ///    — **never** a wholesale replace from the pre-lock read, so a concurrent
-    ///    per-package upsert is never clobbered.
+    ///    per-package upsert is never clobbered. A moved row step 3 could not
+    ///    re-snapshot keeps its on-disk entry and holds the ETag back, so the
+    ///    next sync re-diffs it (see the loop below).
     ///
     /// Returns the sync outcome (moved set, unchanged flag) for reporting;
     /// remote-catalog drift a caller did not re-snapshot is staleness ("update
@@ -338,6 +340,18 @@ impl LocalIndex {
         // routes through `fetch_root_document`.
         let source_index = super::Index::from_source(source.clone());
         let mut refreshed: std::collections::HashSet<&String> = std::collections::HashSet::new();
+        // Moved rows that ARE materialized locally but were not re-snapshotted,
+        // for either reason below. Their on-disk root is still the OLD one, so
+        // adopting the fetched (NEW) catalog value in step 4 would manufacture
+        // the exact root/catalog straddle A2 forbids, and both continuations of
+        // it dead-end: `IndexStore::read_root` self-heals the catalog BACK to
+        // the old root's digest and serves the STALE root — so a tag yanked in
+        // the new one is never surfaced — while a resolve-free run leaves the
+        // NEW value committed, and the next sync diffs NEW against NEW and sees
+        // no move. Either way the row is never retried. Keeping the on-disk
+        // entry (step 4) AND holding the ETag back (below) is what makes the
+        // next `ocx index update` re-diff it and try again.
+        let mut stale: std::collections::HashSet<&String> = std::collections::HashSet::new();
         for repository in &outcome.moved {
             if !crate::utility::fs::path_exists_lossy(&self.index_store.root_document_path(namespace, repository)).await
             {
@@ -345,34 +359,36 @@ impl LocalIndex {
             }
             let identifier = oci::Identifier::new_registry(repository.clone(), namespace);
             // A published index that lists a key its own `config.json` says it
-            // cannot express contradicts itself. Skip the row and keep syncing:
-            // step 4 still adopts it as an ordinary listing row (dropping remote
-            // rows would fight the reconcile contract, and a listing row that is
-            // never fetched is harmless). Deliberately NOT hardened into
-            // `validate_catalog_key`, which fails the WHOLE sync closed because a
-            // traversal key is a filesystem-escape risk — a grammar violation is
-            // not, and failing there would abort before the catalog + ETag commit,
-            // leaving this source permanently stale on every later `index update`.
+            // cannot express contradicts itself — and the root its fetched entry
+            // names is unfetchable by construction, since that 404 is what the
+            // `Outside` verdict was read off. Skip the row and keep syncing.
+            // Deliberately NOT hardened into `validate_catalog_key`, which fails
+            // the WHOLE sync closed because a traversal key is a filesystem-escape
+            // risk — a grammar violation is not, and failing there would abort
+            // before the catalog commit, leaving this source permanently stale on
+            // every later `index update`.
             if source.jurisdiction(&identifier).await == super::Jurisdiction::Outside {
                 log::warn!(
                     "index source '{namespace}' lists '{repository}', which its declared name grammar \
                      cannot express — skipping re-snapshot"
                 );
+                stale.insert(repository);
                 continue;
             }
             // Non-fatal, for the same reason the skip above is: a per-package
-            // refresh failure must never veto the source-wide catalog + ETag
-            // commit. Publish skew alone reaches this (a catalog regenerated
-            // ahead of its roots, or a root rolled back, 404s `p/<key>.json`),
-            // and aborting here would leave the ETag pinned and every other
-            // moved package unlanded — permanently, since each later
-            // `ocx index update` repeats it identically and exits 0. The row
-            // adopts its fetched catalog value in step 4 like any other.
+            // refresh failure must never veto the source-wide catalog commit.
+            // Publish skew alone reaches this (a catalog regenerated ahead of
+            // its roots, or a root rolled back, 404s `p/<key>.json`), and
+            // aborting here would leave every OTHER moved package unlanded —
+            // permanently, since each later `ocx index update` repeats it
+            // identically and exits 0. It does hold this run's ETag back (see
+            // step 4), which is the retry, not a veto.
             if let Err(error) = self.refresh_tags(&identifier, &source_index).await {
                 log::warn!(
                     "index source '{namespace}': re-snapshot of '{repository}' failed, \
-                     adopting the fetched catalog value instead: {error}"
+                     keeping the local entry and retrying on the next update: {error}"
                 );
+                stale.insert(repository);
                 continue;
             }
             refreshed.insert(repository);
@@ -393,13 +409,27 @@ impl LocalIndex {
             // its fetched value here in one batched write; an entry only in the
             // on-disk map (a concurrent per-package upsert, or a package the remote
             // dropped) survives. This is the reconcile, not a wholesale replace.
+            // A `stale` row is skipped for the OPPOSITE reason: its on-disk entry
+            // is the older one, and the only one that matches the root actually on
+            // disk. Adopting the fetched value would straddle them.
             for (repository, catalog_entry) in &outcome.catalog {
-                if refreshed.contains(repository) {
+                if refreshed.contains(repository) || stale.contains(repository) {
                     continue;
                 }
                 transaction.catalog().insert(repository.clone(), catalog_entry.clone());
             }
-            transaction.commit(outcome.etag.as_deref()).await?;
+            // Hold the ETag back while any moved row is stale: `commit` writes the
+            // sidecar only for `Some`, so the previous ETag survives and the next
+            // sync gets a `200` and re-diffs. Committing it would answer `304`
+            // forever and retire the retry — the row would stay stale for good.
+            // Every healthy row still lands either way; one failed package must
+            // not veto them.
+            let etag = if stale.is_empty() {
+                outcome.etag.as_deref()
+            } else {
+                None
+            };
+            transaction.commit(etag).await?;
         }
         Ok(outcome)
     }

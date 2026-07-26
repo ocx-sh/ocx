@@ -221,11 +221,17 @@ narrowed by the client. **Fail-closed** throughout: a 404, malformed, unsupporte
 never downgrade a namespace to plain OCI). Infallible, not error-swallowing — nothing is cached on
 failure, so the immediately-following `resolve_root` re-fetches and raises the real error.
 
+Only a **confirmed 404** may settle a declined name as `Outside`. `resolve_root` sends the root `GET`
+unconditionally, so a `304` answering it is a misbehaving edge, not an absence — it raises
+`IndexHttpFailed`, and an errored root keeps the source `Authoritative` like any other fetch failure.
+
 Cost: a declined name adds exactly one root `GET` that 404s. `SourceCacheInner.roots` memoizes the
 miss (`Option<Arc<IndexRoot>>`) alongside the hit, so it is one request per name per process however
 many times the chain consults jurisdiction — eight flat tools in a project = eight cached 404s on a
-cold run. The `Outside` verdict logs at **`warn!`**: a namespace leaving the verified two-hop path is
-rare and deliberate, and must be visible at default verbosity.
+cold run. The `Outside` verdict logs at **`debug!`**: it is the steady state for the shipped namespace
+(41 of 44 `ocx.sh` repositories are flat names), and the memo suppresses the request, not the log line
+— `jurisdiction` is re-entered from every `candidate_sources` call, so at `warn!` one cold `ocx lock`
+emits tens of identical lines.
 
 `ChainedIndex::candidate_sources(id) -> Vec<(&Index, bool)>` is the one place the question is asked;
 the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — the
@@ -246,7 +252,17 @@ are deliberately **not** in `validate_catalog_key`, which fails the whole sync c
 key; aborting there would skip the step-4 catalog + ETag commit, so the ETag would never advance, no
 other moved package would land, and every later `ocx index update` would repeat it and exit 0 — a
 permanently, silently stale source. A per-package failure is already reported by `ocx index update`'s
-own fan-out; it must not veto the source-wide commit. `LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
+own fan-out; it must not veto the source-wide commit.
+
+Non-fatal is not "adopt anyway". Both skips collect the key into a `stale` set, which step 4 reads
+twice: the fetched entry is **not** merged (the on-disk root is still the old one, so adopting the new
+entry manufactures the root/catalog straddle — `read_root` then self-heals the catalog back and serves
+the STALE root past the yank gate), and the ETag is passed as `None` (`CatalogTransaction::commit`
+writes the sidecar only for `Some`), so the previous ETag survives and the next sync gets a `200` and
+re-diffs the failed key. Committing it instead would retire the retry permanently: `304` forever on
+one path, `diff_moved` comparing NEW against NEW on the other. Healthy rows land either way.
+
+`LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
 outcomes (`sync_catalog` skips, `ocx index update` reroutes to the registry).
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`
