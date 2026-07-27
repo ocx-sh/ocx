@@ -170,8 +170,12 @@ check_drift() {
     mkdir -p -- "${scratch}"
     place_leaves "${stage_dir}/${src_rel}" "${scratch}"
     echo "comparing ${dest_rel} against ocx-sh/index@main (${commit})"
-    # README.md and SOURCE_COMMIT are ocx-authored, not vendored bytes.
-    diff -r -x README.md -x SOURCE_COMMIT -- "${scratch}" "${dest}" ||
+    # README.md, SOURCE_COMMIT and cpython/ are ocx-authored, not vendored
+    # bytes: cpython/ is generated from CPython's json module, the §14 byte
+    # authority the bot repo itself implements. Excluding it cannot hide an
+    # upstream addition — an upstream `cpython` path claims no leaf, so
+    # assert_every_upstream_path_is_claimed dies before this comparison runs.
+    diff -r -x README.md -x SOURCE_COMMIT -x cpython -- "${scratch}" "${dest}" ||
         die "vendored fixtures differ from ocx-sh/index@main (${commit}); re-run with '--ref main' and review the diff"
     echo "no drift: vendored fixtures match ocx-sh/index@main (${commit})"
 }
