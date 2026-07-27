@@ -412,3 +412,63 @@ def test_no_moved_root_command_in_a_runnable_snippet() -> None:
         "shell snippets invoke a root command that exits 64 — use the "
         "`ocx package <cmd>` form:\n  " + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Prose guard (issue #242) — separate mechanism from the fence guard above
+# ---------------------------------------------------------------------------
+
+# ponytail: an allowlist with per-site opt-in, deliberately NOT a wider version
+# of the fence regex above. The fence guard reads fences because reading fences
+# is what makes its exemption free; prose has the opposite property — a sentence
+# that *documents* the removal must name the bare form, and no regex tells that
+# apart from a sentence that assumes it still works. So the rule here is not
+# "guess intent", it is "an unmarked prose occurrence is red". Two things turn
+# it green, both explicit: the line is a `> **Moved to ...` tombstone (that
+# shape IS the documentation of the removal), or it sits inside a
+# `<!-- moved-command-ok -->` … `<!-- /moved-command-ok -->` region, which is a
+# reviewable diff hunk rather than a suppression comment scattered per line.
+# The ceiling: opening a region hides everything until the close marker, so a
+# region kept small is on the author. If regions start spanning pages, split
+# them — do not relax the guard.
+_TOMBSTONE = "> **Moved to "
+_OK_OPEN = "<!-- moved-command-ok"
+_OK_CLOSE = "<!-- /moved-command-ok"
+
+
+def test_no_unmarked_moved_root_command_in_prose() -> None:
+    """No prose line under ``website/src/docs`` names a moved root command
+    unless it is explicitly marked as documenting the move.
+
+    Complements ``test_no_moved_root_command_in_a_runnable_snippet``: that one
+    owns fenced snippets, this one owns everything outside a fence.
+    """
+    docs = PROJECT_ROOT / "website" / "src" / "docs"
+    offenders = []
+    for page in sorted(docs.rglob("*.md")):
+        in_fence = False
+        in_ok = False
+        for lineno, line in enumerate(page.read_text().splitlines(), 1):
+            if line.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if _OK_CLOSE in line:
+                in_ok = False
+                continue
+            if _OK_OPEN in line:
+                in_ok = True
+                continue
+            if in_ok or line.lstrip().startswith(_TOMBSTONE):
+                continue
+            if _MOVED_INVOCATION.search(line):
+                offenders.append(
+                    f"{page.relative_to(PROJECT_ROOT)}:{lineno}: {line.strip()}"
+                )
+    assert not offenders, (
+        "prose names a root command that exits 64 — use the `ocx package <cmd>` "
+        "form, or wrap the passage in `<!-- moved-command-ok -->` … "
+        "`<!-- /moved-command-ok -->` if it documents the removal:\n  "
+        + "\n  ".join(offenders)
+    )
