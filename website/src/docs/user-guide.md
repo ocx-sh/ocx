@@ -183,7 +183,7 @@ The repository half of an [identifier][oci-identifier] is a path, not a single w
 
 Mirrored upstream tools sit at the registry root under their common name: `cmake`, `shellcheck`, `uv`. OCX's own first-party binaries live under the reserved `ocx/` namespace — the CLI is `ocx/cli`, the mirror tool is `ocx/mirror`. The namespace *is* the provenance: a root name is an upstream tool OCX repackaged; an `ocx/` name is OCX itself.
 
-Slash-nested names are ordinary OCI repositories — `ocx install ocx/mirror:1` resolves exactly like `ocx install cmake:3.28`. Anyone publishing to their own registry can group packages the same way; the convention is OCX's, the mechanism is the registry's.
+Slash-nested names are ordinary OCI repositories — `ocx package install ocx/mirror:1` resolves exactly like `ocx package install cmake:3.28`. Anyone publishing to their own registry can group packages the same way; the convention is OCX's, the mechanism is the registry's.
 
 ## Embed a stable path in your IDE or shell {#stable-paths}
 
@@ -221,7 +221,7 @@ Both `--candidate` and `--current` fail immediately if the required symlink is a
 
 ### Running an installed tool on Windows {#stable-paths-windows}
 
-On Windows, `ocx install` (and `ocx select`) generates two files per entrypoint in the package's `entrypoints/` directory:
+On Windows, `ocx package install` (and `ocx package select`) generates two files per entrypoint in the package's `entrypoints/` directory:
 
 | File | Role |
 |------|------|
@@ -976,6 +976,8 @@ This section covers the changes introduced in the `feat/project-toolchain` relea
 
 ### Shell integration removed — re-run the installer {#migration-shell-profile}
 
+<!-- moved-command-ok: this section documents the removal; the bare forms are the subject, not an instruction -->
+
 `ocx shell hook`, `ocx shell init`, `ocx shell env`, and root `ocx install / select / deselect / uninstall / exec` have been removed — they exit 64 if invoked. `ocx ci export` is also removed.
 
 **Global toolchain activation** is now handled by the installer. Re-run the OCX install script to write `$OCX_HOME/env.sh` and the block-marker source line in your login profile:
@@ -996,6 +998,8 @@ After installation, every new login shell sources `$OCX_HOME/env.sh`, which runs
 | `ocx deselect <pkg>` | `ocx package deselect <pkg>` |
 | `ocx uninstall <pkg>` | `ocx package uninstall <pkg>` |
 | `ocx exec <pkg> -- cmd` | `ocx package exec <pkg> -- cmd` |
+
+<!-- /moved-command-ok -->
 
 For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to write `.envrc` — the project toolchain activation model is unchanged.
 

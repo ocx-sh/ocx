@@ -3,7 +3,7 @@ outline: deep
 ---
 # Entry Points
 
-`entrypoints` are named launchers OCX generates at install time. Each entry becomes a tiny script in the package's `entrypoints/` directory; when the package is selected via `ocx select`, those scripts land on the consumer's PATH as bare commands. The headline reason to declare them is **dependency encapsulation**: the launcher carries the package's own dep graph and runs in a clean environment, so two tools that share a runtime — Python, Node, the JVM — stop fighting over a single ambient version.
+`entrypoints` are named launchers OCX generates at install time. Each entry becomes a tiny script in the package's `entrypoints/` directory; when the package is selected via `ocx package select`, those scripts land on the consumer's PATH as bare commands. The headline reason to declare them is **dependency encapsulation**: the launcher carries the package's own dep graph and runs in a clean environment, so two tools that share a runtime — Python, Node, the JVM — stop fighting over a single ambient version.
 
 This page covers the publisher decisions: when to declare entrypoints at all, how to pick names that don't collide with the rest of the ecosystem, and how the composed `PATH` from the package's `env` block tells the launcher where each entry point's binary lives.
 
@@ -41,7 +41,7 @@ Packages that declare entrypoints typically demote `${installPath}/bin` from `pu
 
 Entry-point names must match `^[a-z0-9][a-z0-9_-]*$` and stay under 64 characters. The string is what consumers type at the shell, so it should read like a top-level command. `cmake-gen` is fine; `__internal-helper` is not — names starting with `_` are rejected.
 
-Collisions are the failure mode publishers underestimate. OCX checks for them at two distinct points — at install time (within the package being installed and its transitive deps) and at compose time (when `ocx exec` or `ocx env` is given two or more roots) — and surfaces an `EntrypointCollision` error rather than silently picking one. `ocx select` itself never picks owners; it only flips the candidate symlink. The avoid-collisions rules:
+Collisions are the failure mode publishers underestimate. OCX checks for them at two distinct points — at install time (within the package being installed and its transitive deps) and at compose time (when `ocx package exec` or `ocx env` is given two or more roots) — and surfaces an `EntrypointCollision` error rather than silently picking one. `ocx package select` itself never picks owners; it only flips the candidate symlink. The avoid-collisions rules:
 
 - **Match the upstream binary name when wrapping a single tool.** If you ship [CMake][cmake], declare `cmake`, `ctest`, `cpack` — that's what users expect on PATH.
 - **Namespace internal launchers.** A wrapper for `myorg/build-tools` should declare `myorg-build` or `mbt` rather than a generic `build` that any other tool might also want.
@@ -83,7 +83,7 @@ A meta-package that exposes a tool from a dependency without re-bundling it — 
 ```
 
 ::: warning Binary not stat'd at install
-A typo in an entry-point name (e.g. `cmke` instead of `cmake`) will install cleanly and only fail when the launcher is invoked and the PATH search comes up empty. Test every launcher with `ocx exec <pkg> -- <name>` after install to catch missing-binary bugs early.
+A typo in an entry-point name (e.g. `cmke` instead of `cmake`) will install cleanly and only fail when the launcher is invoked and the PATH search comes up empty. Test every launcher with `ocx package exec <pkg> -- <name>` after install to catch missing-binary bugs early.
 :::
 
 ::: tip Entry points are never `binaries`
@@ -139,7 +139,7 @@ A statically-linked [Go][go] or [Rust][rust] binary has no interpreter to pin. `
 :::
 
 ::: info Multi-platform launchers
-A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar, all from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]. Launcher discovery never needs `PATHEXT` (`.EXE` is always in the default Windows `PATHEXT`); `PATHEXT` only matters inside [`ocx exec`][cmd-exec-pathext] when it resolves a packaged tool that ships as a `.bat`/`.cmd` child binary.
+A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar, all from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]. Launcher discovery never needs `PATHEXT` (`.EXE` is always in the default Windows `PATHEXT`); `PATHEXT` only matters inside [`ocx package exec`][cmd-exec-pathext] when it resolves a packaged tool that ships as a `.bat`/`.cmd` child binary.
 :::
 
 ## See Also {#see-also}

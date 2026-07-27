@@ -105,7 +105,7 @@ Here `cmake` dispatches to a binary named `cmake` (empty object, the common case
 ## Environment Variables {#env}
 
 The `env` array declares environment variables that OCX exposes when running
-commands with the package (via [`ocx exec`][cmd-exec] or [`ocx env`][cmd-env]).
+commands with the package (via [`ocx package exec`][cmd-exec] or [`ocx env`][cmd-env]).
 
 Each entry is an object with a `key`, a `type` (`path` or `constant`), and a `value`
 template. Two placeholders are available in `value`:
@@ -421,7 +421,7 @@ installation, environment composition, and garbage collection from a user's pers
 
 ## Entry Points {#entry-points}
 
-The `entrypoints` object declares named launchers that `ocx install` generates at install time.
+The `entrypoints` object declares named launchers that `ocx package install` generates at install time.
 Each launcher is a small `.sh` shell script on Unix, or a native `<name>.exe` shim plus a
 one-line `<name>.shim` sidecar on Windows, placed in an `entrypoints/` directory
 inside the package directory. When the package is selected with `--select`, the per-repo `current`
@@ -476,7 +476,7 @@ entries.
 ### Disk Layout {#entry-points-disk-layout}
 
 Generated launchers land in `entrypoints/` inside the package directory (a sibling of `content/`).
-When the package is selected with `ocx install --select` or `ocx select`, the per-repo `current`
+When the package is selected with `ocx package install --select` or `ocx package select`, the per-repo `current`
 symlink is flipped to that package root, and consumers reach the launchers via
 `{registry}/{repo}/current/entrypoints`. Packages with no entrypoints produce no `entrypoints/`
 directory, so the same `current/entrypoints` path simply does not exist for them.
@@ -591,7 +591,7 @@ declared this yet" apart from "the publisher looked, and there genuinely are non
 confused with each other. `binaries` names files the publisher shipped in the content tree;
 `entrypoints` names launchers OCX *generates* at install time. **A generated launcher name never
 appears inside `binaries`** — it is not a file the publisher's archive contains, it is something
-`ocx install` writes.
+`ocx package install` writes.
 
 The same name can legitimately appear in both, without contradiction: `binaries: ["cmake"]`
 declares that the underlying `cmake` binary exists, and `entrypoints: {"cmake": {}}` declares

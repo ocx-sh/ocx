@@ -117,13 +117,13 @@ Groups are primarily a **composition concern** — they scope which tools `ocx r
 
 ## Pulling and executing {#pull-exec}
 
-Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pull`][cmd-pull] pre-warms the [package store][in-depth-storage-packages] from the lock without creating install symlinks — ideal for CI matrix builds and developer machines that already have a [direnv][direnv] hook in place. [`ocx run`][cmd-run] spawns a child with the project's resolved environment, treating the lock as the source of truth (project-tier counterpart to OCI-tier [`ocx exec`][cmd-exec]).
+Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pull`][cmd-pull] pre-warms the [package store][in-depth-storage-packages] from the lock without creating install symlinks — ideal for CI matrix builds and developer machines that already have a [direnv][direnv] hook in place. [`ocx run`][cmd-run] spawns a child with the project's resolved environment, treating the lock as the source of truth (project-tier counterpart to OCI-tier [`ocx package exec`][cmd-exec]).
 
 Both gate on the lock's `declaration_hash`: if `ocx.toml` has changed since the lock was generated, the command exits with a structured error pointing at [`ocx lock`][cmd-lock]. There is no implicit re-resolution — the project file is the input, the lock file is the contract, and registry round-trips happen only when you ask for them.
 
 ## Running tools {#running}
 
-Once `ocx.lock` is current, [`ocx run`][cmd-run] spawns a child process whose environment is composed from the lock's resolved tool set. It is the project-tier counterpart to the OCI-tier [`ocx exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
+Once `ocx.lock` is current, [`ocx run`][cmd-run] spawns a child process whose environment is composed from the lock's resolved tool set. It is the project-tier counterpart to the OCI-tier [`ocx package exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
 
 ### Argument shape {#running-shape}
 
@@ -205,7 +205,7 @@ Exit codes 64 and 78 for clap-level failures: OCX remaps clap's default exit 2 t
 
 `ocx run` never falls back to OCI-tier behavior. If `ocx.toml` is absent, it exits 64 rather than re-parsing the NAME arguments as OCI identifiers. This makes the behavior stable across directory changes and prevents embedding scripts from silently switching contracts.
 
-`ocx exec` remains unchanged — it never consults `ocx.toml` even when one is present.
+`ocx package exec` remains unchanged — it never consults `ocx.toml` even when one is present.
 
 ## Groups {#groups}
 
@@ -276,7 +276,7 @@ A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.oc
 The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. Unlike the old home-tier fallback, the global toolchain is **never discovered implicitly** — the CWD walk does not activate it. You must pass `--global` or set `OCX_GLOBAL`.
 
 ::: warning Global and project tools are isolated by PATH precedence
-`ocx run` and `ocx exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global tools remain on `PATH` (there is no strip), but project-declared tools are **prepended** by the active hook, so they shadow any same-named global tools. See [Strict isolation][env-composition-strict-isolation] for the full model.
+`ocx run` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global tools remain on `PATH` (there is no strip), but project-declared tools are **prepended** by the active hook, so they shadow any same-named global tools. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
 
 For managing global tools day-to-day, see [Keep everyday tools available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].

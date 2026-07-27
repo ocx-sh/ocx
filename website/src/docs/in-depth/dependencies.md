@@ -5,7 +5,7 @@ outline: deep
 
 A binary tool rarely runs in isolation. A web application needs a JavaScript runtime; a build tool needs a compiler; a Maven build needs both Java and Maven on `PATH`. Most package managers solve this with version-range resolvers and project-level lockfiles — useful when source compilation produces unique builds, but heavyweight when the upstream is already a content-addressed binary in an OCI registry.
 
-OCX takes a deliberately narrow approach. Every dependency is pinned to an exact <Tooltip term="OCI digest">A SHA-256 fingerprint that identifies a specific build of a package. The publisher records the exact digest they tested against — not a version range, not a "latest" tag. This means the dependency graph is fully determined by the package metadata alone.</Tooltip> by the publisher; there are no version ranges, no resolution algorithm, no auto-updates. The dependency graph is a flat list of digests baked into each package's metadata. This page explains *why* the surface is so small, *how* transitive resolution works, and where the related design — visibility, environment composition, GC — lives. The user-facing surface — auto-fetch, `ocx exec`, `ocx package deps` — lives in the [Dependencies section of the user guide][user-deps].
+OCX takes a deliberately narrow approach. Every dependency is pinned to an exact <Tooltip term="OCI digest">A SHA-256 fingerprint that identifies a specific build of a package. The publisher records the exact digest they tested against — not a version range, not a "latest" tag. This means the dependency graph is fully determined by the package metadata alone.</Tooltip> by the publisher; there are no version ranges, no resolution algorithm, no auto-updates. The dependency graph is a flat list of digests baked into each package's metadata. This page explains *why* the surface is so small, *how* transitive resolution works, and where the related design — visibility, environment composition, GC — lives. The user-facing surface — auto-fetch, `ocx package exec`, `ocx package deps` — lives in the [Dependencies section of the user guide][user-deps].
 
 ## Manifest Pins, Not Index Pins {#manifest-pins}
 
@@ -47,7 +47,7 @@ OCX sits closest to Nix in philosophy — exact pins, no resolution — but with
 
 ## Composition {#composition}
 
-To actually *run* a package with its dependency environments configured, use [`ocx exec`][cmd-exec] (or [`ocx env`][cmd-env] to export the composed environment into a shell). [`ocx exec`][cmd-exec] composes the environments of all dependencies in <Tooltip term="topological order">Dependencies are applied before their dependents. If A depends on B, and B depends on C, the order is C → B → A. Among packages at the same level, alphabetical order (by identifier) is used as a tiebreaker so the result is deterministic.</Tooltip> before launching the command. Dependencies come first, then the package you requested.
+To actually *run* a package with its dependency environments configured, use [`ocx package exec`][cmd-exec] (or [`ocx env`][cmd-env] to export the composed environment into a shell). [`ocx package exec`][cmd-exec] composes the environments of all dependencies in <Tooltip term="topological order">Dependencies are applied before their dependents. If A depends on B, and B depends on C, the order is C → B → A. Among packages at the same level, alphabetical order (by identifier) is used as a tiebreaker so the result is deterministic.</Tooltip> before launching the command. Dependencies come first, then the package you requested.
 
 Scalar variables (like `JAVA_HOME`) follow last-writer-wins; accumulator variables (like `PATH`) merge naturally — each dependency's `bin/` directory is prepended in order.
 
@@ -59,7 +59,7 @@ Every package owns two environment surfaces: an **interface surface** (what cons
 
 Each dependency declares a `visibility` value (`sealed` / `private` / `public` / `interface`) controlling which surface it reaches. When dependencies form chains, visibility propagates inductively along edges; diamond resolution applies the most-open value per axis.
 
-The complete model — including the per-axis truth table, edge filter, propagation rules, and worked examples — is documented in [Environments][in-depth-environments] under [Two Surfaces][env-two-surfaces], [Visibility Views][env-visibility], and [Edge Filter][env-edge-filter]. The `--self` flag selects which surface [`ocx exec`][cmd-exec] emits; the [Visibility Views section][env-visibility] holds the full truth table.
+The complete model — including the per-axis truth table, edge filter, propagation rules, and worked examples — is documented in [Environments][in-depth-environments] under [Two Surfaces][env-two-surfaces], [Visibility Views][env-visibility], and [Edge Filter][env-edge-filter]. The `--self` flag selects which surface [`ocx package exec`][cmd-exec] emits; the [Visibility Views section][env-visibility] holds the full truth table.
 
 ## Garbage Collection {#gc}
 
