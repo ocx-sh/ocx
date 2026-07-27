@@ -196,10 +196,20 @@ A green result is evidence only if a red one was reachable. The structural
 sibling of unevidenced "verified": a check whose passing state is
 indistinguishable from the check never having run.
 
-**The test**: state what would turn it red, then make that happen once and
-watch it. If you cannot make it fail, you do not have a check — you have a
-habit. Applies to any config whose failure mode is "quietly does less"
-(unmatched globs, `paths:` on rule files) as much as to tests.
+**The test**: demonstrate **both** outcomes. Show it red, show it green, on
+inputs you control. Either one alone is half a proof — "it can go red" does
+not rule out a check that is always red, and "it went green" is the state a
+check that never ran is in. If you cannot produce both, you do not have a
+check — you have a habit. Applies to any config whose failure mode is
+"quietly does less" (unmatched globs, `paths:` on rule files) as much as to
+tests.
+
+A detector that can match its own invocation is measuring itself. `pgrep
+<term>` run from a shell whose command line contains `<term>` matches that
+shell in every state, so it returns the same answer whether or not the thing
+exists — and the obvious filter can just as easily suppress both. Process and
+log greps are where this bites, because they get reached for as corroboration
+exactly when a real handshake is unavailable.
 
 Corollary: a mutation that *fails* to turn the check red means "I have not
 found every guard yet", not "the check is weak". Two independent guards
