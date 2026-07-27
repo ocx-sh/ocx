@@ -17,7 +17,7 @@ than beside their command:
   collapse in `announce::pipeline::resolve_curated_tags`, so it must hold for
   every one of the three curation sources — `--tags`, `--refresh` and a tags
   file. Filtering only `--tags` is the exact three-sources failure D7 exists
-  to prevent: `--refresh` and `--tags-file` start from the committed root, so
+  to prevent: `--refresh` and `--tags-from-file` start from the committed root, so
   neither can introduce a reserved tag but either would re-announce one
   forever once it landed.
 - **`ocx index list`** OMITS them from every listing. There are three filter
@@ -151,7 +151,7 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
 def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Source 3 of 3 — a tags file (`--tags-file`, the file
+    """Source 3 of 3 — a tags file (`--tags-from-file`, the file
     `ocx package push --announce-file` writes). The union is committed ∪ file;
     the drop applies to the union, so a reserved name is filtered whichever
     side it entered from.
@@ -169,7 +169,7 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     tags_file.write_text(f"2.0.0,{_DIGEST_ALIAS}")
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags-file", str(tags_file), "--out", str(tmp_path / "out")
+        ocx, fake_forge, "--package", package, "--tags-from-file", str(tags_file), "--out", str(tmp_path / "out")
     )
 
     assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocxfoo", _DIGEST_ALIAS]), (

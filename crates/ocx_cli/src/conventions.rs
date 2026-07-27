@@ -173,9 +173,9 @@ pub fn resolve_ci_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiF
 /// Splits tag-list bytes on commas and newlines into trimmed, non-empty tag
 /// names, preserving order.
 ///
-/// Shared wire format for `ocx package announce --tags-file` (read) and
+/// Shared wire format for `ocx package announce --tags-from-file` (read) and
 /// `ocx package push --announce-file` (write) — parses whatever either side
-/// writes, and is byte-compatible with `indexbot --tags-file`.
+/// writes, and is byte-compatible with `indexbot --tags-from-file`.
 pub fn parse_tags_file(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .split(['\n', '\r', ','])

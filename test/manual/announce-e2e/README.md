@@ -306,7 +306,7 @@ then asserts the second announce **updated** the same pull request rather than
 opening a second one, and that its committed tag set is a superset of both
 runs' tags.
 
-Both runs use `--tags-file`, which adds to the committed curated set. `--tags`
+Both runs use `--tags-from-file`, which adds to the committed curated set. `--tags`
 *replaces* it, so run #2 would drop tag-a and the scenario would prove nothing.
 
 Needs `OCX_ANNOUNCE_TOKEN`.

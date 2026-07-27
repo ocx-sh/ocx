@@ -106,6 +106,16 @@ pub enum AnnounceError {
         source: Box<crate::oci::client::error::ClientError>,
     },
 
+    /// Listing the physical repository's tags failed (`--tags-from-registry`).
+    ///
+    /// Boxed for the same reason as [`Self::Observe`].
+    #[error("failed to list the tags on {repository}")]
+    ListTags {
+        repository: String,
+        #[source]
+        source: Box<crate::Error>,
+    },
+
     /// A curated tag resolves to a bare OCI image manifest. The index records
     /// image indices only, and `ocx package push` always publishes one — so the
     /// artifact behind this tag was not published by ocx.
@@ -168,6 +178,7 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             Self::Ssrf(inner) => inner.classify(),
             Self::Forge(inner) => inner.classify(),
             Self::Observe { source, .. } => source.classify(),
+            Self::ListTags { source, .. } => source.classify(),
             // A publisher typo — the tag genuinely does not exist on the
             // physical registry. Same category as `ClientError::ManifestNotFound`.
             Self::UnresolvedTag { .. } => Some(crate::cli::ExitCode::NotFound),
@@ -231,6 +242,25 @@ mod tests {
             base_ref: "main".to_string(),
         };
         assert_eq!(error.classify(), Some(ExitCode::NotFound));
+    }
+
+    /// A `--tags-from-registry` run reaches the registry twice — once to list,
+    /// once per tag to observe — and a failure at either point is the same class
+    /// of problem. Delegating both to the inner error keeps a listing failure
+    /// from collapsing to exit 1, where a caller could not tell "the registry is
+    /// unreachable" from a crash.
+    #[test]
+    fn list_tags_variant_classifies_via_the_inner_error() {
+        let error = AnnounceError::ListTags {
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            source: Box::new(crate::Error::OfflineMode),
+        };
+        assert_eq!(error.classify(), crate::Error::OfflineMode.classify());
+        let message = error.to_string();
+        assert!(
+            message.contains("oci://ghcr.io/acme/widget"),
+            "the message must name the repository whose listing failed: {message}"
+        );
     }
 
     /// The D4(a) refusal is a verdict a release wrapper must be able to act on.

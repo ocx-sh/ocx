@@ -14,13 +14,19 @@ pub enum TagSelection {
     /// `--tags`: the given list **is** the universe. A committed tag absent from
     /// the list is dropped (reference-impl replace semantics).
     Replace(Vec<String>),
-    /// `--tags-file`: additive union of the file's tags with the committed root
+    /// `--tags-from-file`: additive union of the file's tags with the committed root
     /// — deletion only ever happens via [`Replace`](TagSelection::Replace).
     UnionFile(Vec<String>),
     /// `--refresh`: re-observe every tag already in the committed root (catches
     /// moved digests such as `latest`/cascades) without scanning the registry or
     /// touching yank markers.
     Refresh,
+    /// `--tags-from-registry`: additive union of every tag the physical
+    /// repository currently holds with the committed root. The registry supplies
+    /// the candidates instead of the caller; the merge is
+    /// [`UnionFile`](TagSelection::UnionFile)'s, so nothing committed is ever
+    /// dropped and yank markers survive.
+    FromRegistry,
 }
 
 /// Where announce writes its rebuilt root + CAS objects.

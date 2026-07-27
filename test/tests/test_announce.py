@@ -474,7 +474,7 @@ def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_ch
 def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C3/C4: two concurrent `--tags-file` announces must UNION, never clobber.
+    """C3/C4: two concurrent `--tags-from-file` announces must UNION, never clobber.
     The loser's fast-forward-only update is rejected, and its retry has to
     re-resolve its curated universe against the WINNING head — `regenerate`
     replaces the root's `tags` object wholesale, so a retry that replays the tag
@@ -513,7 +513,7 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     # The loser announces `3.0.0` by file — additive union (C3).
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("3.0.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    report = announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
 
     assert report["status"] == "updated"
     assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
@@ -628,7 +628,7 @@ def test_announce_unchanged_unmodelled_compare_status_is_refused(
     assert fake_forge.compare_status_once is None, "the scripted compare status must have fired"
 
 
-# ── curation semantics: --tags replace, --tags-file union, --refresh ───────
+# ── curation: --tags, --tags-from-file, --tags-from-registry, --refresh ────
 
 
 def test_announce_tags_replace_drops_omitted_committed_tag(
@@ -665,9 +665,106 @@ def test_announce_tags_file_union_adds_without_dropping(
     announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
 
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+
+
+def _seed_cascade_and_curate_one(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> tuple[str, list[str]]:
+    """Publish `1.2.3` **with its cascade** and curate only the exact version.
+
+    Leaves the registry holding strictly more tags than the index root carries,
+    which is the state `--tags-from-registry` exists to close and the one every
+    other announce test deliberately avoids by passing ``cascade=False``.
+
+    Returns the package id and the argv prefix shared by the announce calls.
+    """
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=True)
+    package = f"acme/{unique_repo}"
+    seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.2.3")
+    assert set(committed_root(fake_forge, package)["tags"]) == {
+        "1.2.3"
+    }, "precondition: the root starts behind the registry"
+    return package, args
+
+
+def test_announce_tags_from_registry_discovers_unannounced_tags(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """The registry supplies the curated set, so a cascade published before the
+    package reached the index gets announced without anyone naming the tags."""
+    package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
+
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+
+    assert set(committed_root(fake_forge, package)["tags"]) == {
+        "1.2.3",
+        "1.2",
+        "1",
+        "latest",
+    }, "every rolling tag the cascade wrote is discovered"
+
+
+def test_announce_tags_from_registry_drops_no_canonical_tag_into_the_root(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`push` writes a canonical `sha256.<hex>` tag per platform by default, so a
+    registry listing carries one per published version. They are not versions and
+    must never reach the index — and, unlike a caller-named reserved tag, they are
+    filtered silently rather than reported, because the caller named nothing."""
+    package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
+
+    report = announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+
+    tags = committed_root(fake_forge, package)["tags"]
+    assert not [tag for tag in tags if tag.startswith("sha256.")], f"canonical tags leaked into the root: {sorted(tags)}"
+    assert report["reserved_tags_dropped"] == [], "a registry listing names nothing, so it reports no drops"
+
+
+def test_announce_tags_from_registry_never_drops_a_committed_tag(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Additive only. A committed tag the registry no longer serves survives: the
+    index treats a vanished non-yanked tag as an anomaly for a human to look at,
+    so announce silently dropping it would pre-empt that decision."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    # A second package pushed into the same repo moves the registry on without
+    # removing 1.0.0 from the committed root's claim.
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+
+    tags = committed_root(fake_forge, package)["tags"]
+    assert "1.0.0" in tags, "the already-committed tag is never dropped by a registry-sourced run"
+    assert "2.0.0" in tags, "and the newly published one is picked up"
+
+
+def test_announce_tags_from_registry_keeps_a_yank_marker(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Retirement is yank, not delete: a yanked tag re-observed from the registry
+    keeps its marker. This is what makes the additive union safe to re-run — a
+    dropped tag would come back, a yanked one stays yanked."""
+    package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
+    announce_json(ocx, fake_forge, *args, "--yank", "1.2.3", "--yank-reason", "bad build", "--refresh")
+    assert committed_root(fake_forge, package)["tags"]["1.2.3"]["yanked"]["reason"] == "bad build"
+
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+
+    yanked = committed_root(fake_forge, package)["tags"]["1.2.3"].get("yanked")
+    assert yanked is not None, "a registry-sourced re-observe must not clear the yank marker"
+    assert yanked["reason"] == "bad build"
 
 
 def _squash_merge_the_announce(fake_forge: FakeForge, package: str) -> None:
@@ -745,7 +842,7 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
 
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
 
     assert (
         fake_forge.commit_parent("forkuser", "index", branch_name(package)) == first_head

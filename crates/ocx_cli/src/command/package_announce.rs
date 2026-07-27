@@ -21,6 +21,12 @@ use crate::{api::data::announce::AnnounceReport, app::CommandError, conventions,
 /// in the registry credential store.
 const OCX_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
 
+/// The tag-selection flags other than `--tags`. Named once so the
+/// mutually-exclusive-and-exactly-one rule is a single list: a fifth mode added
+/// to one attribute but not the other would compile, and the gap would only
+/// show as a flag silently accepted alongside `--tags`.
+const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_from_file", "tags_from_registry", "refresh"];
+
 /// Observe an owner-curated set of registry tags and publish the rebuilt
 /// package entry into the index.
 ///
@@ -46,16 +52,24 @@ pub struct PackageAnnounce {
         long = "tags",
         value_name = "TAGS",
         value_delimiter = ',',
-        conflicts_with_all = ["tags_file", "refresh"],
-        required_unless_present_any = ["tags_file", "refresh"],
+        conflicts_with_all = TAG_SELECTION_SIBLINGS_OF_TAGS,
+        required_unless_present_any = TAG_SELECTION_SIBLINGS_OF_TAGS,
     )]
     tags: Vec<String>,
 
     /// Add the tags listed in this file to the already-committed curated set.
     /// The file holds comma- or newline-separated tag names. Never removes a
     /// committed tag; use `--tags` for that.
-    #[clap(long = "tags-file", value_name = "PATH", conflicts_with = "refresh")]
-    tags_file: Option<PathBuf>,
+    #[clap(long = "tags-from-file", value_name = "PATH", conflicts_with_all = ["refresh", "tags_from_registry"])]
+    tags_from_file: Option<PathBuf>,
+
+    /// Add every tag the package's registry repository currently holds to the
+    /// already-committed curated set. Use it to announce versions that were
+    /// published before the package was in the index, or that an earlier
+    /// announce missed. Never removes a committed tag, and a yanked tag stays
+    /// yanked.
+    #[clap(long = "tags-from-registry", conflicts_with = "refresh")]
+    tags_from_registry: bool,
 
     /// Re-observe every already-committed tag, picking up a digest that moved
     /// (e.g. `latest`) without changing which tags are curated.
@@ -101,7 +115,9 @@ impl PackageAnnounce {
 
         let curated = if self.refresh {
             TagSelection::Refresh
-        } else if let Some(path) = &self.tags_file {
+        } else if self.tags_from_registry {
+            TagSelection::FromRegistry
+        } else if let Some(path) = &self.tags_from_file {
             let bytes = tokio::fs::read(path)
                 .await
                 .with_context(|| format!("reading tags file {}", path.display()))?;
@@ -221,30 +237,68 @@ mod tests {
         assert_eq!(args.package.raw(), "acme/widget");
     }
 
+    /// The four tag-selection modes, in the argv form each is given.
+    const TAG_SELECTION_ARGV: [&[&str]; 4] = [
+        &["--tags", "1.0.0"],
+        &["--tags-from-file", "tags.txt"],
+        &["--tags-from-registry"],
+        &["--refresh"],
+    ];
+
     #[test]
     fn tags_selection_is_required() {
         assert!(
             PackageAnnounce::try_parse_from(["announce", "--package", "acme/widget", "--out", "d"]).is_err(),
-            "at least one of --tags/--tags-file/--refresh is required"
+            "a tag selection is required"
         );
     }
 
+    /// Exactly-one, proven over **every** pair rather than one sampled pair: the
+    /// rule is spread across four `conflicts_with*` attributes, so a mode left
+    /// out of one of them still compiles and is only observable as a pair that
+    /// clap wrongly accepts.
     #[test]
-    fn tags_selection_is_mutually_exclusive() {
-        assert!(
-            PackageAnnounce::try_parse_from([
-                "announce",
-                "--package",
-                "acme/widget",
-                "--tags",
-                "1.0.0",
-                "--refresh",
-                "--out",
-                "d",
-            ])
-            .is_err(),
-            "--tags and --refresh together must be a clap usage error"
-        );
+    fn tags_selection_is_mutually_exclusive_over_every_pair() {
+        for (index, first) in TAG_SELECTION_ARGV.iter().enumerate() {
+            for second in &TAG_SELECTION_ARGV[index + 1..] {
+                let mut argv = vec!["announce", "--package", "acme/widget", "--out", "d"];
+                argv.extend_from_slice(first);
+                argv.extend_from_slice(second);
+                assert!(
+                    PackageAnnounce::try_parse_from(&argv).is_err(),
+                    "{first:?} and {second:?} together must be a clap usage error"
+                );
+            }
+        }
+    }
+
+    /// The positive half: each mode on its own parses. Without it the pair test
+    /// above would still pass if a flag were misspelled out of existence — every
+    /// pair containing it would error for the wrong reason.
+    #[test]
+    fn every_tags_selection_parses_on_its_own() {
+        for selection in &TAG_SELECTION_ARGV {
+            let mut argv = vec!["announce", "--package", "acme/widget", "--out", "d"];
+            argv.extend_from_slice(selection);
+            assert!(
+                PackageAnnounce::try_parse_from(&argv).is_ok(),
+                "{selection:?} alone must be a valid selection"
+            );
+        }
+    }
+
+    #[test]
+    fn tags_from_registry_sets_the_flag() {
+        let args = PackageAnnounce::try_parse_from([
+            "announce",
+            "--package",
+            "acme/widget",
+            "--tags-from-registry",
+            "--out",
+            "d",
+        ])
+        .expect("valid invocation parses");
+        assert!(args.tags_from_registry);
     }
 
     #[test]

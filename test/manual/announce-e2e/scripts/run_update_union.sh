@@ -6,7 +6,7 @@
 # Usage: run_update_union.sh <tag-a> <tag-b>
 #
 # Both tags must already exist on the registry — announce observes tags, it
-# does not create them. Uses `--tags-file` (union-add) for both runs:
+# does not create them. Uses `--tags-from-file` (union-add) for both runs:
 # `--tags` replaces the curated set, which would drop tag-a on the second run
 # and prove nothing.
 #
@@ -31,7 +31,7 @@ announce_tag() {
     printf '%s\n' "$tag" >"$tags_file"
     announce_capture "$label" \
         --package "$E2E_NAMESPACE/$E2E_PACKAGE" \
-        --tags-file "$tags_file" \
+        --tags-from-file "$tags_file" \
         --fork "$INDEX_FORK" \
         --index-repo "$GH_REPO_INDEX"
 }
