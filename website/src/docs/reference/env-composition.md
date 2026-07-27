@@ -191,7 +191,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 
 <!-- commands -->
 [cmd-add]: ./command-line.md#add
-[cmd-exec]: ./command-line.md#exec
+[cmd-exec]: ./command-line.md#package-exec
 [cmd-env-root]: ./command-line.md#env-root
 [cmd-lock]: ./command-line.md#lock
 [cmd-pull]: ./command-line.md#pull

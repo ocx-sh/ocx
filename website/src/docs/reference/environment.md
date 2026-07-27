@@ -630,7 +630,7 @@ On Linux the host trust store is discovered through the platform's standard mech
 Point `SSL_CERT_FILE` at a bundle that includes your corporate root CA to pull from a proxy-fronted registry:
 
 ```sh
-SSL_CERT_FILE=/etc/pki/corp-root.pem ocx install internal/tool:1.2
+SSL_CERT_FILE=/etc/pki/corp-root.pem ocx package install internal/tool:1.2
 ```
 
 ::: warning PEM text, not DER

@@ -329,7 +329,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 
 <!-- commands -->
 [cmd-clean]: ../reference/command-line.md#clean
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-global-flag]: ../reference/command-line.md#global-flag
 [cmd-lock]: ../reference/command-line.md#lock
 [cmd-pull]: ../reference/command-line.md#pull
