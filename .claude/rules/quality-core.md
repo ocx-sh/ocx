@@ -190,6 +190,28 @@ Verification claims must be evidence-backed. Hedging in review verdicts, commit 
 - Premature celebration before verification evidence: **Warn-tier**
 - Stating "verified" without citing evidence: **Block-tier** (false verification)
 
+### Unchecked Green
+
+A green result is evidence only if a red one was reachable. The structural
+sibling of unevidenced "verified": a check whose passing state is
+indistinguishable from the check never having run.
+
+**The test**: state what would turn it red, then make that happen once and
+watch it. If you cannot make it fail, you do not have a check — you have a
+habit. Applies to any config whose failure mode is "quietly does less"
+(unmatched globs, `paths:` on rule files) as much as to tests.
+
+Corollary: a mutation that *fails* to turn the check red means "I have not
+found every guard yet", not "the check is weak". Two independent guards
+defending one property both pass when either alone is deleted — keep
+mutating until one reds.
+
+Cheapest tells: a tolerated *range* of exit codes; an assertion on file text
+where a parser exists; a skip whose message names a cause it never observed.
+
+- Claiming a check works without having seen it red: **Warn-tier**
+- Shipping a check whose red state was never reachable: **Block-tier**
+
 ---
 
 ## See Also — Language-Specific Quality Rules
