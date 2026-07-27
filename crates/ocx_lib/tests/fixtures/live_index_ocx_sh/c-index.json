@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "packages": {
+    "bazelbuild/bazelisk": "sha256:1f6551a444edb92c688e92879d880de05d9658e872703d1b8957a04155dc2548",
+    "michael-herwig/ocx-e2e-hello": "sha256:c23e42e2d79551c588113acec3e7638c67d59e2c89dee04d3d6b7cdd1817ab09",
+    "ocx/cli": "sha256:02170b859bb6201f19e19139c8676d50a3e4bd7047e124be5b237a744d041c85",
+    "ocx/mirror": "sha256:2dcf5c91eee8fdacc2308192f09e7293c54ee54a685a0259f764105a9f5a1789",
+    "regclient/regsync": "sha256:f66852a0d64d54dce9e1f4d7ba7f83043450d3646b4bd384fa70ffe417f5f938"
+  }
+}

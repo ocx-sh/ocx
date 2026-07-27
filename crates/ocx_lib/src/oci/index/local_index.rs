@@ -1086,6 +1086,16 @@ mod tests {
         IndexStore::new(dir.path().join("index"))
     }
 
+    /// Decodes a persisted `c/index.json` straight off disk into its `packages`
+    /// map — asserting on the writer's own bytes rather than round-tripping
+    /// through [`IndexStore::read_source_catalog`], which would hide a matched
+    /// read/write pair of bugs.
+    fn catalog_on_disk(path: &std::path::Path) -> crate::oci::index::CatalogIndex {
+        let document: crate::oci::index::CatalogDocument =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        document.into_packages().unwrap()
+    }
+
     fn repo_id() -> oci::Identifier {
         oci::Identifier::new_registry(REPO, REGISTRY)
     }
@@ -2713,8 +2723,7 @@ mod tests {
             "the published root must land byte-identical, never re-serialized"
         );
 
-        let catalog: crate::oci::index::CatalogIndex =
-            serde_json::from_slice(&std::fs::read(store.source_catalog_path(REGISTRY)).unwrap()).unwrap();
+        let catalog = catalog_on_disk(&store.source_catalog_path(REGISTRY));
         assert_eq!(
             catalog.get(REPO),
             Some(&IndexStore::root_catalog_entry(&bytes)),
@@ -2737,8 +2746,7 @@ mod tests {
         let bytes = br#"{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{}}"#.to_vec();
         index.persist_published_root(&tagged_id("3.28"), &bytes).await.unwrap();
 
-        let catalog: crate::oci::index::CatalogIndex =
-            serde_json::from_slice(&std::fs::read(store.source_catalog_path(REGISTRY)).unwrap()).unwrap();
+        let catalog = catalog_on_disk(&store.source_catalog_path(REGISTRY));
         assert_eq!(
             catalog.get("other/tool"),
             Some(&"sha256:existing".to_string()),
@@ -2857,17 +2865,20 @@ mod tests {
     /// Serialises a catalog with `key` (untrusted) plus one always-valid key so
     /// the map is non-trivial. `serde_json` handles all escaping, so a
     /// backslash in `key` round-trips into the JSON body verbatim.
+    /// A served `c/index.json` body carrying `key` alongside a benign entry —
+    /// in the format-version envelope the site serves, so the key check under
+    /// test is reached through the real parse.
     fn catalog_with_key(key: &str) -> String {
-        let mut map = serde_json::Map::new();
-        map.insert(
+        let mut packages = serde_json::Map::new();
+        packages.insert(
             key.to_string(),
             serde_json::Value::String(format!("sha256:{}", "a".repeat(64))),
         );
-        map.insert(
+        packages.insert(
             "kitware/cmake".to_string(),
             serde_json::Value::String(format!("sha256:{}", "b".repeat(64))),
         );
-        serde_json::Value::Object(map).to_string()
+        serde_json::json!({ "format_version": 1, "packages": packages }).to_string()
     }
 
     fn ocx_source_with_catalog(catalog_json: String) -> super::super::OcxIndex {

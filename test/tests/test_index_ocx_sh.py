@@ -1430,7 +1430,7 @@ def test_piggyback_catalog_sync_snapshots_only_the_named_package(
 
     # ...but the synced catalog (offline listing source) still lists ALL three.
     catalog_path = _source_dir(index_dir) / "c" / "index.json"
-    local_catalog = json.loads(catalog_path.read_text())
+    local_catalog = static_index.read_catalog(catalog_path)
     assert set(local_catalog) == {repo_a, repo_b, repo_c}, (
         "the synced catalog must list every remote package as a row, even the "
         "unmaterialized siblings"
