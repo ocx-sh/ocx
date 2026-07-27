@@ -244,12 +244,18 @@ def test_create_metadata_without_platform_is_usage_error(
     pkg_dir, metadata = _write_app(
         tmp_path, "noplat", [{"identifier": f"{leaf.fq}@{manifest_digest}"}]
     )
-    out = tmp_path / "app-noplat.tar.xz"
+    # Deliberately NOT `app-noplat.tar.xz`: `_write_app` names the authored
+    # sidecar `app-noplat-metadata.json`, which is byte-for-byte the path
+    # `create -o app-noplat.tar.xz` derives for the sidecar it writes. Under
+    # the colliding name the "no sidecar" assertion below observes the
+    # fixture's own input file and fires whatever `create` did.
+    out = tmp_path / "app-noplat-bundle.tar.xz"
 
     result = _create(ocx, pkg_dir, metadata, out, check=False)
     assert result.returncode == EXIT_USAGE, result.stderr
     assert "--platform" in result.stderr, "error must hint at --platform"
     assert not _sidecar_path(out).exists(), "a rejected create must write no sidecar"
+    assert not out.exists(), "a rejected create must leave no orphan bundle"
 
 
 def test_create_concrete_platform_passes_through_pinned_dep(
