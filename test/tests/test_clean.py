@@ -69,16 +69,6 @@ def test_clean_preserves_referenced_objects(
     assert_dir_exists(content)
 
 
-def _registry_slug_from_packages_tree(packages_root: Path, manifest_path: Path) -> str:
-    """Recover the registry slug directory name from the absolute path of an
-    installed package's manifest.json.
-
-    Layout: {ocx_home}/packages/{registry_slug}/{algo}/{2hex}/{30hex}/manifest.json
-    """
-    rel = manifest_path.relative_to(packages_root)
-    return rel.parts[0]
-
-
 def test_clean_preserves_config_blob_of_installed_package(
     ocx: OcxRunner, ocx_home: Path, published_package: PackageInfo
 ):
@@ -97,20 +87,28 @@ def test_clean_preserves_config_blob_of_installed_package(
 
     pkg = published_package
 
-    # Install the package; this creates packages/.../manifest.json from which
-    # we can recover the config blob digest.
-    ocx.plain("package", "install", "--select", pkg.short)
+    # Install the package. The JSON output names the install symlink ocx made
+    # for *this* package, which is the identity handle for its manifest.
+    #
+    # Selecting instead by `next(packages_root.rglob("manifest.json"))` picks
+    # the first manifest in directory order. That is one manifest today and an
+    # arbitrary one the moment the fixture gains a dependency — and since a
+    # dependency's config blob is linked too, the wrong pick would still find a
+    # blob on disk and pass, silently asserting about a different package.
+    installs = ocx.json("package", "install", "--select", pkg.short)
+    assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
 
-    # Walk packages/ to find the installed package's manifest.json.
-    packages_root = ocx_home / "packages"
-    manifest_paths = list(packages_root.rglob("manifest.json"))
-    assert manifest_paths, f"expected at least one manifest.json under {packages_root}"
-    manifest = json.loads(manifest_paths[0].read_text())
+    # The install symlink resolves to the package's content/ dir; manifest.json
+    # sits beside it in the package root.
+    package_root = Path(next(iter(installs.values()))["path"]).resolve().parent
+    manifest = json.loads((package_root / "manifest.json").read_text())
     config_digest = manifest["config"]["digest"]  # e.g. "sha256:abcd..."
 
     algo, hex_digest = config_digest.split(":", 1)
     # Same sharding as BlobStore::path: {algorithm}/{hex[0..2]}/{hex[2..32]}/data
-    registry_slug = _registry_slug_from_packages_tree(packages_root, manifest_paths[0])
+    # Layout: {ocx_home}/packages/{registry_slug}/{algo}/{2hex}/{30hex}/
+    packages_root = ocx_home / "packages"
+    registry_slug = package_root.relative_to(packages_root).parts[0]
     blob_data = (
         ocx_home
         / "blobs"
