@@ -594,22 +594,21 @@ Two one-time steps happen on the [index site][index-ocx-sh] itself, before the f
 
 Most publishers already have a release workflow that builds and uploads binaries; slotting announce into it is additive, not a rewrite. The [copy-paste GitHub Actions snippet][index-announce-ci-snippet] on the index site shows where `push --announce-file` and `announce` go relative to your existing build steps, plus the `OCX_ANNOUNCE_TOKEN` secret wiring for both a classic-PAT and a machine-account setup. The snippet lives there, not here, so it stays in sync with the index bot's own contract instead of drifting out of two copies.
 
-### What your consumers need today {#publish-consumer-prerequisite}
+### What your consumers need {#publish-consumer-prerequisite}
 
-One honest caveat about the install side. Resolving `<ns>/<pkg>` through the
-public index requires the consumer's ocx to treat that namespace as
-index-kind, and today that means an explicit [`[registries."<prefix>"]`
-entry][config-registries-index] carrying an `index` URL — keyed on the
-**registry prefix** (`ocx.sh`), not on your package's namespace. Two things
-follow. That config field is not in a released ocx yet: 0.4.3 rejects it with
-`unknown field 'index', expected 'url'`. And `ocx.sh` is not index-kind by
-default, so even on a build that accepts the field, a consumer has to opt in
-by hand until that default ships.
+Nothing. The [compiled-in defaults][config-registries-index] name
+`https://index.ocx.sh` as the index for the `ocx.sh` namespace, so
+[`ocx package install`][cmd-install] `<ns>/<pkg>` resolves through the [public
+index][in-depth-indices-public] on a machine with no OCX config at all. A
+consumer opts *out*, not in — `index = ""`, or a [`[mirrors]`][config-mirrors]
+entry pinning `ocx.sh` at a registry endpoint.
 
-Until then, announce is worth doing early — the index entry is durable and
-your package is discoverable the moment consumers can resolve it — but a
-colleague on a released ocx cannot yet `ocx package install <ns>/<pkg>`
-without the registry coordinates you were trying to stop handing out.
+That authority is exclusive, and it cuts both ways. The index is the sole
+resolver for `ocx.sh/…` — which is what lets a yank reach everyone who
+installs the package — so an `index.ocx.sh` outage fails those installs
+outright rather than falling through to whatever registry happens to serve a
+repository under the same name. An announced package inherits the index's
+availability along with its guarantees.
 
 ### What happens after {#publish-what-happens-after}
 
@@ -764,6 +763,17 @@ A plain string, as above, redirects every kind of traffic OCX sends that host. A
 ### Relation to the default registry {#mirrors-default-registry}
 
 [`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a bare identifier (e.g. `cmake:3.28` → `ocx.sh/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure a `[mirrors]` entry for `ocx.sh`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
+
+Pinning `ocx.sh` at a mirror's **registry** endpoint carries one deliberate side effect: it suppresses the [compiled-in index][config-registries-index] for that namespace, which then resolves as a plain OCI registry through the mirror. That is the point — a site that routes `ocx.sh` to its own artifact manager should not start dialling `index.ocx.sh`, a host it never allow-listed. OCX logs a warning naming the namespace it dropped, because the index's digest verification and yank gate go with it. To keep the verified index path *and* pin the physical registry, name the index explicitly; a written `index` outranks the compiled-in one and is never suppressed.
+
+```toml
+[registries."ocx.sh"]
+index = "https://index.ocx.sh"                     # explicit: survives the mirror entry
+
+[mirrors]
+"ocx.sh" = "https://artifactory.corp/ocx-remote"
+"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }
+```
 
 ### Lockfile portability {#mirrors-lockfile}
 
