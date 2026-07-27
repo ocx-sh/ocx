@@ -229,6 +229,8 @@ def _make_two_packages_sharing_layer(
         str(metadata_path),
         "-o",
         str(bundle_path),
+        "-p",
+        current_platform(),
         str(pkg_dir),
     )
 
@@ -595,7 +597,10 @@ def test_strip_applied_at_assemble_registry_path(
     base_meta = tmp_path / "registry-base-meta.json"
     base_meta.write_text(json.dumps({"type": "bundle", "version": 1}))
     bundle = tmp_path / "registry-topdir-bundle.tar.xz"
-    ocx.plain("package", "create", "-m", str(base_meta), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(base_meta), "-o", str(bundle),
+        "-p", current_platform(), str(pkg_dir),
+    )
 
     for repo, strip in ((repo_strip1, 1), (repo_strip0, 0)):
         meta = tmp_path / f"registry-meta-{repo}.json"
@@ -662,7 +667,10 @@ def test_strip_applied_at_assemble_local_path(
     base_meta = tmp_path / "local-base-meta.json"
     base_meta.write_text(json.dumps({"type": "bundle", "version": 1, "platform": current_platform()}))
     bundle = tmp_path / "local-topdir-bundle.tar.xz"
-    ocx.plain("package", "create", "-m", str(base_meta), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(base_meta), "-o", str(bundle),
+        "-p", current_platform(), str(pkg_dir),
+    )
 
     # Push once so the identifier resolves cleanly; the local metadata (-m) is
     # what drives assemble strip, not the pushed config.
@@ -739,7 +747,10 @@ def test_single_package_strip_components_regression(
     meta = tmp_path / "regress-meta.json"
     _strip_metadata(meta, 1)
     bundle = tmp_path / "regress-bundle.tar.xz"
-    ocx.plain("package", "create", "-m", str(meta), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(meta), "-o", str(bundle),
+        "-p", current_platform(), str(pkg_dir),
+    )
 
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
     ocx.plain("package", "push", "-n", "-p", current_platform(), "-m", str(meta), "-i", fq, str(bundle))

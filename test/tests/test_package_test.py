@@ -711,7 +711,10 @@ def test_invalid_metadata_data_error(
     # Use a valid minimal metadata to create the bundle, then override the path.
     valid_meta = tmp_path / "valid-meta.json"
     valid_meta.write_text('{"type":"bundle","version":1}')
-    ocx.plain("package", "create", "-m", str(valid_meta), "-o", str(bundle), str(bundle_dir))
+    ocx.plain(
+        "package", "create", "-m", str(valid_meta), "-o", str(bundle),
+        "-p", _PLATFORM, str(bundle_dir),
+    )
 
     fq = f"{ocx.registry}/{unique_repo}-invalid:1.0.0"
     result = ocx.plain(

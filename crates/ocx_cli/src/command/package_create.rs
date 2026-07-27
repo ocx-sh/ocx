@@ -17,14 +17,15 @@ pub struct PackageCreate {
     identifier: Option<options::Identifier>,
     /// Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
-    /// When metadata declares dependencies without a digest, this flag is
-    /// required: create resolves each one against the selected index to a
-    /// platform manifest digest and rewrites the metadata sidecar with the
-    /// resolved pins. Resolution honors `--remote`, `--offline`, and
-    /// `--frozen`. When `--metadata` is given, this platform is also
-    /// recorded in the sidecar; `ocx package push` and `ocx package test`
-    /// default to it and reject a `--platform` that disagrees. Also used
-    /// to infer the output filename.
+    /// Required whenever `--metadata` is given: it declares the platform the
+    /// packaged content runs on, which cannot be read off the machine doing
+    /// the build. Dependencies carrying no digest are resolved against the
+    /// selected index to a platform manifest digest for this platform, the
+    /// content tree is scanned under this platform's executable convention,
+    /// and the value is recorded in the metadata sidecar; `ocx package push`
+    /// and `ocx package test` default to the recorded value and reject a
+    /// `--platform` that disagrees. Resolution honors `--remote`,
+    /// `--offline`, and `--frozen`. Also used to infer the output filename.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -35,9 +36,9 @@ pub struct PackageCreate {
     force: bool,
     /// Path to a `metadata.json` file to validate, resolve, and write alongside the output bundle
     ///
-    /// Dependencies without a digest are pinned to platform manifest digests
-    /// (requires `--platform`); the resolved sidecar is written next to the
-    /// output bundle in canonical form.
+    /// Requires `--platform`. Dependencies without a digest are pinned to
+    /// that platform's manifest digests; the resolved sidecar is written next
+    /// to the output bundle in canonical form.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -56,6 +57,7 @@ pub struct PackageCreate {
 impl PackageCreate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         self.validate_bin_scan()?;
+        let declared_platform = self.declared_platform()?;
 
         let identifier = options::Identifier::transform_optional(self.identifier.clone(), context.default_registry())?;
         let output = match &self.output {
@@ -82,19 +84,17 @@ impl PackageCreate {
         // empty platform intersection), and a failure must leave no orphan
         // bundle on disk (Codex #3). Only after the metadata is fully validated
         // do we build the archive and, last, write the resolved sidecar.
-        let resolved_metadata = match &self.metadata {
-            Some(metadata_source) => {
-                let metadata = AuthoringMetadata::read_json(metadata_source.as_path()).await?;
-                let metadata = self.resolve_dependency_pins(metadata, &context).await?;
-                let platform = self.validation_platform();
+        let resolved_metadata = match self.metadata.as_deref().zip(declared_platform) {
+            Some((metadata_source, platform)) => {
+                let metadata = AuthoringMetadata::read_json(metadata_source).await?;
+                let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
                 let metadata = self.resolve_binaries(metadata, &platform).await?;
                 // Validate the projection the publisher will actually push:
                 // run the publish-time env/entrypoint checks against the
                 // declared platform.
                 package::metadata::ValidMetadata::try_from(metadata.to_published(&platform)?)?;
                 // Record the platform dependency pins were resolved against
-                // so `ocx package push`/`ocx package test` can bind to it
-                // instead of silently defaulting to the host platform.
+                // so `ocx package push`/`ocx package test` bind to it.
                 Some(metadata.with_platform(platform))
             }
             None => None,
@@ -148,36 +148,40 @@ impl PackageCreate {
         Ok(())
     }
 
-    /// Pick the platform to run publish-time validation against: the declared
-    /// `--platform`, or the host platform (falling back to `any`) when a
-    /// pre-pinned sidecar was supplied without one.
-    fn validation_platform(&self) -> oci::Platform {
-        self.platform
-            .clone()
-            .unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
+    /// The platform `--metadata` is compiled for: dependency pins resolve
+    /// against it, the binaries scan applies its executable convention, and
+    /// it is recorded in the sidecar for `ocx package push` / `ocx package
+    /// test` to read back. `None` when no sidecar was supplied — `--platform`
+    /// then only shapes the inferred output filename.
+    ///
+    /// There is no default. The host platform describes what the build
+    /// machine *supplies*; the recorded platform describes what the packaged
+    /// artifact *demands* — a static musl binary cross-built on a glibc host
+    /// demands neither the host's libc nor its architecture. Guessing one
+    /// from the other corrupts every downstream consumer of the recorded
+    /// value, so an absent `--platform` is a usage error rather than a
+    /// silent host default.
+    fn declared_platform(&self) -> anyhow::Result<Option<oci::Platform>> {
+        match (&self.metadata, &self.platform) {
+            (None, _) => Ok(None),
+            (Some(_), Some(platform)) => Ok(Some(platform.clone())),
+            (Some(_), None) => Err(ocx_lib::cli::UsageError::new(
+                "--platform (-p) is required with --metadata (-m); the sidecar records the platform \
+                 the packaged content runs on, which cannot be inferred from the build host",
+            )
+            .into()),
+        }
     }
 
-    /// Resolve unpinned dependencies against the selected index.
-    ///
-    /// - `--platform` given: resolve every unpinned dependency against it
-    ///   (already-pinned dependencies pass through untouched, no network).
-    /// - `--platform` omitted: metadata must already be fully pinned (usage
-    ///   error otherwise); passes through for canonical rewrite only.
+    /// Resolve unpinned dependencies against the selected index for
+    /// `platform`. Already-pinned dependencies pass through untouched (no
+    /// network).
     async fn resolve_dependency_pins(
         &self,
         metadata: AuthoringMetadata,
         context: &crate::app::Context,
+        platform: &oci::Platform,
     ) -> anyhow::Result<AuthoringMetadata> {
-        let Some(platform) = &self.platform else {
-            if !metadata.is_fully_pinned() {
-                return Err(ocx_lib::cli::UsageError::new(
-                    "metadata declares dependencies that are not pinned to a manifest digest; \
-                     pass --platform (-p) so ocx package create can resolve them",
-                )
-                .into());
-            }
-            return Ok(metadata);
-        };
         let _spin = context.progress().spinner("Resolving dependency pins");
         Ok(package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
     }
@@ -258,5 +262,69 @@ mod tests {
     fn auto_mode_without_metadata_is_accepted() {
         let create = PackageCreate::try_parse_from(["package-create", "."]).expect("parse");
         assert!(create.validate_bin_scan().is_ok());
+    }
+
+    /// `--metadata` without `--platform` must not fall back to the host
+    /// platform. The host describes what the build machine supplies; the
+    /// sidecar field describes what the artifact demands. A musl bundle
+    /// cross-built on a glibc host would otherwise be recorded as demanding
+    /// `libc.glibc`, and `ocx package push` / `ocx package test` bind to that
+    /// recorded value — so the corruption is unrecoverable downstream.
+    #[test]
+    fn metadata_without_platform_is_rejected_instead_of_defaulting_to_the_host() {
+        let create = PackageCreate::try_parse_from(["package-create", "-m", "metadata.json", "."]).expect("parse");
+        let error = create
+            .declared_platform()
+            .expect_err("--metadata without --platform must not resolve to the host platform");
+        let message = error.to_string();
+        assert!(
+            message.contains("--platform") && message.contains("--metadata"),
+            "usage error must name both flags: {message}"
+        );
+    }
+
+    /// The rejection above is a usage error (64), not a data error — the
+    /// invocation is malformed, nothing was read or parsed yet. Classified
+    /// through the same path `main` uses.
+    #[test]
+    fn metadata_without_platform_exits_with_usage_error() {
+        let create = PackageCreate::try_parse_from(["package-create", "-m", "metadata.json", "."]).expect("parse");
+        let error = create.declared_platform().expect_err("rejected above");
+        assert_eq!(
+            crate::app::classify_error(error.as_ref()),
+            ocx_lib::cli::ExitCode::UsageError
+        );
+    }
+
+    /// Control for the two tests above: with `--platform` given, the declared
+    /// value is what gets recorded — verbatim, including a libc feature the
+    /// build host does not have.
+    #[test]
+    fn declared_platform_is_the_flag_value_verbatim() {
+        let create = PackageCreate::try_parse_from([
+            "package-create",
+            "-m",
+            "metadata.json",
+            "-p",
+            "linux/amd64+libc.musl",
+            ".",
+        ])
+        .expect("parse");
+        let platform = create.declared_platform().expect("explicit platform is accepted");
+        assert_eq!(
+            platform.map(|platform| platform.to_string()),
+            Some("linux/amd64+libc.musl".to_string())
+        );
+    }
+
+    /// No sidecar, no recorded platform: `--platform` stays optional there,
+    /// where it only shapes the inferred output filename.
+    #[test]
+    fn no_metadata_needs_no_platform() {
+        let create = PackageCreate::try_parse_from(["package-create", "."]).expect("parse");
+        assert!(
+            create.declared_platform().expect("no sidecar is ok").is_none(),
+            "without --metadata there is nothing to record a platform on"
+        );
     }
 }

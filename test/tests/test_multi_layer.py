@@ -56,7 +56,10 @@ def _bundle_layer(
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
-    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(layer_dir))
+    ocx.plain(
+        "package", "create", "-m", str(metadata_path), "-o", str(bundle),
+        "-p", current_platform(), str(layer_dir),
+    )
     return bundle
 
 

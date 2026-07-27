@@ -2121,8 +2121,14 @@ When `--metadata` is given, `create` is also the compiler for [dependency pins][
 it validates the sidecar and always rewrites it, in canonical form, next to the output bundle — never a
 byte copy of the input file.
 
-- `--platform` omitted: every dependency in the sidecar must already carry a manifest digest (else
-  usage error, exit 64, hinting `--platform`); no network access.
+`--platform` is **required** whenever `--metadata` is given (else usage error, exit 64). It declares the
+platform the packaged content runs on, and `create` records it in the sidecar for
+[`ocx package push`][cmd-package-push] and [`ocx package test`][cmd-package-test] to read back. That
+answer cannot come from the build host: the host describes what the build machine *supplies*, while the
+sidecar states what the artifact *demands* — a static musl binary cross-built on a glibc host demands
+neither the host's libc nor its architecture. Every dependency is pinned for the platform you name, and
+whatever you name is the label the package is published under.
+
 - `--platform <PLATFORM>` (a concrete platform): each dependency without a digest is resolved
   against the selected index to the one manifest [compatible][reference-platforms-compatibility]
   with `<PLATFORM>`. Zero compatible candidates fails with exit 65 (lists what is available); more
@@ -2194,10 +2200,10 @@ ocx package create [OPTIONS] <PATH>
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
-- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content). Used to infer the output filename, and required whenever `--metadata` declares a dependency without a digest (see above).
+- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename.
 - `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
-- `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Dependencies without a digest are pinned to platform manifest digests (requires `--platform`, see above); the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
+- `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Requires `--platform` (see above); dependencies without a digest are pinned to that platform's manifest digests, and the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
 - `--bin-scan`, `--no-bin-scan`: Scan the content tree for executables the package puts on `PATH` to fill or verify the [`binaries`][reference-binaries] metadata claim — see the mode table above. Paired, last-wins flags; neither given (the default) fills an absent claim and passes a declared one through untouched.

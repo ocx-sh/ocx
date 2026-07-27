@@ -65,7 +65,9 @@ def test_cross_repo_dedup_preserves_query_repository(
         )
     )
     bundle = tmp_path / "bundle.tar.xz"
-    ocx.plain("package", "create", "-m", str(metadata), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(metadata), "-o", str(bundle), "-p", plat, str(pkg_dir)
+    )
 
     def push(repo: str) -> None:
         fq = f"{ocx.registry}/{repo}:{tag}"

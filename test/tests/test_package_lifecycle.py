@@ -46,7 +46,9 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
     # --- Create bundle ---
     bundle = tmp_path / "bundle.tar.xz"
-    ocx.plain("package", "create", "-m", str(metadata), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(metadata), "-o", str(bundle), "-p", plat, str(pkg_dir)
+    )
     assert bundle.exists()
 
     # --- Push ---
