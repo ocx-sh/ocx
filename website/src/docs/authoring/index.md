@@ -49,7 +49,7 @@ The sidecar declares one [public env entry][authoring-env-visibility] that prepe
 Bundle `build/` into a deterministic archive, then push it to any registry you can authenticate against. The push attaches `metadata.json` as the manifest config blob — there is no copy inside the archive:
 
 ```sh
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
 ocx package push -n -p linux/amd64 -m metadata.json \
   ghcr.io/me/mytool:1.0.0 mytool-1.0.0.tar.xz
 ```

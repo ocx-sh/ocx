@@ -62,7 +62,7 @@ class MultiLayer(Scenario):
             bundle = self.tmp_path / f"{layer_dir.name}.tar.gz"
             self.ocx.plain(
                 "package", "create",
-                "-m", str(metadata_path), "-o", str(bundle), str(layer_dir),
+                "-m", str(metadata_path), "-o", str(bundle), "-p", plat, str(layer_dir),
             )
             bundles.append(bundle)
 

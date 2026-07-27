@@ -158,7 +158,7 @@ push_patch_pkg() {
     (
         ocx_cd "${bundle_dir}"
         mkdir -p out
-        ocx package create --force -m metadata.json -o "${bundle}" build
+        ocx package create --force -p "${PLATFORM}" -m metadata.json -o "${bundle}" build
         ocx package push -n -c -p "${PLATFORM}" -m metadata.json \
             -i "$(id_of "patches/${subpath##*/}")" "${bundle}"
     )

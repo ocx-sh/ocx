@@ -106,7 +106,7 @@ Substitute `$NS` with `dojo` (the default namespace).
 
 ```sh
 cd test/manual/packages/single-layer-hello
-ocx package create build -m metadata.json -o /tmp/hello-1.0.0.tar.xz
+ocx package create build -p linux/amd64 -m metadata.json -o /tmp/hello-1.0.0.tar.xz
 ocx package test -p linux/amd64 -m metadata.json \
     -i $OCX_DEFAULT_REGISTRY/dojo/single-layer-hello:1.0.0 \
     /tmp/hello-1.0.0.tar.xz -- hello
@@ -166,9 +166,9 @@ Look for the absence of `SOMEVAR=present` in the printed env.
 ```sh
 # Bundle each layer.
 m=test/manual/packages/multi-layer-app/metadata.json
-ocx package create -m $m -o /tmp/base.tar.gz test/manual/packages/multi-layer-app/layer-base
-ocx package create -m $m -o /tmp/libs.tar.gz test/manual/packages/multi-layer-app/layer-libs
-ocx package create -m $m -o /tmp/app.tar.gz  test/manual/packages/multi-layer-app/layer-app
+ocx package create -p linux/amd64 -m $m -o /tmp/base.tar.gz test/manual/packages/multi-layer-app/layer-base
+ocx package create -p linux/amd64 -m $m -o /tmp/libs.tar.gz test/manual/packages/multi-layer-app/layer-libs
+ocx package create -p linux/amd64 -m $m -o /tmp/app.tar.gz  test/manual/packages/multi-layer-app/layer-app
 
 # Push v1 with three file layers.
 fq=$OCX_DEFAULT_REGISTRY/dojo/multi-layer-app:1.0.0

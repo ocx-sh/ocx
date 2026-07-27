@@ -6,5 +6,5 @@
 set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
 # endregion cast

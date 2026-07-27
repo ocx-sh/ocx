@@ -70,9 +70,14 @@ def _create(
     )
 
 
+def _sidecar_path(out: Path) -> Path:
+    """Where `create` writes the rewritten sidecar for output bundle `out`."""
+    return out.parent / (out.name.replace(".tar.xz", "") + "-metadata.json")
+
+
 def _sidecar(out: Path) -> dict:
     """Read the rewritten metadata sidecar next to the output bundle."""
-    sidecar = out.parent / (out.name.replace(".tar.xz", "") + "-metadata.json")
+    sidecar = _sidecar_path(out)
     assert sidecar.exists(), f"expected rewritten sidecar at {sidecar}"
     return json.loads(sidecar.read_text())
 
@@ -225,41 +230,34 @@ def test_create_empty_intersection_fails(ocx: OcxRunner, unique_repo: str, tmp_p
 # ---------------------------------------------------------------------------
 
 
-def test_create_unpinned_without_platform_is_usage_error(
+def test_create_metadata_without_platform_is_usage_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
+    """``--metadata`` without ``--platform`` is rejected even when every
+    dependency is already pinned — the sidecar records the platform the
+    packaged content runs on, and the build host cannot supply that answer.
+    The pinned sidecar is the discriminating case: it is the invocation that
+    would otherwise silently record the host's own platform (libc included)
+    as the artifact's target."""
     leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
-    pkg_dir, metadata = _write_app(tmp_path, "noplat", [{"identifier": leaf.fq}])
+    manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
+    pkg_dir, metadata = _write_app(
+        tmp_path, "noplat", [{"identifier": f"{leaf.fq}@{manifest_digest}"}]
+    )
     out = tmp_path / "app-noplat.tar.xz"
 
     result = _create(ocx, pkg_dir, metadata, out, check=False)
     assert result.returncode == EXIT_USAGE, result.stderr
     assert "--platform" in result.stderr, "error must hint at --platform"
-
-
-def test_create_prepinned_offline_succeeds(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """Fully pinned metadata needs no network — `--offline` create passes and
-    rewrites the sidecar canonically."""
-    leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
-    manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
-    pkg_dir, metadata = _write_app(
-        tmp_path, "offline", [{"identifier": f"{leaf.fq}@{manifest_digest}"}]
-    )
-    out = tmp_path / "app-offline.tar.xz"
-
-    _create(ocx, pkg_dir, metadata, out, root_flags=("--offline",))
-
-    dep = _sidecar(out)["dependencies"][0]
-    assert dep["identifier"].endswith(f"@{manifest_digest}")
+    assert not _sidecar_path(out).exists(), "a rejected create must write no sidecar"
 
 
 def test_create_concrete_platform_passes_through_pinned_dep(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """A dep pre-pinned to its manifest digest needs no index consultation
-    when ``--platform`` names a CONCRETE platform — not just when
-    ``--platform`` is omitted entirely (see the sibling offline test above).
-    The identical digest survives the canonical sidecar rewrite untouched."""
+    """A dep pre-pinned to its manifest digest needs no index consultation:
+    an ``--offline`` create against a concrete ``--platform`` passes, and the
+    identical digest survives the canonical sidecar rewrite untouched."""
     leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
     manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
     pkg_dir, metadata = _write_app(

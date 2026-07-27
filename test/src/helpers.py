@@ -333,6 +333,8 @@ def make_package(
             str(metadata_path),
             "-o",
             str(bundle_ln),
+            "-p",
+            plat,
             str(layer_dir),
         )
         all_bundles.append(bundle_ln)
