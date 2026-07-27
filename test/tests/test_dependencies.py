@@ -1466,6 +1466,7 @@ def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     resolves via the local index.
     """
     find_result = ocx.json("package", "which", repo)
+    assert len(find_result) == 1, f"one identifier in, one entry out: {find_result}"
     key = next(iter(find_result))
     package_root = Path(find_result[key]).resolve()
     assert (package_root / "content").is_dir(), (
@@ -1559,6 +1560,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
 
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
     b_find = ocx.json("package", "which", pkg_b.short)
+    assert len(b_find) == 1, f"one identifier in, one entry out: {b_find}"
     b_pkg_root = str(Path(next(iter(b_find.values()))))
 
     assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
