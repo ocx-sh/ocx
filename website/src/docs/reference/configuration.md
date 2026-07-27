@@ -129,7 +129,7 @@ Pinning the namespace at a [`[mirrors]`](#keys-mirrors) **registry** endpoint is
 
 Two limits keep the switch from firing where it was not meant to:
 
-- **Only a config file you control** — the compiled defaults, the discovered chain, and [`--config`][arg-config]/[`OCX_CONFIG`][env-config]. A `[mirrors]` entry arriving through the [`[managed]`](#keys-managed) tier redirects traffic like any other, but cannot suppress the index: a remotely-published payload must not be able to drop a namespace off the verified resolution path and its yank gate.
+- **Only a config file you control** — the compiled defaults, the discovered chain, and [`--config`][arg-config]/[`OCX_CONFIG`][env-config]. A `[mirrors]` entry arriving through the [`[managed]`](#keys-managed) tier or through [`OCX_MIRRORS`][env-mirrors] redirects traffic like any other, but cannot suppress the index: neither a remotely-published payload nor an inherited environment variable may drop a namespace off the verified resolution path and its yank gate.
 - **Only the `registry` role.** The `index` role is applied keyed on the *index endpoint's* own host, so `"ocx.sh" = { index = … }` cannot redirect anything for the `ocx.sh` namespace and does not suppress. Redirecting the index endpoint itself keeps the index path, pointed at your host:
 
 ```toml
