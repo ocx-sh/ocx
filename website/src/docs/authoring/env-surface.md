@@ -13,7 +13,7 @@ Pick `path` for anything that is a directory list (`PATH`, `MANPATH`, `LD_LIBRAR
 
 ## Templates and Dependency Paths {#templates}
 
-Two placeholders are available inside any env `value` template, resolved at exec time when `ocx exec` or `ocx env` composes the package's environment:
+Two placeholders are available inside any env `value` template, resolved at exec time when `ocx package exec` or `ocx env` composes the package's environment:
 
 - `${installPath}` resolves to the absolute path of the package's own `content/` directory.
 - `${deps.NAME.installPath}` resolves to a declared dependency's `content/` directory, where `NAME` is the last path segment of the dependency's OCI repository or its explicit `name` field.
@@ -34,7 +34,7 @@ OCX validates every `${deps.*}` reference both locally during `ocx package creat
 
 Each `env` entry carries a `visibility` field that controls which surface it contributes to. The model is two surfaces, not a single visibility flag:
 
-- **Interface surface** — what consumers see when they run [`ocx exec mypkg -- <cmd>`][cmd-exec] or compose `mypkg` as a dependency. PATH entries marked `public`, [`JAVA_HOME`][java], every variable a downstream caller depends on lives here.
+- **Interface surface** — what consumers see when they run [`ocx package exec mypkg -- <cmd>`][cmd-exec] or compose `mypkg` as a dependency. PATH entries marked `public`, [`JAVA_HOME`][java], every variable a downstream caller depends on lives here.
 - **Private surface** — what the package's own [generated launchers][in-depth-entry-points] see at exec time. Internal flags, lock-file paths, and any variable a consumer should never observe live here.
 
 Three values map onto the two surfaces:
@@ -53,7 +53,7 @@ For a typical bare-binary package ([`cmake`][cmake], [`node`][nodejs], [`uv`][uv
 
 ## Last-Wins for Constants {#last-wins}
 
-When two packages on the same composition both declare the same constant variable (for example, two [Java][java] distributions each declaring `JAVA_HOME`), exactly one wins in `ocx exec` / `ocx env`: the last one in topological dependency order. The first declaration is replaced silently in the main composition path. The full rule, including how transitive resolution preserves order, lives in [environments in depth][in-depth-environments-last-wins]. (The `ocx ci export` command runs an extra `ConstantTracker` pass that does emit a warning when truly unrelated TC entries collide.)
+When two packages on the same composition both declare the same constant variable (for example, two [Java][java] distributions each declaring `JAVA_HOME`), exactly one wins in `ocx package exec` / `ocx env`: the last one in topological dependency order. The first declaration is replaced silently in the main composition path. The full rule, including how transitive resolution preserves order, lives in [environments in depth][in-depth-environments-last-wins]. (The `ocx ci export` command runs an extra `ConstantTracker` pass that does emit a warning when truly unrelated TC entries collide.)
 
 Treat conflicting constants as a publisher signal. If your package declares `JAVA_HOME` and a sibling package already does too, the deployment is asking two tools to share one slot — the consumer needs to pick one to depend on and seal the other's env, not both publishers fighting over the same key.
 
@@ -95,7 +95,7 @@ After (explicit `"visibility": "public"` on every var that consumers should see)
 }
 ```
 
-Vars without a `visibility` field now default to `"private"` — they reach the package's own launchers but not consumers. If your package has no declared entrypoints and relies entirely on consumers invoking `ocx exec PKG -- cmd`, every var a consumer needs must be explicitly `"public"`.
+Vars without a `visibility` field now default to `"private"` — they reach the package's own launchers but not consumers. If your package has no declared entrypoints and relies entirely on consumers invoking `ocx package exec PKG -- cmd`, every var a consumer needs must be explicitly `"public"`.
 
 ### Decision guide {#migrating-decision}
 

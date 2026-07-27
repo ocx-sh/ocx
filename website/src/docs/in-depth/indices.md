@@ -8,7 +8,7 @@ OCI tags are mutable. The [OCI Distribution Specification][oci-dist-tag] defines
 OCX solves this with a local index: a directory holding a local copy of registry resolution data that only changes when explicitly refreshed. This page explains what an index actually is — one wire format, copied or generated in different places — how the local copy resolves without a network round trip, and how OCX resolves packages published through the [`index.ocx.sh`][index-ocx-sh] public index. The user-facing surface — when to refresh, offline mode, `--remote` — lives in the [Indices section of the user guide][user-indices].
 
 :::info An index resolves versions, not `ocx.lock`
-An index answers one question: which versions of a package exist, and for a chosen version, which platform-manifest digest and physical registry location it points to. It never appears in `ocx.lock` resolution — a lock already records the exact platform-manifest digest it pinned (see [Locking][in-depth-versioning-locking]), so resolving a lock reads that digest straight off disk and fetches it, without consulting any index. What an index buys is free *version choice*: something that names a tag rather than a digest — a devcontainer feature parameter, a Gradle property, a bare `ocx install cmake:3.28` — still needs to resolve deterministically and offline, which is exactly the gap a [shipped index copy](#bundled) closes.
+An index answers one question: which versions of a package exist, and for a chosen version, which platform-manifest digest and physical registry location it points to. It never appears in `ocx.lock` resolution — a lock already records the exact platform-manifest digest it pinned (see [Locking][in-depth-versioning-locking]), so resolving a lock reads that digest straight off disk and fetches it, without consulting any index. What an index buys is free *version choice*: something that names a tag rather than a digest — a devcontainer feature parameter, a Gradle property, a bare `ocx package install cmake:3.28` — still needs to resolve deterministically and offline, which is exactly the gap a [shipped index copy](#bundled) closes.
 :::
 
 ## One format, many copies {#format}
@@ -273,7 +273,7 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 | Command | Refreshes |
 |---|---|
 | [`ocx index update`][cmd-index-update] | The local index at [`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`][arg-index] |
-| [`ocx self update`][cmd-self-update] | The managed ocx install itself |
+| [`ocx self update`][cmd-self-update] | The managed ocx installation itself |
 | [`ocx update`][cmd-update] | A project's `ocx.lock` |
 
 `ocx update` never writes to the local index — `ocx.lock` is its only canonical record. Re-resolving a project's pinned tools does not change what `cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.

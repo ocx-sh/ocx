@@ -179,7 +179,7 @@ This variable is **resolution-affecting**: it is forwarded to every subprocess `
 
 `OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
 
-**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx run` and `ocx exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
+**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx run` and `ocx package exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
 
 ::: warning
 This variable is mostly intended for testing.
@@ -568,7 +568,7 @@ To disable the check entirely rather than adjusting its frequency, use [`OCX_NO_
 
 ### Script env access (`ocx package test --script`) {#script-env-access}
 
-`ocx.env(name)` in a [Starlark test script][authoring-testing-scripted] reads one variable from the **composed package env** — the same env surface that `ocx exec` exposes. It does not read the host process env.
+`ocx.env(name)` in a [Starlark test script][authoring-testing-scripted] reads one variable from the **composed package env** — the same env surface that `ocx package exec` exposes. It does not read the host process env.
 
 No new `OCX_*` variable was introduced by the `--script` feature. The resolution-affecting variables listed above (`OCX_BINARY_PIN`, `OCX_HOME`, `OCX_CONFIG`, `OCX_PROJECT`, `OCX_INDEX`, and others) remain inaccessible to script `ocx.env()` calls and cannot be overridden via the `ocx.run(env=...)` overlay kwarg — those keys are reserved and any attempt to set them results in a `Failed` outcome.
 
