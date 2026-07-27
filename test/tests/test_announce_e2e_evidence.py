@@ -12,12 +12,16 @@ import json
 from pathlib import Path
 
 import pytest
+
 from announce_e2e.evidence import (
+    _TABLE_HEADER,
     MISSING,
     REDACTION,
+    SCENARIOS,
     EvidenceRecord,
     LaneClassification,
     Redacted,
+    _placeholder_row,
     assert_pr_union,
     classify_lane,
     classify_report,
@@ -357,11 +361,21 @@ def test_an_unredacted_run_must_be_stated_not_defaulted() -> None:
         main(["redact"])
 
 
-def test_render_of_an_empty_set_matches_the_committed_results_template() -> None:
-    """The committed artifact's table is exactly what an empty render produces.
+def test_the_committed_results_table_is_one_the_renderer_could_have_produced() -> None:
+    """The committed artifact's table stays renderer-shaped once it is filled.
 
-    Track E and Track F read that file; if the renderer and the template drift,
-    a filled-in run stops being comparable to the skeleton it replaced.
+    Track E and Track F read that file; if the renderer and the artifact drift,
+    a filled-in run stops being comparable to the skeleton it replaced. Real
+    records make byte-equality with `render_evidence_markdown([])` impossible,
+    so what is pinned is what the renderer decides regardless of run data: the
+    header, every scenario present exactly once, seven cells per row, and the
+    rule that an uncaptured scenario is a whole MISSING row rather than a
+    half-filled one.
+
+    Row *order* is deliberately not pinned. The renderer emits captured records
+    in the order they were read and only appends placeholders in `SCENARIOS`
+    order, so a filled table is ordered by record filename — pinning that would
+    fail the moment a scenario is recaptured under a new run id.
     """
     artifact = (
         Path(__file__).parents[2] / ".claude" / "artifacts" / "e2e_results_announce.md"
@@ -369,4 +383,22 @@ def test_render_of_an_empty_set_matches_the_committed_results_template() -> None
     body = artifact.read_text().split("<!-- BEGIN evidence table")[1]
     table = body.split("-->\n", 1)[1].split("<!-- END evidence table -->")[0]
 
-    assert table == render_evidence_markdown([])
+    assert table.startswith(_TABLE_HEADER)
+    rows = table[len(_TABLE_HEADER) :].splitlines(keepends=True)
+    scenarios = [_cells(row)[0] for row in rows]
+    assert sorted(scenarios) == sorted(SCENARIOS), (
+        "every scenario appears exactly once, and nothing else does"
+    )
+
+    for scenario, row in zip(scenarios, rows, strict=True):
+        cells = _cells(row)
+        assert len(cells) == 7, f"{scenario} row has {len(cells)} cells, not 7"
+        # A captured row may still carry MISSING in a field the run had no
+        # value for (idempotency records no pull request), so only the status
+        # cell distinguishes a placeholder — and a placeholder is all-MISSING.
+        if cells[1] == MISSING:
+            assert row == _placeholder_row(scenario)
+
+
+def _cells(row: str) -> list[str]:
+    return row.rstrip("\n").removeprefix("| ").removesuffix(" |").split(" | ")
