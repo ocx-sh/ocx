@@ -118,6 +118,7 @@ def test_install_foreign_platform_writes_no_candidate(
     ref = f"{ocx.registry}/{unique_repo}:3.28"
 
     installs = ocx.json("package", "install", f"--platform={foreign}", ref)
+    assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
     entry = next(iter(installs.values()))
     assert entry["path"] is None, f"foreign install must report no host symlink: {installs}"
 
