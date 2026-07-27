@@ -133,6 +133,22 @@ gh pr list --repo ocx-sh/index --state open \
 
 Empty output, or nothing naming your package, means the run measures itself.
 
+**The spent branch — reset it before every run.** The index squash-merges, so the
+announce branch's own commits never become ancestors of `main`. The next
+announce builds on that spent branch and its pull request opens `CONFLICTING`,
+which auto-merge cannot act on. `ocx` fixes this on its side (rebuild from the
+base when the branch is spent), but the publisher's CI resolves a dev-channel
+`ocx` and only picks the fix up once it is deployed. Until then, point the
+branch back at the index's `main` before each run — **reset it, never delete
+it**: a dev-channel `ocx` that predates the fix cannot create the branch from
+scratch and exits with `forge returned HTTP status 404 for .../git/refs`.
+
+```sh
+gh api -X PATCH "repos/$INDEX_FORK/git/refs/heads/$ANNOUNCE_BRANCH" \
+    -f sha="$(gh api "repos/$GH_REPO_INDEX/git/ref/heads/main" --jq .object.sha)" \
+    -F force=true --jq .object.sha
+```
+
 ## Sequenced Scenario
 
 `./scripts/run_sequence.sh <tag>` — design-spec §7's exit gate, in order.
