@@ -656,6 +656,7 @@ def test_clean_keeps_global_lock_pinned_package(
     )
     install_data = _json.loads(install_info.stdout)
     # The JSON is keyed by the package short name; value has a "path" field.
+    assert len(install_data) == 1, f"one identifier in, one entry out: {install_data}"
     short_key = next(iter(install_data))
     content_path = Path(install_data[short_key]["path"]).resolve()
     assert content_path.is_dir(), (
