@@ -30,7 +30,7 @@ MANUAL_ROOT="${REPO_ROOT}/test/manual"
 
 # Run from test/manual/packages/<repo>/ for each package so echoed `ocx`
 # calls look like the real-world workflow: `cd packages/foo`, then
-# `ocx package create -m metadata.json -o out/foo-1.0.0.tar.xz build`.
+# `ocx package create -p "$PLATFORM" -m metadata.json -o out/foo-1.0.0.tar.xz build`.
 # `out/` is gitignored.
 cd "$MANUAL_ROOT"
 PKG_ROOT="packages"

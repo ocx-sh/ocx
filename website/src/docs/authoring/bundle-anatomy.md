@@ -20,7 +20,7 @@ Archive creation is sensitive to inputs that vary between runs. [`ocx package cr
 That matters because [layer reuse][in-depth-storage-layers] hinges on digest equality: bundle the same content twice and you get two layers in the registry, two downloads at install time, and zero dedup. The fix is not byte-reproducibility — it is to capture the digest after the first push and reference it explicitly on every subsequent push:
 
 ```sh
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
 ocx package push -n -p linux/amd64 -m metadata.json mytool:1.0.0 mytool-1.0.0.tar.xz
 
 # Record the layer digest. The on-disk archive is the same blob the registry stores,
@@ -50,7 +50,7 @@ Compression level (`fast`, `default`, `best`) trades publish-time CPU for archiv
 [`ocx package create`][cmd-package-create] follows a sidecar convention so the metadata travels with the archive. Pass `-m metadata.json` and the command copies that file to a sibling next to the output archive, named after the archive itself:
 
 ```sh
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
+ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
 ```
 
 Produces:

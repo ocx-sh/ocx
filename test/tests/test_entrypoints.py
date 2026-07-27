@@ -18,7 +18,7 @@ import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
-from src.runner import OcxRunner, PackageInfo
+from src.runner import OcxRunner, PackageInfo, current_platform
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,8 @@ def test_invalid_entrypoint_name_rejected_at_validation(
 
     bundle = tmp_path / "bundle-invalid-ep.tar.xz"
     result = ocx.run(
-        "package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir),
+        "package", "create", "-m", str(metadata_path), "-o", str(bundle),
+        "-p", current_platform(), str(pkg_dir),
         check=False,
     )
     assert result.returncode != 0, (
