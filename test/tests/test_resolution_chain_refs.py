@@ -224,16 +224,22 @@ def test_clean_retains_reachable_blobs(
     blobs_after = _count_blobs(_blobs_dir(ocx))
     # All blobs that are reachable via refs/blobs/ must survive.
     refs_blobs = _refs_blobs_dir(content)
-    if refs_blobs.is_dir():
-        for ref_link in refs_blobs.iterdir():
-            if ref_link.is_symlink():
-                target = Path(os.readlink(ref_link))
-                # Resolve relative paths relative to the symlink directory.
-                if not target.is_absolute():
-                    target = (ref_link.parent / target).resolve()
-                assert target.exists(), (
-                    f"AC3: clean must not delete blob {target} reachable via {ref_link}"
-                )
+    # `if refs_blobs.is_dir()` guarded existence but not contents, so an empty
+    # refs dir made the AC3 loop below prove nothing. The blob counts above gave
+    # partial cover — which is why this ranked below the fully-vacuous cases —
+    # but the loop needs its own precondition to mean anything.
+    assert refs_blobs.is_dir(), f"AC3 precondition: {refs_blobs} must exist after install"
+    ref_links = list(refs_blobs.iterdir())
+    assert ref_links, f"AC3 precondition: {refs_blobs} must carry ref links after install"
+    for ref_link in ref_links:
+        if ref_link.is_symlink():
+            target = Path(os.readlink(ref_link))
+            # Resolve relative paths relative to the symlink directory.
+            if not target.is_absolute():
+                target = (ref_link.parent / target).resolve()
+            assert target.exists(), (
+                f"AC3: clean must not delete blob {target} reachable via {ref_link}"
+            )
 
 
 # ── Test 50 — AC4: clean collects orphaned chain after uninstall --purge ──

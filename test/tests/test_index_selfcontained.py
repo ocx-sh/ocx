@@ -629,7 +629,13 @@ def test_gc_retention_oci_derived_keeps_index_blob_index_resolved_adds_no_edge(
     ocx.plain("--index", str(index_dir), "package", "install", entry.logical_id)
 
     ocx_sh_blobs = Path(ocx.env["OCX_HOME"]) / "blobs" / registry_dir("ocx.sh")
-    for data_file in ocx_sh_blobs.rglob("data"):
+    fetched = list(ocx_sh_blobs.rglob("data"))
+    # The assertion below is negative, so an empty iteration passes without
+    # checking anything. Any drift in this path — the registry-dir slug, the
+    # blob layout, the install writing elsewhere — would silently make it
+    # vacuous, so pin that the install actually put blobs here.
+    assert fetched, f"precondition: the install must have fetched blobs under {ocx_sh_blobs}"
+    for data_file in fetched:
         try:
             media_type = json.loads(data_file.read_bytes()).get("mediaType", "")
         except (json.JSONDecodeError, UnicodeDecodeError):
