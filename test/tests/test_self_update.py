@@ -228,8 +228,24 @@ def _curate_local_index_to_v1(custom_index: Path) -> None:
     Diverges the local index from the registry (which still holds both tags) so
     a test can prove whether a code path consults the local index or the
     registry for tag discovery.
+
+    Selects the root document by *shape*, not by position. This used to take
+    ``next(custom_index.rglob("*.json"))`` — "the first JSON file under the
+    index home" — which is not a defined thing: the home also holds
+    ``c/index.json``, and directory iteration order is not a contract. It
+    picked a root by luck until the catalog gained its ``format_version``
+    envelope, then picked the catalog and died on ``KeyError: 'tags'``. The
+    exact-one assertion is the point: a missing root fails loudly here instead
+    of curating nothing and leaving the caller to conclude the local index was
+    consulted when it never was.
     """
-    idx_file = next(custom_index.rglob("*.json"))
+    roots = [
+        path
+        for path in sorted(custom_index.rglob("*.json"))
+        if "tags" in json.loads(path.read_text())
+    ]
+    assert len(roots) == 1, f"expected exactly one root document under {custom_index}, found {roots}"
+    idx_file = roots[0]
     data = json.loads(idx_file.read_text())
     data["tags"].pop("0.0.2", None)
     idx_file.write_text(json.dumps(data))
