@@ -95,6 +95,19 @@ impl PackageCreate {
                 package::metadata::ValidMetadata::try_from(metadata.to_published(&platform)?)?;
                 // Record the platform dependency pins were resolved against
                 // so `ocx package push`/`ocx package test` bind to it.
+                //
+                // This overwrites a `platform` already present in the input
+                // sidecar rather than asserting agreement with it, which is
+                // the opposite of what `push`/`test` do with a disagreeing
+                // `--platform` (`PlatformMismatch`, exit 65). Intended: the
+                // asymmetry is declare-vs-assert. `create` DECLARES the
+                // target — `--platform` is this invocation's statement of
+                // what the content runs on, and everything below it (pins,
+                // binaries scan, projection) is resolved for that value, so
+                // the field it writes is an output. `push`/`test` ASSERT
+                // against that output. Re-creating an existing sidecar for a
+                // different target is the ordinary cross-compile case, not
+                // an error to be caught here.
                 Some(metadata.with_platform(platform))
             }
             None => None,
