@@ -3295,7 +3295,11 @@ mod tests {
         // the on-disk root and the catalog straddled.
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert_with_etag(&catalog_url(), br#"{"go-task":"sha256:moved"}"#, "etag-jurisdiction");
+        transport.insert_with_etag(
+            &catalog_url(),
+            &catalog_body(r#"{"go-task":"sha256:moved"}"#),
+            "etag-jurisdiction",
+        );
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();
@@ -3344,7 +3348,7 @@ mod tests {
         seed_empty_index(&transport, "ns/pkg", "1.0");
         transport.insert_with_etag(
             &catalog_url(),
-            br#"{"ns/pkg":"sha256:moved","ns/skewed":"sha256:moved"}"#,
+            &catalog_body(r#"{"ns/pkg":"sha256:moved","ns/skewed":"sha256:moved"}"#),
             "etag-skew",
         );
         let source = make_source(transport.clone(), false);
@@ -3409,7 +3413,7 @@ mod tests {
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
         seed_empty_index(&transport, "ns/pkg", "1.0");
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:moved"}"#, "etag-ok");
+        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:moved"}"#), "etag-ok");
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();
