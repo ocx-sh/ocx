@@ -108,6 +108,17 @@ jobs:
           name: ocx-schema
           path: website/src/public/schemas/metadata/v1.json
           retention-days: 1
+      # `task schema:generate` above leaves the built binary behind. Ship it, so
+      # the acceptance job never compiles: it has no Rust cache, so building
+      # there is a cold full compile of ocx_lib that stalls the run with no
+      # failing test to blame (test_schema_generation.py skips when absent).
+      - name: Upload Schema Binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-schema-binary
+          path: target/release/ocx_schema
+          compression-level: 0
+          retention-days: 1
       - name: Publish Unit Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
@@ -148,6 +159,13 @@ jobs:
         with:
           name: ocx-schema
           path: website/src/public/schemas/metadata
+      - name: Download Schema Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-schema-binary
+          path: target/release
+      - name: Prepare Schema Binary
+        run: chmod +x target/release/ocx_schema
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
