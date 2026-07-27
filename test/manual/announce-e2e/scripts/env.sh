@@ -234,9 +234,15 @@ poll_check() {
 }
 
 _checks_settled() {
-    # grep exits 1 when no check is still PENDING — that is the success case.
+    # grep exits 1 when no check is still running — that is the success case.
+    #
+    # PENDING alone is not the whole unsettled set: gh reports a commit status
+    # as PENDING, but a check RUN carries its own status until it completes —
+    # QUEUED, IN_PROGRESS, WAITING, REQUESTED. Gating on PENDING only reads a
+    # queued Actions job as settled, and poll_check's all-green assertion then
+    # fails a pull request whose checks had simply not started yet.
     ! gh pr checks "$1" --repo "$GH_REPO_INDEX" --json state --jq '.[].state' |
-        grep -qx 'PENDING'
+        grep -qxE 'PENDING|QUEUED|IN_PROGRESS|WAITING|REQUESTED'
 }
 
 # The highest workflow-run id this repo+workflow+ref already carries, or 0.
