@@ -100,7 +100,7 @@ The result: the dependency surface is a strict subset of what a general-purpose 
 [oci-image-manifest]: https://github.com/opencontainers/image-spec/blob/main/manifest.md#image-manifest
 
 <!-- commands -->
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-env]: ../reference/command-line.md#env
 [cmd-clean]: ../reference/command-line.md#clean
 [cmd-package-create]: ../reference/command-line.md#package-create

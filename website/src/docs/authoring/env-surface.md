@@ -134,7 +134,7 @@ If your package declares [`entrypoints`][authoring-entry-points], consumers reac
 [in-depth-entry-points]: ../in-depth/entry-points.md
 
 <!-- commands -->
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-exec]: ../reference/command-line.md#package-exec
 
 <!-- authoring -->
 [authoring-entry-points]: ./entry-points.md
