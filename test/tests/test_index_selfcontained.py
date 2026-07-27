@@ -523,10 +523,10 @@ def test_catalog_entry_delete_self_heals_on_next_local_read(
     ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
 
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    catalog = json.loads(catalog_path.read_text())
+    catalog = static_index.read_catalog(catalog_path)
     assert repository in catalog, "precondition: the catalog must carry the package's entry"
     del catalog[repository]
-    catalog_path.write_text(json.dumps(catalog))
+    static_index.write_catalog(catalog_path.parent.parent, catalog)
 
     # A pure local read (tag listing — no fetch needed, everything is
     # already cached) must succeed without error and restore the deleted
@@ -535,7 +535,7 @@ def test_catalog_entry_delete_self_heals_on_next_local_read(
     assert result.returncode == 0
     assert "1.0.0" in result.stdout
 
-    restored = json.loads(catalog_path.read_text())
+    restored = static_index.read_catalog(catalog_path)
     assert restored.get(repository) == entry.root_digest, (
         "the deleted catalog entry must be restored (re-derived) by the read path"
     )
@@ -711,7 +711,7 @@ def test_catalog_concurrent_updates_of_distinct_packages_both_entries_survive(
     assert proc_b.returncode == 0, f"concurrent update B failed: {err_b}"
 
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    catalog = json.loads(catalog_path.read_text())
+    catalog = static_index.read_catalog(catalog_path)
     assert repo_a in catalog, f"catalog must retain repo_a's entry after concurrent updates: {catalog}"
     assert repo_b in catalog, f"catalog must retain repo_b's entry after concurrent updates: {catalog}"
 
@@ -810,7 +810,7 @@ def test_catalog_sync_race_direct_update_vs_piggyback_resnapshot_same_package(
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
     root_a_bytes = root_a_path.read_bytes()
     expected_entry = f"sha256:{hashlib.sha256(root_a_bytes).hexdigest()}"
-    catalog = json.loads(catalog_path.read_text())
+    catalog = static_index.read_catalog(catalog_path)
     assert catalog.get(repo_a) == expected_entry, (
         "pkgA's catalog entry must match its actual on-disk root bytes after the race, "
         f"got {catalog.get(repo_a)!r}, expected {expected_entry!r}"
@@ -923,7 +923,7 @@ def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
         "the .etag sidecar must survive the concurrent reconcile-commits, non-empty"
     )
 
-    catalog = json.loads(catalog_path.read_text())
+    catalog = static_index.read_catalog(catalog_path)
 
     # pkgA and pkgB were materialized by the named `index update` calls: each
     # catalog entry must match its OWN on-disk root bytes (no torn write from the
@@ -1085,7 +1085,7 @@ def test_orphan_dispatch_object_without_root_self_heals_on_next_online_update(
 
     root_bytes = root_path.read_bytes()
     expected_entry = f"sha256:{hashlib.sha256(root_bytes).hexdigest()}"
-    catalog = json.loads(catalog_path.read_text())
+    catalog = static_index.read_catalog(catalog_path)
     assert catalog.get(repository) == expected_entry, "the catalog entry must match the newly-written root's own bytes"
 
     # The orphan is reused, not duplicated: exactly one dispatch object
@@ -1137,7 +1137,7 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
 
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
     root_path = index_dir / "ocx.sh" / "p" / f"{repository}.json"
-    stale_entry = json.loads(catalog_path.read_text())[repository]
+    stale_entry = static_index.read_catalog(catalog_path)[repository]
     assert stale_entry == entry.root_digest, "precondition: the catalog must match the initial root"
 
     # Hand-craft "root updated, catalog stale": overwrite the root document
@@ -1160,7 +1160,7 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
     new_root_bytes = root_path.read_bytes()
     expected_entry = f"sha256:{hashlib.sha256(new_root_bytes).hexdigest()}"
     assert expected_entry != stale_entry, "precondition: the new root must hash differently from the stale entry"
-    assert json.loads(catalog_path.read_text())[repository] == stale_entry, (
+    assert static_index.read_catalog(catalog_path)[repository] == stale_entry, (
         "precondition: hand-crafting the root alone must not touch the catalog"
     )
 
@@ -1179,7 +1179,7 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
     )
     assert "1.0.0" in read_result.stdout, "the read must reflect the actual on-disk root, not the stale catalog"
 
-    healed = json.loads(catalog_path.read_text())[repository]
+    healed = static_index.read_catalog(catalog_path)[repository]
     assert healed == expected_entry, (
         "a stale-but-present catalog entry must self-heal to match the on-disk root, "
         f"got {healed!r}, expected {expected_entry!r}"

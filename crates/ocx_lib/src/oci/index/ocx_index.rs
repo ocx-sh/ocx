@@ -62,13 +62,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::wire::{CatalogIndex, IndexRoot, RootTag};
+use super::wire::{CatalogDocument, CatalogIndex, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION};
 use super::{IndexOperation, index_impl};
 use crate::{Result, log, oci};
 
 // ── Frozen wire shapes (● contract) ──────────────────────────────────────────
 //
-// `IndexRoot` / `RootTag` / `CatalogIndex` live in `oci::index::wire`
+// `IndexRoot` / `RootTag` / `CatalogDocument` / `CatalogIndex` and the shared
+// `SUPPORTED_FORMAT_VERSION` pin live in `oci::index::wire`
 // (`adr_index_indirection.md` §Data Model) — the frozen grammar shared
 // verbatim by this remote client and the local store
 // (`crate::file_structure::IndexStore`), imported above. What a tag points at
@@ -78,7 +79,9 @@ use crate::{Result, log, oci};
 /// own declaration of the names it can express.
 ///
 /// Read once per source; an unknown `format_version` is a hard error
-/// (fail-closed, F1). Forward-compatible: unknown sibling fields are ignored.
+/// (fail-closed, F1). Forward-compatible: unknown sibling fields are ignored —
+/// the live site already serves a `name_segments` sibling this reader has no
+/// use for.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexFormatConfig {
     pub format_version: u64,
@@ -99,10 +102,6 @@ pub struct IndexFormatConfig {
     #[serde(default)]
     pub name_segments: Option<std::num::NonZeroU32>,
 }
-
-/// The `format_version` OCX understands. A served value other than this is
-/// rejected (`adr_index_indirection.md` F1).
-pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
 
 use crate::oci::client::MAX_INDEX_DOCUMENT_BYTES;
 
@@ -920,7 +919,8 @@ impl OcxIndex {
                 unchanged: false,
             }),
             IndexFetch::Found { bytes, etag } => {
-                let fetched: CatalogIndex = parse_document(&bytes, &url)?;
+                let document: CatalogDocument = parse_document(&bytes, &url)?;
+                let fetched = document.into_packages()?;
                 let moved = diff_moved(previous, &fetched);
                 Ok(CatalogSyncOutcome {
                     catalog: fetched,
@@ -1318,6 +1318,14 @@ mod tests {
     fn catalog_url() -> String {
         format!("{BASE}/c/index.json")
     }
+
+    /// A served `c/index.json` body: `packages_json` (the bare `<ns>/<pkg>` →
+    /// digest object) inside the format-version envelope the site serves.
+    /// Stubs must speak the real wire — a bare map here would let the client
+    /// drift back off the served shape unnoticed.
+    fn catalog_body(packages_json: &str) -> Vec<u8> {
+        format!(r#"{{"format_version":1,"packages":{packages_json}}}"#).into_bytes()
+    }
     fn tagged_id() -> oci::Identifier {
         oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_tag("3.28")
     }
@@ -1436,8 +1444,12 @@ mod tests {
             "artifactType is stored and never rendered — but it must survive the parse"
         );
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(br#"{"kitware/cmake":"sha256:root1","other/tool":"sha256:root2"}"#).unwrap();
+        let catalog: CatalogIndex = serde_json::from_slice::<CatalogDocument>(&catalog_body(
+            r#"{"kitware/cmake":"sha256:root1","other/tool":"sha256:root2"}"#,
+        ))
+        .unwrap()
+        .into_packages()
+        .unwrap();
         assert_eq!(catalog.get("kitware/cmake").map(String::as_str), Some("sha256:root1"));
     }
 
@@ -2018,7 +2030,7 @@ mod tests {
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         transport.insert_with_etag(
             &catalog_url(),
-            br#"{"kitware/cmake":"sha256:new","stable/tool":"sha256:same","fresh/pkg":"sha256:brand"}"#,
+            &catalog_body(r#"{"kitware/cmake":"sha256:new","stable/tool":"sha256:same","fresh/pkg":"sha256:brand"}"#),
             "etag-v2",
         );
         let source = make_source(transport, false);
@@ -2046,7 +2058,11 @@ mod tests {
     async fn sync_catalog_not_modified_is_unchanged() {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(&catalog_url(), br#"{"kitware/cmake":"sha256:x"}"#, "etag-1");
+        transport.insert_with_etag(
+            &catalog_url(),
+            &catalog_body(r#"{"kitware/cmake":"sha256:x"}"#),
+            "etag-1",
+        );
         let source = make_source(transport, false);
 
         let mut previous = CatalogIndex::new();
@@ -2168,11 +2184,11 @@ mod tests {
         // second, unchanged sync sees no diff. A mock literal that disagreed with
         // the served root would make every sync re-diff the root-derived local
         // entry against the stale claim and re-snapshot forever.
-        let catalog = format!(
+        let catalog = catalog_body(&format!(
             r#"{{"ns/pkg":"{}"}}"#,
             crate::file_structure::IndexStore::root_catalog_entry(root.as_bytes())
-        );
-        transport.insert(&catalog_url(), catalog.as_bytes());
+        ));
+        transport.insert(&catalog_url(), &catalog);
         transport.insert(
             &format!(
                 "{BASE}/p/ns/pkg/o/{}/{}.json",
@@ -2248,7 +2264,9 @@ mod tests {
         let transport = StubIndexTransport::new();
         transport.insert(
             &catalog_url(),
-            format!(r#"{{"moved/pkg":"{WRONG_CLAIM}","unmoved/pkg":"sha256:oldunmoved"}}"#).as_bytes(),
+            &catalog_body(&format!(
+                r#"{{"moved/pkg":"{WRONG_CLAIM}","unmoved/pkg":"sha256:oldunmoved"}}"#
+            )),
         );
         seed_empty_index(&transport, "moved/pkg", "1.0");
         let source = make_source(transport, false);
@@ -2747,7 +2765,7 @@ mod tests {
     async fn local_index_sync_catalog_persists_etag_and_honors_304() {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:root"}"#, "etag-1");
+        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:root"}"#), "etag-1");
         // Serve the moved package so the first sync can re-snapshot it.
         seed_empty_index(&transport, "ns/pkg", "1.0");
         let source = make_source(transport.clone(), false);
@@ -2794,7 +2812,7 @@ mod tests {
 
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(&catalog_url(), br#"{"ns/pkg":"sha256:root"}"#, WEAK_ETAG);
+        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:root"}"#), WEAK_ETAG);
         seed_empty_index(&transport, "ns/pkg", "1.0");
         let source = make_source(transport.clone(), false);
 

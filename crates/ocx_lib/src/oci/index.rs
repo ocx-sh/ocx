@@ -14,9 +14,9 @@ pub use oci_index::OciIndex;
 pub use oci_index::OciIndexConfig;
 pub use ocx_index::{
     CatalogSyncOutcome, DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig,
-    ReqwestIndexTransport, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
+    ReqwestIndexTransport, parse_physical_repository,
 };
-pub use wire::{CatalogIndex, IndexRoot, RootTag, YankMarker};
+pub use wire::{CatalogDocument, CatalogIndex, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION, YankMarker};
 pub use wire_writer::serialize_root;
 
 mod chained_index;
