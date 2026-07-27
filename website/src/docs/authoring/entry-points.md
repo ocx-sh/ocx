@@ -169,7 +169,7 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 [select-collision]: ../reference/command-line.md#select-entry-point-collision
 
 <!-- commands -->
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-exec-pathext]: ../reference/command-line.md#exec
 
 <!-- in-depth -->

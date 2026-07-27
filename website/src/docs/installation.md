@@ -290,7 +290,7 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
 [cmd-update]: ./reference/command-line.md#update
-[cmd-uninstall]: ./reference/command-line.md#uninstall
+[cmd-uninstall]: ./reference/command-line.md#package-uninstall
 [cmd-clean]: ./reference/command-line.md#clean
 [arg-remote]: ./reference/command-line.md#arg-remote
 

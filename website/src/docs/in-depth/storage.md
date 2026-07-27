@@ -240,14 +240,14 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 [oci-blob-mount]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#mounting-a-blob-from-another-repository
 
 <!-- commands -->
-[cmd-install]: ../reference/command-line.md#install
-[cmd-select]: ../reference/command-line.md#select
-[cmd-uninstall]: ../reference/command-line.md#uninstall
+[cmd-install]: ../reference/command-line.md#package-install
+[cmd-select]: ../reference/command-line.md#package-select
+[cmd-uninstall]: ../reference/command-line.md#package-uninstall
 [cmd-clean]: ../reference/command-line.md#clean
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-launcher-exec]: ../reference/command-line.md#exec
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-package-env]: ../reference/command-line.md#package-env
 
 <!-- environment -->

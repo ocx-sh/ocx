@@ -54,7 +54,7 @@ When set, the specified file layers at the top of the file-tier chain. If the fi
 To disable an ambient `OCX_CONFIG` for a single invocation without unsetting it (common when it is exported from a shell profile), set it to the empty string:
 
 ```sh
-OCX_CONFIG= ocx install cmake:3.28
+OCX_CONFIG= ocx package install cmake:3.28
 ```
 
 Empty is the escape hatch — `OCX_CONFIG` set to empty string is treated as unset, not as an error.

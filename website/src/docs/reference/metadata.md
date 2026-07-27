@@ -792,7 +792,7 @@ If you published packages before the visibility-default flip, their untagged env
 [in-depth-project-lock-format]: ../in-depth/project.md#lock-format
 
 <!-- commands -->
-[cmd-exec]: ./command-line.md#exec
+[cmd-exec]: ./command-line.md#package-exec
 [cmd-launcher-exec]: ./command-line.md#launcher-exec
 [cmd-env]: ./command-line.md#env
 [cmd-env-root]: ./command-line.md#env-root

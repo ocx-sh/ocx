@@ -373,3 +373,34 @@ def test_global_flag_section_links_strict_isolation(cli_ref_text: str) -> None:
         "`[env-composition-strict-isolation]` so users reach the "
         "strict-isolation spec (plan amendment C)"
     )
+
+
+# Root commands the taxonomy refactor moved under `ocx package`. The bare
+# forms reach plugin dispatch and exit 64, so a runnable snippet naming one
+# is a copy-paste trap. Prose and the `> **Moved to ...**` tombstones stay
+# legal by construction: this only reads shell fences.
+MOVED_ROOT_COMMANDS = ("install", "uninstall", "select", "deselect", "exec", "which", "deps")
+_MOVED_INVOCATION = re.compile(
+    r"(?<![\w.-])ocx\s+(?:" + "|".join(MOVED_ROOT_COMMANDS) + r")(?![\w-])"
+)
+_SHELL_FENCE = re.compile(r"^```(?:sh|shell|bash|console)\b")
+
+
+def test_no_moved_root_command_in_a_runnable_snippet() -> None:
+    """No shell snippet under ``website/src/docs`` invokes a root command
+    that now exits 64. Guards the whole docs tree, not just the CLI
+    reference — the same trap has surfaced in the user guide, the storage
+    page, and the environment reference."""
+    docs = PROJECT_ROOT / "website" / "src" / "docs"
+    offenders = []
+    for page in sorted(docs.rglob("*.md")):
+        in_shell = False
+        for lineno, line in enumerate(page.read_text().splitlines(), 1):
+            if line.startswith("```"):
+                in_shell = bool(_SHELL_FENCE.match(line)) if not in_shell else False
+            elif in_shell and _MOVED_INVOCATION.search(line):
+                offenders.append(f"{page.relative_to(PROJECT_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "shell snippets invoke a root command that exits 64 — use the "
+        "`ocx package <cmd>` form:\n  " + "\n  ".join(offenders)
+    )
