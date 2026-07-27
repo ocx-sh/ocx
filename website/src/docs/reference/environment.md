@@ -287,6 +287,14 @@ This variable is **resolution-affecting**: it is forwarded to every subprocess `
 
 `OCX_MIRRORS` overrides the [`[mirrors]`][config-mirrors] config key on a per-host, per-role basis. A role present in a host's `OCX_MIRRORS` entry replaces the config entry for that role only; roles and hosts absent from `OCX_MIRRORS` still come from `[mirrors]` in the config file.
 
+One thing it cannot do is revoke a verified index path. A `registry`-role entry
+in a config file the operator controls suppresses the compiled-in index for that
+namespace; the same entry arriving through `OCX_MIRRORS` redirects traffic but
+leaves the index in place. `OCX_MIRRORS='{"ocx.sh":"…"}'` therefore still
+resolves `ocx.sh/…` through [`index.ocx.sh`][in-depth-indices-public] — a forwarded
+environment variable must not be able to drop a namespace off the index's digest
+verification and yank gate.
+
 ::: warning Malformed values abort at startup
 A malformed `OCX_MIRRORS` value is a **hard startup error**. OCX aborts with an error message naming the problem:
 
