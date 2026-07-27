@@ -448,8 +448,9 @@ happened to carry moves to the single caller that fans out.
 - **`TargetPlatforms` is deleted** (`metadata/authoring/target_platforms.rs`). Published
   metadata never carried it (stripped at publish); authoring no longer needs a set.
 - **One platform per `ocx package create` / `ocx package push`.** `--platform` takes a single
-  value (default `current()`); `ocx package create --platform P` resolves each tag-only
-  dependency to the single leaf compatible with `P` and embeds nothing broader.
+  value, **required whenever `--metadata` is given and with no default** (see "No host default at
+  create" below); `ocx package create --platform P` resolves each tag-only dependency to the
+  single leaf compatible with `P` and embeds nothing broader.
 - **The `--platform any` coverage-intersection machinery is deleted** (`dependency_pinning.rs:
   155-297`): `resolve_for_any`, `derive_target_platforms`, `covered_platforms`,
   `candidate_universe`, `advertised_platform_keys`.
@@ -480,10 +481,41 @@ equals the pin (a flat `Manifest::Image`: its own digest must equal the pin). Er
 fetch cause) when the manifest cannot be fetched — an unverifiable claim is treated as untrusted,
 never silently accepted. Cost: one extra manifest GET per dependency, on `any`-target pushes only.
 
+### No host default at create
+
+`--platform` has **no default**. It is required whenever `--metadata` is given; an absent flag is a
+usage error (`UsageError`, exit 64) naming both flags. Without `--metadata` the flag stays optional —
+nothing is recorded, and it only shapes the inferred output filename.
+
+**Rationale.** `Platform::current()` answers a different question than the sidecar field asks. The
+host platform describes what the **build machine supplies** — including the libc family
+`HostCapabilities::detect` found on it. The recorded platform describes what the **packaged artifact
+demands**. Supply and demand are independent quantities: a static musl binary cross-built on a glibc
+runner demands neither the host's libc nor its architecture. `create` is the step that *records* the
+platform, so a guess there is not a local convenience — it is the origin of the value `push` and
+`test` bind to (below), the platform dependency pins are resolved for, and the executable convention
+`bin_scan` scans under. Verified on a glibc host: `create -m metadata.json` with no `--platform` wrote
+`"platform": "linux/amd64+libc.glibc"` into the sidecar without the publisher naming a platform
+anywhere.
+
+This closes the same class of defect the recorded-platform binding closed for `push`/`test`, at the
+one step that had kept a host default alive. Two consequences follow for free:
+
+- The D5 any-target rules (`any`-only dependencies, no direct digest pins) now run on **every**
+  `create --metadata` invocation. The no-`--platform` path previously skipped `pin_dependencies`
+  entirely for an already-pinned sidecar, so an `any`-targeted bundle carrying a hand-written digest
+  pin slipped past the check this ADR requires it to fail.
+- The "`--platform` omitted ⇒ metadata must already be fully pinned" usage error disappears with the
+  branch it guarded; the flag is required before pinning state is ever inspected.
+
+**Cost, accepted.** A fully-pinned sidecar bundled without `--platform` used to succeed and now exits
+64. Pre-1.0 clean break (D5 above) — no shim, no fallback, no deprecation window. Callers add the
+platform they were already targeting.
+
 ### Recorded platform binds `create` to `push`/`test`
 
-`ocx package create` resolves every dependency against its `--platform` value (default
-`Platform::current()`). That platform is **recorded in the authoring sidecar** — a new optional
+`ocx package create` resolves every dependency against its required `--platform` value. That
+platform is **recorded in the authoring sidecar** — a new optional
 `AuthoringBundle.platform` field, serialized as a **canonical-grammar string** on the wire
 (`#[serde(with = "platform_field")]`, `skip_serializing_if none`; optional in the JSON schema),
 read back via `AuthoringMetadata::platform()` / `resolve_platform()`.
@@ -691,6 +723,10 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
 - [ ] `ocx package push`/`test` default to the sidecar's recorded platform; an explicit
       `--platform` mismatching it → `PlatformMismatch` (65); a sidecar missing the field →
       `MissingRecordedPlatform` (65).
+- [x] `ocx package create --metadata` without `--platform` exits 64 naming both flags and writes no
+      sidecar — including for an already-pinned sidecar, the case that previously succeeded and
+      recorded the host's own platform. Mutation-checked: restoring the host default turns the
+      guard red. *(implemented)*
 - [ ] Dual-libc host resolves both a `libc.glibc` and a `libc.musl` lock entry (gap-closed
       regression).
 - [ ] V1 and V2 `ocx.lock` fixtures both fail load with `UnsupportedLockVersion` + regenerate
@@ -735,3 +771,4 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
 | 2026-07-17 | architect (opus) | Post-review amendments (both verified against merged `feat/platform-model-unification`): (1) D1 scoring extended to the **3-tuple `(is_specific, matched_refinement_count, matched_os_feature_count)`** (fix `650f0ef0`, `compatibility_score`) — the middle axis ranks a `variant`/`os_version`-exact offer above an unconstrained one, fixing the spurious `Ambiguous` on explicit `--platform linux/arm64/v8` (truth-table rows 8/9, 12/13 tied under the 2-tuple); scoring section, pseudocode, examples, and validation updated. (2) D5 gains the **recorded-platform binding** (fix `39ffaf56`): `AuthoringBundle.platform` (canonical-grammar string on the wire, optional in schema), `ocx package push`/`test` default to the recorded platform via `resolve_platform`, explicit `--platform` becomes a checked assertion (`PlatformMismatch` 65 / `MissingRecordedPlatform` 65) — closes the cross-compile host-default corruption. Surface map + validation updated; parity / canonical-key / escape / scoring validation rows marked implemented. |
 | 2026-07-17 | architect (opus) | Final gate-fix amendments (both verified against merged commit `9da15746`): (1) D5 **`any`-pin provenance check** — the push gate fetches each dependency's manifest by tag and requires an `any` entry whose digest equals the pin (flat manifest: own digest = pin); `PublishGateError::AnyPinNotAdvertisedAsAny` (65), `AnyPinProvenanceUnavailable` (fail-closed, chain-classified); one manifest GET per dep on any-target pushes. Sidecar keys are claims, not evidence. (2) D3 **write/load validation parity** — one `ProjectLock::validate` (declaration-hash version, bare repository, canonical keys) invoked by both `from_str_with_path` and `to_toml_string`/`save`; every serialized lock also loads (round-trip property test). |
 | 2026-07-17 | architect (sonnet) | **`os_version` axis removed from the model entirely** — no producer (authoring records `Platform::current()`, which never set it), no consumer (all five ship platforms bare), and anti-positioning (OS-version-tied binaries are the Homebrew-bottle disease OCX rejects, see `product-context.md`). Canonical grammar drops to `os/arch[/variant][+feature[,feature...]]` \| `any`; `@` loses reserved status in the percent-escape codec (legal literal, no escaping); `is_compatible`'s offer-gated strict equality and the scoring `matched_refinement_count` axis now apply to `variant` only. OCI boundary: an `os.version` key in a manifest `platform` entry is warn-dropped at the `TryFrom<native::Platform>` boundary, same pattern as the CPU `features` warn-drop — verbatim-observed foreign data, reversible without migration. Grammar, EBNF, escape table, truth table (renumbered #1–#16), scoring, round-trip, and validation sections updated to read as designed without it. |
+| 2026-07-27 | architect (opus) | **D5 loses the create-time host default** (defect found in `package_create.rs::validation_platform`, which still resolved an absent `--platform` to `Platform::current()`). `--platform` is now required whenever `--metadata` is given — usage error, exit 64, naming both flags — and has no default at all; without `--metadata` it stays optional and filename-only. The host platform answers what the build machine *supplies* (libc included); the sidecar field states what the artifact *demands*, and `create` is the step that records it, so the guess corrupted the pins, the `bin_scan` executable convention, and the value `push`/`test` bind to. Empirically: a glibc host recorded `linux/amd64+libc.glibc` with no platform named anywhere. Alternative (b) — record nothing and let `MissingRecordedPlatform` fire at push — was rejected: it still needs a platform for the projection and the binaries scan, and `Platform::any()` there both misfires D5's any-target rules on concrete bundles and silently bakes a wrong `binaries` claim, moving the guess to a field with no downstream guard. Consequences: the D5 any-target digest-pin check now runs on every `--metadata` invocation (the no-`--platform` path had skipped `pin_dependencies` for already-pinned sidecars), and the "omitted ⇒ must be fully pinned" usage error is deleted with the branch it guarded. Pre-1.0 clean break — a fully-pinned bundle created without `--platform` now exits 64. |
