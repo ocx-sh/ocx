@@ -41,6 +41,7 @@ website-build gate pins the wiring.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -61,31 +62,67 @@ SCHEMA_VARIANTS = [
         "https://ocx.sh/schemas/project-lock/v3.json",
         "project-lock",
     ),
+    (
+        "execution-record",
+        "https://ocx.sh/schemas/execution-record/v1.json",
+        "execution-record",
+    ),
 ]
+
+
+# A local build against a warm `target/` is seconds; a cold one is minutes. The
+# bound exists so a cold or lock-contended build can never masquerade as a hung
+# test suite — which is exactly what it did in CI, where every worker's fixture
+# raced the same `target/` lock on a two-core runner and the run stalled just
+# short of 100% with no failing test to point at.
+BUILD_TIMEOUT_SECONDS = 300
 
 
 @pytest.fixture(scope="module")
 def schema_binary() -> Path:
-    """Ensure ``target/release/ocx_schema`` exists.
+    """Resolve ``target/release/ocx_schema``, building it only when that is cheap.
 
-    Builds the binary once per session if it's missing. Skips the test
-    module if the build fails (e.g. environment without cargo).
+    CI must **supply** the binary rather than have this fixture build it: the
+    acceptance job downloads a prebuilt `ocx` and carries no Rust cache, so a
+    build here is a cold full compile of `ocx_lib` inside a job that has no
+    business compiling anything. The workflows upload it alongside the `ocx`
+    binary; if it is missing the module skips loudly instead of silently paying
+    for a rebuild.
+
+    Locally the build stays automatic — `target/` is normally warm — but is
+    bounded so it fails as a skip rather than hanging the suite.
     """
-    if not SCHEMA_BINARY.exists():
+    if SCHEMA_BINARY.exists():
+        return SCHEMA_BINARY
+
+    if os.environ.get("CI"):
+        pytest.skip(
+            f"{SCHEMA_BINARY} was not provided by the workflow. CI jobs must "
+            "download it as an artifact; building it here would be a cold "
+            "release compile inside an acceptance job."
+        )
+
+    try:
         result = subprocess.run(
             ["cargo", "build", "--release", "-p", "ocx_schema"],
             cwd=PROJECT_ROOT,
             capture_output=True,
-            text=True, check=False,
+            text=True,
+            check=False,
+            timeout=BUILD_TIMEOUT_SECONDS,
         )
-        if result.returncode != 0:
-            pytest.skip(
-                f"failed to build ocx_schema binary: {result.stderr.strip()}"
-            )
-        if not SCHEMA_BINARY.exists():
-            pytest.skip(
-                f"ocx_schema build succeeded but binary missing at {SCHEMA_BINARY}"
-            )
+    except FileNotFoundError:
+        pytest.skip("cargo is not available to build ocx_schema")
+    except subprocess.TimeoutExpired:
+        pytest.skip(
+            f"building ocx_schema exceeded {BUILD_TIMEOUT_SECONDS}s; run "
+            "`cargo build --release -p ocx_schema` once and re-run"
+        )
+
+    if result.returncode != 0:
+        pytest.skip(f"failed to build ocx_schema binary: {result.stderr.strip()}")
+    if not SCHEMA_BINARY.exists():
+        pytest.skip(f"ocx_schema build succeeded but binary missing at {SCHEMA_BINARY}")
     return SCHEMA_BINARY
 
 
