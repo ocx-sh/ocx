@@ -377,8 +377,16 @@ def test_global_flag_section_links_strict_isolation(cli_ref_text: str) -> None:
 
 # Root commands the taxonomy refactor moved under `ocx package`. The bare
 # forms reach plugin dispatch and exit 64, so a runnable snippet naming one
-# is a copy-paste trap. Prose and the `> **Moved to ...**` tombstones stay
-# legal by construction: this only reads shell fences.
+# is a copy-paste trap.
+#
+# ponytail: shell fences only, deliberately — do NOT widen this to a plain
+# string search over the docs. Reading fences is what makes the exemption
+# free: `command-line.md`'s `> **Moved to `ocx package install`**` tombstones
+# and the migration table in `user-guide.md` have to name the bare forms to
+# document them, and they are prose, so they never match. A string ban needs
+# an allowlist to stay green, and an allowlist is a thing people append to
+# instead of fixing the doc. The ceiling is that prose still drifts (~80 such
+# references today); fix that with a sweep, not by broadening the guard.
 MOVED_ROOT_COMMANDS = ("install", "uninstall", "select", "deselect", "exec", "which", "deps")
 _MOVED_INVOCATION = re.compile(
     r"(?<![\w.-])ocx\s+(?:" + "|".join(MOVED_ROOT_COMMANDS) + r")(?![\w-])"
