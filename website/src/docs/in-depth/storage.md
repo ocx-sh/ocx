@@ -5,7 +5,7 @@ outline: deep
 
 Most package managers keep everything in a single mutable tree. Installing a new version silently replaces the old one, breaking anything that referenced the old path. They also hit the network on every operation, making offline use and reproducible CI awkward.
 
-OCX takes the opposite approach. The data directory under `~/.ocx/` (configurable via [`OCX_HOME`][env-ocx-home]) is split into independent stores — each owns one concern, each is content-addressed where it matters, each can be reasoned about in isolation. This page explains the layout and *why* each store exists. The user-facing surface — what `ocx install` produces, where to find binaries, which paths are safe to embed — lives in the [Storage section of the user guide][user-storage].
+OCX takes the opposite approach. The data directory under `~/.ocx/` (configurable via [`OCX_HOME`][env-ocx-home]) is split into independent stores — each owns one concern, each is content-addressed where it matters, each can be reasoned about in isolation. This page explains the layout and *why* each store exists. The user-facing surface — what `ocx package install` produces, where to find binaries, which paths are safe to embed — lives in the [Storage section of the user guide][user-storage].
 
 ## Stores {#stores}
 
@@ -85,7 +85,7 @@ The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/`
 
 ### Generated Launchers {#generated-launchers}
 
-When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX materializes a sibling `entrypoints/` directory at install time with the launchers for each entry — a POSIX `.sh` launcher for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar. Each launcher carries the digest-addressed package root and re-enters via [`ocx launcher exec`][cmd-launcher-exec], so every invocation runs under the same clean-environment guarantee as [`ocx exec <package>`][cmd-exec].
+When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX materializes a sibling `entrypoints/` directory at install time with the launchers for each entry — a POSIX `.sh` launcher for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar. Each launcher carries the digest-addressed package root and re-enters via [`ocx launcher exec`][cmd-launcher-exec], so every invocation runs under the same clean-environment guarantee as [`ocx package exec <package>`][cmd-exec].
 
 Packages that declare no entrypoints never get an `entrypoints/` directory. See the [entry points guide][in-depth-entry-points] for the publisher workflow.
 
@@ -94,7 +94,7 @@ Packages that declare no entrypoints never get an `entrypoints/` directory. See 
 The `refs/symlinks/` subdirectory inside each package tracks every install symlink that currently points to it. That directory is the GC root signal — [`ocx clean`][cmd-clean] starts a reachability walk from every package with a live `refs/symlinks/` entry and follows forward-refs through all three tiers.
 
 ::: details How back-references work
-When `ocx install cmake:3.28` creates the symlink `symlinks/…/cmake/candidates/3.28 → packages/…/sha256/ab/c123…/content`, it simultaneously writes a back-reference entry inside the package's `refs/symlinks/` directory. Removing the symlink via [`ocx uninstall`][cmd-uninstall] removes that back-reference entry. [`ocx clean`][cmd-clean] then builds a reachability graph across all three tiers: packages with live `refs/symlinks/` entries (and any profile content-mode references) are roots, and a single BFS pass follows each package's forward-refs in `refs/deps/`, `refs/layers/`, and `refs/blobs/`. Packages, layers, and blobs that remain unreachable across all three tiers are deleted in one sweep.
+When `ocx package install cmake:3.28` creates the symlink `symlinks/…/cmake/candidates/3.28 → packages/…/sha256/ab/c123…/content`, it simultaneously writes a back-reference entry inside the package's `refs/symlinks/` directory. Removing the symlink via [`ocx package uninstall`][cmd-uninstall] removes that back-reference entry. [`ocx clean`][cmd-clean] then builds a reachability graph across all three tiers: packages with live `refs/symlinks/` entries (and any profile content-mode references) are roots, and a single BFS pass follows each package's forward-refs in `refs/deps/`, `refs/layers/`, and `refs/blobs/`. Packages, layers, and blobs that remain unreachable across all three tiers are deleted in one sweep.
 :::
 
 A dependency is protected by the liveness of its dependents, not by a back-reference inside itself: when OCX installs a package with dependencies, it records each dependency as a forward-ref inside the dependent package's `refs/deps/` directory, pointing at the dependency's `content/`. Nothing is written into the dependency's own `refs/symlinks/`. The same `ocx clean` sweep that removes the last dependent therefore also collects the now-unreachable dependency.
@@ -140,7 +140,7 @@ ocx package push -p linux/amd64 mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
 The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
 
 ::: info Digest verification on pull
-Every layer downloaded by `ocx install` or `ocx package pull` is verified in-stream: bytes are hashed as they arrive and compared against the digest declared in the manifest before extraction completes. A mismatch — the registry serving different bytes for the same digest ([CWE-345][cwe-345]) — fails the command. Zero-layer pulls are valid: a config-only package (produced by `ocx package push` with no file layers and `--metadata`) installs into an empty `content/` directory, which is the expected shape for referrer-only or description-only artifacts.
+Every layer downloaded by `ocx package install` or `ocx package pull` is verified in-stream: bytes are hashed as they arrive and compared against the digest declared in the manifest before extraction completes. A mismatch — the registry serving different bytes for the same digest ([CWE-345][cwe-345]) — fails the command. Zero-layer pulls are valid: a config-only package (produced by `ocx package push` with no file layers and `--metadata`) installs into an empty `content/` directory, which is the expected shape for referrer-only or description-only artifacts.
 :::
 
 ::: warning Bring your own archives
@@ -193,17 +193,17 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. Tha
     <Node name="{registry}/" icon="📁" open-icon="📂" open>
       <Node name="{repo}/" icon="📁" open-icon="📂" open>
         <Node name="current" icon="➡️" open>
-          <Description>active package root — set by ocx select</Description>
+          <Description>active package root — set by ocx package select</Description>
           <Node name="content/" icon="📂" />
           <Node name="entrypoints/" icon="🚀" />
           <Node name="metadata.json" icon="📋" />
         </Node>
         <Node name="candidates/" icon="📁" open-icon="📂" open>
           <Node name="3.28" icon="➡️">
-            <Description>pinned package root — created by ocx install cmake:3.28</Description>
+            <Description>pinned package root — created by ocx package install cmake:3.28</Description>
           </Node>
           <Node name="3.30" icon="➡️">
-            <Description>pinned package root — created by ocx install cmake:3.30</Description>
+            <Description>pinned package root — created by ocx package install cmake:3.30</Description>
           </Node>
         </Node>
       </Node>
@@ -213,11 +213,11 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. Tha
 
 Two symlink entries cover every use case. Both target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory; consumers traverse into `…/content/` for files, `…/entrypoints/` for launcher scripts, or read `…/metadata.json` directly:
 
-**`candidates/{tag}`** — pinned to a specific version. Created by [`ocx install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. cmake 3.28 and 3.30 can coexist; both candidates remain until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
+**`candidates/{tag}`** — pinned to a specific version. Created by [`ocx package install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. cmake 3.28 and 3.30 can coexist; both candidates remain until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
 
 This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on a non-Windows host, or `--select` of one) populates the object store but leaves both `candidates/{tag}` and `current` untouched, so a platformless resolver never hands you a package the host cannot run. Reference a foreign-platform install by its digest instead.
 
-**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you refresh the local index. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment — from [`ocx package env`][cmd-package-env], or the global toolchain activation `eval "$(ocx --global env --shell=sh)"` — emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
+**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx package select`][cmd-select] (or `ocx package install --select` in one step). It is never updated automatically — not when you install a newer version, not when you refresh the local index. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment — from [`ocx package env`][cmd-package-env], or the global toolchain activation `eval "$(ocx --global env --shell=sh)"` — emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.

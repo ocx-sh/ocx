@@ -16,7 +16,7 @@ OCX enforces a hard boundary between the global toolchain and project-tier resol
 This applies without exception to:
 
 - [`ocx run`][cmd-run] — project-tier env-composition command. Reads `ocx.toml` + `ocx.lock`. The global toolchain (`$OCX_HOME/ocx.toml`) is not consulted, not merged, and not used as a fallback for tools the project does not declare.
-- [`ocx exec`][cmd-exec] — OCI-tier env-composition command. Never reads any `ocx.toml`, whether project or global. Takes OCI identifiers directly.
+- [`ocx package exec`][cmd-exec] — OCI-tier env-composition command. Never reads any `ocx.toml`, whether project or global. Takes OCI identifiers directly.
 
 Both commands are hermetic: the environment they produce is determined entirely by their declared inputs. An undeclared tool is absent, never filled from the global set.
 
@@ -44,7 +44,7 @@ The emitted shell statements are **self-contained**: they depend on no `ocx` pro
 ocx package env cmake --shell bash >> ~/.bashrc
 ```
 
-— where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
+— where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx package exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
 
 ::: info Shell-specific requirements
 All ten supported shells — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell, and Windows `cmd` — emit idempotent move-to-front output. The `cmd` form rebuilds `PATH` with `%VAR:search=%` substring deletion (no `FOR /F`, no delayed expansion, so `!`-bearing paths stay intact) and matches segments case-insensitively, the way Windows `PATH` lookup does. A couple of shells have version floors: elvish needs the `str:` module (0.16+); nushell needs the auto-list `PATH` conversion (0.101+).
@@ -58,9 +58,9 @@ Naming a binding subset (`ocx run cmake -- …`) narrows composition further: on
 
 By default `ocx run` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
 
-### What "hermetic" means for `ocx exec` {#strict-isolation-exec}
+### What "hermetic" means for `ocx package exec` {#strict-isolation-exec}
 
-`ocx exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables from the resolved packages, and spawns the command with that environment. No `ocx.toml` is read — not the project file, not the global file. The entire operation is stateless with respect to project configuration.
+`ocx package exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables from the resolved packages, and spawns the command with that environment. No `ocx.toml` is read — not the project file, not the global file. The entire operation is stateless with respect to project configuration.
 
 ## Patch Opt-Out Scope {#patch-opt-out-scope}
 
@@ -132,7 +132,7 @@ Generated launchers force `self_view = true` internally; they do not expose `--s
 
 ## Composition Order {#composition-order}
 
-When multiple packages contribute to an environment (via `ocx run -g GROUP1,GROUP2` or `ocx exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
+When multiple packages contribute to an environment (via `ocx run -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
 
 For `ocx run`, the full order rule is:
 

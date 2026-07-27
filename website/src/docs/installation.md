@@ -219,7 +219,7 @@ Then remove the managed activation that [`ocx self setup`][cmd-self-setup] added
 - **PowerShell**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from your `$PROFILE`
 
 ::: warning This deletes everything
-This removes all installed packages, the local index cache, and ocx itself. If you only want to remove specific packages, use [`ocx uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
+This removes all installed packages, the local index cache, and ocx itself. If you only want to remove specific packages, use [`ocx package uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
 :::
 
 ## CI Setup {#ci}

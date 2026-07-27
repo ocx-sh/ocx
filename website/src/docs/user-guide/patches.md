@@ -347,7 +347,7 @@ reference for the full forwarding mechanics.
 
 ## Working offline {#patches-offline}
 
-Composing the environment never touches the network: `ocx run`, `ocx exec`, and `ocx env`
+Composing the environment never touches the network: `ocx run`, `ocx package exec`, and `ocx env`
 always resolve companions from whatever is already installed locally, snapshot or not.
 `--offline` only affects whether OCX can *discover and install* companions in the first
 place, at `ocx package install` or `ocx patch sync` time — it changes nothing about how an
