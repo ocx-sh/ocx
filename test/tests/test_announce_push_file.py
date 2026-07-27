@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""`ocx package push --announce-file` -> `ocx package announce --tags-file`
+"""`ocx package push --announce-file` -> `ocx package announce --tags-from-file`
 integration (design register C2, cross-track contract #2).
 
 `push --announce-file` writes a comma-joined, `indexbot`-compatible tag file
 (the pushed primary tag plus any cascade tags, deduped on append); this
-proves that file can be fed straight into `announce --tags-file` and unions
+proves that file can be fed straight into `announce --tags-from-file` and unions
 correctly with whatever is already committed.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_push_announce_file_feeds_announce_tags_file_union(
     announce_file = tmp_path / "announce-tags.txt"
 
     # A pre-existing committed tag on a DIFFERENT, real version — proves the
-    # union keeps it (deletion only ever happens via --tags, not --tags-file).
+    # union keeps it (deletion only ever happens via --tags, not --tags-from-file).
     make_package(ocx, unique_repo, "0.9.0", tmp_path, new=True, cascade=False)
 
     # The cascading push under test: writes the pushed tag + cascade tags
@@ -59,11 +59,11 @@ def test_push_announce_file_feeds_announce_tags_file_union(
     args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     announce_json(ocx, fake_forge, *args, "--tags", "0.9.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(announce_file))
+    report = announce_json(ocx, fake_forge, *args, "--tags-from-file", str(announce_file))
 
     assert report["status"] == "updated"
     final_tags = set(committed_root(fake_forge, package)["tags"])
-    assert final_tags == {"0.9.0", *file_tags}, "--tags-file must union with the committed root, dropping nothing"
+    assert final_tags == {"0.9.0", *file_tags}, "--tags-from-file must union with the committed root, dropping nothing"
 
 
 def test_push_reports_canonical_tags_and_keeps_them_out_of_the_announce_file(
@@ -76,7 +76,7 @@ def test_push_reports_canonical_tags_and_keeps_them_out_of_the_announce_file(
     Two halves of one rule (D7). A canonical tag is a digest alias, not a
     version: the push genuinely writes it (so the report must say so — the
     report states what reached the registry), and announce would drop it (so
-    the file that feeds `announce --tags-file` must not carry it in the first
+    the file that feeds `announce --tags-from-file` must not carry it in the first
     place). Reporting is not publishing.
 
     Non-vacuity: the report's canonical list must be non-empty. `push` writes
@@ -114,7 +114,7 @@ def test_push_reports_canonical_tags_and_keeps_them_out_of_the_announce_file(
     assert "1.0.0" in file_tags, f"the pushed primary tag must be in the announce file: {file_tags}"
     for tag in canonical:
         assert tag not in file_tags, (
-            f"the announce file feeds `announce --tags-file`; a canonical tag is not a version "
+            f"the announce file feeds `announce --tags-from-file`; a canonical tag is not a version "
             f"and must never enter it: {tag} in {file_tags}"
         )
 

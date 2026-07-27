@@ -16,7 +16,8 @@
 //! The pipeline behaviourally matches the Python reference tool
 //! (`ocx-sh/index` `bot/cli/announce.py`, design register FP-9), with the
 //! owner-ratified C-cell decisions layered on: branch-head base (C4),
-//! replace/union/refresh curation (C3/C5), the unchanged short-circuit (C6),
+//! replace/union/refresh/from-registry curation (C3/C5), the unchanged
+//! short-circuit (C6),
 //! owner-only yank markers (C7), fork auto-create at the upstream base SHA (C8),
 //! and one atomic multi-file commit (C15). The SSRF guard runs before the first
 //! registry request (X3); the announce credential never leaves the ambient
@@ -250,7 +251,7 @@ pub async fn announce(
                         observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
                     // The retry re-resolved the curated set against the winning
                     // head, so its drop list supersedes — never unions with —
-                    // the pre-race one: for `--tags-file`/`--refresh` the base
+                    // the pre-race one: for `--tags-from-file`/`--refresh` the base
                     // root differs between passes, so the two lists legitimately
                     // differ and only the second describes what was announced.
                     reserved_dropped = merged.reserved_dropped;
@@ -329,7 +330,7 @@ struct Rebuilt {
 /// Shared verbatim by the initial commit and the C4 non-fast-forward retry, so
 /// the retry re-derives the *whole* sequence from the winning head instead of
 /// replaying a tag universe resolved against the pre-race root. Re-resolving is
-/// what preserves a concurrent announce's additions: `--tags-file` and
+/// what preserves a concurrent announce's additions: `--tags-from-file` and
 /// `--refresh` take the base root's tags as their starting set, so unioning
 /// against the new head keeps a tag the winner added — replaying a stale set
 /// would delete it, since [`pipeline::regenerate`] replaces `tags` wholesale.
@@ -350,11 +351,21 @@ async fn observe_and_rebuild(
     package: &str,
 ) -> Result<Rebuilt, AnnounceError> {
     let base_tags = pipeline::committed_tag_names(base_root);
+    // X3: the physical target is remote-controlled data (a root `repository`
+    // pointer), so it is resolved and validated once, ahead of the first
+    // registry request of any kind. Under `--tags-from-registry` that first
+    // request is the tag listing rather than an observe — a pre-flight inside
+    // the observe loop would guard the wrong thing.
+    let physical = pipeline::guarded_physical(base_root, &request.trusted_hosts).await?;
+    let discovered = match &request.curated {
+        TagSelection::FromRegistry => pipeline::list_registry_tags(publisher, &physical).await?,
+        TagSelection::Replace(_) | TagSelection::UnionFile(_) | TagSelection::Refresh => Vec::new(),
+    };
     let pipeline::ResolvedTags {
         tags: curated,
         reserved_dropped,
-    } = pipeline::resolve_curated_tags(&request.curated, &base_tags)?;
-    let observed = pipeline::observe_curated(publisher, base_root, &curated, &request.trusted_hosts).await?;
+    } = pipeline::resolve_curated_tags(&request.curated, &base_tags, &discovered)?;
+    let observed = pipeline::observe_curated(publisher, &physical, &curated).await?;
     let mut root = pipeline::regenerate(base_root, &observed, now);
     pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
     let root_bytes = serialize_root(&root);
@@ -634,5 +645,78 @@ mod tests {
             "exactly one tag was fetched: {:?}",
             data.read().calls
         );
+    }
+
+    // ── --tags-from-registry ─────────────────────────────────────────────────
+
+    /// The registry supplies the candidates: a tag the physical repository
+    /// serves but the committed root has never carried gets announced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_registry_discovers_a_tag_the_committed_root_lacks() {
+        let data = StubTransportData::new();
+        seed_index(&data, "1.0.0");
+        seed_index(&data, "2.0.0");
+        data.write().tags = vec![vec!["1.0.0".to_string(), "2.0.0".to_string()]];
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data))));
+        let root = committed_root(serde_json::json!({
+            "1.0.0": { "content": format!("sha256:{}", "b".repeat(64)), "observed": "2026-07-01T00:00:00Z" }
+        }));
+
+        let rebuilt = observe_and_rebuild(
+            &publisher,
+            &root,
+            &request(TagSelection::FromRegistry),
+            "2026-07-25T00:00:00Z",
+            "p/acme/widget.json",
+            "acme/widget",
+        )
+        .await
+        .expect("both registry tags announce");
+
+        let observed: Vec<&str> = rebuilt.observed.iter().map(|entry| entry.tag.as_str()).collect();
+        assert_eq!(
+            observed,
+            vec!["1.0.0", "2.0.0"],
+            "the committed tag first, then the one only the registry knew"
+        );
+    }
+
+    /// X3 ordering, and the reason the pre-flight had to move: under
+    /// `--tags-from-registry` the **tag listing** is the first registry request,
+    /// so a pre-flight left inside the observe loop would have guarded nothing.
+    /// A forbidden host must therefore cost zero registry calls of any kind —
+    /// not merely zero observes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_registry_refuses_a_forbidden_host_before_listing_any_tag() {
+        let data = StubTransportData::new();
+        data.write().tags = vec![vec!["1.0.0".to_string()]];
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+        let root = committed_root(serde_json::json!({}));
+        // The default `request` trusts loopback; this one does not, so the
+        // committed root's `oci://127.0.0.1/x` pointer is forbidden.
+        let mut request = request(TagSelection::FromRegistry);
+        request.trusted_hosts = Vec::new();
+
+        let result = observe_and_rebuild(
+            &publisher,
+            &root,
+            &request,
+            "2026-07-25T00:00:00Z",
+            "p/acme/widget.json",
+            "acme/widget",
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::Ssrf(_))),
+            "a forbidden physical host must be refused"
+        );
+        let inner = data.read();
+        assert!(
+            inner.calls.is_empty(),
+            "no registry call — listing included — may precede the SSRF refusal: {:?}",
+            inner.calls
+        );
+        assert!(inner.auth_calls.is_empty(), "no auth call may precede the SSRF refusal");
     }
 }

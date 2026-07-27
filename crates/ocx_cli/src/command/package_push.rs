@@ -80,7 +80,7 @@ pub struct PackagePush {
 
     /// After a successful push, append the pushed tag and any cascade tags
     /// to this file (creating it if absent), so `ocx package announce
-    /// --tags-file` can pick them up.
+    /// --tags-from-file` can pick them up.
     ///
     /// This is a scratch file for one pipeline run, not a persistent list -
     /// a stale file left over from an earlier run could re-add a tag that

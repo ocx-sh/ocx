@@ -56,7 +56,7 @@ not open questions:
 - **`ocx package push --announce-file <path>`** appends the pushed primary tag plus its
   cascade tags to a per-package file (comma/newline format, matching `indexbot
   --tags-file`).
-- **`ocx package announce --tags-file`** unions file tags with the committed root's tags
+- **`ocx package announce --tags-from-file`** unions file tags with the committed root's tags
   (client-side sugar); explicit `--tags` full-replace curation is retained. This is a
   **deliberate deviation** from the reference `regenerate()` (replace-only, "observed =
   the universe") — flagged below as a one-way door needing owner ratification.
@@ -175,7 +175,7 @@ reference's Git Data tree/commit/ref approach) — no local `git clone`, no `git
 dependency, and the same shape ports to GitLab's Commits API later.
 
 **One-way-door analysis (what must be forge-neutral from v1):**
-- **CLI flags:** `--fork <owner/repo>`, `--index-repo`, `--tags`/`--tags-file`,
+- **CLI flags:** `--fork <owner/repo>`, `--index-repo`, `--tags`/`--tags-from-file`/`--tags-from-registry`,
   `--yank`/`--unyank`/`--yank-reason` — all already forge-neutral in the Python reference.
   Shipping any `--github-*`-prefixed flag is the door slamming.
 - **Config schema:** the announce target derives from the index config
@@ -307,7 +307,7 @@ ADR-6's contract and byte-exact serializer (FP-4/FP-9, CONTRACTS §12/§14).
   single `wire.rs`, conformance-test against the index golden fixtures in CI.
 - **Surface leak.** A single `--github-*` flag or github-only config key silently slams the
   GitLab door. Mitigation: review every public string for forge-neutrality before v1 lock.
-- **Additive `--tags-file` divergence** from the replace-only reference impl (below).
+- **Additive `--tags-from-file` divergence** from the replace-only reference impl (below).
 
 ## Non-Functional Requirements
 
@@ -331,7 +331,7 @@ ADR-6's contract and byte-exact serializer (FP-4/FP-9, CONTRACTS §12/§14).
 ```
 publisher CI (GitHub Actions | GitLab CI)
   └─ CI unit (D1): reusable workflow / CI/CD Component
-       setup-ocx (pinned) ─▶ ocx package announce --package … --tags[-file] … --fork <owner/repo>
+       setup-ocx (pinned) ─▶ ocx package announce --package … (--tags|--tags-from-file|--tags-from-registry) … --fork <owner/repo>
                                     │  reads OCX_ANNOUNCE_TOKEN from ambient env (D3)
                                     ▼
                               ocx_lib::announce  (D5)
@@ -348,7 +348,7 @@ publisher CI (GitHub Actions | GitLab CI)
 ### CLI / config / contract surface (all forge-neutral — D2)
 
 ```
-ocx package announce --package <id> (--tags <list> | --tags-file <path>)
+ocx package announce --package <id> (--tags <list> | --tags-from-file <path> | --tags-from-registry)
                      (--out <dir> | --fork <owner/repo>) [--index-repo <owner/repo>]
                      [--yank <tag> | --unyank <tag>] [--yank-reason <text>]
 ocx package push … --announce-file <path>     # appends primary+cascade tags (comma/newline)
@@ -389,7 +389,7 @@ index golden fixtures.
 
 ## Ratified Owner Decisions (2026-07-18/19)
 
-- **Additive `--tags-file` union** — ratified. File tags union with the committed root;
+- **Additive `--tags-from-file` union** — ratified. File tags union with the committed root;
   deletion only via explicit full-replace `--tags`. Documented deviation from the
   replace-only reference `regenerate()`; conformance tests cover both modes.
 - **Unchanged ⇒ no-op** (2026-07-18) — byte-identical root + no new CAS files skips commit
@@ -447,3 +447,4 @@ index golden fixtures.
 | 2026-07-18 | Michael Herwig + Claude design swarm | Initial Proposed draft: publisher-side announce integration surface — CI-unit shape (D1), GitHub-only-behind-neutral-surface forge posture (D2), token model (D3), CI-unit placement (D4), ocx_lib layering + wire-serializer dependency (D5); NFRs; open items for owner |
 | 2026-07-19 | Michael Herwig (owner) | Accepted. Ratified: additive `--tags-file` union, unchanged⇒no-op, fork auto-create, land-#217-first sequencing, GitLab-hosted index as real future track (forge-neutral line enforced), live-real-index E2E topology. D4 placement deferred to CI-unit phase. |
 | 2026-07-22 | Michael Herwig (owner) + Claude design swarm | This ADR predates the `design_spec_announce_initiative.md` register session — ratified/detailed there: S3 (always fork, no direct push ever, first-party included), S4 (PAT-only day one via a dedicated `ocx-bot` machine account, fine-grained PATs cannot fork/PR public repos), C4 (update from the existing announce branch's head, not `main`, so sequential announces accumulate into one open PR), C5 (`--refresh` re-observes every curated tag plus file additions to catch moved digests without becoming registry-scan), X1–X3 (default-on range-based SSRF guard resolving-then-validating connect-time IPs, `trusted_hosts` per-`[registries."<ns>"]` escape hatch, guard ordered before announce's first registry request). See register §1, §2, §4. |
+| 2026-07-27 | Michael Herwig (owner) | **Fourth tag-selection mode, `--tags-from-registry`; `--tags-file` renamed to `--tags-from-file`.** Rename closes a standing `subsystem-cli.md` Flag Naming Convention violation — the `-file` suffix is reserved for output sinks, and the old flag read a file. Pre-1.0 interface break: announced in `CHANGELOG.md` only, no dual-form parsing, no migration prose (CLAUDE.md "Stability tiers"). New mode lists every tag the package's registry repository currently holds and unions them onto the committed root, same additive-union semantics as `--tags-from-file`, mutually exclusive with the other three selectors. **D-additive-only:** the union can never drop a committed tag — the index's ADR-6 FP-3 makes a vanished non-yanked tag an anomaly surfaced to humans, never auto-healed, so a mode that dropped absent tags on a from-registry run would silently violate that. **D-yank-not-delete:** because the union is additive, deleting a tag from the curated set is not durable once a package has ever been announced from the registry — it reappears on the next `--tags-from-registry` run; retire via `--yank` instead, whose marker survives both the unmoved-digest and moved-digest branches of `regenerate()`. **D-publisher-enumerates, not the index:** this flag does *not* reinstate the registry enumeration that index-repo ADR-6 FP-2 removed from index-bot ("the bot no longer enumerates the registry to populate `tags` — it verifies the curated set the owner announced"). The **owner** enumerates, at their own explicit CLI invocation, and the result is additive — authority stays with the publisher, not with automated index tooling. At a glance the flag looks like the old index-bot behaviour FP-2 killed; it is not a reinstatement. See `design_spec_announce_initiative.md` C1/C3/C5. |

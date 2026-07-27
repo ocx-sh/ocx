@@ -7,8 +7,9 @@
 //! without a network: curated-tag resolution (C3/C5/D7), the regenerate step
 //! that preserves `observed` timestamps for unmoved digests (C6), the
 //! yank/unyank rules (C7), physical-repository extraction, and the
-//! SSRF-before-observe ordering (X3). The forge-touching orchestration (root
-//! read, fork/commit/PR dispatch) lives in the parent [`super`] module.
+//! SSRF-before-any-registry-request ordering (X3). The forge-touching
+//! orchestration (root read, fork/commit/PR dispatch) lives in the parent
+//! [`super`] module.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -105,36 +106,47 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 /// Resolve the curated tag set from the selection and the committed tags
 /// (design register C3/C5). `Replace` is the universe as given; `UnionFile`
 /// unions the committed set (order-preserving) with file additions; `Refresh`
-/// re-observes the committed set. Duplicates are dropped, first occurrence wins.
+/// re-observes the committed set; `FromRegistry` unions the committed set with
+/// `discovered` (the tags the physical repository currently holds, already
+/// filtered — see below). Duplicates are dropped, first occurrence wins.
+///
+/// `discovered` is empty for every selection other than
+/// [`TagSelection::FromRegistry`], which is the only one that reaches the
+/// registry to decide *which* tags exist.
 ///
 /// This is where the reserved-tag rule applies (D7), and it applies **here**
-/// rather than at any of the three selection sources: only after the collapse
-/// is the tag universe concrete. `--refresh` and `--tags-file` start from the
-/// committed root, so they are carriers — neither can introduce a reserved tag,
-/// but either would re-announce one forever once it landed. A reserved tag is
-/// not a version, so it is dropped and reported, never refused: refusing would
-/// make announce police how a publisher tags their own repository. A selection
-/// that is *entirely* reserved collapses into the existing
-/// [`AnnounceError::NoCuratedTags`] — the empty-set case, no separate variant —
-/// carrying the dropped names, because that path returns no outcome for the
-/// CLI's drop notice to read and the names would otherwise vanish.
+/// rather than at any of the caller-supplied selection sources: only after the
+/// collapse is the tag universe concrete. `--refresh` and `--tags-from-file`
+/// start from the committed root, so they are carriers — neither can introduce a
+/// reserved tag, but either would re-announce one forever once it landed. A
+/// reserved tag is not a version, so it is dropped and reported, never refused:
+/// refusing would make announce police how a publisher tags their own
+/// repository. A selection that is *entirely* reserved collapses into the
+/// existing [`AnnounceError::NoCuratedTags`] — the empty-set case, no separate
+/// variant — carrying the dropped names, because that path returns no outcome
+/// for the CLI's drop notice to read and the names would otherwise vanish.
+///
+/// `discovered` is the one source filtered *before* the collapse, by
+/// [`list_registry_tags`], and it is filtered silently. `reserved_dropped`
+/// reports what the **caller** named that turned out not to be a version; a
+/// registry listing names nothing — canonical `sha256.<hex>` tags are pushed by
+/// default, so reporting them would drown a real drop under one line per
+/// published version. A reserved tag that is nonetheless *committed* still
+/// reaches the collapse through `committed` and is still dropped and reported.
 ///
 /// # Errors
 ///
 /// [`AnnounceError::NoCuratedTags`] when nothing survives resolution.
-pub fn resolve_curated_tags(selection: &TagSelection, committed: &[String]) -> Result<ResolvedTags, AnnounceError> {
+pub fn resolve_curated_tags(
+    selection: &TagSelection,
+    committed: &[String],
+    discovered: &[String],
+) -> Result<ResolvedTags, AnnounceError> {
     let resolved = match selection {
         TagSelection::Replace(tags) => dedup_in_order(tags),
-        TagSelection::UnionFile(file_tags) => {
-            let mut union = dedup_in_order(committed);
-            for tag in file_tags {
-                if !union.contains(tag) {
-                    union.push(tag.clone());
-                }
-            }
-            union
-        }
+        TagSelection::UnionFile(file_tags) => union_onto_committed(committed, file_tags),
         TagSelection::Refresh => dedup_in_order(committed),
+        TagSelection::FromRegistry => union_onto_committed(committed, discovered),
     };
     let (reserved_dropped, tags): (Vec<String>, Vec<String>) =
         resolved.into_iter().partition(|tag| Tag::is_reserved_str(tag));
@@ -142,6 +154,44 @@ pub fn resolve_curated_tags(selection: &TagSelection, committed: &[String]) -> R
         return Err(AnnounceError::NoCuratedTags { reserved_dropped });
     }
     Ok(ResolvedTags { tags, reserved_dropped })
+}
+
+/// The additive merge shared by `--tags-from-file` and `--tags-from-registry`: the
+/// committed set in its on-disk order, then whatever `additions` contributes
+/// that is not already there. A committed tag is never dropped by either — only
+/// [`TagSelection::Replace`] removes.
+fn union_onto_committed(committed: &[String], additions: &[String]) -> Vec<String> {
+    let mut union = dedup_in_order(committed);
+    for tag in additions {
+        if !union.contains(tag) {
+            union.push(tag.clone());
+        }
+    }
+    union
+}
+
+/// List the tags the physical repository currently holds, dropping the reserved
+/// ones (D7) at the source.
+///
+/// The caller must have run the SSRF pre-flight for `physical` already — this is
+/// the first registry request of a `--tags-from-registry` run, so validating
+/// after it would validate nothing.
+///
+/// # Errors
+///
+/// [`AnnounceError::ListTags`] when the registry listing fails. An empty
+/// repository is not an error here: it collapses into
+/// [`AnnounceError::NoCuratedTags`] alongside an empty committed set, the same
+/// as any other selection that resolves to nothing.
+pub async fn list_registry_tags(publisher: &Publisher, physical: &Physical) -> Result<Vec<String>, AnnounceError> {
+    let tags = publisher
+        .list_tags(physical.identifier.clone())
+        .await
+        .map_err(|source| AnnounceError::ListTags {
+            repository: physical.display.clone(),
+            source: Box::new(source),
+        })?;
+    Ok(tags.into_iter().filter(|tag| !Tag::is_reserved_str(tag)).collect())
 }
 
 fn dedup_in_order(tags: &[String]) -> Vec<String> {
@@ -170,27 +220,42 @@ pub fn extract_physical(root: &Value) -> Result<Physical, AnnounceError> {
     })
 }
 
-/// SSRF pre-flight (X3) then observe every curated tag against the physical
-/// repository. The pre-flight resolves + validates the physical host **before**
-/// the first registry request, so a forbidden host aborts with zero observes.
+/// Resolve and validate the physical host (X3) before any registry request.
+///
+/// Split out of [`observe_curated`] because the observe loop is no longer the
+/// only thing that talks to the registry: `--tags-from-registry` lists tags
+/// first, so a pre-flight living inside the observe loop would leave that
+/// listing unguarded. One `Physical` is resolved once and threaded to both, so
+/// the guarded target and the requested target cannot diverge.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::Ssrf`] if the physical host is forbidden or unresolvable;
+/// [`AnnounceError::RootMissingField`] / [`AnnounceError::MalformedPhysicalRepository`]
+/// if the root's `repository` pointer is absent or unparseable;
+/// [`AnnounceError::Ssrf`] if the host is forbidden or unresolvable.
+pub async fn guarded_physical(root: &Value, trusted_hosts: &[String]) -> Result<Physical, AnnounceError> {
+    let physical = extract_physical(root)?;
+    oci::ssrf::resolve_and_validate(&physical.host, physical.port, trusted_hosts).await?;
+    Ok(physical)
+}
+
+/// Observe every curated tag against the physical repository.
+///
+/// `physical` must come from [`guarded_physical`] — this function makes registry
+/// requests and runs no pre-flight of its own.
+///
+/// # Errors
+///
 /// [`AnnounceError::UnresolvedTag`] if a curated tag does not resolve (a
 /// publisher typo); or an [`AnnounceError::Observe`] transport failure.
 pub async fn observe_curated(
     publisher: &Publisher,
-    root: &Value,
+    physical: &Physical,
     curated: &[String],
-    trusted_hosts: &[String],
 ) -> Result<Vec<Observed>, AnnounceError> {
-    let physical = extract_physical(root)?;
-    // X3: validate the remote-controlled host before the first registry request.
-    oci::ssrf::resolve_and_validate(&physical.host, physical.port, trusted_hosts).await?;
     let mut observed = Vec::with_capacity(curated.len());
     for tag in curated {
-        observed.push(observe_one_tag(publisher, &physical, tag).await?);
+        observed.push(observe_one_tag(publisher, physical, tag).await?);
     }
     Ok(observed)
 }
@@ -449,10 +514,17 @@ mod tests {
 
     // ── resolve_curated_tags (C3/C5) ─────────────────────────────────────────
 
+    /// [`resolve_curated_tags`] for the three caller-supplied selections, which
+    /// reach no registry and so have nothing discovered. `FromRegistry` tests
+    /// call the real function and pass their discovered set explicitly.
+    fn resolve_no_discovery(selection: &TagSelection, committed: &[String]) -> Result<ResolvedTags, AnnounceError> {
+        resolve_curated_tags(selection, committed, &[])
+    }
+
     #[test]
     fn replace_is_the_universe_and_drops_absent_committed_tags() {
         let committed = vec!["1.0.0".to_string(), "2.0.0".to_string()];
-        let curated = resolve_curated_tags(&TagSelection::Replace(vec!["2.0.0".into()]), &committed).unwrap();
+        let curated = resolve_no_discovery(&TagSelection::Replace(vec!["2.0.0".into()]), &committed).unwrap();
         assert_eq!(
             curated.tags,
             vec!["2.0.0".to_string()],
@@ -463,7 +535,7 @@ mod tests {
     #[test]
     fn union_file_adds_to_the_committed_set_preserving_order() {
         let committed = vec!["1.0.0".to_string(), "2.0.0".to_string()];
-        let curated = resolve_curated_tags(
+        let curated = resolve_no_discovery(
             &TagSelection::UnionFile(vec!["3.0.0".into(), "1.0.0".into()]),
             &committed,
         )
@@ -479,18 +551,18 @@ mod tests {
     #[test]
     fn refresh_re_observes_the_committed_set_in_order() {
         let committed = vec!["1.0.0".to_string(), "latest".to_string()];
-        let curated = resolve_curated_tags(&TagSelection::Refresh, &committed).unwrap();
+        let curated = resolve_no_discovery(&TagSelection::Refresh, &committed).unwrap();
         assert_eq!(curated.tags, committed);
     }
 
     #[test]
     fn empty_curated_set_is_an_error() {
         assert!(matches!(
-            resolve_curated_tags(&TagSelection::Replace(vec![]), &[]),
+            resolve_no_discovery(&TagSelection::Replace(vec![]), &[]),
             Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
         assert!(matches!(
-            resolve_curated_tags(&TagSelection::Refresh, &[]),
+            resolve_no_discovery(&TagSelection::Refresh, &[]),
             Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
     }
@@ -503,7 +575,7 @@ mod tests {
     #[test]
     fn resolve_curated_tags_drops_reserved_from_replace() {
         let canonical = canonical_tag();
-        let curated = resolve_curated_tags(
+        let curated = resolve_no_discovery(
             &TagSelection::Replace(vec![
                 "__ocx.desc".into(),
                 "__ocx".into(),
@@ -535,7 +607,7 @@ mod tests {
     #[test]
     fn resolve_curated_tags_drops_reserved_from_refresh_carrier() {
         let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string(), canonical_tag()];
-        let curated = resolve_curated_tags(&TagSelection::Refresh, &committed).unwrap();
+        let curated = resolve_no_discovery(&TagSelection::Refresh, &committed).unwrap();
         assert_eq!(curated.tags, vec!["1.0.0".to_string()]);
         assert_eq!(
             curated.reserved_dropped,
@@ -543,12 +615,12 @@ mod tests {
         );
     }
 
-    /// `--tags-file` contributes additions only; the committed base arrives
+    /// `--tags-from-file` contributes additions only; the committed base arrives
     /// separately. Both halves pass through the one filter.
     #[test]
     fn resolve_curated_tags_drops_reserved_from_union_file() {
         let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string()];
-        let curated = resolve_curated_tags(
+        let curated = resolve_no_discovery(
             &TagSelection::UnionFile(vec![canonical_tag(), "2.0.0".into()]),
             &committed,
         )
@@ -568,14 +640,14 @@ mod tests {
     #[test]
     fn resolve_curated_tags_all_reserved_is_no_curated_tags() {
         let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
-            resolve_curated_tags(&TagSelection::Replace(vec!["__ocx.desc".into(), canonical_tag()]), &[])
+            resolve_no_discovery(&TagSelection::Replace(vec!["__ocx.desc".into(), canonical_tag()]), &[])
         else {
             panic!("an entirely reserved selection resolves to nothing");
         };
         assert_eq!(reserved_dropped, vec!["__ocx.desc".to_string(), canonical_tag()]);
 
         let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
-            resolve_curated_tags(&TagSelection::Refresh, &["__ocx.patch".to_string()])
+            resolve_no_discovery(&TagSelection::Refresh, &["__ocx.patch".to_string()])
         else {
             panic!("an entirely reserved committed set resolves to nothing");
         };
@@ -906,24 +978,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn ssrf_pre_flight_refuses_a_forbidden_host_with_zero_observes() {
-        // A committed root pointing at loopback must abort at the SSRF pre-flight
-        // (X3) before any registry request reaches the stub transport.
-        let data = StubTransportData::new();
-        let publisher = stub_publisher(&data);
+    async fn ssrf_pre_flight_refuses_a_forbidden_host() {
+        // A committed root pointing at loopback must abort at the pre-flight (X3)
+        // before any registry request is even constructible: `guarded_physical` is
+        // the only thing that yields the `Physical` both the tag listing and the
+        // observe loop need.
         let root = committed_root("oci://127.0.0.1/x");
-        let result = observe_curated(&publisher, &root, &["1.0.0".to_string()], &[]).await;
         assert!(
-            matches!(result, Err(AnnounceError::Ssrf(_))),
+            matches!(guarded_physical(&root, &[]).await, Err(AnnounceError::Ssrf(_))),
             "forbidden host must be refused"
         );
-        let inner = data.read();
-        assert!(
-            inner.calls.is_empty(),
-            "no registry call may precede the SSRF refusal: {:?}",
-            inner.calls
-        );
-        assert!(inner.auth_calls.is_empty(), "no auth call may precede the SSRF refusal");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -934,10 +998,81 @@ mod tests {
         let data = StubTransportData::new();
         let publisher = stub_publisher(&data);
         let root = committed_root("oci://127.0.0.1/x");
-        let result = observe_curated(&publisher, &root, &["1.0.0".to_string()], &["127.0.0.1".to_string()]).await;
+        let physical = guarded_physical(&root, &["127.0.0.1".to_string()])
+            .await
+            .expect("a trusted loopback host passes the pre-flight");
+        let result = observe_curated(&publisher, &physical, &["1.0.0".to_string()]).await;
         assert!(
             matches!(result, Err(AnnounceError::UnresolvedTag { .. })),
             "a trusted host proceeds to observe; the empty stub yields UnresolvedTag"
         );
+    }
+
+    // ── list_registry_tags (--tags-from-registry source) ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_registry_tags_drops_reserved_at_the_source() {
+        // Canonical `sha256.<hex>` tags are pushed by default, so a registry
+        // listing carries one per published version. They are filtered here and
+        // never reported: `reserved_dropped` answers "what did the CALLER name
+        // that is not a version", and a listing names nothing.
+        let data = StubTransportData::new();
+        data.write().tags = vec![vec![
+            "1.0.0".to_string(),
+            canonical_tag(),
+            "__ocx.desc".to_string(),
+            "latest".to_string(),
+        ]];
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+
+        let tags = list_registry_tags(&publisher, &physical)
+            .await
+            .expect("listing succeeds");
+
+        assert_eq!(tags, vec!["1.0.0".to_string(), "latest".to_string()]);
+    }
+
+    #[test]
+    fn from_registry_unions_onto_the_committed_set() {
+        let committed = vec!["1.0.0".to_string(), "latest".to_string()];
+        let discovered = vec!["latest".to_string(), "2.0.0".to_string(), "1.0.0".to_string()];
+        let curated = resolve_curated_tags(&TagSelection::FromRegistry, &committed, &discovered).unwrap();
+        // Committed order first, then only the genuinely new registry tag.
+        assert_eq!(
+            curated.tags,
+            vec!["1.0.0".to_string(), "latest".to_string(), "2.0.0".to_string()]
+        );
+    }
+
+    /// D1: additive only. A committed tag the registry no longer serves is
+    /// **kept** — the index's own reconcile treats a vanished non-yanked tag as
+    /// an anomaly for a human, so dropping it here would silently pre-empt that.
+    #[test]
+    fn from_registry_never_drops_a_committed_tag_the_registry_lacks() {
+        let committed = vec!["1.0.0".to_string(), "0.9.0".to_string()];
+        let discovered = vec!["1.0.0".to_string()];
+        let curated = resolve_curated_tags(&TagSelection::FromRegistry, &committed, &discovered).unwrap();
+        assert_eq!(curated.tags, committed, "0.9.0 survives its absence from the registry");
+    }
+
+    /// The registry is not consulted for any other selection, so `discovered`
+    /// arrives empty and must not leak into the resolved set.
+    #[test]
+    fn discovered_tags_are_ignored_by_the_caller_supplied_selections() {
+        let committed = vec!["1.0.0".to_string()];
+        let discovered = vec!["9.9.9".to_string()];
+        for selection in [
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            TagSelection::UnionFile(vec![]),
+            TagSelection::Refresh,
+        ] {
+            let curated = resolve_curated_tags(&selection, &committed, &discovered).unwrap();
+            assert_eq!(
+                curated.tags,
+                vec!["1.0.0".to_string()],
+                "{selection:?} must not adopt a discovered tag"
+            );
+        }
     }
 }

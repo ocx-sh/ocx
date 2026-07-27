@@ -364,9 +364,10 @@ question — `Index::list_tags` (`oci/index.rs:247-256`) filters on the cheap st
 **Where the filter applies in announce: once, on the resolved selection.** After `Replace` / `UnionFile` /
 `Refresh` collapse to a concrete set (`crates/ocx_cli/src/command/package_announce.rs:100-109`) — not
 three times at three sources, which is how the two halves of the internal-tag check drifted apart in the
-first place. `--refresh` and `--tags-file` take the base root's committed tags as their starting set
-(`announce.rs:292-295`), so they are **carriers, not sources**: neither can introduce a reserved tag, but
-either will re-announce one forever if it ever lands. Filtering after resolution covers that for free.
+first place. `--refresh`, `--tags-from-file`, and `--tags-from-registry` all take the base root's committed
+tags as their starting set (`announce.rs:292-295`), so they are **carriers, not sources**: none can introduce
+a reserved tag, but any of the three will re-announce one forever if it ever lands. Filtering after
+resolution covers that for free.
 
 **Three layers, three different verbs.** This is the separation-of-concerns point:
 

@@ -2054,10 +2054,12 @@ An unchanged run normally opens no pull request either. The one exception is a `
 
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
 
+A tag that is not a version — the OCX-internal `__ocx` namespace, or a canonical `sha256.<hex>` tag from [`--canonical-tag`][cmd-package-push] — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since canonical tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
+
 **Usage**
 
 ```shell
-ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <PATH> | --refresh) (--out <DIRECTORY> | --fork <OWNER>/<REPO>) [OPTIONS]
+ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) (--out <DIRECTORY> | --fork <OWNER>/<REPO>) [OPTIONS]
 ```
 
 **Options**
@@ -2065,8 +2067,9 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 | Name | Description | Default |
 |------|-------------|---------|
 | `--package <NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required). | — |
-| `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-file`/`--refresh`; exactly one is required. | — |
-| `--tags-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
+| `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-from-file`/`--tags-from-registry`/`--refresh`; exactly one is required. | — |
+| `--tags-from-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
+| `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
 | `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
 | `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`; exactly one is required. | — |
 | `--fork <OWNER>/<REPO>` | Open (or update) a pull request against this fork. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
@@ -2086,6 +2089,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 | A curated tag does not resolve on the physical registry — check for a typo | 79 |
 | The namespace is unclaimed — no committed root exists for the package yet. Claiming one is a human-lane action, never something announce performs | 79 |
 | The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
+| The curated set resolved to nothing but reserved tags — nothing left to announce | 64 |
 
 **JSON report**
 
@@ -2096,18 +2100,19 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
   "pull_request_url": "https://github.com/ocx-sh/index/pull/42",
   "pull_request_number": 42,
   "fork": "forkuser/index",
-  "written_paths": []
+  "written_paths": [],
+  "reserved_tags_dropped": []
 }
 ```
 
-`status` is `unchanged` or `updated`. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode.
+`status` is `unchanged` or `updated`. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
 
 ::: tip
-[`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-file` reads, so a publish pipeline can feed one straight into the other:
+[`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-from-file` reads, so a publish pipeline can feed one straight into the other:
 
 ```shell
 ocx package push -i acme/widget:1.2.3 -c --announce-file tags.txt widget.tar.xz
-ocx package announce --package acme/widget --tags-file tags.txt --fork myuser/index
+ocx package announce --package acme/widget --tags-from-file tags.txt --fork myuser/index
 ```
 :::
 
@@ -2282,7 +2287,7 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
-- `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
+- `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-from-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
 - `-h`, `--help`: Print help information.
 
