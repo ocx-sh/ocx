@@ -206,6 +206,11 @@ found every guard yet", not "the check is weak". Two independent guards
 defending one property both pass when either alone is deleted — keep
 mutating until one reds.
 
+The harness is not exempt. **Prove the mutation landed before trusting the
+result** — a script that reports success unconditionally makes a no-op edit
+indistinguishable from a real one, and the check then passes for the wrong
+reason. Gate the run on the mutated text actually being present.
+
 Cheapest tells: a tolerated *range* of exit codes; an assertion on file text
 where a parser exists; a skip whose message names a cause it never observed.
 
