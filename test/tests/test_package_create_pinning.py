@@ -40,7 +40,13 @@ def _write_app(tmp_path: Path, name: str, deps: list[dict]) -> tuple[Path, Path]
     pkg_dir = tmp_path / f"app-{name}"
     (pkg_dir / "bin").mkdir(parents=True)
     (pkg_dir / "bin" / "app").write_text("#!/bin/sh\necho app\n")
-    metadata = tmp_path / f"app-{name}-metadata.json"
+    # NOT `app-{name}-metadata.json`: that is exactly the path
+    # `create -o app-{name}.tar.xz` derives for the sidecar it WRITES. Sharing
+    # it would make every `_sidecar(out)` assertion below read a file the
+    # fixture authored, so a create that wrote nothing — or wrote back to its
+    # `-m` input instead of next to `-o` (helpers.py documents it must not) —
+    # would still look green.
+    metadata = tmp_path / f"app-{name}-input.json"
     metadata.write_text(
         json.dumps({"type": "bundle", "version": 1, "dependencies": deps})
     )
@@ -244,12 +250,7 @@ def test_create_metadata_without_platform_is_usage_error(
     pkg_dir, metadata = _write_app(
         tmp_path, "noplat", [{"identifier": f"{leaf.fq}@{manifest_digest}"}]
     )
-    # Deliberately NOT `app-noplat.tar.xz`: `_write_app` names the authored
-    # sidecar `app-noplat-metadata.json`, which is byte-for-byte the path
-    # `create -o app-noplat.tar.xz` derives for the sidecar it writes. Under
-    # the colliding name the "no sidecar" assertion below observes the
-    # fixture's own input file and fires whatever `create` did.
-    out = tmp_path / "app-noplat-bundle.tar.xz"
+    out = tmp_path / "app-noplat.tar.xz"
 
     result = _create(ocx, pkg_dir, metadata, out, check=False)
     assert result.returncode == EXIT_USAGE, result.stderr
