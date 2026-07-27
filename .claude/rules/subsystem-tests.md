@@ -172,6 +172,23 @@ When an acceptance test must force internal state that production code derives a
 
 The acceptance harness already builds with the feature: `test/taskfile.yml` and `taskfiles/rust.taskfile.yml` pass `--features ocx/__testing`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_lib/src/package_manager/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
+## Unfalsifiable Greens
+
+Shapes that pass without proving anything. See "Unchecked Green" in
+[quality-core.md](./quality-core.md) for the general rule and its Block-tier.
+
+| Shape | Why it passes anyway | Instead |
+|---|---|---|
+| **Arbitrary selection** — `next(x.glob(...))`, `[0]` off an iterator, an incidental sort key | Guarding emptiness is not guarding ambiguity. `rglob` order is directory order, not a contract, so the pick moves when a sibling file appears | Select by identity (a path the command reported, a predicate on the name); or assert cardinality where identity is genuinely unreachable |
+| **Negative assertion over an empty iteration** | `for x in glob(...): assert not bad(x)` proves the negative vacuously when the glob matches nothing — and a drifted path is exactly how it matches nothing | Assert the collection is non-empty first |
+| **Input and output share a path** | The assertion reads a file the command never had to touch | Check the asserted content differs from what the fixture authored |
+| **Exit-code tolerance band** — `rc in (64, 65, 74)` | Cannot tell "still a stub" from "the binary rejected my input" | Assert the one exit code the contract names |
+| **Text grep where a parser exists** — `assert "foo:" in content` | Passes against a file no parser accepts | Run the real parser and assert on its output |
+| **A skip naming an assumed condition** | "skipped: X unimplemented" outlives X being implemented; the reason was never observed | Assert the condition, or observe it before skipping |
+
+A whole file skipping itself away is indistinguishable from a pass — prefer a
+failed assert on a missing prerequisite over `pytest.skip`.
+
 ## Quality Gate
 
 During review-fix loops, run `task test:parallel` — not full `task verify`. Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).
