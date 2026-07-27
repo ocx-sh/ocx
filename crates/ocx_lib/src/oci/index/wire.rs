@@ -21,9 +21,10 @@
 //! is stored byte-for-byte as the registry served it
 //! (`adr_oci_index_only_dispatch.md` D1).
 //!
-//! `config.json` (the `{"format_version": 1}` version pin) is equally frozen
-//! but stays a small, source-specific concept next to its one reader
-//! (`IndexFormatConfig` in `ocx_index.rs`) rather than moving here.
+//! Two documents carry the format's version pin — `config.json` and the
+//! `c/index.json` envelope — so [`SUPPORTED_FORMAT_VERSION`] lives here, with
+//! the grammar, rather than beside either reader. `config.json`'s own struct
+//! (`IndexFormatConfig` in `ocx_index.rs`) stays next to its one reader.
 //!
 //! Everything else about the format (catalog conditional-GET, dispatch-object
 //! decode, `select_best` resolution) is downstream policy, not grammar — see
@@ -31,9 +32,14 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::oci;
+
+/// The `format_version` OCX understands, shared by every document that carries
+/// one — `config.json` and the [`CatalogDocument`] envelope. A served value
+/// other than this is rejected (`adr_index_indirection.md` F1).
+pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
 
 /// `p/<ns>/<pkg>.json` root document (●).
 ///
@@ -100,7 +106,8 @@ pub struct YankMarker {
     pub at: String,
 }
 
-/// `c/index.json` catalog (● `{"<ns>/<pkg>": "sha256:<root-digest>"}`).
+/// The `packages` map inside a [`CatalogDocument`] (● `{"<ns>/<pkg>":
+/// "sha256:<root-digest>"}`).
 ///
 /// Deliberately kept `String`-valued, NOT `oci::Digest` — a bad catalog
 /// entry must never fail the whole catalog parse (F1 blast-radius contract,
@@ -111,6 +118,59 @@ pub struct YankMarker {
 /// trust-boundary corruption, so it fails the whole document (amendment
 /// 2026-07-19).
 pub type CatalogIndex = BTreeMap<String, String>;
+
+/// `c/index.json` catalog document (● `{"format_version": 1, "packages": {…}}`).
+///
+/// The envelope is the wire: the hosted site and every verbatim copy of it serve
+/// the version pin alongside the listing, the same versioned shape `config.json`
+/// carries. `packages` is the catalog; `format_version` is a gate, not data —
+/// see [`Self::into_packages`].
+///
+/// `format_version` is deliberately **not** `#[serde(default)]`: a listing with
+/// no version pin is not a catalog document, and defaulting it would silently
+/// admit an unversioned body as version 1. `packages` does default, so a
+/// freshly deployed index with nothing published yet reads as an empty catalog
+/// rather than a parse failure.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogDocument {
+    pub format_version: u64,
+    #[serde(default)]
+    pub packages: CatalogIndex,
+}
+
+impl CatalogDocument {
+    /// Wraps `packages` at the current [`SUPPORTED_FORMAT_VERSION`] for writing.
+    pub fn new(packages: CatalogIndex) -> Self {
+        Self {
+            format_version: SUPPORTED_FORMAT_VERSION,
+            packages,
+        }
+    }
+
+    /// Version-gates the envelope and yields the catalog map.
+    ///
+    /// **Fail-closed** — the identical policy `config.json` already applies in
+    /// [`OcxIndex::check_format_version`](super::OcxIndex): an unknown version
+    /// is refused outright, never "ignore the envelope and read `packages`
+    /// anyway". One version pin, one policy, one error, whichever document
+    /// carries it. Reading a newer catalog on the strength of a field name
+    /// OCX happens to recognise is exactly the mis-parse F1 exists to prevent,
+    /// and a catalog is the listing every other read fans out from.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
+    /// when `format_version` is not [`SUPPORTED_FORMAT_VERSION`].
+    pub fn into_packages(self) -> crate::Result<CatalogIndex> {
+        if self.format_version != SUPPORTED_FORMAT_VERSION {
+            return Err(super::error::Error::UnsupportedIndexFormat {
+                version: self.format_version,
+            }
+            .into());
+        }
+        Ok(self.packages)
+    }
+}
 
 /// Specification tests for the frozen ● wire shapes, cross-checked against
 /// the exact JSON `test/src/static_index.py` emits (`write_package()`,
@@ -318,14 +378,48 @@ mod tests {
         );
     }
 
-    // ── CatalogIndex ──────────────────────────────────────────────────────
+    // ── CatalogDocument ───────────────────────────────────────────────────
 
     #[test]
-    fn catalog_index_parses_the_static_index_py_shape() {
+    fn catalog_document_parses_the_static_index_py_shape() {
         // Mirrors static_index.py's write_catalog().
-        let json = r#"{"kitware/cmake": "sha256:root1", "stable/tool": "sha256:root2"}"#;
-        let catalog: CatalogIndex = serde_json::from_str(json).unwrap();
+        let json =
+            r#"{"format_version": 1, "packages": {"kitware/cmake": "sha256:root1", "stable/tool": "sha256:root2"}}"#;
+        let document: CatalogDocument = serde_json::from_str(json).unwrap();
+        let catalog = document.into_packages().unwrap();
         assert_eq!(catalog.get("kitware/cmake"), Some(&"sha256:root1".to_string()));
         assert_eq!(catalog.get("stable/tool"), Some(&"sha256:root2".to_string()));
+    }
+
+    #[test]
+    fn catalog_document_without_the_envelope_is_refused() {
+        // The bare map is not a catalog document — `format_version` carries no
+        // serde default precisely so an unversioned body cannot pass as v1.
+        let json = r#"{"kitware/cmake": "sha256:root1"}"#;
+        serde_json::from_str::<CatalogDocument>(json)
+            .expect_err("a bare package map must not deserialize as a catalog document");
+    }
+
+    #[test]
+    fn catalog_document_with_no_packages_key_reads_as_empty() {
+        // A freshly deployed index that has published nothing yet.
+        let document: CatalogDocument = serde_json::from_str(r#"{"format_version": 1}"#).unwrap();
+        assert!(document.into_packages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsupported_catalog_format_version_fails_closed() {
+        // Same policy as `config.json`'s gate: refuse, never read `packages`
+        // anyway. The `packages` map below is deliberately well-formed — it is
+        // the VERSION that must stop the read, not the payload.
+        let json = r#"{"format_version": 2, "packages": {"kitware/cmake": "sha256:root1"}}"#;
+        let document: CatalogDocument = serde_json::from_str(json).unwrap();
+        let error = document
+            .into_packages()
+            .expect_err("an unknown catalog format_version must fail closed");
+        assert!(
+            error.to_string().contains("format_version 2"),
+            "the refusal must name the served version, got: {error}"
+        );
     }
 }

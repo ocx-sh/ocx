@@ -55,11 +55,13 @@ pub enum Error {
     )]
     PolicyResolutionBlocked { identifier: String, policy: &'static str },
 
-    /// A static-file index (`index.ocx.sh`) served a `config.json` whose
-    /// `format_version` OCX does not understand. Fail-closed
+    /// An index document carrying the format's version pin — `config.json` or
+    /// the `c/index.json` envelope, read off the wire or off a local copy —
+    /// declared a `format_version` OCX does not understand. Fail-closed
     /// (`adr_index_indirection.md` F1): a newer wire format may change shapes
-    /// OCX would otherwise mis-parse.
-    #[error("index.ocx.sh config format_version {version} is not supported")]
+    /// OCX would otherwise mis-parse. One pin, one policy, one error, whichever
+    /// document carries it.
+    #[error("index format_version {version} is not supported")]
     UnsupportedIndexFormat { version: u64 },
 
     /// A fetched dispatch object's bytes did not hash to the digest the root

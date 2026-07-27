@@ -228,7 +228,7 @@ local re-encoding.** A source's subtree is:
 ```
 <home>/<source>/
 ├── config.json                 (published indices only — {"format_version": 1})
-├── c/index.json                (published indices only — catalog: {"<ns>/<pkg>": "sha256:<root-digest>"})
+├── c/index.json                (published indices only — catalog: {"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}})
 ├── c/index.json.etag           (published indices only — conditional-GET validator sidecar)
 └── p/<ns>/
     ├── <pkg>.json              root doc
@@ -511,7 +511,7 @@ lands. The client design spec is re-derived against these shapes (handover waiti
 | `config.json` (● `{"format_version": 1}`) | version pin | Read once; reject unknown `format_version` (fail-closed, `DataError`) |
 | `p/<ns>/<pkg>.json` **root** (●) | **volatile** (human-PR `repository` migration, tag curation) | Snapshot-first under Default — **never auto-refreshed** (Invariant 1; local-first-except-`--remote`, `subsystem-oci.md`). The snapshot copy is dated by `observed`. A live re-fetch happens **only** on an explicit `ocx index update` or a `--remote` resolve, which rewrites the snapshot and bumps `observed`. Offline-first (DR1, Principle #2) means a Default-mode resolve never reaches upstream for the root. Every read **verifies `sha256(bytes)` against the `c/index.json` entry** for a source with a synced catalog (below) |
 | `o/sha256/<hex>` **observation object** (●) | **immutable** (CAS) | Fetch once, **verify `sha256(bytes)` == `<hex>`**, cache forever in `o/sha256/` |
-| `c/index.json` (● `{"<ns>/<pkg>": "sha256:<root-digest>"}`) | volatile catalog | Whole-catalog sync via **conditional GET + digest diff** (F2) |
+| `c/index.json` (● `{"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}}`) | volatile catalog | Whole-catalog sync via **conditional GET + digest diff** (F2) |
 | `desc` blobs (`.md`/`.svg`/`.png`) | **frozen-status UNRESOLVED** | **OPEN interop point — record, do not build on it** (F4) |
 
 The obs-object verify step is load-bearing: it is the primary place OCX re-derives a digest OCX did not
@@ -777,7 +777,7 @@ probing. There is no "tree store" abstraction: there is an index on disk, and `L
 index.ocx.sh served tree  (● = frozen; the local index-source subtree is a verbatim copy of this)
 /
 ├── config.json                       ● {"format_version": 1}
-├── c/index.json                      ● {"<ns>/<pkg>": "sha256:<root-digest>", ...}
+├── c/index.json                      ● {"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>", ...}}
 └── p/<ns>/
     ├── <pkg>.json                    ● root: name, repository (oci://…), owners, status,
     │                                        deprecated_message, created, upstream, superseded_by,

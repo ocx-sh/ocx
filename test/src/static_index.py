@@ -7,7 +7,7 @@ Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogIndex` in
 here:
 
     config.json                {"format_version": 1}
-    c/index.json                {"<repository>": "sha256:<root-digest>", ...}
+    c/index.json                {"format_version": 1, "packages": {"<repository>": "sha256:<root-digest>", ...}}
     p/<repository>.json         root: repository, tags{tag: {content, ...}}, status...
     p/<repository>/o/sha256/<hex>.json   a real OCI image index, verbatim
                                           ({"schemaVersion": 2, "mediaType":
@@ -140,11 +140,26 @@ def write_package(
     )
 
 
-def write_catalog(fixture_root: Path, entries: dict[str, str]) -> None:
-    """Writes `c/index.json` (● `{"<repository>": "sha256:<root-digest>"}`)."""
+def write_catalog(fixture_root: Path, entries: dict[str, str], *, format_version: int = 1) -> None:
+    """Writes `c/index.json` (● `{"format_version": N, "packages": {...}}`).
+
+    The envelope is the served wire — `index.ocx.sh` emits the version pin
+    alongside the listing, the same shape `config.json` carries.
+    """
     path = fixture_root / "c" / "index.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, sort_keys=True, separators=(",", ":")))
+    document = {"format_version": format_version, "packages": entries}
+    path.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")))
+
+
+def read_catalog(path: Path) -> dict[str, str]:
+    """Reads a persisted `c/index.json` and returns its `packages` map.
+
+    Used by tests asserting on OCX's own local catalog: the local copy carries
+    the same envelope the site serves, so tests must unwrap it rather than
+    indexing the document directly.
+    """
+    return json.loads(path.read_text())["packages"]
 
 
 # ---------------------------------------------------------------------------

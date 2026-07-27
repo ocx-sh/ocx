@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use crate::Result;
 use crate::oci::Digest;
-use crate::oci::index::CatalogIndex;
+use crate::oci::index::{CatalogDocument, CatalogIndex};
 use crate::utility::fs::LockedFile;
 
 /// Max time to block waiting for another writer to release a source-scoped
@@ -305,8 +305,9 @@ impl IndexStore {
         self.wire_source_dir(source).join("config.json")
     }
 
-    /// Path to a source's `c/index.json` catalog (● `{"<ns>/<pkg>":
-    /// "sha256:<root-digest>"}`, A2/F1) — per-source, unlike
+    /// Path to a source's `c/index.json` catalog (● `{"format_version": 1,
+    /// "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}}`, A2/F1) —
+    /// per-source, unlike
     /// [`Self::catalog_path`]'s single global file.
     pub fn source_catalog_path(&self, source: &str) -> PathBuf {
         self.wire_source_dir(source).join("c").join("index.json")
@@ -622,6 +623,11 @@ impl IndexStore {
     /// Reads this source's `c/index.json` catalog map (`Ok(None)` when absent
     /// — a fresh source or a derived index that never gets one, A2).
     ///
+    /// The on-disk document is the served [`CatalogDocument`] envelope, the same
+    /// bytes the hosted site serves — a local copy that reads one shape and
+    /// writes another would not be a copy. The version gate runs here, on read,
+    /// exactly as it does for a fetched catalog ([`CatalogDocument::into_packages`]).
+    ///
     /// This is the offline listing source and the diff basis for the next
     /// catalog sync (F2); the caller reads it before the network fetch, and the
     /// reconcile-commit re-reads it under the lock before writing (never a
@@ -634,7 +640,8 @@ impl IndexStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(crate::error::file_error(&target, e)),
         };
-        Ok(Some(serde_json::from_slice(&bytes)?))
+        let document: CatalogDocument = serde_json::from_slice(&bytes)?;
+        Ok(Some(document.into_packages()?))
     }
 
     /// Reads this source's persisted catalog `ETag`, if any (`Ok(None)` when
@@ -934,9 +941,15 @@ impl CatalogTransaction<'_> {
     /// Publishes the (possibly mutated) catalog map — and, when `etag` is
     /// `Some`, the `.etag` sidecar — atomically, still under the held lock.
     /// Consumes the guard, releasing the lock on return.
+    ///
+    /// Written as the [`CatalogDocument`] envelope, the one shape this format
+    /// has: what a local index writes is what the hosted site serves, so a
+    /// derived source's catalog and a mirrored one are the same document and
+    /// [`IndexStore::read_source_catalog`] needs no second branch to tell them
+    /// apart.
     pub async fn commit(self, etag: Option<&str>) -> Result<()> {
         let catalog_path = self.store.source_catalog_path(&self.source);
-        let catalog_bytes = serde_json::to_vec_pretty(&self.catalog)?;
+        let catalog_bytes = serde_json::to_vec_pretty(&CatalogDocument::new(self.catalog))?;
         IndexStore::write_bytes_atomic(&catalog_path, catalog_bytes).await?;
 
         if let Some(etag) = etag {
@@ -972,6 +985,16 @@ mod wire_grammar_tests {
 
     fn store(dir: &Path) -> IndexStore {
         IndexStore::new(dir)
+    }
+
+    /// Decodes a persisted `c/index.json` straight off disk into its `packages`
+    /// map. Deliberately NOT a call to [`IndexStore::read_source_catalog`] —
+    /// these tests assert what the writer actually put on disk, so going
+    /// through the reader under test would let a matched pair of read/write
+    /// bugs pass.
+    async fn catalog_on_disk(path: &Path) -> CatalogIndex {
+        let document: CatalogDocument = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+        document.into_packages().unwrap()
     }
 
     /// Builds minimal root-document bytes matching `test/src/static_index.py`'s
@@ -1586,8 +1609,7 @@ mod wire_grammar_tests {
             .unwrap();
         assert_eq!(on_disk_root, root_bytes, "root document bytes must land verbatim");
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&IndexStore::root_catalog_entry(&root_bytes)),
@@ -1626,8 +1648,7 @@ mod wire_grammar_tests {
                 .unwrap(),
             "root document must exist after commit"
         );
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&IndexStore::root_catalog_entry(&root_bytes)),
@@ -1665,8 +1686,7 @@ mod wire_grammar_tests {
             "an absent catalog entry must self-heal, never hard-fail"
         );
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&expected_entry),
@@ -1693,9 +1713,12 @@ mod wire_grammar_tests {
         );
         let catalog_path = s.source_catalog_path("ocx.sh");
         tokio::fs::create_dir_all(catalog_path.parent().unwrap()).await.unwrap();
-        tokio::fs::write(&catalog_path, serde_json::to_vec(&stale_catalog).unwrap())
-            .await
-            .unwrap();
+        tokio::fs::write(
+            &catalog_path,
+            serde_json::to_vec(&CatalogDocument::new(stale_catalog)).unwrap(),
+        )
+        .await
+        .unwrap();
 
         let result = s
             .read_root("ocx.sh", "kitware/cmake", |_| Ok(()))
@@ -1711,7 +1734,7 @@ mod wire_grammar_tests {
             },
             "a stale (mismatched) catalog entry must self-heal by re-derivation, never hard-fail"
         );
-        let catalog: CatalogIndex = serde_json::from_slice(&tokio::fs::read(&catalog_path).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&catalog_path).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&expected_entry),
@@ -1864,8 +1887,7 @@ mod wire_grammar_tests {
             "recovery must derive the entry from the freshest root bytes"
         );
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&entry_v2),
@@ -1934,8 +1956,7 @@ mod wire_grammar_tests {
             .insert("stable/tool".to_string(), "sha256:bbb".to_string());
         txn_b.commit(None).await.unwrap();
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(catalog.get("kitware/cmake"), Some(&"sha256:aaa".to_string()));
         assert_eq!(catalog.get("stable/tool"), Some(&"sha256:bbb".to_string()));
     }
@@ -1967,8 +1988,7 @@ mod wire_grammar_tests {
             .insert("stable/tool".to_string(), "sha256:added-by-a".to_string());
         txn_a.commit(None).await.unwrap();
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&"sha256:committed-by-b".to_string()),
@@ -2006,8 +2026,7 @@ mod wire_grammar_tests {
         task_a.await.unwrap();
         task_b.await.unwrap();
 
-        let catalog: CatalogIndex =
-            serde_json::from_slice(&tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap()).unwrap();
+        let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
             catalog.get("kitware/cmake"),
             Some(&"sha256:from-a".to_string()),
