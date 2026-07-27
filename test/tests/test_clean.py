@@ -63,7 +63,7 @@ def test_clean_preserves_referenced_objects(
     """ocx install <pkg>; ocx clean"""
     pkg = published_package
     result = ocx.json("package", "install", pkg.short)
-    content = Path(result[pkg.short]["path"]).resolve()
+    content = Path(result[pkg.short]["path"]).resolve().parent
 
     ocx.plain("clean")
     assert_dir_exists(content)
@@ -98,9 +98,10 @@ def test_clean_preserves_config_blob_of_installed_package(
     installs = ocx.json("package", "install", "--select", pkg.short)
     assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
 
-    # The install symlink resolves to the package's content/ dir; manifest.json
-    # sits beside it in the package root.
-    package_root = Path(next(iter(installs.values()))["path"]).resolve().parent
+    # `path` is the candidate symlink, and both `current` and `candidates/{tag}`
+    # target the package root itself — not `content/` (see SymlinkStore's doc
+    # comment). manifest.json sits directly in that root.
+    package_root = Path(next(iter(installs.values()))["path"]).resolve()
     manifest = json.loads((package_root / "manifest.json").read_text())
     config_digest = manifest["config"]["digest"]  # e.g. "sha256:abcd..."
 
