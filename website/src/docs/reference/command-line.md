@@ -2765,7 +2765,7 @@ ocx package describe [OPTIONS] <IDENTIFIER>
 **Options**
 
 - `--readme <PATH>`: Path to a README markdown file.
-- `--logo <PATH>`: Path to a logo image (PNG or SVG).
+- `--logo <PATH>`: Path to a logo image (PNG or SVG). The file's bytes must be the format its extension names; anything else exits 65 without touching the published description.
 - `--title <TITLE>`: Short display title for the package catalog.
 - `--description <TEXT>`: One-line summary.
 - `--keywords <LIST>`: Comma-separated search keywords.

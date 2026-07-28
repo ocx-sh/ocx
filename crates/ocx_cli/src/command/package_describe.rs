@@ -21,6 +21,10 @@ pub struct PackageDescribe {
     readme: Option<std::path::PathBuf>,
 
     /// Path to an optional logo image (PNG or SVG).
+    ///
+    /// The file's bytes must be the format its extension names. A file that is not
+    /// a real PNG or SVG fails the command without touching the published
+    /// description, so a broken checkout cannot blank a catalog logo.
     #[clap(long)]
     logo: Option<std::path::PathBuf>,
 
@@ -85,12 +89,7 @@ impl PackageDescribe {
         };
 
         let logo = match &self.logo {
-            Some(path) => {
-                let data = std::fs::read(path)
-                    .map_err(|e| anyhow::anyhow!("failed to read logo at {}: {e}", path.display()))?;
-                let media_type = package::description::logo_media_type(path)?;
-                Some(package::description::Logo { data, media_type })
-            }
+            Some(path) => Some(package::description::load_logo(path)?),
             None => existing
                 .as_ref()
                 .and_then(|d| d.logo.as_ref())

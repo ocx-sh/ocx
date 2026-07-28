@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- [`ocx package describe --logo`](https://ocx.sh/docs/reference/command-line#package-describe) verifies the file's bytes are the image its extension claims, exiting 65 when they are not *(cli)*: only the extension was checked, so a Git LFS pointer left by a checkout without `lfs: true` — or an empty file, or an HTML error page — published as the logo, exited 0, and blanked the catalog entry a good logo had been pushed to.
 - `ocx patch test` can run a base package that declares entrypoints *(cli)*: the launcher `pkg-root` guard allow-listed only `ocx package test`'s scratch root, so re-entry from a generated launcher under `patch test`'s own scratch root was rejected with exit 64 before the command could run.
 
 ### Removed
