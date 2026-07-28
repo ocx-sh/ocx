@@ -78,6 +78,13 @@ pub enum AnnounceStatus {
     Updated,
 }
 
+impl AnnounceStatus {
+    /// [`Self::Updated`] when something moved, [`Self::Unchanged`] otherwise.
+    pub fn from_changed(changed: bool) -> Self {
+        if changed { Self::Updated } else { Self::Unchanged }
+    }
+}
+
 /// The result of an announce run.
 #[derive(Debug)]
 pub struct AnnounceOutcome {
@@ -93,6 +100,12 @@ pub struct AnnounceOutcome {
     /// The relative paths written under the `--out` directory (sorted) — always
     /// the whole entry, unchanged runs included; empty in fork mode.
     pub written_paths: Vec<String>,
+    /// Whether the `__ocx.desc` observation moved this run (D6).
+    /// [`AnnounceStatus::Updated`] means the root's `desc` object was rebuilt
+    /// and its readme (and logo) blobs written as new CAS objects;
+    /// [`AnnounceStatus::Unchanged`] means the description tag sits where the
+    /// committed root already recorded it, or the package publishes none.
+    pub desc_status: AnnounceStatus,
     /// Reserved tags dropped from the curated set (D7) — the OCX-internal
     /// `__ocx` namespace and `<algorithm>.<hex>` canonical tags. Dropping them
     /// is not a failure, so they are reported here rather than refused; empty

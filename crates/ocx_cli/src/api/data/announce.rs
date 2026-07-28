@@ -16,9 +16,11 @@ use crate::api::Printable;
 /// command warns about them on stderr when there are any.
 ///
 /// JSON format:
-/// `{ "package", "status", "pull_request_url", "pull_request_number", "fork",
-/// "written_paths", "reserved_tags_dropped" }`.
-/// `status` is exactly `"unchanged"` or `"updated"`. `pull_request_url` /
+/// `{ "package", "status", "desc_status", "pull_request_url",
+/// "pull_request_number", "fork", "written_paths", "reserved_tags_dropped" }`.
+/// `status` and `desc_status` are each exactly `"unchanged"` or `"updated"`;
+/// `desc_status` is JSON-only, the plain table being at its column budget.
+/// `pull_request_url` /
 /// `pull_request_number` / `fork` are always `null` for `--out`; in `--fork`
 /// mode they are `null` only when the run made no pull request — an unchanged
 /// run whose announce branch is ahead of the index base still ensures, and
@@ -33,6 +35,11 @@ pub struct AnnounceReport {
     /// `--fork` run still ensures a pull request when its announce branch is
     /// ahead of the index base.
     pub status: String,
+    /// `"updated"` when the package's `__ocx.desc` artifact moved, so the
+    /// root's `desc` object was rebuilt and its readme (and logo) written as
+    /// new content-addressed objects; `"unchanged"` when the description sits
+    /// where the committed root already recorded it, or there is none.
+    pub desc_status: String,
     /// The opened/updated pull request's web URL.
     pub pull_request_url: Option<String>,
     /// The opened/updated pull request's number.
@@ -51,19 +58,25 @@ pub struct AnnounceReport {
 impl AnnounceReport {
     /// Builds a report from an [`AnnounceOutcome`].
     pub fn from_outcome(outcome: AnnounceOutcome) -> Self {
-        let status = match outcome.status {
-            AnnounceStatus::Unchanged => "unchanged",
-            AnnounceStatus::Updated => "updated",
-        };
         Self {
             package: outcome.package,
-            status: status.to_string(),
+            status: status_label(outcome.status).to_string(),
+            desc_status: status_label(outcome.desc_status).to_string(),
             pull_request_url: outcome.pull_request.as_ref().map(|pr| pr.html_url.clone()),
             pull_request_number: outcome.pull_request.as_ref().map(|pr| pr.number),
             fork: outcome.fork.as_ref().map(|fork| fork.full_name.clone()),
             written_paths: outcome.written_paths,
             reserved_tags_dropped: outcome.reserved_tags_dropped,
         }
+    }
+}
+
+/// The wire spelling of a status — the same two words for the root and for the
+/// description, so a consumer parses one vocabulary.
+fn status_label(status: AnnounceStatus) -> &'static str {
+    match status {
+        AnnounceStatus::Unchanged => "unchanged",
+        AnnounceStatus::Updated => "updated",
     }
 }
 
@@ -119,6 +132,7 @@ mod tests {
             }),
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
+            desc_status: AnnounceStatus::Unchanged,
         }
     }
 
@@ -130,6 +144,7 @@ mod tests {
             fork: None,
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
+            desc_status: AnnounceStatus::Unchanged,
         }
     }
 
@@ -146,6 +161,11 @@ mod tests {
         assert_eq!(value.get("pull_request_number").and_then(|v| v.as_u64()), Some(42));
         assert_eq!(value.get("fork").and_then(|v| v.as_str()), Some("forkuser/index"));
         assert_eq!(value.get("written_paths").and_then(|v| v.as_array()), Some(&vec![]));
+        assert_eq!(
+            value.get("desc_status").and_then(|v| v.as_str()),
+            Some("unchanged"),
+            "the description status is reported on every run, not only when it moved"
+        );
         assert_eq!(
             value.get("reserved_tags_dropped").and_then(|v| v.as_array()),
             Some(&vec![]),
@@ -212,6 +232,7 @@ mod tests {
             fork: None,
             written_paths: vec!["p/acme/widget.json".to_string()],
             reserved_tags_dropped: Vec::new(),
+            desc_status: AnnounceStatus::Unchanged,
         };
         let report = AnnounceReport::from_outcome(outcome);
         let value = serde_json::to_value(&report).unwrap();
@@ -220,6 +241,20 @@ mod tests {
             value.get("written_paths").and_then(|v| v.as_array()),
             Some(&vec![serde_json::Value::String("p/acme/widget.json".to_string())])
         );
+    }
+
+    /// The description moves on its own axis: a run can rewrite `desc` (and its
+    /// blobs) while the root's own status says `updated` for either reason, so
+    /// the two statuses are reported independently.
+    #[test]
+    fn a_moved_description_reports_its_own_updated_status() {
+        let outcome = AnnounceOutcome {
+            desc_status: AnnounceStatus::Updated,
+            ..outcome_updated()
+        };
+        let report = AnnounceReport::from_outcome(outcome);
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value.get("desc_status").and_then(|v| v.as_str()), Some("updated"));
     }
 
     #[test]

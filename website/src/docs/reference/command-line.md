@@ -2052,6 +2052,8 @@ An unchanged run normally opens no pull request either. The one exception is a `
 
 `--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
 
+Every run also observes the package description published by [`ocx package describe`][cmd-package-describe]. When its artifact has moved since the last announce, the entry's description block is rebuilt — title, summary, keywords, and content-addressed copies of the README and logo — and the report's `desc_status` reads `updated`. An unmoved description costs one request and writes nothing. A description recorded in the index that the registry no longer serves stops the run rather than clearing it silently.
+
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
 
 A tag that is not a version — the OCX-internal `__ocx` namespace, or a canonical `sha256.<hex>` tag from [`--canonical-tag`][cmd-package-push] — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since canonical tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
@@ -2090,6 +2092,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | The namespace is unclaimed — no committed root exists for the package yet. Claiming one is a human-lane action, never something announce performs | 79 |
 | The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
 | The curated set resolved to nothing but reserved tags — nothing left to announce | 64 |
+| The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
 
 **JSON report**
 
@@ -2100,12 +2103,13 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
   "pull_request_url": "https://github.com/ocx-sh/index/pull/42",
   "pull_request_number": 42,
   "fork": "forkuser/index",
+  "desc_status": "updated",
   "written_paths": [],
   "reserved_tags_dropped": []
 }
 ```
 
-`status` is `unchanged` or `updated`. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
+`status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
 
 ::: tip
 [`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-from-file` reads, so a publish pipeline can feed one straight into the other:
@@ -3545,6 +3549,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [patches-user-guide]: ../user-guide/patches.md
 
 <!-- commands (package-test options) -->
+[cmd-package-describe]: #package-describe
 [cmd-package-push]: #package-push
 [cmd-package-push-layout]: #package-push-layout
 [cmd-package-test]: #package-test
