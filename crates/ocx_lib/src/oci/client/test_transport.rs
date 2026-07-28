@@ -22,6 +22,13 @@ pub(crate) struct StubTransportInner {
     pub repositories: Vec<Vec<String>>,
     /// Image string → (raw manifest bytes, digest string).
     pub manifests: HashMap<String, (Vec<u8>, String)>,
+    /// Image string → artificial latency before `pull_manifest_raw` answers.
+    ///
+    /// Exists so a concurrent fetch loop's completion order can be made to
+    /// differ from its submission order. Without it an in-memory stub answers
+    /// every request in submission order, and an ordering assertion passes just
+    /// as happily against an unordered implementation — proving nothing.
+    pub manifest_delays: HashMap<String, std::time::Duration>,
     /// Digest string → blob bytes (written to file by `pull_blob_to_file`).
     pub blobs: HashMap<String, Vec<u8>>,
     /// Digest returned by `fetch_manifest_digest`.
@@ -182,6 +189,12 @@ impl OciTransport for StubTransport {
     ) -> Result<(Vec<u8>, String)> {
         self.record("pull_manifest_raw");
         let key = image.to_string();
+        // Read the delay and release the lock before awaiting — the guard is not
+        // held across the sleep, and concurrent callers must not serialise here.
+        let delay = self.data.read().manifest_delays.get(&key).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let inner = self.data.read();
         if let Some(manifest) = inner.manifests.get(&key).cloned() {
             Ok(manifest)
