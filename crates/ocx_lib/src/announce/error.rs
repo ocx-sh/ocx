@@ -106,6 +106,25 @@ pub enum AnnounceError {
         source: Box<crate::oci::client::error::ClientError>,
     },
 
+    /// Fetching or decoding the `__ocx.desc` artifact failed (D6): a transport
+    /// failure, a manifest that is not a description artifact, or one carrying
+    /// no markdown readme layer.
+    ///
+    /// Boxed for the same reason as [`Self::Observe`].
+    #[error("failed to observe the description of {repository}")]
+    ObserveDesc {
+        repository: String,
+        #[source]
+        source: Box<crate::oci::client::error::ClientError>,
+    },
+
+    /// The committed root records a description the physical repository no
+    /// longer serves. Retraction semantics are unspecified, so announce stops
+    /// loudly rather than silently clearing `desc` back to null (reference
+    /// parity).
+    #[error("__ocx.desc disappeared from {repository} (was {digest})")]
+    DescDisappeared { repository: String, digest: String },
+
     /// Listing the physical repository's tags failed (`--tags-from-registry`).
     ///
     /// Boxed for the same reason as [`Self::Observe`].
@@ -178,7 +197,15 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             Self::Ssrf(inner) => inner.classify(),
             Self::Forge(inner) => inner.classify(),
             Self::Observe { source, .. } => source.classify(),
+            Self::ObserveDesc { source, .. } => source.classify(),
             Self::ListTags { source, .. } => source.classify(),
+            // The description tag resolved once (it is recorded in the
+            // committed root) and does not now. Nothing is malformed on the
+            // wire and nothing the publisher typed is at fault, but the two
+            // sides of the announce genuinely disagree — the malformed-input
+            // category, same as `TagIsNotAnImageIndex`, and discriminable from
+            // an unclassified crash.
+            Self::DescDisappeared { .. } => Some(crate::cli::ExitCode::DataError),
             // A publisher typo — the tag genuinely does not exist on the
             // physical registry. Same category as `ClientError::ManifestNotFound`.
             Self::UnresolvedTag { .. } => Some(crate::cli::ExitCode::NotFound),
@@ -314,6 +341,45 @@ mod tests {
         };
         assert_eq!(error.to_string(), "no curated tags given");
         assert_eq!(error.classify(), Some(ExitCode::UsageError));
+    }
+
+    /// The description fetch reaches the same registry as the observe loop, so
+    /// its failures classify the same way — an unreachable registry must not
+    /// collapse to exit 1 just because it was the description being fetched.
+    #[test]
+    fn observe_desc_variant_classifies_via_the_inner_error() {
+        let inner = crate::oci::client::error::ClientError::ManifestNotFound("x".to_string());
+        let expected = inner.classify();
+        let error = AnnounceError::ObserveDesc {
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            source: Box::new(inner),
+        };
+        assert_eq!(error.classify(), expected);
+        assert!(
+            error.to_string().contains("oci://ghcr.io/acme/widget"),
+            "the message must name the repository: {error}"
+        );
+    }
+
+    /// A vanished description is a disagreement between the committed root and
+    /// the registry, not an absence and not a crash — a release wrapper must be
+    /// able to tell it apart from both.
+    #[test]
+    fn desc_disappeared_classifies_as_data_error() {
+        let error = AnnounceError::DescDisappeared {
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        assert!(
+            message.contains("__ocx.desc"),
+            "the message must name the tag: {message}"
+        );
+        assert!(
+            message.contains(&format!("sha256:{}", "a".repeat(64))),
+            "the message must name the digest the root recorded: {message}"
+        );
     }
 
     #[test]

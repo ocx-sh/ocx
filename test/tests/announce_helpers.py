@@ -42,9 +42,17 @@ def configure_trusted_hosts(ocx: OcxRunner, registry: str, hosts: list[str]) -> 
 def seed_empty_root(fake_forge: FakeForge, package: str, physical_repository: str) -> None:
     """Seeds an empty-tags committed root at `p/<package>.json` on the index
     repo's `main` — the "namespace already claimed, nothing curated yet"
-    starting state every scenario announces against."""
+    starting state every scenario announces against.
+
+    `name` is carried because the index root schema requires it of every root:
+    announce reads it (it is the fallback for a description with no title
+    annotation), so a fixture omitting it exercises a root the index cannot
+    hold."""
     fake_forge.seed_root(
-        INDEX_OWNER, INDEX_REPO, f"p/{package}.json", {"repository": physical_repository, "tags": {}}
+        INDEX_OWNER,
+        INDEX_REPO,
+        f"p/{package}.json",
+        {"name": f"ocx.sh/{package}", "repository": physical_repository, "tags": {}},
     )
 
 

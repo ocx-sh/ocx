@@ -173,8 +173,19 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     so `--out` materializes the whole entry on every run. A pipeline shaped
     `announce --out dir && publish dir` must never find an empty directory just
     because nothing moved; only `status` reports that. The byte contract makes
-    the repeated write idempotent."""
+    the repeated write idempotent.
+
+    "The whole entry" includes the description's CAS objects, which is why this
+    package publishes an `__ocx.desc`: the curated tags' CAS objects are written
+    unconditionally, and a `desc.readme` the second run alone omitted would leave
+    the published directory carrying a dangling reference the index refuses. The
+    readme is deliberately pushed with no title (no frontmatter, no `--title`),
+    the state that produced a schema-invalid `desc.title: ""`.
+    """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    readme = tmp_path / "README.md"
+    readme.write_text("# widget\n\nDoes widget things.\n")
+    ocx.plain("package", "describe", "--readme", str(readme), f"{ocx.registry}/{unique_repo}")
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -183,6 +194,15 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     first_dir = tmp_path / "first"
     first = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(first_dir))
     assert first["status"] == "updated"
+    assert first["desc_status"] == "updated", "the description moved from null to an object"
+
+    root_obj = json.loads((first_dir / "p" / f"{package}.json").read_bytes())
+    desc = root_obj["desc"]
+    assert desc["title"], f"the index schema types desc.title minLength 1, got {desc['title']!r}"
+    readme_relative = f"p/{package}/o/sha256/{desc['readme'].split(':', 1)[1]}.md"
+    assert readme_relative in first["written_paths"], (
+        f"the root points at {readme_relative}: {first['written_paths']}"
+    )
 
     # Seed the canonical bytes as the index-main root, so the next run rebuilds
     # something byte-identical to what is already committed.
@@ -192,8 +212,12 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     second_dir = tmp_path / "second"
     second = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(second_dir))
     assert second["status"] == "unchanged", "nothing moved, so the status must say so"
+    assert second["desc_status"] == "unchanged", "the description did not move either"
     assert sorted(second["written_paths"]) == sorted(first["written_paths"]), (
         "an unchanged --out run must still write the whole entry, not an empty directory"
+    )
+    assert readme_relative in second["written_paths"], (
+        "the unchanged run's root still points at the readme, so it must write it too"
     )
     for relative in first["written_paths"]:
         assert (second_dir / relative).read_bytes() == (first_dir / relative).read_bytes()

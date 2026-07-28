@@ -117,7 +117,9 @@ pub async fn announce(
         files,
         observed,
         mut reserved_dropped,
+        desc_updated,
     } = observe_and_rebuild(publisher, &committed_root, &request, &now, &root_path, &package).await?;
+    let mut desc_status = AnnounceStatus::from_changed(desc_updated);
 
     // C6: byte-identical root AND no new CAS object ⇒ nothing moved.
     let unchanged = new_root_bytes == committed_bytes && pipeline::new_cas_count(&committed_root, &observed) == 0;
@@ -146,6 +148,7 @@ pub async fn announce(
                 fork: None,
                 written_paths,
                 reserved_tags_dropped: reserved_dropped,
+                desc_status,
             })
         }
         AnnounceTarget::Fork(target) => {
@@ -180,6 +183,7 @@ pub async fn announce(
                         fork: Some(fork.clone()),
                         written_paths: Vec::new(),
                         reserved_tags_dropped: reserved_dropped,
+                        desc_status,
                     });
                 }
                 return Ok(AnnounceOutcome {
@@ -189,6 +193,7 @@ pub async fn announce(
                     fork: None,
                     written_paths: Vec::new(),
                     reserved_tags_dropped: reserved_dropped,
+                    desc_status,
                 });
             }
             // C8: reuse the already-resolved fork, else create one under the
@@ -255,6 +260,7 @@ pub async fn announce(
                     // root differs between passes, so the two lists legitimately
                     // differ and only the second describes what was announced.
                     reserved_dropped = merged.reserved_dropped;
+                    desc_status = AnnounceStatus::from_changed(merged.desc_updated);
                     // Re-apply C6 against the head that WON the race: two
                     // identical racing announces both regenerate the same
                     // bytes, so committing again would push a commit whose tree
@@ -302,6 +308,7 @@ pub async fn announce(
                 fork: Some(fork),
                 written_paths: Vec::new(),
                 reserved_tags_dropped: reserved_dropped,
+                desc_status,
             })
         }
     }
@@ -320,6 +327,9 @@ struct Rebuilt {
     observed: Vec<pipeline::Observed>,
     /// Reserved tags this pass dropped from the curated set (D7).
     reserved_dropped: Vec<String>,
+    /// Whether the `__ocx.desc` observation moved this pass (D6) — false when
+    /// the description is unchanged or the package has none.
+    desc_updated: bool,
 }
 
 /// One full regeneration pass over `base_root`: resolve the curated tag universe
@@ -366,15 +376,30 @@ async fn observe_and_rebuild(
         reserved_dropped,
     } = pipeline::resolve_curated_tags(&request.curated, &base_tags, &discovered)?;
     let observed = pipeline::observe_curated(publisher, &physical, &curated).await?;
+    // D6: the description is a floating tag of its own, observed after the
+    // curated set (reference parity) and behind the same pre-flight — the root's
+    // `desc` object is rewritten only when its tag digest moved, so `--refresh`
+    // on a package whose description never changes stays byte-identical. Its CAS
+    // blobs ride along on every run regardless, exactly as the curated tags' do.
+    let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
     let mut root = pipeline::regenerate(base_root, &observed, now);
+    if let Some(updated) = &desc.desc
+        && let Some(object) = root.as_object_mut()
+    {
+        // Replacing an existing key keeps its position (preserve_order), the
+        // same mechanism `regenerate` relies on for `tags`. Every root carries
+        // `desc` — the index schema requires the key, `null` when unset.
+        object.insert("desc".to_string(), updated.clone());
+    }
     pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
     let root_bytes = serialize_root(&root);
-    let files = pipeline::build_files(root_path, &root_bytes, package, &observed);
+    let files = pipeline::build_files(root_path, &root_bytes, package, &observed, &desc.blobs);
     Ok(Rebuilt {
         root_bytes,
         files,
         observed,
         reserved_dropped,
+        desc_updated: desc.desc.is_some(),
     })
 }
 
@@ -578,6 +603,80 @@ mod tests {
             .insert(format!("127.0.0.1/x:{tag}"), (bytes, digest.to_string()));
     }
 
+    /// Seed a `__ocx.desc` artifact (readme layer only) at `127.0.0.1/x`, and
+    /// return the readme bytes' own hex digest — the CAS name the announce must
+    /// write it under.
+    fn seed_description(data: &StubTransportData) -> String {
+        let readme = b"# widget\n".as_slice();
+        let readme_digest = oci::Algorithm::Sha256.hash(readme);
+        data.write().blobs.insert(readme_digest.to_string(), readme.to_vec());
+        let manifest = oci::Manifest::Image(oci::ImageManifest {
+            artifact_type: Some(crate::MEDIA_TYPE_DESCRIPTION_V1.to_string()),
+            layers: vec![oci::Descriptor {
+                media_type: crate::MEDIA_TYPE_MARKDOWN.to_string(),
+                digest: readme_digest.to_string(),
+                size: i64::try_from(readme.len()).expect("test blob fits i64"),
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            }],
+            annotations: Some([(oci::annotations::TITLE.to_string(), "Widget".to_string())].into()),
+            ..Default::default()
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("manifest serializes");
+        let digest = oci::Algorithm::Sha256.hash(&bytes);
+        data.write()
+            .manifests
+            .insert("127.0.0.1/x:__ocx.desc".to_string(), (bytes, digest.to_string()));
+        readme_digest.hex().to_string()
+    }
+
+    /// A moved description is written back into the root's EXISTING `desc` slot,
+    /// not appended: the index CI re-serializes the committed root and rejects
+    /// any byte that differs, so a `desc` landing after `tags` fails the PR.
+    /// Its readme rides along in the same atomic file set (C15).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moved_description_rewrites_desc_in_place_and_carries_its_readme() {
+        let data = StubTransportData::new();
+        seed_index(&data, "1.0.0");
+        let readme_hex = seed_description(&data);
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data))));
+        let root = committed_root(serde_json::json!({}));
+
+        let rebuilt = observe_and_rebuild(
+            &publisher,
+            &root,
+            &request(TagSelection::Replace(vec!["1.0.0".to_string()])),
+            "2026-07-25T00:00:00Z",
+            "p/acme/widget.json",
+            "acme/widget",
+        )
+        .await
+        .expect("the description observes alongside the tag");
+
+        assert!(rebuilt.desc_updated, "the description moved from null to an object");
+        let announced: Value = serde_json::from_slice(&rebuilt.root_bytes).expect("the root is JSON");
+        let fields: Vec<&str> = announced
+            .as_object()
+            .expect("the root is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["name", "repository", "owners", "status", "created", "desc", "tags"],
+            "desc keeps its committed position — CONTRACTS field order is a wire contract"
+        );
+        assert!(announced["desc"]["digest"].is_string(), "desc is no longer null");
+        assert!(
+            rebuilt
+                .files
+                .contains_key(&format!("p/acme/widget/o/sha256/{readme_hex}.md")),
+            "the readme blob ships in the same commit as the root: {:?}",
+            rebuilt.files.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// The D7 drop list is threaded out of the regeneration pass, not recomputed
     /// or dropped on the floor: every `AnnounceOutcome` construction site reads
     /// it from here, and the retry pass supersedes it from the same field.
@@ -685,11 +784,14 @@ mod tests {
     /// `--tags-from-registry` the **tag listing** is the first registry request,
     /// so a pre-flight left inside the observe loop would have guarded nothing.
     /// A forbidden host must therefore cost zero registry calls of any kind —
-    /// not merely zero observes.
+    /// not merely zero observes. The `__ocx.desc` probe is the third kind of
+    /// request in the pass and is seeded here so a mis-ordered one would show up
+    /// as a recorded call rather than a silent absence.
     #[tokio::test(flavor = "multi_thread")]
     async fn from_registry_refuses_a_forbidden_host_before_listing_any_tag() {
         let data = StubTransportData::new();
         data.write().tags = vec![vec!["1.0.0".to_string()]];
+        seed_description(&data);
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
         let root = committed_root(serde_json::json!({}));
         // The default `request` trusts loopback; this one does not, so the

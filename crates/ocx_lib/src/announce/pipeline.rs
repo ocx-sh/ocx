@@ -19,7 +19,8 @@ use serde_json::{Map, Value, json};
 use super::error::AnnounceError;
 use super::request::TagSelection;
 use crate::oci;
-use crate::package::tag::Tag;
+use crate::oci::annotations;
+use crate::package::tag::{InternalTag, Tag};
 use crate::publisher::Publisher;
 
 /// One curated tag's freshly observed state — the registry's own image-index
@@ -35,6 +36,40 @@ pub struct Observed {
     /// The image-index digest the registry served (the tag's new `content`).
     pub content: oci::Digest,
     /// The registry's image-index bytes, unmodified (the CAS payload).
+    pub bytes: Vec<u8>,
+}
+
+/// The observed `__ocx.desc` artifact: the rebuilt `desc` object when it moved,
+/// plus the payload blobs the root points at.
+pub struct ObservedDesc {
+    /// The new `desc` object in the index bot's field order (CONTRACTS §14):
+    /// `digest`, `title`, `description`, `keywords`, then `readme`, then `logo`
+    /// when the artifact carries one. An absent logo omits the key outright —
+    /// the index schema types it as a digest string, so `null` is not a form it
+    /// has.
+    ///
+    /// `None` when the `__ocx.desc` tag digest did not move (D6) — the
+    /// committed `desc` then rides through verbatim.
+    pub desc: Option<Value>,
+    /// The readme blob, and the logo blob when there is one, verbatim.
+    ///
+    /// Carried on **every** run of a package that publishes a description, not
+    /// only the runs where it moved, exactly as the curated tags' CAS objects
+    /// are. `--out` materializes the whole entry per run (`announce --out dir &&
+    /// publish dir`), so a root naming a `desc.readme` object the run did not
+    /// write is a dangling CAS reference the index rejects.
+    pub blobs: Vec<DescBlob>,
+}
+
+/// One `__ocx.desc` payload blob, stored as this package's own CAS object.
+pub struct DescBlob {
+    /// The index's own SHA-256 over `bytes`, deliberately independent of the
+    /// registry's blob digest for the same content (a different digest
+    /// namespace, mirroring the tag `content` pointer).
+    pub digest: oci::Digest,
+    /// The CAS filename extension: `md` for the readme, `png`/`svg` for a logo.
+    pub extension: &'static str,
+    /// The blob bytes exactly as the registry served them.
     pub bytes: Vec<u8>,
 }
 
@@ -298,6 +333,193 @@ async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) 
     })
 }
 
+/// Observe the `__ocx.desc` artifact against the physical repository (D6).
+///
+/// The comparison is a **floating-tag** one: the `__ocx.desc` tag digest the
+/// registry currently serves against the committed root's `desc.digest`. Equal
+/// — both-absent included — means the description did not move, so the
+/// committed `desc` rides through verbatim ([`ObservedDesc::desc`] is `None`).
+///
+/// The payload blobs are fetched regardless, whenever the registry serves a
+/// description at all: [`ObservedDesc::blobs`] is the *file set* half, not the
+/// *change* half, and the `--out` contract writes the whole entry every run.
+/// A package with no `__ocx.desc` costs one HEAD and nothing else.
+///
+/// `desc.digest` is that observed tag digest itself, never a recomputed content
+/// hash; `desc.readme` / `desc.logo` are the opposite — this index's own SHA-256
+/// over the exact bytes the registry served, which is what the index CI
+/// re-derives from the committed CAS objects.
+///
+/// `physical` must come from [`guarded_physical`]: this makes registry requests
+/// and runs no pre-flight of its own.
+///
+/// # Errors
+///
+/// [`AnnounceError::DescDisappeared`] when the committed root records a
+/// description the registry no longer serves — retraction semantics are
+/// unspecified, so the run stops loudly rather than silently clearing `desc`
+/// back to null (reference parity). [`AnnounceError::ObserveDesc`] for any
+/// transport failure, and for a malformed artifact: a manifest that is not a
+/// description, or one carrying no markdown readme layer.
+pub async fn observe_desc(
+    publisher: &Publisher,
+    physical: &Physical,
+    committed_root: &Value,
+) -> Result<ObservedDesc, AnnounceError> {
+    let committed_digest = committed_root
+        .get("desc")
+        .and_then(|desc| desc.get("digest"))
+        .and_then(Value::as_str);
+    let desc_identifier = physical.identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
+    let observed = publisher
+        .client()
+        .probe_manifest_digest(&desc_identifier)
+        .await
+        .map_err(|source| AnnounceError::ObserveDesc {
+            repository: physical.display.clone(),
+            source: Box::new(source),
+        })?
+        .map(|digest| digest.to_string());
+    let Some(observed_digest) = observed else {
+        if let Some(committed_digest) = committed_digest {
+            return Err(AnnounceError::DescDisappeared {
+                repository: physical.display.clone(),
+                digest: committed_digest.to_string(),
+            });
+        }
+        // No description on either side — the overwhelmingly common case.
+        return Ok(ObservedDesc {
+            desc: None,
+            blobs: Vec::new(),
+        });
+    };
+    let moved = Some(observed_digest.as_str()) != committed_digest;
+
+    // The one description fetcher in the codebase: it applies the artifact-type
+    // and readme-layer rules and hands back the decoded payload. It downloads
+    // the layers through a temporary directory, so announce supplies a private
+    // one rather than sharing filenames with a concurrent run.
+    let temporary = tempfile::tempdir().map_err(|source| AnnounceError::OutputWrite {
+        path: std::env::temp_dir().display().to_string(),
+        source,
+    })?;
+    let description = publisher
+        .client()
+        .pull_description(&physical.identifier, temporary.path())
+        .await
+        .map_err(|source| AnnounceError::ObserveDesc {
+            repository: physical.display.clone(),
+            source: Box::new(source),
+        })?
+        // The tag answered the HEAD and was gone by the GET — the same
+        // retraction the branch above refuses, one round trip later.
+        .ok_or_else(|| AnnounceError::DescDisappeared {
+            repository: physical.display.clone(),
+            digest: observed_digest.clone(),
+        })?;
+
+    let manifest_annotations = description.annotations;
+    let readme = description.readme.into_bytes();
+    let readme_digest = oci::Algorithm::Sha256.hash(&readme);
+    let logo = description.logo.map(|logo| {
+        // The layer's own media type names the extension. The reference tool
+        // sniffs the PNG magic number instead, having dropped the media type by
+        // this point; the two agree for the two media types the format allows.
+        let extension = if logo.media_type == crate::MEDIA_TYPE_PNG {
+            "png"
+        } else {
+            "svg"
+        };
+        DescBlob {
+            digest: oci::Algorithm::Sha256.hash(&logo.data),
+            extension,
+            bytes: logo.data,
+        }
+    });
+
+    let mut desc = Map::new();
+    desc.insert("digest".to_string(), Value::String(observed_digest));
+    desc.insert(
+        "title".to_string(),
+        Value::String(title(&manifest_annotations, committed_root, physical)),
+    );
+    desc.insert(
+        "description".to_string(),
+        annotation(&manifest_annotations, annotations::DESCRIPTION),
+    );
+    desc.insert(
+        "keywords".to_string(),
+        Value::Array(parse_keywords(manifest_annotations.get(annotations::KEYWORDS))),
+    );
+    desc.insert("readme".to_string(), Value::String(readme_digest.to_string()));
+    if let Some(logo) = &logo {
+        desc.insert("logo".to_string(), Value::String(logo.digest.to_string()));
+    }
+
+    let mut blobs = vec![DescBlob {
+        digest: readme_digest,
+        extension: "md",
+        bytes: readme,
+    }];
+    blobs.extend(logo);
+    Ok(ObservedDesc {
+        desc: moved.then(|| Value::Object(desc)),
+        blobs,
+    })
+}
+
+/// A manifest annotation as a JSON string, empty when absent — `description` is
+/// a required field of a non-null `desc`, so it may not be omitted just because
+/// the publisher left the annotation off.
+fn annotation(annotations: &BTreeMap<String, String>, key: &str) -> Value {
+    Value::String(annotations.get(key).cloned().unwrap_or_default())
+}
+
+/// The `desc.title`: the `org.opencontainers.image.title` annotation, falling
+/// back to the root's own `name`, then to the physical repository.
+///
+/// `title` is required *and* typed `minLength: 1` by the index root schema, so
+/// the empty string is not a value it has. A root carrying one passes the pull
+/// request checks — neither `indexbot validate` nor the claim re-derivation
+/// looks at title length — and then fails `schema:validate:rendered`, blocking
+/// the deploy for every package in the index. `ocx package describe --readme`
+/// over a readme with no frontmatter title pushes exactly that artifact, so the
+/// annotation is genuinely optional and the fallback carries the invariant.
+///
+/// `name` first because it is what the index's own catalog renderer already
+/// shows as the title of a package with no description at all — the fallback
+/// shows what the card would have shown anyway. The repository closes the last
+/// hole: `name` is schema-required of every real root, but reading a non-empty
+/// title out of remote data that merely *ought* to carry one is the same bet
+/// this function exists to stop making.
+fn title(annotations: &BTreeMap<String, String>, committed_root: &Value, physical: &Physical) -> String {
+    let annotated = annotations
+        .get(annotations::TITLE)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let name = committed_root.get("name").and_then(Value::as_str).unwrap_or_default();
+    for candidate in [annotated, name, physical.identifier.repository()] {
+        if !candidate.is_empty() {
+            return candidate.to_string();
+        }
+    }
+    // Unreachable via `guarded_physical`: an `oci://host/repo` pointer with no
+    // repository does not parse. Never emit the one value the schema refuses.
+    physical.display.clone()
+}
+
+/// Split the comma-separated `sh.ocx.keywords` annotation: each keyword
+/// trimmed, empties dropped, an absent annotation yielding the empty array.
+fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
+    raw.map(String::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|keyword| !keyword.is_empty())
+        .map(|keyword| Value::String(keyword.to_string()))
+        .collect()
+}
+
 /// Rebuild the root's `tags` map from the observed curated set (design register
 /// C3/C6). A tag whose observed digest equals its committed `content` keeps its
 /// entry verbatim — same `observed` timestamp, same yank marker — so a no-op
@@ -416,13 +638,19 @@ pub fn new_cas_count(committed: &Value, observed: &[Observed]) -> usize {
         .count()
 }
 
-/// Assemble the atomic file set for an announce: the root plus one CAS object
-/// per observed tag, keyed by wire path (design register C15 — one commit).
+/// Assemble the atomic file set for an announce: the root, one CAS object per
+/// observed tag, and the description's payload blobs when it moved this run
+/// (design register C15 — one commit).
+///
+/// Every CAS object is keyed by wire path; only the extension distinguishes
+/// them, and it is descriptive only — the index derives a CAS file's claimed
+/// digest from the filename's hex half alone.
 pub fn build_files(
     root_path: &str,
     root_bytes: &[u8],
     package_repo: &str,
     observed: &[Observed],
+    desc_blobs: &[DescBlob],
 ) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     files.insert(root_path.to_string(), root_bytes.to_vec());
@@ -431,6 +659,14 @@ pub fn build_files(
         files.insert(
             format!("p/{package_repo}/o/{algorithm}/{hex}.json"),
             entry.bytes.clone(),
+        );
+    }
+    for blob in desc_blobs {
+        let (algorithm, hex) = blob.digest.parts();
+        let extension = blob.extension;
+        files.insert(
+            format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}"),
+            blob.bytes.clone(),
         );
     }
     files
@@ -768,7 +1004,7 @@ mod tests {
 
         assert_eq!(observed.bytes, served_bytes, "the CAS payload must be the served bytes");
         assert_eq!(observed.content, served_digest, "the pointer must be the served digest");
-        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed));
+        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[]);
         let (algorithm, hex) = served_digest.parts();
         assert_eq!(
             files.get(&format!("p/x/o/{algorithm}/{hex}.json")).map(Vec::as_slice),
@@ -812,6 +1048,301 @@ mod tests {
         let observed = observe_one_tag(&publisher, &physical, "1.0.0").await.unwrap();
 
         assert_eq!(observed.bytes, served_bytes, "no descriptor is dropped on the way in");
+    }
+
+    // ── observe_desc (D6) ────────────────────────────────────────────────────
+
+    /// Seed one `__ocx.desc` layer blob on the stub and describe it.
+    fn desc_layer(data: &StubTransportData, media_type: &str, bytes: &[u8]) -> oci::Descriptor {
+        let digest = oci::Algorithm::Sha256.hash(bytes);
+        data.write().blobs.insert(digest.to_string(), bytes.to_vec());
+        oci::Descriptor {
+            media_type: media_type.to_string(),
+            digest: digest.to_string(),
+            size: i64::try_from(bytes.len()).expect("test blob fits i64"),
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        }
+    }
+
+    /// Seed a description artifact at `127.0.0.1/x:__ocx.desc` — the manifest
+    /// and its layer blobs — and hand back the tag digest the registry serves.
+    fn seed_description(
+        data: &StubTransportData,
+        readme: &[u8],
+        logo: Option<(&str, &[u8])>,
+        annotations: &[(&str, &str)],
+    ) -> String {
+        let mut layers = vec![desc_layer(data, crate::MEDIA_TYPE_MARKDOWN, readme)];
+        if let Some((media_type, bytes)) = logo {
+            layers.push(desc_layer(data, media_type, bytes));
+        }
+        let manifest = oci::Manifest::Image(oci::ImageManifest {
+            artifact_type: Some(crate::MEDIA_TYPE_DESCRIPTION_V1.to_string()),
+            layers,
+            annotations: Some(
+                annotations
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("manifest serializes");
+        let digest = oci::Algorithm::Sha256.hash(&bytes);
+        data.write().manifests.insert(
+            format!("127.0.0.1/x:{}", InternalTag::DESCRIPTION_TAG),
+            (bytes, digest.to_string()),
+        );
+        digest.to_string()
+    }
+
+    fn loopback_physical() -> Physical {
+        extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses")
+    }
+
+    /// A committed root whose `desc` records tag digest `digest` and points at
+    /// CAS readme object `readme`.
+    fn root_with_desc(digest: &str, readme: &str) -> Value {
+        let mut root = committed_root("oci://127.0.0.1/x");
+        root["desc"] = serde_json::json!({
+            "digest": digest,
+            "title": "Widget",
+            "description": "A widget",
+            "keywords": [],
+            "readme": readme,
+        });
+        root
+    }
+
+    /// The full wire contract of a fresh observation: the `desc` object's field
+    /// order and values, and the CAS blobs it points at. `digest` is the
+    /// registry's floating `__ocx.desc` tag digest — never a content hash —
+    /// while `readme`/`logo` are this index's own hashes over the served bytes,
+    /// which the index CI re-derives from the committed files.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_builds_the_wire_object_and_its_cas_blobs() {
+        let data = StubTransportData::new();
+        let readme = b"# widget\n\nDoes widget things.\n".as_slice();
+        let logo = b"\x89PNG\r\n\x1a\nnot-really-a-png".as_slice();
+        let tag_digest = seed_description(
+            &data,
+            readme,
+            Some((crate::MEDIA_TYPE_PNG, logo)),
+            &[
+                (oci::annotations::TITLE, "Widget"),
+                (oci::annotations::DESCRIPTION, "A widget"),
+                (oci::annotations::KEYWORDS, " build ,, tool "),
+            ],
+        );
+        let publisher = stub_publisher(&data);
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &committed_root("oci://127.0.0.1/x"))
+            .await
+            .expect("the description observes");
+        let rebuilt = observed
+            .desc
+            .clone()
+            .expect("a description where the root had none is a change");
+
+        let readme_digest = oci::Algorithm::Sha256.hash(readme);
+        let logo_digest = oci::Algorithm::Sha256.hash(logo);
+        let expected = serde_json::json!({
+            "digest": tag_digest,
+            "title": "Widget",
+            "description": "A widget",
+            "keywords": ["build", "tool"],
+            "readme": readme_digest.to_string(),
+            "logo": logo_digest.to_string(),
+        });
+        assert_eq!(
+            String::from_utf8(serialize_root(&rebuilt)).expect("UTF-8"),
+            String::from_utf8(serialize_root(&expected)).expect("UTF-8"),
+            "field order and values must match the index bot's Desc wire shape"
+        );
+
+        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
+        assert_eq!(
+            files
+                .get(&format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex()))
+                .map(Vec::as_slice),
+            Some(readme),
+            "the readme rides into CAS verbatim, under its own hash and a .md name"
+        );
+        assert_eq!(
+            files
+                .get(&format!("p/acme/widget/o/sha256/{}.png", logo_digest.hex()))
+                .map(Vec::as_slice),
+            Some(logo),
+            "the logo's extension comes from its layer media type"
+        );
+    }
+
+    /// D6 is a floating-tag comparison: an unmoved `__ocx.desc` digest leaves the
+    /// committed `desc` object alone, so a `--refresh` of a package whose
+    /// description never changes keeps the C6 short-circuit intact.
+    ///
+    /// Its CAS blobs still ride along. The `--out` contract materializes the
+    /// whole entry every run (`announce --out dir && publish dir`), and the
+    /// curated tags' CAS objects are already re-written unconditionally — a
+    /// `desc.readme` the run alone omitted is a dangling reference the index
+    /// refuses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unmoved_description_rewrites_no_desc_but_still_carries_its_blobs() {
+        let data = StubTransportData::new();
+        let readme = b"# widget\n".as_slice();
+        let tag_digest = seed_description(&data, readme, None, &[]);
+        let readme_digest = oci::Algorithm::Sha256.hash(readme);
+        let publisher = stub_publisher(&data);
+        let root = root_with_desc(&tag_digest, &readme_digest.to_string());
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &root)
+            .await
+            .expect("the probe succeeds");
+
+        assert!(
+            observed.desc.is_none(),
+            "an unmoved description is not rewritten into the root"
+        );
+        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
+        let readme_path = format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex());
+        assert_eq!(
+            files.get(&readme_path).map(Vec::as_slice),
+            Some(readme),
+            "the root still points at {readme_path}, so the unchanged run must write it too: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The optional half of the format: no logo layer means no `logo` key at
+    /// all. The index types it as a digest string, so `null` is not a form it
+    /// has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_omits_the_logo_field_when_the_artifact_carries_none() {
+        let data = StubTransportData::new();
+        seed_description(&data, b"# widget\n", None, &[(oci::annotations::TITLE, "Widget")]);
+        let publisher = stub_publisher(&data);
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &committed_root("oci://127.0.0.1/x"))
+            .await
+            .expect("the description observes");
+        let rebuilt = observed.desc.expect("a new description is a change");
+
+        assert!(rebuilt.get("logo").is_none(), "an absent logo omits the key: {rebuilt}");
+        assert_eq!(observed.blobs.len(), 1, "only the readme blob is written");
+        assert_eq!(observed.blobs[0].extension, "md");
+    }
+
+    /// `keywords` is required, so an absent `sh.ocx.keywords` annotation is the
+    /// empty array — never a missing field.
+    ///
+    /// `title` is required too, but typed `minLength: 1`: the empty string is
+    /// not a value it has. An `__ocx.desc` pushed without a title annotation
+    /// (`ocx package describe --readme` on a readme with no frontmatter title)
+    /// therefore falls back to the root's `name` — what the index catalog
+    /// renderer already shows for a package with no description at all. Emitting
+    /// `""` builds a root the pull request checks pass and
+    /// `schema:validate:rendered` then rejects, blocking the whole index deploy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_defaults_absent_annotations_to_valid_values() {
+        let data = StubTransportData::new();
+        seed_description(&data, b"# widget\n", None, &[]);
+        let publisher = stub_publisher(&data);
+        let root = committed_root("oci://127.0.0.1/x");
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &root)
+            .await
+            .expect("the description observes");
+        let rebuilt = observed.desc.expect("a new description is a change");
+
+        assert_eq!(rebuilt.get("keywords"), Some(&serde_json::json!([])));
+        assert_eq!(
+            rebuilt.get("title"),
+            root.get("name"),
+            "an absent title annotation falls back to the root's name, never the empty string"
+        );
+        assert_eq!(
+            rebuilt.get("description"),
+            Some(&Value::String(String::new())),
+            "an absent description annotation is the empty string — the schema allows it"
+        );
+    }
+
+    /// The same fallback for a title annotation the publisher set to the empty
+    /// string (`ocx package describe --title ""`): present-but-empty is exactly
+    /// the value the schema refuses, so absence is not the only trigger.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_replaces_an_empty_title_annotation() {
+        let data = StubTransportData::new();
+        seed_description(&data, b"# widget\n", None, &[(oci::annotations::TITLE, "")]);
+        let publisher = stub_publisher(&data);
+        let root = committed_root("oci://127.0.0.1/x");
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &root)
+            .await
+            .expect("the description observes");
+        let rebuilt = observed.desc.expect("a new description is a change");
+
+        assert_eq!(rebuilt.get("title"), root.get("name"));
+    }
+
+    /// The last rung. `name` is schema-required of every real root, but the
+    /// title fallback exists precisely because reading a non-empty string out of
+    /// data that merely ought to carry one is the bet that produced `""` in the
+    /// first place — so a root without `name` still yields a valid title.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_titles_a_root_without_a_name_from_its_repository() {
+        let data = StubTransportData::new();
+        seed_description(&data, b"# widget\n", None, &[]);
+        let publisher = stub_publisher(&data);
+        let mut root = committed_root("oci://127.0.0.1/x");
+        root.as_object_mut().expect("the root is an object").remove("name");
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &root)
+            .await
+            .expect("the description observes");
+        let rebuilt = observed.desc.expect("a new description is a change");
+
+        assert_eq!(
+            rebuilt.get("title"),
+            Some(&Value::String("x".to_string())),
+            "the physical repository stands in; the empty string never ships"
+        );
+    }
+
+    /// The overwhelmingly common case today: no `__ocx.desc` published and a
+    /// `desc: null` root. Both absent is "no change", never an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_of_a_package_without_a_description_is_a_no_op() {
+        let data = StubTransportData::new();
+        let publisher = stub_publisher(&data);
+
+        let observed = observe_desc(&publisher, &loopback_physical(), &committed_root("oci://127.0.0.1/x"))
+            .await
+            .expect("an absent description must not fail the announce");
+
+        assert!(observed.desc.is_none());
+        assert!(observed.blobs.is_empty());
+    }
+
+    /// A recorded description that has since vanished stops the run: retraction
+    /// semantics are unspecified, and silently clearing `desc` back to null
+    /// would destroy governed content on a publisher's routine tag announce.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_desc_refuses_a_description_that_disappeared() {
+        let data = StubTransportData::new();
+        let publisher = stub_publisher(&data);
+        let recorded = digest_string('e');
+
+        let root = root_with_desc(&recorded, &digest_string('f'));
+        let result = observe_desc(&publisher, &loopback_physical(), &root).await;
+
+        let Err(AnnounceError::DescDisappeared { repository, digest }) = result else {
+            panic!("a vanished description must be refused, not silently cleared");
+        };
+        assert_eq!(repository, "oci://127.0.0.1/x");
+        assert_eq!(digest, recorded);
     }
 
     // ── regenerate (C6 no-churn) ─────────────────────────────────────────────
@@ -963,6 +1494,7 @@ mod tests {
             b"root-bytes",
             "acme/widget",
             std::slice::from_ref(&entry),
+            &[],
         );
         assert_eq!(
             files.get("p/acme/widget.json").map(Vec::as_slice),
