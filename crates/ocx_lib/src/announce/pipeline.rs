@@ -476,7 +476,8 @@ fn annotation(annotations: &BTreeMap<String, String>, key: &str) -> Value {
 }
 
 /// The `desc.title`: the `org.opencontainers.image.title` annotation, falling
-/// back to the root's own `name`, then to the physical repository.
+/// back to the last segment of the root's own `name`, then of the physical
+/// repository.
 ///
 /// `title` is required *and* typed `minLength: 1` by the index root schema, so
 /// the empty string is not a value it has. A root carrying one passes the pull
@@ -486,19 +487,23 @@ fn annotation(annotations: &BTreeMap<String, String>, key: &str) -> Value {
 /// over a readme with no frontmatter title pushes exactly that artifact, so the
 /// annotation is genuinely optional and the fallback carries the invariant.
 ///
-/// `name` first because it is what the index's own catalog renderer already
-/// shows as the title of a package with no description at all — the fallback
-/// shows what the card would have shown anyway. The repository closes the last
-/// hole: `name` is schema-required of every real root, but reading a non-empty
-/// title out of remote data that merely *ought* to carry one is the same bet
-/// this function exists to stop making.
+/// The *last segment* rather than the whole name: a title is the display name
+/// of one package, and the card that renders it already shows the namespace
+/// beside it — `ocx.sh/bazelbuild/bazelisk` reads as a path, `bazelisk` reads as
+/// a name. The repository closes the last hole: `name` is schema-required of
+/// every real root, but reading a non-empty title out of remote data that merely
+/// *ought* to carry one is the same bet this function exists to stop making.
 fn title(annotations: &BTreeMap<String, String>, committed_root: &Value, physical: &Physical) -> String {
     let annotated = annotations
         .get(annotations::TITLE)
         .map(String::as_str)
         .unwrap_or_default();
     let name = committed_root.get("name").and_then(Value::as_str).unwrap_or_default();
-    for candidate in [annotated, name, physical.identifier.repository()] {
+    for candidate in [
+        annotated,
+        last_segment(name),
+        last_segment(physical.identifier.repository()),
+    ] {
         if !candidate.is_empty() {
             return candidate.to_string();
         }
@@ -506,6 +511,12 @@ fn title(annotations: &BTreeMap<String, String>, committed_root: &Value, physica
     // Unreachable via `guarded_physical`: an `oci://host/repo` pointer with no
     // repository does not parse. Never emit the one value the schema refuses.
     physical.display.clone()
+}
+
+/// The part after the last `/`, or the whole string when it holds none. A
+/// trailing slash yields the empty string, which the caller's chain then skips.
+fn last_segment(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, last)| last)
 }
 
 /// Split the comma-separated `sh.ocx.keywords` annotation: each keyword
@@ -1240,9 +1251,9 @@ mod tests {
     /// `title` is required too, but typed `minLength: 1`: the empty string is
     /// not a value it has. An `__ocx.desc` pushed without a title annotation
     /// (`ocx package describe --readme` on a readme with no frontmatter title)
-    /// therefore falls back to the root's `name` — what the index catalog
-    /// renderer already shows for a package with no description at all. Emitting
-    /// `""` builds a root the pull request checks pass and
+    /// therefore falls back to the last segment of the root's `name` — the
+    /// package's own display name, without the namespace path the card renders
+    /// beside it. Emitting `""` builds a root the pull request checks pass and
     /// `schema:validate:rendered` then rejects, blocking the whole index deploy.
     #[tokio::test(flavor = "multi_thread")]
     async fn observe_desc_defaults_absent_annotations_to_valid_values() {
@@ -1259,8 +1270,9 @@ mod tests {
         assert_eq!(rebuilt.get("keywords"), Some(&serde_json::json!([])));
         assert_eq!(
             rebuilt.get("title"),
-            root.get("name"),
-            "an absent title annotation falls back to the root's name, never the empty string"
+            Some(&Value::String("widget".to_string())),
+            "an absent title annotation falls back to the name's last segment, never the empty string \
+             and never the whole ocx.sh/<namespace>/<package> path"
         );
         assert_eq!(
             rebuilt.get("description"),
@@ -1284,7 +1296,12 @@ mod tests {
             .expect("the description observes");
         let rebuilt = observed.desc.expect("a new description is a change");
 
-        assert_eq!(rebuilt.get("title"), root.get("name"));
+        assert_eq!(rebuilt.get("title"), Some(&Value::String("widget".to_string())));
+        assert_ne!(
+            rebuilt.get("title"),
+            root.get("name"),
+            "the whole logical name is a path, not a title"
+        );
     }
 
     /// The last rung. `name` is schema-required of every real root, but the
