@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use futures::stream::{self, StreamExt, TryStreamExt};
 use serde_json::{Map, Value, json};
 
 use super::error::AnnounceError;
@@ -274,6 +275,15 @@ pub async fn guarded_physical(root: &Value, trusted_hosts: &[String]) -> Result<
     Ok(physical)
 }
 
+/// How many curated tags are observed against the registry at once.
+///
+/// Each observation is one latency-bound manifest fetch — the same shape, against
+/// the same registries, as [`LocalIndex::refresh_tags`](crate::oci::index::LocalIndex)'
+/// dispatch-object persist, so it carries that path's cap rather than inventing a
+/// second number. A mirror with a hundred versions is one round instead of a
+/// hundred; the cap is what keeps the burst under a registry's `429` threshold.
+const OBSERVE_CONCURRENCY: usize = 64;
+
 /// Observe every curated tag against the physical repository.
 ///
 /// `physical` must come from [`guarded_physical`] — this function makes registry
@@ -288,11 +298,18 @@ pub async fn observe_curated(
     physical: &Physical,
     curated: &[String],
 ) -> Result<Vec<Observed>, AnnounceError> {
-    let mut observed = Vec::with_capacity(curated.len());
-    for tag in curated {
-        observed.push(observe_one_tag(publisher, physical, tag).await?);
-    }
-    Ok(observed)
+    // `buffered`, not `buffer_unordered`: the rebuilt root's tag order — and the
+    // first error a caller sees — must not depend on which request finished
+    // first. Ordered output keeps the failure the lowest-indexed curated tag's,
+    // exactly as the former sequential loop reported it.
+    stream::iter(
+        curated
+            .iter()
+            .map(|tag| async move { observe_one_tag(publisher, physical, tag).await }),
+    )
+    .buffered(OBSERVE_CONCURRENCY)
+    .try_collect()
+    .await
 }
 
 /// Observe a single curated tag: fetch what the registry serves and keep it.
@@ -714,6 +731,8 @@ pub async fn write_out(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::oci::client::test_transport::{StubTransport, StubTransportData};
     use crate::oci::index::serialize_root;
@@ -1554,6 +1573,71 @@ mod tests {
         assert!(
             matches!(result, Err(AnnounceError::UnresolvedTag { .. })),
             "a trusted host proceeds to observe; the empty stub yields UnresolvedTag"
+        );
+    }
+
+    // ── observe_curated ordering + failure determinism ───────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_curated_returns_the_curated_order_not_the_completion_order() {
+        // The observations run concurrently, so nothing about response timing may
+        // reach the rebuilt root. The curated order is the wire order.
+        let data = StubTransportData::new();
+        let curated: Vec<String> = ["9.0.0", "1.0.0", "latest", "2.5.1"]
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect();
+        for (index, tag) in curated.iter().enumerate() {
+            let manifest = image_index(vec![index_entry("amd64", (b'a' + index as u8) as char)]);
+            seed_manifest(&data, tag, &manifest);
+        }
+        // Answer in the exact reverse of the curated order, so an implementation
+        // that yields results as they complete cannot produce the curated order
+        // by accident. Without this the assertion passes against `buffer_unordered`.
+        for (index, tag) in curated.iter().enumerate() {
+            let remaining = (curated.len() - index) as u32;
+            data.write().manifest_delays.insert(
+                format!("127.0.0.1/x:{tag}"),
+                Duration::from_millis(20 * u64::from(remaining)),
+            );
+        }
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+
+        let observed = observe_curated(&publisher, &physical, &curated)
+            .await
+            .expect("every seeded tag resolves");
+
+        let tags: Vec<&str> = observed.iter().map(|o| o.tag.as_str()).collect();
+        assert_eq!(tags, vec!["9.0.0", "1.0.0", "latest", "2.5.1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observe_curated_reports_the_first_failing_tag_in_curated_order() {
+        // Two tags are unresolvable. Which one is reported must be decided by the
+        // curated order, never by which request lost the race.
+        let data = StubTransportData::new();
+        seed_manifest(&data, "1.0.0", &image_index(vec![index_entry("amd64", 'a')]));
+        let curated = ["1.0.0", "missing-first", "missing-second"]
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect::<Vec<_>>();
+        // The earlier failure answers last, so "whichever error arrived first"
+        // and "the earliest curated tag" are different answers here.
+        data.write()
+            .manifest_delays
+            .insert("127.0.0.1/x:missing-first".to_string(), Duration::from_millis(60));
+        let publisher = stub_publisher(&data);
+        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+
+        // `Observed` carries raw bytes and has no `Debug`, so `expect_err` is out.
+        let Err(error) = observe_curated(&publisher, &physical, &curated).await else {
+            panic!("an unresolvable curated tag is a hard error");
+        };
+
+        assert!(
+            matches!(&error, AnnounceError::UnresolvedTag { tag, .. } if tag == "missing-first"),
+            "expected the earlier curated tag to be reported, got {error:?}"
         );
     }
 
