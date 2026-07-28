@@ -28,10 +28,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::env;
+use ocx_lib::launch::{self, Launch};
+use ocx_lib::package_manager::Materialization;
 use ocx_lib::project::{
     DEFAULT_GROUP, Origin, SelectedTool, expand_all_keyword, resolve_selected_tools, select_tool_set,
 };
-use ocx_lib::utility::child_process;
+use ocx_lib::record::{PackageBinding, RecordInputs, Scope};
 
 use crate::app::project_context::load_project_with_lock;
 use crate::options;
@@ -62,6 +64,9 @@ pub struct Run {
 
     #[clap(flatten)]
     pub env: options::EnvOverride,
+
+    #[clap(flatten)]
+    pub records: options::Records,
 
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
@@ -142,6 +147,12 @@ impl Run {
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
 
+        // Fold `[records]` with `OCX_RECORDS_*` and this invocation's flags, for
+        // the same reason and at the same point: a malformed name template is a
+        // configuration error, and the operator should hear about it before any
+        // filesystem or network work rather than after the tools are installed.
+        let records = context.records(self.records.options())?;
+
         // ── Phase B: project context ──────────────────────────────────────
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
@@ -194,11 +205,21 @@ impl Run {
         let manager = context.manager();
 
         let identifiers: Vec<_> = resolved.iter().map(|r| r.identifier.clone()).collect();
-        let infos = manager
-            .find_or_install_all(identifiers, host.clone(), context.concurrency())
+        let found = manager
+            .find_or_install_all(&identifiers, host.clone(), context.concurrency())
             .await?;
+        // Which tools this invocation materialized on the spot. Half of the drift
+        // signal an execution record publishes — the other half is a surviving
+        // advisory tag on the package itself. Results come back in input order,
+        // so the zip is sound.
+        let auto_installed: Vec<ocx_lib::oci::Identifier> = identifiers
+            .iter()
+            .zip(&found)
+            .filter(|(_, found)| found.materialization == Materialization::Pulled)
+            .map(|(identifier, _)| identifier.clone())
+            .collect();
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
-            infos.into_iter().map(std::sync::Arc::new).collect();
+            found.into_iter().map(|found| std::sync::Arc::new(found.info)).collect();
         // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
         // opted-out bases get no companion overlay unless the tier is
         // system-required. `run.rs` does not need the patch boundary index.
@@ -225,10 +246,13 @@ impl Run {
         // A toolchain consumer is a consumer of every tool it declares, so the
         // self view would compose a strictly worse toolchain. The flag belongs
         // on `ocx package exec` / `ocx package env`, and only there.
-        let entries = manager
-            .resolve_env_with_patch_boundary(&install_infos, false, scope)
-            .await?
-            .0;
+        //
+        // `resolve_env_with_attribution` rather than the attribution-dropping
+        // wrapper: the record names which package claimed each executable on
+        // `PATH`, and that derivation already exists here.
+        let (entries, _, _, admitted) = manager
+            .resolve_env_with_attribution(&install_infos, false, scope)
+            .await?;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
@@ -259,6 +283,12 @@ impl Run {
         if let Some(patches) = forwarded_config.patches.as_mut() {
             patches.no_patches = forwarded_no_patches;
         }
+        // Hand the resolved sink down. The config and environment tiers a child
+        // re-derives for itself; the flag tier it cannot, so without this a
+        // generated launcher's re-entry (`ocx launcher exec`) would record
+        // somewhere else — or, since `apply_ocx_config` is set-or-remove,
+        // nowhere — and the entrypoint pair would lose its inner half.
+        forwarded_config.records = records.forwarded();
         // Composed entries + forwarded ocx config + forwarded stages 4-6, in the
         // one order that is correct — see `Env::apply_child_env`. `project_env`
         // (stages 4-6) is the forwarded slice, NOT the whole composed set: the
@@ -274,23 +304,87 @@ impl Run {
         // `<name>.exe` shim and `.EXE` is unconditionally in the default
         // Windows PATHEXT, so the child resolves it via the OS default.
 
+        // Project-tier facts the record's `scope` block names. The lock's
+        // declaration hash is reused verbatim rather than recomputed: it is the
+        // canonicalization the project tier already defines, and re-deriving it
+        // would need the project config plus file I/O on the exec path.
+        let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
+        let declaration_digest = ocx_lib::oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
+        let bindings = project_bindings(&resolved, &install_infos);
+
         // clap enforces `last = true, num_args = 1.., required = true` on the
         // `argv` field — `self.argv` is always non-empty at this point.
-        let (command, args) = self
+        let (command, _) = self
             .argv
             .split_first()
             .expect("clap last=true + num_args=1.. + required=true guarantees non-empty argv");
 
-        let resolved = process_env.resolve_command(command);
+        // Resolved once, then handed to both the record and the launch: a second
+        // resolution could disagree with the first and make the audit trail name
+        // a binary other than the one that ran.
+        let executable = process_env.resolve_command(command);
+        let launch = Launch::recording(
+            process_env,
+            RecordInputs {
+                packages: &install_infos,
+                admitted: &admitted,
+                executable: &executable,
+                store_root: context.file_structure().packages.root(),
+                argv: &self.argv,
+                config: context.config_view(),
+                // Already in memory: the snapshot is read once at `try_init` and
+                // identity-gated there, so naming it here costs no I/O on the
+                // exec path.
+                managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
+                platform: Some(&host),
+                clean_env: self.clean,
+                auto_installed: &auto_installed,
+                scope: Scope::Project {
+                    root: project_root,
+                    lock: ctx.lock_path.clone(),
+                    declaration_digest,
+                    groups: expanded,
+                    bindings,
+                },
+            },
+            &records,
+        )?;
 
         // Replace this process with the child on Unix (PID inherited via
         // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
-        // `CreateProcess` has no exec equivalent. Either way the helper
-        // diverges on success — only start-up failures fall through to
-        // the error-wrapping path below.
-        let err = child_process::exec(&resolved, args, process_env);
-        Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
+        // `CreateProcess` has no exec equivalent. Either way the seam diverges
+        // on success — only start-up failures fall through to the
+        // error-wrapping path below.
+        Err(anyhow::Error::from(launch::exec(launch).await))
     }
+}
+
+/// Pair each root package with the `ocx.toml` binding it was selected under.
+///
+/// `find_or_install_all` preserves input order, so the two slices line up
+/// index-for-index — the pinned identifier comes from the install rather than
+/// from the selection, because only the former is digest-complete.
+///
+/// A tool selected as a positional rather than through a group carries no group
+/// name and is skipped: the record emits `sh.ocx.binding` and `sh.ocx.group`
+/// together or not at all. `ocx run` passes no positionals to `select_tool_set`,
+/// so today the skip is unreachable.
+fn project_bindings(
+    resolved: &[ocx_lib::project::ResolvedTool],
+    install_infos: &[std::sync::Arc<ocx_lib::package::install_info::InstallInfo>],
+) -> Vec<PackageBinding> {
+    resolved
+        .iter()
+        .zip(install_infos)
+        .filter_map(|(tool, info)| match &tool.origin {
+            Origin::Group(group) => Some(PackageBinding {
+                binding: tool.binding.clone(),
+                group: group.clone(),
+                package: info.identifier().clone(),
+            }),
+            Origin::Explicit => None,
+        })
+        .collect()
 }
 
 /// Errors from the CLI-layer NAME filter applied after `select_tool_set`.

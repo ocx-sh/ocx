@@ -11,6 +11,7 @@ use ocx_lib::Config;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::patch::PatchDescriptor;
 use ocx_lib::project::{ProjectConfig, ProjectLock};
+use ocx_lib::record::ExecutionRecord;
 use schemars::generate::SchemaSettings;
 
 /// Top-level `$comment` injected into the project-lock schema. Flags the
@@ -22,7 +23,8 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// Generate a JSON Schema for the given schema kind.
 ///
 /// Returns `Some(json_string)` for known kinds and `None` for unknown kinds.
-/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`.
+/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`,
+/// `execution-record`.
 ///
 /// The output JSON has its `$id` set to the canonical published URL
 /// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
@@ -34,6 +36,12 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// `ocx patch publish --descriptor` (and carried in the `__ocx.patch`
 /// OCI artifact layer); the `[patches]` config tier itself is covered by the
 /// `config` schema.
+///
+/// The `execution-record` schema describes the pre-exec resolution record
+/// written per tool launch. Its URL version and the record's own in-band
+/// `schemaVersion` move in lockstep — the first incompatible change bumps
+/// both. The `[records]` config section that designates the sink is covered by
+/// the `config` schema, mirroring the `patch` / `[patches]` split above.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         // Per-layer strip/prefix layout lives in manifest layer-descriptor annotations
@@ -59,6 +67,10 @@ pub fn schema_for(kind: &str) -> Option<String> {
         )),
         "patch" => Some(generate_schema::<PatchDescriptor>(
             "https://ocx.sh/schemas/patch/v1.json",
+            None,
+        )),
+        "execution-record" => Some(generate_schema::<ExecutionRecord>(
+            "https://ocx.sh/schemas/execution-record/v1.json",
             None,
         )),
         _ => None,
@@ -183,6 +195,61 @@ mod tests {
         assert!(
             defs.get("BinaryElement").is_none(),
             "the read-side string|object element union must never appear in the published schema"
+        );
+    }
+
+    /// The execution-record schema is the published half of a two-channel
+    /// version contract: this URL and the in-band `schemaVersion` move in
+    /// lockstep, so the first incompatible change bumps both. Records are
+    /// consumed by policy engines keyed on exact field names, so the camelCase
+    /// wire spellings are pinned here — a blanket `rename_all` (or its removal)
+    /// would rewrite them silently.
+    #[test]
+    fn execution_record_schema_pins_id_and_wire_key_spellings() {
+        let schema = schema_for("execution-record").expect("execution-record schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+
+        assert_eq!(
+            value.get("$id").and_then(|v| v.as_str()),
+            Some("https://ocx.sh/schemas/execution-record/v1.json"),
+            "the published URL must move in lockstep with the in-band schemaVersion"
+        );
+
+        let required: Vec<&str> = value
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("schema has a `required` array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for key in ["schemaVersion", "kind", "recordedAt", "packages"] {
+            assert!(
+                required.contains(&key),
+                "`{key}` must be a required top-level key: {required:?}"
+            );
+        }
+    }
+
+    /// `[records]` rides the `config` schema transitively — there is no separate
+    /// arm for `RecordsOptions`. Its `system_locked` flag is runtime provenance
+    /// set by the loader on `/etc/ocx/config.toml`, never authored, so it must
+    /// not appear in the published schema and invite operators to write it.
+    #[test]
+    fn config_schema_documents_records_without_the_loader_only_lock_flag() {
+        let schema = schema_for("config").expect("config schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+
+        assert!(
+            value.pointer("/properties/records").is_some(),
+            "the config schema must document the [records] section"
+        );
+
+        let records = value
+            .pointer("/$defs/RecordsOptions")
+            .expect("config schema defines RecordsOptions");
+        assert!(
+            records.pointer("/properties/system_locked").is_none(),
+            "`system_locked` is loader-set provenance and must stay out of the published schema"
         );
     }
 }

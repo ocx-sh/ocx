@@ -1369,6 +1369,8 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends) — the same two kinds [`[env]`][config-project-env] uses. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
+| `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
+| `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1399,7 +1401,8 @@ The composer prepends env entries in iteration order, so the **last group listed
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
+| 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the child never starts. |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted; or the `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory (see [Execution Records][execution-records-ref]). |
 | 79 | Package not found in registry during auto-install. |
 | 80 | Authentication failure during auto-install. |
 
@@ -2917,7 +2920,26 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
 | `--env <KEY[:TYPE]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted) or `path` (prepends); a relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. Recording failure aborts the invocation when [`[records] required`][config-records] is `true` — exit 74 for an unwritable sink, exit 78 when the sink resolves through a symlink. | *(unset — recording off)* |
+| `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
 | `-h`, `--help` | | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
+| 1 | Child spawn failed (binary not found, exec errno). |
+| 64 | A bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty; `--env` sets an `OCX_*`/`__OCX_*` key. |
+| 69 | Registry unreachable while auto-installing a missing package. |
+| 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true`. |
+| 78 | The `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory. |
+| 79 | A package identifier is not found in the registry during auto-install. |
+| 80 | Authentication failure during auto-install. |
+
+::: info `ocx launcher exec` takes no `--records-*` flags
+An entrypoint launcher's re-entry (`ocx launcher exec`) inherits the active sink only through the forwarded [`OCX_RECORDS_DIR`][env-ocx-records-dir]/[`OCX_RECORDS_NAME`][env-ocx-records-name] environment variables — the same mechanism that forwards every other resolution-affecting setting into a launcher re-entry. See [Two records per launcher invocation][execution-records-frames].
+:::
 
 #### `env` {#package-env}
 
@@ -3515,10 +3537,20 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
 [config-project-env]: ./configuration.md#project-config-env
+[config-records]: ./configuration.md#keys-records
+[config-records-dir]: ./configuration.md#keys-records-dir
+[config-records-name]: ./configuration.md#keys-records-name
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[env-ocx-records-dir]: ./environment.md#ocx-records-dir
+[env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config
 [env-composition-project-env]: ./env-composition.md#project-env
+
+<!-- execution records -->
+[execution-records-ref]: ./execution-records.md
+[execution-records-filename]: ./execution-records.md#execution-records-filename
+[execution-records-frames]: ./execution-records.md#execution-records-frames
 
 <!-- external: login/logout interop -->
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/

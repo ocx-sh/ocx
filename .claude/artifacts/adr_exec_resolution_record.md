@@ -426,6 +426,14 @@ The reasoning: with no operator policy the sink is *yours* — set it however yo
 
 A developer who typed `--records-dir` once and fat-fingered the path should not have their build die for a policy nobody set. Fail-closed is a *policy* posture, which is exactly why `required` lives with the policy.
 
+##### Two ways the posture was silently defeated (amended 2026-07-28)
+
+Both were found by a max-tier review of the implementation, both silent, both untested, and both are the same defect as the launcher exemption above: the guarantee was specified as a property of the config *merge* and every hole was upstream of the point where posture is applied.
+
+1. **`required = true` with no `dir` resolved to a policy that records nothing.** The launch path early-returns on `!policy.is_recording()` *before* `apply_posture` runs, so a SYSTEM file containing only `[records] required = true` — the plainest way an operator writes "recording is mandatory" — gave every child on the fleet an unrecorded run, exit 0, no warning. Now a typed `RecordsError::RequiredWithoutSink` → exit **78** at `resolve_records`, matching the `SinkSymlink` precedent (a configuration fault surfaces before the work, not as an I/O one during it). The trigger is an **explicit** `required = true` at some tier, never the value `required` resolves to from the SYSTEM-lock default: a locked `[records]` block with no `dir` is plausibly an operator locking recording *off* for the host, and that keeps working. `RecordsOptions::required` is `Option<bool>` and already carries exactly that distinction.
+
+2. **A symlinked or unreadable `/etc/ocx/config.toml` dropped the locked block with a warning.** `ConfigLoader::existing_candidates` filtered the SYSTEM candidate with the same best-effort semantics as the user tiers. An operator symlinking `/etc/ocx/config.toml` at a config-management–owned fleet file — an ordinary move — took the whole fleet out of recording, silently. Now fatal for the **SYSTEM candidate only** (exit 78, `config::error::Error::SystemConfig`), including on the `OCX_NO_CONFIG` path, which runs the same check over that one candidate; `NotFound` stays a silent skip, and the user/`$OCX_HOME` tiers keep best-effort discovery. This is broader than `[records]` — it protects every `lock_as_system` section — which is why it lives in the loader rather than in this feature.
+
 #### Why `[records]`, plural
 
 The existing config surface is not uniformly plural — the rule is shape-dependent, and `[patches]` is this feature's exact structural twin:
@@ -450,37 +458,68 @@ Undesigned in the original decision, so recorded here rather than folded silentl
 
 That alone is not sufficient. A package that declares an entrypoint bakes a generated launcher, and both preview commands invoke through that launcher exactly like a real install would (F6) — so the preview re-enters `ocx launcher exec`. That re-entry is a **fresh process**: it re-reads `[records]` from its own config/env/CLI chain from scratch, so the exemption the outer command declared at its own spawn site does not survive the hop by itself — forwarding a sink is not the problem, the problem is that a fresh process has no memory of why the outer command was exempt in the first place. Carrying the exemption over a new environment variable was considered and rejected: it would be exactly the new internal forwarding channel this ADR's "zero new internal forwarding channels" consequence exists to avoid, on a surface already carrying 13+ (see "Related concern" above).
 
-The pkg-root path the launcher was baked with is the one carrier that does survive the hop, because it names the very scratch directory the preview command materialised it under. `ocx launcher exec` inherits its `ExemptionReason` by checking whether the validated pkg-root sits under one of exactly two known command-scratch roots — a short, explicit allow-list, deliberately never "anything under `temp/`", which would also admit in-progress download directories sharing that parent (`crates/ocx_cli/src/command/launcher/exec.rs:63-66` for the root/reason pairing, `:271-277` for the exempt-launch branch; the enum lives in `crates/ocx_lib/src/launch.rs`, and its two sanctioned call sites are enumerated by a source-scan test at `crates/ocx_lib/src/launch.rs:640`). An exempt launch skips `[records]` resolution entirely, so a `required = true` policy the operator set can never fail a preview that record was never meant to observe.
+The pkg-root path the launcher was baked with is the one carrier that does survive the hop, because it names the very scratch directory the preview command materialised it under. `ocx launcher exec` inherits its `ExemptionReason` by checking whether the validated pkg-root sits under one of exactly two known command-scratch roots — a short, explicit allow-list, deliberately never "anything under `temp/`", which would also admit in-progress download directories sharing that parent (`crates/ocx_cli/src/command/launcher/exec.rs:63-66` for the root/reason pairing; the enum lives in `crates/ocx_lib/src/launch.rs`, and its sanctioned call sites are enumerated by a source-scan test in the same file).
 
-### Data model (sketch — no implementation)
+#### The exemption is bounded by the posture (amended 2026-07-28)
+
+The paragraph above originally ended: *"An exempt launch skips `[records]` resolution entirely, so a `required = true` policy the operator set can never fail a preview that record was never meant to observe."* That was the defect, not the design.
+
+**The claim it broke.** `website/src/docs/reference/execution-records.md` states "No caller can opt out of a sink the operator has locked at system scope". The exemption is granted on **path placement**: a caller-supplied pkg-root under `$OCX_HOME/temp/test/` or `$OCX_HOME/temp/patch-test/`. Both roots are inside the *invoking user's own* `$OCX_HOME`, and `ocx launcher exec` is hidden from `--help` but perfectly invocable — it is a wire ABI. Copy an installed package tree under `$OCX_HOME/temp/test/`, invoke the launcher against it, and the launch was exempt; because the exempt path skipped the `[records]` fold, the operator's policy was never even consulted.
+
+**Why a capability token cannot fix it.** The obvious repair is for the preview command to mint a short-lived capability the launcher verifies. It does not work here: the preview command and the forger run as the **same uid**, so anything the parent can mint the caller can mint. A secret in the child's environment, a file under `$OCX_HOME`, a signed token whose key the parent can read — each is readable and reproducible by the party it is meant to exclude. The threat model this feature is written to ("protects against error, not malice", above) does not change that; even for the *accidental* case, a token adds a forwarding channel this ADR spent a whole consequence avoiding, for a property it cannot actually establish.
+
+**What the operator does control** is the posture. So:
+
+> When the resolved policy has `required() == true`, **no exemption is granted**. The launch is refused with a typed error, exit `74`, and the message names the `[records]` policy that refused it rather than only an I/O condition.
+
+A fail-closed posture and an exemption are a contradiction — "this invocation must be recorded" against "this invocation will not be" — and it is resolved in the operator's favour. The cost is stated plainly and accepted: on a host carrying a fail-closed policy, `ocx package test` and `ocx patch test` do not run. That is the correct trade for a control whose whole value is that it has no exceptions; a maintainer previewing an unpublished artifact can relax the policy on their own machine, whereas an operator cannot un-ring a fleet that ran unrecorded.
+
+Consequences, all load-bearing:
+
+- `Launch::exempt` takes the resolved `&RecordingPolicy` and returns `Result`. The decision stays unfabricable at call sites — a policy is still mintable only by `record::policy::resolve_records`, so a frame cannot conjure a permissive one to hand in.
+- `ocx launcher exec` folds `[records]` on the **exempt path too**. Skipping the fold was half the hole: a policy never resolved is a policy that cannot refuse anything.
+- `ocx package test` and `ocx patch test` resolve and pass their own policy at their spawn sites.
+- `policy.required()` is the trigger, deliberately not "locked at SYSTEM scope". `RecordingPolicy` carries no `system_locked` field by design (`forwarded()` drops it so the child re-derives it), and an unlocked config file that sets `required = true` has asked for the same thing.
+
+**Residual, named rather than fixed:** `ocx package test --script` / `ocx patch test --script` reach the Starlark host's `ocx.run`, which spawns through its own sanctioned path (`crates/ocx_lib/src/script/ocx_module.rs`, allow-listed in `no_process_spawn_outside_launch`) and does not consult `[records]`. A script preview therefore still runs unrecorded under a fail-closed policy. Same class as the hole closed here, on a surface the launch seam does not own yet; worth its own issue rather than a second special case in the seam.
+
+### Data model
 
 ```rust
-// crates/ocx_lib/src/record/mod.rs — new module, lib-side (owner doctrine: lib hosts substance)
+// crates/ocx_lib/src/record/execution_record.rs — lib-side (owner doctrine: lib hosts substance)
 
 pub struct ExecutionRecord {
-    pub schema_version: &'static str,  // in-band, pip-style string; bumped ONLY on incompatible change
-    pub recorded_at: OffsetDateTime,
-    pub ocx: OcxIdentity,              // version + self_exe (already on OcxConfigView)
+    pub schema_version: String,        // in-band, pip-style string; bumped ONLY on incompatible change
+    pub kind: String,                  // "sh.ocx.execution-record"
+    pub recorded_at: DateTime<Utc>,
+    pub ocx: OcxBuild,                 // version + binary (already on OcxConfigView)
     pub frame: Frame,                  // Run | PackageExec | LauncherExec + identity quality
-    pub process: ProcessAttributes,    // pid, executable (flat string, ECS), args (ECS), working_directory
-    pub host: HostAttributes,          // name (both agree), arch (OTel enum = OCI vocabulary)
-    pub os: OsAttributes,              // type (both agree)
+    pub process: Process,              // pid, parent?, user?, arch?, executable, working_directory? — NO argv
+    pub host: Host,                    // name? — NOT arch; see "process.arch is the running process" below
+    pub os: Os,                        // type?
     pub executable: BTreeMap<String, String>, // sh.ocx.* — provenance, kind, package purl
-    pub scope: Scope,                  // Project { root, lock digest, groups } | Package | Launcher
-    pub resolution: ResolutionContext, // offline/remote/frozen, index sources, mirrors, managed pin
+    pub scope: ScopeBlock,             // Project { .. } | Package { .. } | Launcher
+    pub resolution: Resolution,        // offline/remote/frozen, requestedPlatform, registries?, mirrors?, managedConfig?, autoInstalled?
     pub packages: Vec<ResourceDescriptor>,  // in-toto shape — root + closure, topological
 }
 // Built from: Vec<Arc<InstallInfo>> (identity + digest + closure, F3)
 //           + ComposeOutput.admitted_binaries / admitted_entrypoints (claimed names, F2)
 //           + Env::resolve_command output    (the leaf executable, F15)
+//
+// `argv` is still an input — `RecordInputs::argv` — because the child's
+// arguments are its tail (`argv[0]` plus the rest); it is simply never carried
+// into the built record. A command line routinely holds access tokens and
+// passwords, and this record's sink is operator-collected and often
+// fleet-aggregated, which turns one leaked argv into many. `process.executable`
+// still names the binary that ran; see the field-by-field table below.
 
 /// Deliberately field-for-field in-toto `ResourceDescriptor`, so a consumer can
 /// drop `packages` straight into SLSA `resolvedDependencies` (D5).
 pub struct ResourceDescriptor {
-    pub name: String,                        // "ocx.sh/cmake"
-    pub uri: String,                         // a purl — see format rules below
-    pub digest: BTreeMap<String, String>,    // {"sha256": "…"}
-    pub annotations: BTreeMap<String, String>, // sh.ocx.* — role, platform, visibility, entrypoints
+    pub name: String,                         // "cmake" — the last repository segment
+    pub uri: Option<String>,                  // a purl; omitted for a synthetic, identity-less package
+    pub digest: BTreeMap<String, String>,     // {"sha256": "…"}
+    pub annotations: BTreeMap<String, Value>, // sh.ocx.* — role, platform (roots only), visibility, binaries/entrypoints as JSON arrays
 }
 ```
 
@@ -510,8 +549,8 @@ Adopting one standard wholesale is not available: **ECS and OTel disagree struct
 | parent pid | `process.parent.pid` (nested) | `process.parent_pid` (flat) | **ECS** | Consistent with the rest of the block, and the nested form leaves room for more parent fields without a rename. Lets a consumer reconstruct call trees — `make` → `ocx run` → tool — from records alone. |
 | invoking user | `process.user.name` (nested; effective uid) | `process.owner` (flat string) | **ECS** | "Who ran this" is a real audit question, so it is recorded **deliberately** rather than leaking through a home-directory path. ECS's nesting also leaves room for uid later. |
 | executable | `process.executable` = **string** | `process.executable.{path,name}` = object | **ECS** | Flat string is more legible under `jq`, and it leaves our custom fields nowhere to collide — they move to `sh.ocx.*`. |
-| args | `process.args` | `process.command_args` | **ECS** | Tiebreak only; matches `argv` naming. |
-| host architecture | `host.architecture` — **free-form**, example `x86_64` | `host.arch` — **closed enum**: `amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86` | **OTel** | Decisive, not a tiebreak: **OTel's enum *is* the OCI vocabulary** OCX already carries. ECS has no controlled vocabulary to comply with and would need an `amd64 → x86_64` mapping table we would own and have to keep correct — a translation layer for zero benefit. |
+| args | `process.args` | `process.command_args` | **neither — not recorded** | A command line routinely carries access tokens and passwords, and this record's sink is operator-collected and often fleet-aggregated — exactly the destination that turns one leaked argv into many. `argv` stays a launch-only input (`RecordInputs::argv`, driving `Env::resolve_command` and the child's actual arguments); it is never carried into the built record. `process.executable` is the field that names what ran. |
+| process architecture | *(no ECS equivalent)* | `process.architecture` — **closed enum**: `amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86` | **OTel's vocabulary, ocx's placement** | Typed to the closed OCI/OTel arch vocabulary — the vocabulary ECS lacks — but scoped to the **process**, not the host machine. See the next subsection for why a machine-level arch field does not exist at all. |
 
 Mixing reads as inconsistent; the reason is per-field and documented, which beats a consistency that costs a mapping table. Both surviving vocabularies are flat lowercase, so the mixed-casing wart of the first draft is gone.
 
@@ -531,20 +570,20 @@ The probe keeps fail-closed honest (an unwritable sink refuses *before* anything
 
 Deliberately **not** doing: recording ocx's pid on Windows and calling it `process.pid`. Same field name, different referent per platform, is the defect class this ADR keeps rejecting.
 
-#### `host.arch` is the machine; `sh.ocx.platform` is what ran
+#### `process.arch` is the running process; `sh.ocx.platform` is what ran
 
-Both standards define their arch field as *the host system's* architecture. That is **not** the audit-relevant fact, and the two genuinely diverge — Rosetta 2 (arm64 host, amd64 process), qemu/binfmt emulation, a 32-bit binary on a 64-bit host, or an explicit `ocx --platform` selecting a non-native target.
+`host.arch` renamed to `process.arch` purely so the name matched the value it was always going to hold: the closed-vocabulary architecture value ocx has available at zero cost is `Architecture::current()`, which reads the target the running binary was **compiled for** (`std::env::consts::ARCH`) — an amd64 ocx under Rosetta 2 on an arm64 host reports `amd64` here, exactly true of the process, not the machine. Calling that value `host.arch` would have been a quiet lie in the one case (emulation) where it matters most, so the field moved to where its subject actually is: `process`.
 
-So the record carries both, answering different questions:
+**The record does not carry a genuine host-machine architecture field at all**, by the same "omit, never fabricate" contract every best-effort field follows. Recovering the machine's true native architecture reliably would need a per-OS native probe — telling Rosetta 2, qemu/binfmt emulation and a 32-bit binary on a 64-bit host apart — plus a `uname`-name-to-OCI mapping table this module would then own and have to keep correct; a wrong answer there is worse than no answer, so the field is not attempted rather than built and hedged.
+
+`sh.ocx.platform` answers a different question — what OCX resolved to when it chose the package:
 
 | Field | Answers | Vocabulary |
 |---|---|---|
-| `host.arch` | what machine is this | OTel enum (= OCI arch names) |
+| `process.arch` | what architecture is *ocx itself* running as | OTel's closed enum (= OCI arch names) |
 | `sh.ocx.platform` | **what OCX resolved to when it chose the package** | OCX's own grammar — `linux/amd64+libc.glibc` |
 
-Neither standard has anywhere to put `+libc.glibc`, and that component is load-bearing for OCX resolution — so `sh.ocx.platform` is not a duplicate to be tidied away later.
-
-**Their divergence is itself an audit signal.** An `amd64` package resolved on an `arm64` host means emulation was in play; a compliance team asking "which bits produced this output" wants that visible, not flattened into one field.
+Neither standard has anywhere to put `+libc.glibc`, and that component is load-bearing for OCX resolution — so `sh.ocx.platform` is not a duplicate to be tidied away later. `process.arch` and `sh.ocx.platform` describe different subjects (the ocx process vs. the resolved package) and are not expected to agree or diverge the way a probed host arch and a resolved package arch would; the record simply states both truthfully and leaves the comparison, if any, to the consumer.
 
 **Evaluated and rejected**, each for a specific reason rather than taste:
 
@@ -567,14 +606,14 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
 6. **A tag appears only when one was actually resolved.** `ocx.lock` stores no tags (F11), so a project-tier record has none and must not synthesise one. Same for the purl's `tag` qualifier.
 7. **`schemaVersion` is a string, bumped only for backward-incompatible change** (pip's discipline). Additive fields never bump it; consumers must tolerate unknown keys.
 8. **One record = one JSON document = one file, serialized COMPACT (single line).** Not JSON Lines, not concatenated documents. Compact because all seven mainstream log shippers — OTel Collector filelog, Vector, Fluent Bit, Fluentd, Filebeat, Alloy, Splunk UF — are line-oriented and choke on a multi-line JSON document; on one line, "read whole file" degenerates to "read one line" and every one of them copes. This is the **only** change that materially helps ingest; field naming does nothing for it. (Bazel's `--execution_log_json_file` shipped newline-delimited proto by accident and has carried the bug for years — choose the shape deliberately.)
-9. **Key casing is flat lowercase in the borrowed blocks, camelCase in the envelope.** Both surviving borrowed vocabularies (ECS, OTel `host.arch`) are flat lowercase; the envelope matches the provenance cluster (in-toto, SLSA, CycloneDX, SPDX). The first draft's mixed snake/camel wart came from OTel's object form and is gone with it.
-10. **Borrowed names are pinned by this document, not by upstream.** OTel `host.arch` is *release-candidate* and ECS is mid-convergence with OTel — neither is frozen upstream. Record which spec each name came from here; **an upstream rename does not license a break in this file.**
+9. **Key casing is flat lowercase in the borrowed blocks, camelCase in the envelope.** Both surviving borrowed vocabularies (ECS, OTel's arch enum) are flat lowercase; the envelope matches the provenance cluster (in-toto, SLSA, CycloneDX, SPDX). The first draft's mixed snake/camel wart came from OTel's object form and is gone with it.
+10. **Borrowed names are pinned by this document, not by upstream.** OTel's arch enum is *release-candidate* and ECS is mid-convergence with OTel — neither is frozen upstream. Record which spec each name came from here; **an upstream rename does not license a break in this file.**
 11. **Two field classes, and only one can fail the invocation.** The record must never fail an invocation because an *environmental* detail could not be determined.
 
     | Class | Fields | On failure |
     |---|---|---|
     | **Load-bearing** — the audit answer itself | `packages[]`, `digest`, `process.executable`, `frame` | Cannot fail: all are in hand from resolution (F3, F15). If one were somehow absent the record would be a lie, so absence is a bug, not a runtime condition. |
-    | **Best-effort** — environmental context | `host.name`, `host.arch`, `os.type`, `process.user.name`, `process.parent.pid`, `process.working_directory` | **Omit the key.** Never fail, never guess, never emit a placeholder like `"unknown"`. |
+    | **Best-effort** — environmental context | `host.name`, `os.type`, `process.arch`, `process.user.id`, `process.user.name`, `process.parent.pid`, `process.working_directory` | **Omit the key.** Never fail, never guess, never emit a placeholder like `"unknown"`. |
 
     Concretely: an unreadable hostname, an undetectable architecture (exotic target, container without `/proc`), a missing username (no passwd entry — common in scratch containers) each drop one key. Consumers must already tolerate absent keys per rule 7, so this costs them nothing. **An absent key means "not determinable here"; a present key is always true.** A `"unknown"` sentinel would be indistinguishable from a host genuinely named `unknown`.
 
@@ -602,12 +641,12 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
   "process": {
     "pid": 48123,
     "parent": { "pid": 47990 },
-    "user": { "name": "ci" },
+    "user": { "id": "1000", "name": "ci" },
+    "arch": "amd64",
     "executable": "/home/ci/.ocx/packages/index.ocx.sh/sha256/3f/7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0/entrypoints/cmake",
-    "args": ["cmake", "--build", "build", "--target", "all"],
     "working_directory": "/scratch/job-88213"
   },
-  "host": { "name": "batch-node-17", "arch": "amd64" },
+  "host": { "name": "batch-node-17" },
   "os": { "type": "linux" },
   "executable": {
     "sh.ocx.provenance": "ocx-package",
@@ -620,7 +659,7 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
     "projectRoot": "/scratch/job-88213",
     "lock": {
       "path": "/scratch/job-88213/ocx.lock",
-      "digest": { "sha256": "9c1f0b3a77d2e4518ab6c0f92d3e7a41b8c5d6e0f1a2b3c4d5e6f708192a3b4c" }
+      "declarationDigest": { "sha256": "9c1f0b3a77d2e4518ab6c0f92d3e7a41b8c5d6e0f1a2b3c4d5e6f708192a3b4c" }
     },
     "groups": ["default"]
   },
@@ -628,9 +667,9 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
     "offline": false,
     "remote": false,
     "frozen": true,
-    "platform": "linux/amd64+libc.glibc",
-    "indexSources": ["index.ocx.sh"],
-    "mirrors": { "ghcr.io": "https://artifactory.corp.example/ghcr-remote" },
+    "requestedPlatform": "linux/amd64+libc.glibc",
+    "registries": ["index.ocx.sh"],
+    "mirrors": { "ghcr.io": { "registry": "https://artifactory.corp.example/ghcr-remote" } },
     "managedConfig": {
       "source": "internal.corp.example/ocx-config:user",
       "digest": { "sha256": "4d2c8e1f5a90b7c36e4d1928f0a5b3c7d9e2f4a6b8c0d1e3f5a7b9c1d3e5f709" }
@@ -647,7 +686,7 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
         "sh.ocx.group": "default",
         "sh.ocx.platform": "linux/amd64+libc.glibc",
         "sh.ocx.visibility": "public",
-        "sh.ocx.entrypoints": "cmake,ctest,cpack"
+        "sh.ocx.entrypoints": ["cmake", "ctest", "cpack"]
       }
     },
     {
@@ -660,16 +699,15 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
         "sh.ocx.group": "default",
         "sh.ocx.platform": "linux/amd64+libc.glibc",
         "sh.ocx.visibility": "public",
-        "sh.ocx.binaries": "ninja"
+        "sh.ocx.binaries": ["ninja"]
       }
     },
     {
       "name": "libstdcxx-runtime",
-      "uri": "pkg:oci/libstdcxx-runtime@sha256:c0d3e6f9a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3?repository_url=index.ocx.sh%2Focx&arch=amd64",
+      "uri": "pkg:oci/libstdcxx-runtime@sha256:c0d3e6f9a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3?repository_url=index.ocx.sh%2Focx",
       "digest": { "sha256": "c0d3e6f9a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1a4b7c0d3" },
       "annotations": {
         "sh.ocx.role": "dependency",
-        "sh.ocx.platform": "linux/amd64+libc.glibc",
         "sh.ocx.visibility": "interface"
       }
     }
@@ -677,7 +715,7 @@ Neither standard has anywhere to put `+libc.glibc`, and that component is load-b
 }
 ```
 
-Three things in this record are load-bearing and easy to misread as noise:
+Several things in this record are load-bearing and easy to misread as noise:
 
 **No `tag` qualifier on any purl — correct, not an omission.** `ocx.lock` V3 stores a bare repository plus a per-platform digest and *rejects* a tag at validation (F11). A project-tier run has no tag to report; synthesising one would be the first lie in an audit record.
 
@@ -685,9 +723,13 @@ Three things in this record are load-bearing and easy to misread as noise:
 
 **`sh.ocx.provenance`** is the field an auditor reads first. `"ocx-package"` here; `"external"` when the resolved path lands outside the store — `ocx run -- bash …` picking up the *system* bash is a fact this record must state out loud, and it is currently invisible in every other ocx output. Note it sits in its own `executable` block under the `sh.ocx.*` namespace, **not** nested under `process.executable`: ECS types that field as a flat keyword string, so hanging sub-fields off it would be an ingest type-conflict, not merely a naming quibble.
 
-**`host.arch` is `amd64` and `resolution.platform` is `linux/amd64+libc.glibc`** — not a duplication. The first is the machine (OTel's enum, which is the OCI vocabulary); the second is what OCX resolved to, in a grammar that carries `+libc.glibc`, which neither standard can express. When these two disagree, emulation was in play — an audit signal, not an inconsistency.
+**No `process.args`.** The command line is what launched this record's own subject, and it can carry access tokens or passwords typed on it — a leak vector this operator-collected, often fleet-aggregated sink must not amplify. `process.executable` still names the binary that ran; that is the field an auditor keys on, not the argument list.
 
-`sh.ocx.entrypoints` / `sh.ocx.binaries` come from `ComposeOutput.admitted_entrypoints` / `admitted_binaries` (F2) — already computed, zero extra work, and they answer the auditor's follow-up: *which executables did this package put on `PATH`?* That is also the datum [#177](https://github.com/ocx-sh/ocx/issues/177) wants; the two features should share one derivation.
+**`process.arch` is `amd64` and `resolution.requestedPlatform` is `linux/amd64+libc.glibc`** — not a duplication. The first is the architecture the running ocx binary was compiled for (never a probed host architecture — see "process.arch is the running process" above); the second is what OCX resolved to, in a grammar that carries `+libc.glibc`, which neither standard can express.
+
+**`sh.ocx.platform` appears only on the two roots, never on `libstdcxx-runtime`.** A dependency is reachable here as an identifier, not as an install, so the platform it actually resolved to is not in hand at record-build time — the field is omitted rather than guessed, the same "omit, never fabricate" contract as every other best-effort field.
+
+`sh.ocx.entrypoints` / `sh.ocx.binaries` come from `ComposeOutput.admitted_entrypoints` / `admitted_binaries` (F2) — already computed, zero extra work, and they answer the auditor's follow-up: *which executables did this package put on `PATH`?* That is also the datum [#177](https://github.com/ocx-sh/ocx/issues/177) wants; the two features should share one derivation. Each is a genuine JSON array of strings, not a comma-joined string: an in-toto descriptor's `annotations` values are arbitrary JSON, and no separator is forbidden in a binary name, so `["a,b"]` and `["a","b"]` would otherwise arrive indistinguishable.
 
 ### 2. `ocx package exec` — OCI tier, no lock (the reporter's actual case)
 
@@ -705,11 +747,12 @@ Three things in this record are load-bearing and easy to misread as noise:
   },
   "process": {
     "pid": 48124,
+    "user": { "id": "1000", "name": "ci" },
+    "arch": "amd64",
     "executable": "/home/ci/.ocx/packages/internal.corp.example/sha256/aa/11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899/content/bin/solver",
-    "args": ["solver", "--input", "model.dat"],
     "working_directory": "/scratch/job-88213"
   },
-  "host": { "name": "batch-node-17", "arch": "amd64" },
+  "host": { "name": "batch-node-17" },
   "os": { "type": "linux" },
   "executable": {
     "sh.ocx.provenance": "ocx-package",
@@ -725,8 +768,8 @@ Three things in this record are load-bearing and easy to misread as noise:
     "offline": false,
     "remote": false,
     "frozen": false,
-    "platform": "linux/amd64+libc.glibc",
-    "indexSources": ["internal.corp.example"],
+    "requestedPlatform": "linux/amd64+libc.glibc",
+    "registries": ["internal.corp.example"],
     "mirrors": {},
     "managedConfig": {
       "source": "internal.corp.example/ocx-config:user",
@@ -769,22 +812,22 @@ A user runs `cmake` straight from `PATH` after `ocx env`, with no ocx parent fra
   "frame": {
     "command": "launcher-exec",
     "identity": "degraded",
-    "identityNote": "package directories are content-shared and carry no registry/repository (resolve.json deliberately omits the root identifier), so logical identity is not recoverable in this frame and no purl can be emitted"
+    "identityNote": "package directories are content-shared and carry no registry/repository, so logical identity is not recoverable in this frame and no purl can be emitted"
   },
   "process": {
     "pid": 48123,
+    "arch": "amd64",
     "executable": "/home/ci/.ocx/packages/index.ocx.sh/sha256/3f/7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0/content/bin/cmake",
-    "args": ["cmake", "--build", "build", "--target", "all"],
     "working_directory": "/scratch/job-88213"
   },
-  "host": { "name": "batch-node-17", "arch": "amd64" },
+  "host": { "name": "batch-node-17" },
   "os": { "type": "linux" },
   "executable": {
     "sh.ocx.provenance": "ocx-package",
     "sh.ocx.kind": "binary"
   },
   "scope": { "tier": "launcher" },
-  "resolution": { "offline": false, "remote": false, "frozen": false, "platform": null },
+  "resolution": { "offline": false, "remote": false, "frozen": false, "requestedPlatform": null },
   "packages": [
     {
       "name": "file-url-mode/3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0",
@@ -809,7 +852,7 @@ Read them together and the audit question is fully answered:
 | join key | `digest` — identical in both | |
 | pid | 48123 | 48123 — same, the exec chain preserves it (F14) |
 
-**No `uri` field at all**, rather than a fabricated one. An earlier draft emitted `ocx-store:/home/ci/.ocx/packages/…` here; that was an invented URI scheme dressed up as identity, and a purl cannot be constructed without a repository. Omitting the field is the honest encoding — `ResourceDescriptor` permits it, since `digest` alone identifies the resource. `"identity": "degraded"` states the limitation in-band. `"platform": null` per F7 — not fabricated from the host.
+**No `uri` field at all**, rather than a fabricated one. An earlier draft emitted `ocx-store:/home/ci/.ocx/packages/…` here; that was an invented URI scheme dressed up as identity, and a purl cannot be constructed without a repository. Omitting the field is the honest encoding — `ResourceDescriptor` permits it, since `digest` alone identifies the resource. `"identity": "degraded"` states the limitation in-band. `"requestedPlatform": null` per F7 — not fabricated from the host.
 
 ### 4. The consumer that actually works today — Conftest / OPA
 
@@ -902,7 +945,7 @@ The one thing worth doing when the SBOM work lands: a docs section showing the t
 - The reporter's wrapper scripts stop being the control point; the operator's managed config is.
 - Zero extra resolution work, zero network, one small file write on a path that already does filesystem I/O.
 - **Zero new internal forwarding channels** — on a surface already carrying 13+. The three new `OCX_RECORDS_*` variables are user-facing settings with flag and config peers, resolved by one shared fold, not private ocx-to-ocx signalling.
-- The leaf binary is captured, and `process.executable.provenance` states out loud when the thing that ran was *not* ocx-supplied — currently invisible in every ocx output.
+- The leaf binary is captured, and `executable["sh.ocx.provenance"]` states out loud when the thing that ran was *not* ocx-supplied — currently invisible in every ocx output.
 - `packages` stays `ResourceDescriptor`-shaped, so if an attestation flow is ever built ([#198](https://github.com/ocx-sh/ocx/issues/198)/[#102](https://github.com/ocx-sh/ocx/issues/102)) the data model is already right — even though the wrapper itself buys nothing today.
 - Field names are borrowed from purl, in-toto, ECS and OTel wherever a maintained standard already names the thing, so a consumer who knows any of them reads most of the record without our documentation.
 - A user can gate CI on approved digests with a few lines of Rego and no infrastructure at all (Conftest example above).
@@ -945,7 +988,7 @@ The one thing worth doing when the SBOM work lands: a docs section showing the t
 5. [ ] Wire the layers: `[records]` config section (managed tier folds in for free via `Config::merge`), `OCX_RECORDS_{DIR,NAME}` into `apply_ocx_config`'s forwarded set with set-or-remove discipline, `--records-{dir,name}` flags on `run` / `package exec`. `required` is config-only. Then the binary `system_locked` clamp.
 6. [ ] Acceptance tests: all three frames emit; an entrypoint invocation emits **exactly two** records joining on digest; degraded-identity launcher case emits no `uri`; unwritable sink fails closed when SYSTEM-locked and warns when not; N concurrent invocations produce N distinct files; unknown placeholder rejected at resolve time; **precedence matrix — each field set at each layer, highest wins, `None` never clobbers a lower layer**; `system_locked` ignores env and CLI entirely; emitted purl round-trips through the `packageurl` crate with the unencoded colon; **`process.pid` is the tool's pid on Unix and the spawned child's on Windows**; **best-effort fields omit rather than fail** — assert a record is still written with hostname, architecture and username resolution all forced to fail.
 7. [ ] Docs: env reference, `reference/execution-records.md` **leading with the Conftest/OPA example**, inclusion in [#178](https://github.com/ocx-sh/ocx/issues/178)'s declared-stable set. State plainly that `pkg:oci` gives identity, not vulnerability lookup, and that records contain absolute paths including the user's home directory.
-8. [ ] Sink path handling: the operator-designated sink is canonicalized and **pinned to where it really is**, once, at policy resolution (`pin_sink` in `crates/ocx_lib/src/record/policy.rs`) — refusing a sink for merely *containing* a symlink was the wrong guard, since macOS reaches an ordinary `/var/log/ocx/records` through `/var` → `/private/var` and that check refused it on every launch, permanently under `required = true`. What is refused is **substitution of the sink after the operator designated it**: `emit`/`probe_writable` re-walk the already-pinned path via `refuse_if_symlink_in_path` and fail if a symlink has been inserted into it since — nobody redirects the audit trail after the fact. (No security review — no threat model; see the risk table.)
+8. [ ] Sink path handling: the operator-designated sink is canonicalized and **pinned to where it really is**, once, at policy resolution (`pin_sink` in `crates/ocx_lib/src/record/policy.rs`) — refusing a sink for merely *containing* a symlink was the wrong guard, since macOS reaches an ordinary `/var/log/ocx/records` through `/var` → `/private/var` and that check refused it on every launch, permanently under `required = true`. What is refused is **substitution of the sink after the operator designated it**: `emit`/`probe_writable` re-resolve the already-pinned path and fail if it no longer resolves to itself, so a symlink inserted since designation does not redirect the audit trail. The check compares a canonical *path*, not the directory's identity, and runs before the write rather than holding the directory open across it — so it does not catch a sink replaced by a *different real directory* at the same path, nor a symlink inserted between the check and the file being created. Both would need an `openat`-style handle pinned at designation with every write made relative to it. That is the correct scope here: this is an integrity control against accidental redirection, not a defence against an adversary racing it. (No security review — no threat model; see the risk table.)
 9. [ ] **After the SBOM slices land** ([#199](https://github.com/ocx-sh/ocx/issues/199)): docs section showing the digest → `ocx package sbom` chain. No format change.
 
 ---
@@ -958,7 +1001,7 @@ Settled during the 2026-07-26 discussion and owner-confirmed, recorded so they a
 - Two records per entrypoint invocation, joined by content digest.
 - `[records]` plural; `dir` + `name` settable at config/env/CLI via one four-layer fold; `required` config-only.
 - **Binary lock**: a SYSTEM-scope policy (`/etc/ocx/config.toml`) locks the whole block; otherwise nothing is locked. Fail-closed when locked, warn when not.
-- purl `pkg:oci` (unencoded colon, platform-leaf digest) + in-toto `ResourceDescriptor`; **ECS** for `process.executable`/`process.args`, **OTel** for `host.arch`, both agree on the rest; `sh.ocx.*` for everything ocx-specific.
+- purl `pkg:oci` (unencoded colon, platform-leaf digest) + in-toto `ResourceDescriptor`; **ECS** for `process.executable`, **OTel's** closed arch enum for `process.arch` (scoped to the running ocx process, not a probed host — see "process.arch is the running process"), both agree on the rest; `sh.ocx.*` for everything ocx-specific. `process.args` is not recorded at all — see the Amendment below.
 - Compact single-line JSON, one document per file.
 - No in-toto `Statement` in v1; subject question deferred as genuinely additive.
 - Conftest/OPA is the documented consumer story.
@@ -984,7 +1027,11 @@ A max-tier adversarial review of the shipped implementation (PR [#238](https://g
 1. **`process.args` is removed from v1.** Argv can carry access tokens and passwords — a secret typed on a command line is a well-known leak vector, and this record's sink is exactly the kind of destination that turns one leaked argv into many: operator-collected, and routinely fleet-aggregated into a central store with a wider audience than the invoking host. Removing the field now, before any fleet has consumed a v1 record, costs nothing. Removing it after a fleet has built tooling against `process.args` would be exactly the kind of break `schemaVersion` (format rule 7) exists to price honestly rather than absorb for free. A config-gated opt-in for operators who accept the exposure and want the field may follow later; it is not in v1.
 2. **`RecordsError::SinkSymlink` classifies to exit `78` (`ConfigError`), not `64` (`UsageError`).** The Technical Details section above ("Failure posture follows the lock") matched this to the existing `SymlinkWalkError::Ancestor` symlink-refusal precedent, which is `64` because that precedent guards a path the *user typed as a CLI argument* — a usage fault the invoker fixes by retyping a flag. The execution-record sink is never typed as an argument: it arrives from `[records]` config, `OCX_RECORDS_DIR`, or a SYSTEM-scope lock. A symlinked sink under any of those is a configuration fault the operator fixes by editing a file, and `64` would send them looking at their invocation instead of their config — the same reasoning format rule 7's neighbour already applies to a bad name template (`TemplateUnknownPlaceholder` / `TemplateNotUnique` / `NameNotAFilename`, all `78`). The `SymlinkWalkError::Ancestor` precedent does not transfer across that distinction, and `SinkSymlink` joins those three at `78`.
 3. **A managed (registry-delivered) `[records] required = true` is deliberately not an error.** "The lock is an integrity control, not a security boundary" (Technical Details, above) already establishes that no adversarial model exists for this feature — the SYSTEM lock guards against a well-meaning wrapper script overriding an operator's collection contract by accident, not against a hostile caller. A managed tier asserting the strictest posture is the intended use of that mechanism, not an edge case requiring a new error path or a distinct code branch.
-4. **The sink-pinning guard (checklist item 8, above) protects within a process, not across the two-process entrypoint hop.** `pin_sink` canonicalizes and pins the sink once **per process**, in `resolve_records`; substitution between designation and write is refused on both the pre-spawn probe and the emit path, but only inside that one process's lifetime. An entrypoint invocation's two records come from **two processes** (F6): the launcher re-entry re-runs `resolve_records` against the forwarded `OCX_RECORDS_DIR` and re-pins from scratch, so a symlink planted before the child starts pins to its own target and the child records there silently. The property is "no substitution within a recording process," not "no substitution across the process boundary of one entrypoint invocation." Accepted, not closed: the lock is already an integrity control, not a security boundary — planting that symlink needs write access to the sink's parent, and whoever holds it already owns the trail. Closing it would need the child to distinguish "pinned by my parent" from "typed by an operator," which means a new channel in `RecordsOptions` — exactly the internal forwarding channel this ADR rejected, at the price the old ancestor-walk guard already proved too high (a universal macOS outage).
+4. **The sink-pinning guard (checklist item 8, above) protects within a process, not across the two-process entrypoint hop.** `pin_sink` canonicalizes and pins the sink once **per process**, in `resolve_records`; substitution between designation and write is refused on both the pre-spawn probe and the emit path, but only inside that one process's lifetime. An entrypoint invocation's two records come from **two processes** (F6): the launcher re-entry re-runs `resolve_records` against the forwarded `OCX_RECORDS_DIR` and re-pins from scratch, so a symlink planted before the child starts pins to its own target and the child records there silently. The property is "no substitution within a recording process," not "no substitution across the process boundary of one entrypoint invocation."
+
+   Two further limits hold **within** a process, both from the same cause — the guard pins a canonical *path* and re-checks it before the write, rather than holding the designated directory open across it. A sink replaced by a *different real directory* at the same path re-resolves to itself and is accepted; and a symlink inserted in the window between the check and `NamedTempFile::new_in` is followed. So the honest statement of the whole guard is: **it catches a symlink present in the pinned path at check time — the accidental redirection it exists for — and nothing that races it.**
+
+   Accepted, not closed, and the reasoning is one argument for all three limits: this is already an integrity control rather than a security boundary — planting any of these needs write access to the sink's parent, and whoever holds that already owns the trail, or can simply not run `ocx` at all. Closing the intra-process pair needs an `openat`-style directory handle pinned at designation with every write made relative to it; closing the cross-process one additionally needs the child to distinguish "pinned by my parent" from "typed by an operator," which means a new channel in `RecordsOptions` — exactly the internal forwarding channel this ADR rejected. The prior guard that *did* close more of this (refusing any symlinked ancestor) was removed because its price was a universal macOS outage, which prices the trade plainly.
 
 ---
 

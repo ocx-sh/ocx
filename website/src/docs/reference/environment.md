@@ -416,7 +416,9 @@ If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) 
 
 ### `OCX_NO_CONFIG` {#ocx-no-config}
 
-When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. It also suppresses the [`[managed]`][config-managed] snapshot candidate entirely and disables the [`OCX_MANAGED_CONFIG`](#ocx-managed-config) env-override read — hermetic means hermetic, so a managed tier cannot slip in through either the local snapshot or the env override while this variable is set. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
+When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no user or `$OCX_HOME/config.toml` is loaded. It also suppresses the [`[managed]`][config-managed] snapshot candidate entirely and disables the [`OCX_MANAGED_CONFIG`](#ocx-managed-config) env-override read — hermetic means hermetic, so a managed tier cannot slip in through either the local snapshot or the env override while this variable is set. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
+
+**A SYSTEM-scope policy is not ambient configuration, and this variable does not suppress it.** `/etc/ocx/config.toml` still loads under `OCX_NO_CONFIG=1` — and, on this path as on the ordinary one, a system file that exists and cannot be read aborts the invocation (exit 78) instead of being skipped, since skipping it would drop the very policy this paragraph is about. What loads is filtered down to only the sections an operator locked there — a locked [`[registry]`][config-registry], [`[registries.<name>]`][config-registries], [`[mirrors]`][config-mirrors], [`[patches]`][config-patches], or [`[records]`][config-records] section still applies. Only the `[managed]` tier is dropped unconditionally, since it is itself a mechanism for pulling in ambient state. The distinction is deliberate: `OCX_NO_CONFIG` exists so a caller can opt out of config that leaked in from a runner image or a mounted home directory, not so a caller can opt out of a policy the operator declared with root access to `/etc/ocx/config.toml`.
 
 Use this for CI reproducibility: locked workflows should ignore any ambient config that might leak in from the runner image or a mounted home directory.
 
@@ -530,6 +532,38 @@ Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no
 **Escape hatch**: setting this to the empty string (`OCX_PROJECT=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
 **Symlink policy**: explicit paths (this variable and `--project`) follow symlinks. The CWD walk rejects symlinked `ocx.toml` candidates — use `--project` or `OCX_PROJECT` to opt in.
+
+### `OCX_RECORDS_DIR` {#ocx-records-dir}
+
+Sink directory for the [exec-time resolution record][execution-records-ref] — a JSON file OCX writes immediately before starting a tool, naming every package digest that composed the child's environment. Equivalent to the `--records-dir` flag on [`ocx run`][cmd-run] and [`ocx package exec`][cmd-package-exec], and to the [`[records]` `dir`][config-records-dir] config key, but injectable via environment for CI and container setups where the command line is not controlled.
+
+```sh
+export OCX_RECORDS_DIR=/var/log/ocx/records
+```
+
+Unset at every tier — the default — means no record is written and no I/O is added to the exec path. This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so a generated launcher's re-entry (`ocx launcher exec`, which takes no flags of its own) writes to the same sink as the parent invocation.
+
+**Escape hatch**: setting this to the empty string (`OCX_RECORDS_DIR=`) is treated as unset, matching the [`OCX_CONFIG`](#ocx-config) precedent — useful when the variable is exported from a shell profile and you want to disable recording for a single invocation without unsetting it.
+
+Overridden by `--records-dir`. A SYSTEM-scope [`[records]`][config-records] declaration locks the whole section, including `dir`, and this variable has no effect once locked. See [Execution Records][execution-records-ref] for the full precedence fold, the sink's no-clobber write behavior, and the failure posture when a record cannot be written.
+
+### `OCX_RECORDS_NAME` {#ocx-records-name}
+
+Filename template for the [exec-time resolution record][execution-records-ref]. Equivalent to the `--records-name` flag on [`ocx run`][cmd-run] and [`ocx package exec`][cmd-package-exec], and to the [`[records]` `name`][config-records-name] config key.
+
+```sh
+export OCX_RECORDS_NAME='{time}-{host}-{pid}.json'
+```
+
+Accepts the same closed placeholder set as the config key — `{time}`, `{pid}`, `{rand}`, `{host}` — see [Filename grammar][execution-records-filename]. An unrecognized placeholder is a configuration error (exit 78) at resolve time, never a silently-unexpanded literal. Has no effect unless a sink is also active via [`OCX_RECORDS_DIR`](#ocx-records-dir), `--records-dir`, or config `[records] dir`.
+
+**Escape hatch**: setting this to the empty string (`OCX_RECORDS_NAME=`) is treated as unset, matching the [`OCX_CONFIG`](#ocx-config) precedent.
+
+This variable is **resolution-affecting** and forwarded to every subprocess `ocx` spawns, the same as [`OCX_RECORDS_DIR`](#ocx-records-dir). Overridden by `--records-name`. Locked along with the rest of `[records]` under a SYSTEM-scope policy.
+
+::: tip No `OCX_RECORDS_REQUIRED`
+Recording's fail-open/fail-closed posture (`[records] required`) is config-file-only at every tier — never an environment variable, never a CLI flag. See [Configuring `[records]`][execution-records-configuration].
+:::
 
 ### `OCX_REMOTE` {#ocx-remote}
 
@@ -712,6 +746,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-remote]: command-line.md#arg-remote
 [cmd-index-update]: command-line.md#index-update
 [cmd-package-announce]: command-line.md#package-announce
+[cmd-package-exec]: command-line.md#package-exec
 [cmd-run]: command-line.md#run
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate
@@ -731,6 +766,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- reference -->
 [config-ref]: ./configuration.md
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
+[config-registry]: ./configuration.md#keys-registry
+[config-registries]: ./configuration.md#keys-registries
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
@@ -738,6 +775,14 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md
 [config-project-env]: ./configuration.md#project-config-env
+[config-records]: ./configuration.md#keys-records
+[config-records-dir]: ./configuration.md#keys-records-dir
+[config-records-name]: ./configuration.md#keys-records-name
+
+<!-- execution records -->
+[execution-records-ref]: ./execution-records.md
+[execution-records-filename]: ./execution-records.md#execution-records-filename
+[execution-records-configuration]: ./execution-records.md#execution-records-configuration
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

@@ -16,4 +16,15 @@ markers = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-xdist>=3.5", "pexpect>=4.9", "oras>=0.2.42", "rich>=14.0"]
+# `jsonschema` binds an emitted execution record to the schema `ocx_schema`
+# publishes (test_execution_records.py). A hand-rolled subset check would be a
+# third description of the format, free to go stale on its own — which is the
+# drift the binding exists to close.
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "pexpect>=4.9",
+    "oras>=0.2.42",
+    "rich>=14.0",
+    "jsonschema>=4.23",
+]

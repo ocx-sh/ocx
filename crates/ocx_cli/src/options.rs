@@ -12,6 +12,7 @@ mod group_selection;
 mod identifier;
 mod platform;
 mod pull;
+mod records;
 mod verify;
 
 pub use bin_scan::{BinScan, BinScanMode};
@@ -25,4 +26,5 @@ pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
 pub use platform::PlatformOption;
 pub use pull::Pull;
+pub use records::Records;
 pub use verify::Verify;

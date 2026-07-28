@@ -206,12 +206,20 @@ jobs:
         with:
           name: ocx-schema-binary
           path: target/release
+      # Fail here rather than downstream: the schema tests skip themselves when
+      # `CI` is set and this binary is absent, so a lost artifact would disarm
+      # every one of them — including the check that binds an emitted execution
+      # record to the published schema — and still report the job green.
+      - name: Prepare Schema Binary
+        shell: bash
+        run: |
+          chmod +x target/release/ocx_schema
+          test -x target/release/ocx_schema
       - name: Prepare Binaries
         shell: bash
         run: |
           mv "test/bin/ocx-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/ocx${{ matrix.job.ext }}"
           chmod +x test/bin/ocx${{ matrix.job.ext }}
-          chmod +x target/release/ocx_schema
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task

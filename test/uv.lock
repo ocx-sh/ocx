@@ -212,6 +212,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "oras" },
     { name = "pexpect" },
     { name = "pytest" },
@@ -223,6 +224,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "oras", specifier = ">=0.2.42" },
     { name = "pexpect", specifier = ">=4.9" },
     { name = "pytest", specifier = ">=8.0" },

@@ -85,6 +85,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::env::ForwardedEnvError;
     use crate::file_structure::error::Error as FileStructureError;
     use crate::forge::ForgeError;
+    use crate::launch::LaunchError;
     use crate::managed_config::{
         ManagedConfigFetchError, ManagedConfigPersistError, ManagedConfigPublishError, ManagedConfigUpdateError,
     };
@@ -104,6 +105,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::patch::PatchError;
     use crate::project::error::Error as ProjectError;
     use crate::publisher::{LayerRefParseError, PublishGateError};
+    use crate::record::RecordsError;
     use crate::setup::error::Error as SetupError;
     use crate::utility::fs::path::PathEscapeError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
@@ -155,6 +157,12 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(DependencyPinningError);
     try_downcast!(BinScanError);
     try_downcast!(ProjectError);
+    try_downcast!(RecordsError);
+    // `LaunchError` is the type a fail-closed launch returns, so it is the node
+    // this ladder meets first — before the `RecordsError` it carries. Its own arm
+    // is what keeps the records exit code intact no matter how the wrapper is
+    // spelled; without it the operator's 74 depends on the wrapper's shape.
+    try_downcast!(LaunchError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
     // Per-layer layout errors: publish-side layer-ref parse → UsageError (64);
@@ -470,6 +478,138 @@ mod tests {
         };
         let err = crate::project::error::Error::Project(ProjectError::new(PathBuf::new(), kind));
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    // ── record::RecordsError exit-code classification ────────────────────────
+
+    /// `try_classify` is a hand-written downcast ladder with no compile-time
+    /// guard: a type with no arm silently falls through to `Failure` (1). For
+    /// records that would turn an unwritable operator sink from exit 74 into
+    /// exit 1, so this test locks in both the arm's presence and every variant's
+    /// code. The variants split across two codes deliberately — an unwritable
+    /// sink is an I/O fault, while everything the operator fixes by editing
+    /// `[records]` (the template, the rendered name, the sink itself) is a
+    /// config fault.
+    #[test]
+    fn records_error_classifies_to_correct_exit_codes() {
+        use crate::record::RecordsError;
+
+        let err = RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "unwritable sink must map to IoError(74)"
+        );
+
+        let err = RecordsError::Serialize(serde_json::from_str::<u8>("{").expect_err("malformed JSON"));
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "serialize failure must map to IoError(74)"
+        );
+
+        let err = RecordsError::TemplateUnknownPlaceholder {
+            placeholder: "nope".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "unknown placeholder is a config parse error → ConfigError(78), never IoError(74)"
+        );
+
+        let err = RecordsError::TemplateNotUnique;
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a non-unique template must map to ConfigError(78)"
+        );
+
+        let err = RecordsError::NameNotAFilename {
+            name: "../escape.json".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a name that is not a plain filename must map to ConfigError(78)"
+        );
+
+        let err = RecordsError::SinkSymlink {
+            path: PathBuf::from("/var/log/ocx"),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a symlinked sink is a `[records] dir` misconfiguration → ConfigError(78), not a usage error"
+        );
+    }
+
+    /// The same codes must survive the wrap into the root `Error`, which reaches
+    /// them through a transparent variant rather than its own mapping.
+    #[test]
+    fn records_error_classifies_through_root_error() {
+        use crate::record::RecordsError;
+
+        let err = crate::Error::Records(RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        });
+        assert_eq!(classify(err), ExitCode::IoError);
+
+        let err = crate::Error::Records(RecordsError::TemplateNotUnique);
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "the root wrapper must not flatten the template/sink split to one code"
+        );
+    }
+
+    /// `LaunchError` is the type a fail-closed launch actually returns, so the
+    /// ladder needs its own arm for it: it is the node reached first, ahead of
+    /// the `RecordsError` it carries. This test pins the codes to the records
+    /// fault rather than to how the wrapper happens to be spelled — the operator
+    /// branches on 74 and 78, and neither may drift when the wrapper changes.
+    #[test]
+    fn launch_error_records_variant_preserves_the_records_exit_code() {
+        use crate::launch::LaunchError;
+        use crate::record::RecordsError;
+
+        let err = LaunchError::Records(RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        });
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "a fail-closed record write must exit 74 through the launch seam"
+        );
+
+        let err = LaunchError::Records(RecordsError::TemplateNotUnique);
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// A spawn failure must classify exactly as it did before the three exec
+    /// sites were folded into the launch seam: delegate to the wrapped
+    /// `io::Error`, so a permission-denied spawn is 77 and anything else falls
+    /// through to `Failure` (1). Locking this in keeps the seam's adoption a
+    /// behaviour-preserving refactor.
+    #[test]
+    fn launch_error_spawn_delegates_to_the_inner_io_error() {
+        use crate::launch::LaunchError;
+
+        let err = LaunchError::Spawn {
+            resolved: PathBuf::from("/usr/bin/cmake"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES"),
+        };
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+
+        let err = LaunchError::Spawn {
+            resolved: PathBuf::from("/usr/bin/cmake"),
+            source: std::io::Error::other("exec boom"),
+        };
+        assert_eq!(classify(err), ExitCode::Failure);
     }
 
     // ── singleflight::Error exit-code classification ─────────────────────────

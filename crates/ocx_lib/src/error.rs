@@ -45,6 +45,15 @@ pub enum Error {
     #[error("JSON serialization error: {0}")]
     SerializationFailure(#[from] serde_json::Error),
 
+    /// An execution record could not be built or published.
+    ///
+    /// Transparent so classification descends to the inner
+    /// [`RecordsError`](crate::record::RecordsError) and reaches its own split
+    /// (74 for an unwritable sink, 78 for a malformed name template, 64 for a
+    /// symlinked sink) rather than flattening to one code here.
+    #[error(transparent)]
+    Records(#[from] crate::record::RecordsError),
+
     /// An unsupported OCI media type was encountered.
     #[error("unsupported media type '{media_type}', expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
     UnsupportedMediaType(String, &'static [&'static str]),
@@ -241,6 +250,7 @@ impl ClassifyExitCode for Error {
             Self::Compression(e) => e.classify(),
             Self::Ci(e) => e.classify(),
             Self::Config(e) => e.classify(),
+            Self::Records(e) => e.classify(),
             Self::Package(e) => e.as_ref().classify(),
             // Shell errors have no specific exit code yet; defer to chain walker.
             Self::Shell(_) => None,
