@@ -24,6 +24,10 @@ pub enum Error {
     #[error("unsupported logo format: {0}")]
     UnsupportedLogoFormat(String),
 
+    /// A logo file's bytes are not the image format its extension claims.
+    #[error("logo at {} is not a {expected} image", .path.display())]
+    InvalidLogoContent { path: PathBuf, expected: &'static str },
+
     /// A required path does not exist.
     #[error("required path does not exist: {}", .0.display())]
     RequiredPathMissing(PathBuf),
@@ -53,9 +57,11 @@ pub enum Error {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) | Self::EmptyPushSet => {
-                Some(ExitCode::DataError)
-            }
+            Self::VersionInvalid(_)
+            | Self::UnsupportedLogoFormat(_)
+            | Self::InvalidLogoContent { .. }
+            | Self::BuildMeta(_)
+            | Self::EmptyPushSet => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointArgInterpolation { source, .. } => source.classify(),

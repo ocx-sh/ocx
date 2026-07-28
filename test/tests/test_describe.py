@@ -225,3 +225,52 @@ def test_describe_cli_flags_override_frontmatter(ocx: OcxRunner, unique_repo: st
 
     # Description was only in frontmatter (no CLI flag), so frontmatter value is used.
     assert annotations["org.opencontainers.image.description"] == "Frontmatter description"
+
+
+# A 1x1 transparent PNG.
+VALID_PNG = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+    b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx"
+    b"\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+# What a checkout without `lfs: true` leaves behind at `assets/logo.png`.
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\noid sha256:c95693dc\nsize 596109\n"
+
+
+def _sole_logo_digest(registry: str, repo: str) -> str:
+    """Digest of the one image layer on __ocx.desc, refusing an ambiguous manifest."""
+    manifest = fetch_manifest_from_registry(registry, repo, "__ocx.desc")
+    images = [l for l in manifest["layers"] if l["mediaType"].startswith("image/")]
+    assert len(images) == 1, f"expected exactly one image layer, got {images}"
+    return images[0]["digest"]
+
+
+def test_describe_refuses_a_logo_whose_bytes_are_not_an_image(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A file that is not really a PNG must fail loudly, leaving the published logo intact.
+
+    The regression: `--logo` validated only the extension, so an LFS pointer left by a
+    checkout without `lfs: true` published as the logo, exit 0, and blanked the catalog
+    entry that a good logo had been pushed to.
+    """
+    readme = tmp_path / "README.md"
+    readme.write_text("# Tool\n")
+    good = tmp_path / "logo.png"
+    good.write_bytes(VALID_PNG)
+
+    fq = f"{ocx.registry}/{unique_repo}"
+    ocx.plain("package", "describe", "--readme", str(readme), "--logo", str(good), fq)
+    published = _sole_logo_digest(ocx.registry, unique_repo)
+
+    pointer = tmp_path / "pointer.png"
+    pointer.write_bytes(LFS_POINTER)
+    result = ocx.plain("package", "describe", "--logo", str(pointer), fq, check=False)
+
+    assert result.returncode == 65, f"rc={result.returncode} stderr={result.stderr}"
+    assert "is not a PNG image" in result.stderr, result.stderr
+
+    # The good logo is still what the registry serves — nothing was overwritten.
+    assert _sole_logo_digest(ocx.registry, unique_repo) == published

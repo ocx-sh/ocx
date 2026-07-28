@@ -23,12 +23,60 @@ pub struct Logo {
 }
 
 /// Returns the media type for a logo file based on its extension.
-pub fn logo_media_type(path: &Path) -> Result<&'static str> {
+fn logo_media_type(path: &Path) -> Result<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => Ok(MEDIA_TYPE_PNG),
         Some("svg") => Ok(MEDIA_TYPE_SVG),
         other => Err(super::error::Error::UnsupportedLogoFormat(other.unwrap_or("<no extension>").to_string()).into()),
     }
+}
+
+/// The 8-byte PNG signature every PNG file starts with (PNG spec, clause 5.2).
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Reads a logo file and verifies its bytes are the format its extension claims.
+///
+/// The verification exists because an unchecked `--logo` silently overwrites a
+/// published logo with whatever is on disk — a Git LFS pointer left by a checkout
+/// without `lfs: true`, an empty file, an HTML error page — and the catalog then
+/// renders nothing. Failing here turns that into a loud publish failure.
+///
+/// # Errors
+///
+/// - [`Error::UnsupportedLogoFormat`](super::error::Error::UnsupportedLogoFormat)
+///   when the extension is neither `png` nor `svg`.
+/// - An I/O error carrying the path when the file cannot be read.
+/// - [`Error::InvalidLogoContent`](super::error::Error::InvalidLogoContent) when the
+///   bytes are not the claimed format.
+pub fn load_logo(path: &Path) -> Result<Logo> {
+    let media_type = logo_media_type(path)?;
+    let data = std::fs::read(path).map_err(|e| crate::error::file_error(path, e))?;
+    verify_logo_bytes(path, media_type, &data)?;
+    Ok(Logo { data, media_type })
+}
+
+/// Verifies logo bytes against the media type its extension claimed.
+///
+/// PNG is an exact signature check. SVG is UTF-8 text carrying an `<svg` element —
+/// a presence check, not a parse: it rejects every non-SVG payload seen in practice
+/// (LFS pointers, empty files, HTML, binaries) without owning an XML parser. A text
+/// file that merely mentions `<svg` passes; the fix for that is a real XML parse,
+/// which no failure so far justifies.
+fn verify_logo_bytes(path: &Path, media_type: &'static str, data: &[u8]) -> Result<()> {
+    let is_png = media_type == MEDIA_TYPE_PNG;
+    let valid = if is_png {
+        data.starts_with(&PNG_SIGNATURE)
+    } else {
+        std::str::from_utf8(data).is_ok_and(|text| text.contains("<svg"))
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(super::error::Error::InvalidLogoContent {
+        path: path.to_path_buf(),
+        expected: if is_png { "PNG" } else { "SVG" },
+    }
+    .into())
 }
 
 /// YAML frontmatter extracted from a README.
@@ -123,6 +171,108 @@ pub fn parse_readme(raw: &str) -> ParsedReadme {
                 body: raw.to_string(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod logo_tests {
+    use super::*;
+
+    /// What a checkout without `lfs: true` leaves at `assets/logo.png`. This exact
+    /// shape was published as a logo and blanked a live catalog entry.
+    const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/v1\noid sha256:c95693dc\nsize 596109\n";
+
+    fn png() -> Vec<u8> {
+        let mut data = PNG_SIGNATURE.to_vec();
+        data.extend_from_slice(b"\x00\x00\x00\rIHDR");
+        data
+    }
+
+    fn verify(name: &str, data: &[u8]) -> Result<()> {
+        let path = Path::new(name);
+        verify_logo_bytes(path, logo_media_type(path)?, data)
+    }
+
+    /// `Logo` holds raw bytes and deliberately has no `Debug`, so `unwrap_err` is
+    /// unavailable here.
+    fn load_error(path: &str) -> String {
+        match load_logo(Path::new(path)) {
+            Ok(_) => panic!("expected '{path}' to be refused"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn real_png_bytes_pass() {
+        assert!(verify("logo.png", &png()).is_ok());
+    }
+
+    #[test]
+    fn lfs_pointer_named_png_is_rejected() {
+        let error = verify("logo.png", LFS_POINTER).unwrap_err().to_string();
+        assert!(error.contains("is not a PNG image"), "{error}");
+    }
+
+    #[test]
+    fn lfs_pointer_named_svg_is_rejected() {
+        let error = verify("logo.svg", LFS_POINTER).unwrap_err().to_string();
+        assert!(error.contains("is not a SVG image"), "{error}");
+    }
+
+    #[test]
+    fn empty_file_is_rejected_for_both_formats() {
+        assert!(verify("logo.png", b"").is_err());
+        assert!(verify("logo.svg", b"").is_err());
+    }
+
+    #[test]
+    fn svg_passes_with_or_without_an_xml_declaration() {
+        assert!(verify("logo.svg", br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).is_ok());
+        assert!(verify("logo.svg", b"<?xml version=\"1.0\"?>\n<svg viewBox=\"0 0 1 1\"></svg>").is_ok());
+    }
+
+    #[test]
+    fn html_error_page_named_svg_is_rejected() {
+        assert!(verify("logo.svg", b"<!DOCTYPE html><html><body>404</body></html>").is_err());
+    }
+
+    #[test]
+    fn png_bytes_named_svg_are_rejected() {
+        // Swapped extensions are caught in both directions.
+        assert!(verify("logo.svg", &png()).is_err());
+        assert!(verify("logo.png", br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).is_err());
+    }
+
+    #[test]
+    fn unsupported_extension_is_still_rejected_before_any_read() {
+        let error = load_error("logo.gif");
+        assert!(error.contains("unsupported logo format: gif"), "{error}");
+    }
+
+    #[test]
+    fn missing_file_reports_the_path() {
+        let error = load_error("no/such/logo.png");
+        assert!(error.contains("no/such/logo.png"), "{error}");
+    }
+
+    #[test]
+    fn load_logo_returns_the_bytes_and_media_type_it_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logo.png");
+        std::fs::write(&path, png()).unwrap();
+
+        let logo = load_logo(&path).unwrap();
+        assert_eq!(logo.media_type, MEDIA_TYPE_PNG);
+        assert_eq!(logo.data, png());
+    }
+
+    #[test]
+    fn load_logo_refuses_a_file_whose_bytes_lie() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logo.png");
+        std::fs::write(&path, LFS_POINTER).unwrap();
+
+        assert!(load_logo(&path).is_err());
     }
 }
 
