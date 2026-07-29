@@ -933,6 +933,28 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn admits_system_path_entries_alongside_a_scannable_package_dir() {
+            // A package may legitimately put system directories on PATH
+            // (`/bin`, `/usr/bin` — the shape `--clean` fixtures use so `sh`
+            // stays reachable). Those are unresolvable *by intent*: the
+            // package ships nothing there, so nothing of its went
+            // uninspected. Only a value referencing `${installPath}` that
+            // will not classify means the check could not look.
+            let (dir, metadata) = tree_with_env(&format!(
+                "{},{},{}",
+                path_var("${installPath}/bin"),
+                path_var("/bin"),
+                path_var("/usr/bin")
+            ));
+            std::fs::create_dir_all(dir.path().join("bin")).expect("create bin/");
+            static_binary(&dir.path().join("bin"), "tool");
+
+            check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect("system PATH entries must not be mistaken for an unlookable scan scope");
+        }
+
+        #[tokio::test]
         async fn reads_every_same_named_file_across_two_interface_path_dirs() {
             // `collect_candidates` keys on the bare name, so a second
             // directory shipping the same filename used to be dropped. For

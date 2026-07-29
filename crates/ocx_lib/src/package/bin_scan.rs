@@ -82,18 +82,26 @@ pub async fn scan_interface_files(
     Ok(candidates.into_values().flat_map(|candidate| candidate.paths).collect())
 }
 
-/// The raw values of interface-visible `Path` vars whose shape
-/// [`classify_install_path_rooted_dir`] cannot resolve to a directory —
-/// a bare `${installPath}`, a `:`-joined value combining `${deps.*}`, a
-/// root-escaping `..`, or a token that does not lead the value.
+/// The raw values of interface-visible `Path` vars that **reference this
+/// package's install path** yet whose shape [`classify_install_path_rooted_dir`]
+/// cannot resolve to a directory — a bare `${installPath}`, a `:`-joined value
+/// combining `${deps.*}`, a token that does not lead the value, or a
+/// root-escaping `..`.
 ///
 /// For [`scan_interface_binaries`] these are a best-effort scope exclusion
 /// (ADR §2 step 1). For [`super::libc_lint`] they are the difference between
 /// "checked every file the package puts on `PATH`" and "could not look at
 /// what the package puts on `PATH`" — two states an empty candidate set
-/// otherwise renders indistinguishable. Pure: reads metadata, never the
-/// filesystem.
+/// otherwise renders indistinguishable.
+///
+/// The `${installPath}` reference is what makes a value a subject at all. A
+/// var naming a system directory (`/bin`, `/usr/bin`) or another package's
+/// tree (`${deps.other.installPath}/bin`) is unresolvable *by intent*: this
+/// package ships nothing there, so nothing of its went uninspected. Flagging
+/// those would refuse a legitimate package for declaring a system `PATH`
+/// entry. Pure: reads metadata, never the filesystem.
 pub fn unscannable_interface_paths(metadata: &AuthoringMetadata) -> Vec<String> {
+    const INSTALL_PATH_TOKEN: &str = "${installPath}";
     let AuthoringMetadata::Bundle(bundle) = metadata;
     (&bundle.env)
         .into_iter()
@@ -102,7 +110,7 @@ pub fn unscannable_interface_paths(metadata: &AuthoringMetadata) -> Vec<String> 
             Modifier::Path(path_var) => Some(&path_var.value),
             Modifier::Constant(_) => None,
         })
-        .filter(|value| classify_install_path_rooted_dir(value).is_none())
+        .filter(|value| value.contains(INSTALL_PATH_TOKEN) && classify_install_path_rooted_dir(value).is_none())
         .cloned()
         .collect()
 }
