@@ -98,38 +98,50 @@ def _write_tree(tmp_path: Path, name: str) -> Path:
     return bin_dir
 
 
-def _write_metadata(tmp_path: Path, name: str) -> Path:
-    metadata_path = tmp_path / f"metadata-{name}.json"
-    metadata_path.write_text(
-        json.dumps(
+def _write_metadata(tmp_path: Path, name: str, *, binaries: list[str] | None = None) -> Path:
+    """Write a `-m` input sidecar with one interface PATH var.
+
+    ``binaries=None`` omits the field (undeclared); any list declares it, which
+    is what makes bin-scan's Auto mode skip scanning entirely.
+    """
+    metadata_obj: dict = {
+        "type": "bundle",
+        "version": 1,
+        "env": [
             {
-                "type": "bundle",
-                "version": 1,
-                "env": [
-                    {
-                        "key": "PATH",
-                        "type": "path",
-                        "required": True,
-                        "value": "${installPath}/bin",
-                        "visibility": "public",
-                    }
-                ],
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+                "visibility": "public",
             }
-        )
-    )
+        ],
+    }
+    if binaries is not None:
+        metadata_obj["binaries"] = binaries
+    metadata_path = tmp_path / f"metadata-{name}.json"
+    metadata_path.write_text(json.dumps(metadata_obj))
     return metadata_path
 
 
-def _create(ocx: OcxRunner, tmp_path: Path, name: str, platform_spec: str):
+def _create(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    name: str,
+    platform_spec: str,
+    *args: str,
+    binaries: list[str] | None = None,
+):
     return ocx.plain(
         "package",
         "create",
         "-m",
-        str(_write_metadata(tmp_path, name)),
+        str(_write_metadata(tmp_path, name, binaries=binaries)),
         "-o",
         str(tmp_path / f"{name}.tar.xz"),
         "-p",
         platform_spec,
+        *args,
         str(tmp_path / f"pkg-{name}"),
         check=False,
     )
@@ -217,4 +229,45 @@ def test_native_binary_declared_platform_agnostic_is_refused(ocx: OcxRunner, tmp
     result = _create(ocx, tmp_path, "agnostic", "any")
 
     assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "libc.glibc" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Independence from the `--bin-scan` gates
+#
+# The lint reads the same content tree as the interface-binaries scan, but it
+# must NOT inherit that scan's mode table. `--bin-scan` governs the `binaries`
+# claim; the lint governs the `os.features` claim. The two ways a publisher
+# can legitimately switch the binaries scan off are exactly the shape of the
+# reported bug — a mirror that hand-declares its binaries — so a lint that
+# rode along on `resolve_binaries` would have missed it.
+# ---------------------------------------------------------------------------
+
+
+def test_lint_still_runs_under_no_bin_scan(ocx: OcxRunner, tmp_path: Path):
+    """`--no-bin-scan` declines a binary-list fill, not a false libc claim."""
+    _glibc_binary(_write_tree(tmp_path, "noscan") / "bazel")
+
+    result = _create(ocx, tmp_path, "noscan", "linux/amd64", "--no-bin-scan")
+
+    assert result.returncode == EXIT_DATA_ERR, (
+        f"--no-bin-scan must not disable the libc check\n{result.stderr}"
+    )
+    assert "libc.glibc" in result.stderr
+
+
+def test_lint_still_runs_when_binaries_are_hand_declared(ocx: OcxRunner, tmp_path: Path):
+    """Auto mode skips scanning when `binaries` is declared — the lint does not.
+
+    This is the reported bug's exact shape: a mirror that authors its own
+    `binaries` list gets no scan from bin-scan's Auto default, so a lint hung
+    off that traversal would never have seen the glibc-linked binary.
+    """
+    _glibc_binary(_write_tree(tmp_path, "declaredbins") / "bazel")
+
+    result = _create(ocx, tmp_path, "declaredbins", "linux/amd64", binaries=["bazel"])
+
+    assert result.returncode == EXIT_DATA_ERR, (
+        f"a hand-declared binaries list must not disable the libc check\n{result.stderr}"
+    )
     assert "libc.glibc" in result.stderr
