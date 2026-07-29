@@ -31,10 +31,11 @@ const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_from_file", "tags_from_
 /// package entry into the index.
 ///
 /// Reads the currently-committed index entry, re-observes the given tags on
-/// the registry, and either writes the rebuilt entry to a local directory
-/// (`--out`) or opens a pull request against a fork of the index repository
-/// (`--fork`). A run that produces no change reports as unchanged and makes
-/// no commit or pull request.
+/// the registry, and writes the rebuilt entry to a local directory (`--out`),
+/// or opens a pull request against the index repository. The pull request comes
+/// from a fork with `--fork`, and from a branch on the index repository itself
+/// when `--fork` is omitted, which needs push access there. A run that produces
+/// no change reports as unchanged and makes no commit or pull request.
 ///
 /// Opening a pull request needs a GitHub credential in the `OCX_ANNOUNCE_TOKEN`
 /// environment variable; writing to `--out` works without one.
@@ -77,18 +78,16 @@ pub struct PackageAnnounce {
     refresh: bool,
 
     /// Write the rebuilt index entry under this directory instead of opening
-    /// a pull request.
+    /// a pull request. Works without a credential.
     #[clap(long = "out", value_name = "DIRECTORY", conflicts_with = "fork")]
     out: Option<PathBuf>,
 
-    /// Open (or update) a pull request against this fork, as `<owner>/<repo>`.
-    /// Requires `OCX_ANNOUNCE_TOKEN`.
-    #[clap(
-        long = "fork",
-        value_name = "OWNER/REPO",
-        conflicts_with = "out",
-        required_unless_present = "out"
-    )]
+    /// Open (or update) the pull request from this fork, as `<owner>/<repo>`.
+    /// Omit it to push the announce branch straight to `--index-repo` and open
+    /// the pull request from there, which needs push access on that repository.
+    /// Either way the change lands as a pull request, never a direct commit to
+    /// the index's default branch.
+    #[clap(long = "fork", value_name = "OWNER/REPO", conflicts_with = "out")]
     fork: Option<RepoCoordinate>,
 
     /// Index repository the pull request targets, as `<owner>/<repo>`.
@@ -126,17 +125,7 @@ impl PackageAnnounce {
             TagSelection::Replace(self.tags.clone())
         };
 
-        let target = if let Some(directory) = &self.out {
-            AnnounceTarget::Out(directory.clone())
-        } else {
-            // clap's `conflicts_with`/`required_unless_present` pair on
-            // `--out`/`--fork` guarantees exactly one is present.
-            let coordinate = self
-                .fork
-                .clone()
-                .expect("clap guarantees --fork is present when --out is absent");
-            AnnounceTarget::Fork(coordinate)
-        };
+        let target = self.target();
 
         // The SSRF escape hatch is sourced exclusively from the selected
         // `[registries."<ns>"]` entry for the package's namespace — the same
@@ -161,12 +150,15 @@ impl PackageAnnounce {
             trusted_hosts: trusted_hosts.clone(),
         };
 
-        // A forge is needed for both modes (`--out` reads the committed root
-        // over the contents API too); the token is only required for `--fork`.
+        // A forge is needed for every mode (`--out` reads the committed root
+        // over the contents API too); the token is required by every mode that
+        // writes, which is every mode except `--out`.
         let token = std::env::var(OCX_ANNOUNCE_TOKEN).ok().filter(|value| !value.is_empty());
-        if self.fork.is_some() && token.is_none() {
+        if self.out.is_none() && token.is_none() {
             return Err(CommandError::new(
-                format!("ocx package announce --fork requires the {OCX_ANNOUNCE_TOKEN} environment variable"),
+                format!(
+                    "ocx package announce requires the {OCX_ANNOUNCE_TOKEN} environment variable unless --out is given"
+                ),
                 cli::ExitCode::AuthError,
             )
             .into());
@@ -190,6 +182,20 @@ impl PackageAnnounce {
         context.api().report(&AnnounceReport::from_outcome(outcome))?;
 
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// The write target the flag pair selects.
+    ///
+    /// `--out` and `--fork` are mutually exclusive (clap `conflicts_with`), and
+    /// neither given means the announce branch is pushed to `--index-repo`
+    /// itself. A method rather than an inline `match` so the mapping — which
+    /// decides *which repository gets written to* — is assertable without a forge.
+    fn target(&self) -> AnnounceTarget {
+        match (&self.out, &self.fork) {
+            (Some(directory), _) => AnnounceTarget::Out(directory.clone()),
+            (None, Some(coordinate)) => AnnounceTarget::Fork(coordinate.clone()),
+            (None, None) => AnnounceTarget::Direct,
+        }
     }
 }
 
@@ -216,6 +222,8 @@ fn announce_client(context: &crate::app::Context, trusted_hosts: Vec<String>) ->
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory as _, Parser as _};
+
+    use ocx_lib::announce::AnnounceTarget;
 
     use super::PackageAnnounce;
 
@@ -316,11 +324,52 @@ mod tests {
         assert_eq!(args.tags, vec!["1.0.0".to_string(), "2.0.0".to_string()]);
     }
 
+    /// The whole point of the fork-free path: with neither `--out` nor
+    /// `--fork`, the announce branch goes to the index repository — NOT to a
+    /// fork, and not to a local directory. Asserting on the resolved
+    /// `AnnounceTarget` rather than on "clap accepted it" is deliberate: clap
+    /// would accept the invocation just as happily if the mapping still built
+    /// a `Fork` out of thin air.
     #[test]
-    fn target_selection_is_required() {
+    fn omitting_out_and_fork_targets_the_index_repository_itself() {
+        let args = PackageAnnounce::try_parse_from(["announce", "--package", "acme/widget", "--tags", "1.0.0"])
+            .expect("a target-less invocation is the direct path, not a usage error");
         assert!(
-            PackageAnnounce::try_parse_from(["announce", "--package", "acme/widget", "--tags", "1.0.0"]).is_err(),
-            "at least one of --out/--fork is required"
+            matches!(args.target(), AnnounceTarget::Direct),
+            "no --out and no --fork must resolve to the direct (fork-free) target"
+        );
+    }
+
+    /// The other two mappings, so the direct case above cannot pass by a
+    /// `match` that collapsed everything onto one arm.
+    #[test]
+    fn out_and_fork_each_resolve_to_their_own_target() {
+        let out = PackageAnnounce::try_parse_from([
+            "announce",
+            "--package",
+            "acme/widget",
+            "--tags",
+            "1.0.0",
+            "--out",
+            "somewhere",
+        ])
+        .expect("valid invocation parses");
+        assert!(
+            matches!(out.target(), AnnounceTarget::Out(directory) if directory == std::path::Path::new("somewhere"))
+        );
+
+        let fork = PackageAnnounce::try_parse_from([
+            "announce",
+            "--package",
+            "acme/widget",
+            "--tags",
+            "1.0.0",
+            "--fork",
+            "ocx-contrib/index",
+        ])
+        .expect("valid invocation parses");
+        assert!(
+            matches!(fork.target(), AnnounceTarget::Fork(coordinate) if coordinate.full_name() == "ocx-contrib/index")
         );
     }
 

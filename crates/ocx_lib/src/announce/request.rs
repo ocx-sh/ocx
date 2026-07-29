@@ -39,6 +39,21 @@ pub enum AnnounceTarget {
     /// coordinate's `owner` threads into the fork-create target (design register
     /// S12 shared `ocx-contrib/index` fork path).
     Fork(RepoCoordinate),
+    /// Commit the announce branch onto the index repository **itself** and open
+    /// the pull request from it — no fork anywhere.
+    ///
+    /// For a publisher whose credential can already push to
+    /// [`AnnounceRequest::index_repo`]: OCX's own packages are published from
+    /// repositories in the organization that owns the index, and GitHub refuses
+    /// to fork a repository into the organization that already owns it, so the
+    /// fork path is not merely redundant for them — it cannot run at all.
+    ///
+    /// Still a **pull request**, never a push to the index's default branch: the
+    /// index's governance gate and its `refresh`/`new-package` labelling run on
+    /// pull requests, so bypassing them would be strictly worse than forking.
+    /// Narrows design register S3 ("always fork") to "always a reviewed pull
+    /// request".
+    Direct,
 }
 
 /// One package's announce request (design register C11/C12 — one package per
@@ -95,7 +110,8 @@ pub struct AnnounceOutcome {
     /// The opened/updated pull request — `None` for `--out` and for an unchanged
     /// run.
     pub pull_request: Option<PullRequest>,
-    /// The verified fork identity — `None` for `--out` and for an unchanged run.
+    /// The verified fork identity — `None` for `--out`, for an unchanged run,
+    /// and for [`AnnounceTarget::Direct`], which has no fork by construction.
     pub fork: Option<ForkIdentity>,
     /// The relative paths written under the `--out` directory (sorted) — always
     /// the whole entry, unchanged runs included; empty in fork mode.

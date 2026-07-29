@@ -255,6 +255,10 @@ class FakeForge(http.server.ThreadingHTTPServer):
         # value verbatim — used to prove a value the client does not model is
         # refused, not guessed. Fires once, then clears.
         self.compare_status_once: str | None = None
+        # "owner/repo" repos whose metadata reports `permissions.push: false` —
+        # the fork-free announce path's up-front push probe
+        # (`GitHubForge::ensure_push_access`) must refuse before writing anything.
+        self.no_push_access: set[str] = set()
 
         super().__init__(("127.0.0.1", 0), _Handler)
 
@@ -621,7 +625,13 @@ class FakeForge(http.server.ThreadingHTTPServer):
         full_name = record["full_name"]
         owner = record["owner"]
         parent = record.get("parent")
-        body: dict[str, Any] = {"full_name": full_name, "owner": {"login": owner}}
+        # GitHub returns `permissions` only on an authenticated read; the
+        # fork-free path's push probe reads `permissions.push` from exactly here.
+        body: dict[str, Any] = {
+            "full_name": full_name,
+            "owner": {"login": owner},
+            "permissions": {"push": full_name not in self.no_push_access},
+        }
         if parent is not None:
             body["parent"] = {"full_name": parent}
         return body
