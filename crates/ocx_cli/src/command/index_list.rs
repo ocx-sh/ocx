@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    process::ExitCode,
-};
+use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::{log, oci, oci::index::IndexOperation, package::version::Version};
+use ocx_lib::{
+    log, oci,
+    oci::index::IndexOperation,
+    package::version::{self, Version},
+};
 
 use crate::{api, options};
 
@@ -115,18 +116,22 @@ impl IndexList {
         let variants_report = resolved
             .into_iter()
             .map(|(package, _, tags)| {
-                let versions: Vec<Version> = tags.iter().filter_map(|t| Version::parse(t)).collect();
-                let has_default = versions.iter().any(|v| v.variant().is_none());
-                let mut variant_names: Vec<String> = versions
+                // One derivation, shared with the `variants` field
+                // `ocx package announce` records on an index root — so this
+                // listing and a published root can never disagree about what a
+                // tag set means.
+                let mut names = version::variant_names(tags.iter().map(String::as_str));
+                // The default variant has no name; the empty string is this
+                // command's placeholder for it and belongs to the display, not
+                // to the derivation (and never to the wire).
+                if tags
                     .iter()
-                    .filter_map(|v| v.variant().map(|s| s.to_string()))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                if has_default {
-                    variant_names.insert(0, String::new());
+                    .filter_map(|tag| Version::parse(tag))
+                    .any(|v| v.variant().is_none())
+                {
+                    names.insert(0, String::new());
                 }
-                (package, variant_names)
+                (package, names)
             })
             .collect::<HashMap<_, _>>();
         context

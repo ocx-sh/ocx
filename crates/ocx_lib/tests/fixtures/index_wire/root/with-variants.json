@@ -1,0 +1,55 @@
+{
+  "name": "ocx.sh/astral-sh/python-build-standalone",
+  "repository": "oci://ghcr.io/ocx-contrib/python-build-standalone",
+  "owners": [
+    {
+      "github": "ocx-bot",
+      "github_id": 309019509
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-07-29",
+  "desc": {
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "title": "python-build-standalone",
+    "description": "Portable CPython builds, default and slim.",
+    "keywords": [
+      "python",
+      "cpython"
+    ],
+    "readme": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "upstream": {
+    "org": "Astral",
+    "repository_url": "https://github.com/astral-sh/python-build-standalone",
+    "disclaimer": null
+  },
+  "source": "https://github.com/ocx-contrib/mirror-python-build-standalone",
+  "variants": [
+    "musl",
+    "slim"
+  ],
+  "tags": {
+    "3.13.1": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-29T00:00:00Z"
+    },
+    "latest": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-29T00:00:00Z"
+    },
+    "musl-3.13.1-rc1": {
+      "content": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "observed": "2026-07-29T00:00:00Z"
+    },
+    "slim": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-29T00:00:00Z"
+    },
+    "slim-3.13.1": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-29T00:00:00Z"
+    }
+  }
+}

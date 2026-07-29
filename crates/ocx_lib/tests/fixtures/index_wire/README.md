@@ -52,6 +52,14 @@ It is not vendored — read it at the pinned commit in `ocx-sh/index`.
 ## Provenance & re-sync
 
 - `SOURCE_COMMIT` pins the `ocx-sh/index` commit these bytes came from.
+- **Pending re-pin:** `root/with-variants.json` was vendored ahead of its
+  upstream merge (the `variants` root field, `ocx-sh/index` PR). It is
+  therefore the one vector `SOURCE_COMMIT` does *not* yet name. Re-run
+  `test/scripts/sync_index_conformance.sh --ref main` once that PR lands, which
+  re-pins the whole tree; until then a bare re-run will report it as drift.
+  Announce must not write the `variants` field to a real index before that
+  merge either — the index CI's byte gate rejects a field its own serializer
+  does not know.
 - `test/scripts/sync_index_conformance.sh` re-vendors: a bare re-run verifies
   against the pin, `--ref <ref>` vendors and re-pins, `--check` compares the
   vendored tree against `ocx-sh/index@main` without writing to it. It prints the
