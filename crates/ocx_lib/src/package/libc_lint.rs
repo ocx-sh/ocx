@@ -42,9 +42,10 @@
 //! by any host, so checking for one would only manufacture false failures.
 //!
 //! **Interface binaries only.** The subjects are the files the package puts
-//! on a consumer's `PATH` ([`super::bin_scan::scan_interface_files`]), not the
-//! whole content tree. What this does *not* catch is listed on
-//! [`check_declared_libc`].
+//! on a consumer's `PATH` — resolved by this module's own
+//! [`resolve_scan_scope`], deliberately not [`super::bin_scan`]'s, because the
+//! two answer different questions about the same metadata. What this does
+//! *not* catch is listed on [`check_declared_libc`].
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -106,18 +107,34 @@ pub async fn check_declared_libc(
         Platform::Specific { .. } => return Ok(()),
     };
 
-    // Fail-closed on an unlookable scan scope. An empty candidate set is
-    // otherwise indistinguishable between "read every file the package puts
-    // on PATH, none needed a libc" and "could not resolve where the package
-    // puts anything, so read nothing" — and passing the second as the first
-    // is the same false-negative class this lint exists to close, one level
-    // up: a verified claim that nothing verified.
-    let unscannable = crate::package::bin_scan::unscannable_interface_paths(metadata);
-    if !unscannable.is_empty() {
-        return Err(LibcLintError::UnscannableScanScope { values: unscannable });
+    let scope = resolve_scan_scope(metadata);
+    // A shape that names this package's install path and still will not
+    // resolve leaves a directory uninspected, and a subset scan would report
+    // success over it.
+    if !scope.unresolvable.is_empty() {
+        return Err(LibcLintError::UnresolvableScanScope {
+            values: scope.unresolvable,
+        });
     }
 
-    for path in crate::package::bin_scan::scan_interface_files(content_root, metadata, platform).await? {
+    let files = collect_scan_files(content_root, metadata, &scope.directories).await?;
+    // Fail-closed on an empty result, not on an enumerated list of bad input
+    // shapes. Emptiness is what actually matters and every route to it —
+    // a directory that does not exist, one that exists and is empty, a
+    // wildcard level the strip count never reaches — arrives here the same
+    // way. Checking the result catches them all at once; checking the inputs
+    // catches whichever one was thought of.
+    if !scope.directories.is_empty() && files.is_empty() {
+        return Err(LibcLintError::NothingInspected {
+            directories: scope
+                .directories
+                .iter()
+                .map(|dir| dir.as_path().display().to_string())
+                .collect(),
+        });
+    }
+
+    for path in files {
         // Blocking file I/O (`ElfStream` needs `Read + Seek`), so it goes to
         // the blocking pool. Sequential rather than fanned out: the subjects
         // are one `PATH` directory's entries, and a `JoinSet` here would buy
@@ -151,6 +168,126 @@ pub async fn check_declared_libc(
         });
     }
     Ok(())
+}
+
+/// Where the package puts its own content on an interface `PATH`.
+struct ScanScope {
+    /// `${installPath}`-relative directories to inspect. Empty means the
+    /// package puts nothing of its own on `PATH` — nothing to check.
+    directories: Vec<crate::utility::fs::path::RelativePath>,
+    /// Values naming this package's install path in a shape that cannot be
+    /// resolved to a directory.
+    unresolvable: Vec<String>,
+}
+
+/// Resolves the lint's scan scope from the metadata alone (no filesystem).
+///
+/// Deliberately **not** [`super::bin_scan`]'s scope. That module answers "which
+/// directories claim command names", and excludes awkward shapes best-effort
+/// because a missed name is a missed *claim*. This answers "which directories
+/// hold files a consumer will execute", where a missed directory is a binary
+/// whose loader never got read. Same metadata, different question — sharing
+/// one projection between them is what let a bare `${installPath}` be refused
+/// as illegal and a `:`-joined value be dropped in silence.
+///
+/// A `PATH` value is a separator-joined list, so each segment is classified on
+/// its own: `${installPath}/bin:${deps.other.installPath}/bin` contributes
+/// `bin` and ignores the dependency's tree rather than failing whole. Segments
+/// that never name `${installPath}` (`/usr/bin`, a `${deps.*}` tree) are not
+/// this package's to inspect. A bare `${installPath}` is the content root
+/// itself — a legal shape, and one this lint must scan rather than refuse.
+fn resolve_scan_scope(metadata: &AuthoringMetadata) -> ScanScope {
+    use crate::package::metadata::env::modifier::Modifier;
+    use crate::package::metadata::template::classify_install_path_rooted_dir;
+    use crate::utility::fs::path::RelativePath;
+
+    const INSTALL_PATH_TOKEN: &str = "${installPath}";
+    let AuthoringMetadata::Bundle(bundle) = metadata;
+    let mut scope = ScanScope {
+        directories: Vec::new(),
+        unresolvable: Vec::new(),
+    };
+    for var in &bundle.env {
+        if !var.visibility.has_interface() {
+            continue;
+        }
+        let Modifier::Path(path_var) = &var.modifier else {
+            continue;
+        };
+        // Split on `:` rather than `std::env::split_paths`: the value is
+        // authored for the *target*, and this lint only runs for Linux
+        // targets, so the host's separator is the wrong one to use here.
+        for segment in path_var.value.split(':') {
+            if !segment.contains(INSTALL_PATH_TOKEN) {
+                continue;
+            }
+            if segment == INSTALL_PATH_TOKEN {
+                scope.directories.push(RelativePath::default());
+            } else if let Some(relative) = classify_install_path_rooted_dir(segment) {
+                scope.directories.push(relative);
+            } else {
+                scope.unresolvable.push(segment.to_string());
+            }
+        }
+    }
+    scope
+}
+
+/// Every regular file under `directories`, resolved against the wildcard top
+/// level `strip_components` maps `${installPath}` onto.
+///
+/// No name-grammar filter and no exec-bit filter: both belong to the
+/// *binaries claim*, and applying them here would hide files whose loader
+/// still matters — a bundled `.so`, a name `BinaryName` rejects, a file whose
+/// exec bit a non-Unix build host cannot even read.
+async fn collect_scan_files(
+    content_root: &Path,
+    metadata: &AuthoringMetadata,
+    directories: &[crate::utility::fs::path::RelativePath],
+) -> Result<Vec<PathBuf>, LibcLintError> {
+    use crate::utility::fs::path::join_under_root;
+
+    let AuthoringMetadata::Bundle(bundle) = metadata;
+    let strip = usize::from(bundle.strip_components.unwrap_or(0));
+    let wildcard_dirs = crate::package::bin_scan::wildcard_target_dirs(content_root, strip).await?;
+
+    let mut files = Vec::new();
+    for wildcard_dir in &wildcard_dirs {
+        for relative in directories {
+            let Ok(scan_dir) = join_under_root(wildcard_dir, relative.as_path()) else {
+                continue;
+            };
+            let mut entries = match tokio::fs::read_dir(&scan_dir).await {
+                Ok(entries) => entries,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(crate::error::file_error(&scan_dir, error).into()),
+            };
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|error| crate::error::file_error(&scan_dir, error))?
+            {
+                let path = entry.path();
+                // Follows symlinks, so a dangling one is `NotFound` and simply
+                // ships no bytes to inspect.
+                match tokio::fs::metadata(&path).await {
+                    Ok(file_metadata) if file_metadata.is_file() => files.push(path),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(crate::error::file_error(&path, error).into()),
+                }
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// Decodes the `libc.*` subset of a declared `os.features` list. Non-libc
@@ -398,19 +535,31 @@ pub enum LibcLintError {
         #[source]
         source: std::io::Error,
     },
-    /// The package puts something on an interface `PATH`, but the declaring
-    /// value's shape cannot be resolved to a directory, so no file could be
-    /// inspected. Refused rather than passed: a claim nothing could check is
-    /// not a checked claim.
+    /// A `PATH` segment names this package's install path in a shape that
+    /// cannot be resolved to a directory, so that directory's files were
+    /// never inspected.
     #[error(
-        "cannot determine what the package puts on PATH, so its declared os.features could not be \
-         checked against any binary: {} names no single `${{installPath}}/<dir>` directory; rewrite \
-         it in that form, or split a joined value into one entry per directory",
+        "cannot resolve which directory {} names, so its files could not be checked against the \
+         declared os.features; write it as `${{installPath}}` or `${{installPath}}/<dir>`",
         values.join(", ")
     )]
-    UnscannableScanScope {
-        /// The interface `Path` values whose shape could not be resolved.
+    UnresolvableScanScope {
+        /// The unresolvable `PATH` segments.
         values: Vec<String>,
+    },
+    /// The package declares directories on an interface `PATH` and not one
+    /// file was found in them, so the declared `os.features` were checked
+    /// against nothing. Refused rather than reported as verified — an empty
+    /// result and a clean result are the same value, and only one of them is
+    /// evidence.
+    #[error(
+        "found no file to inspect in {}, so the declared os.features were checked against nothing; \
+         the directories the package puts on PATH are absent or empty",
+        directories.join(", ")
+    )]
+    NothingInspected {
+        /// The `${installPath}`-relative directories that yielded no files.
+        directories: Vec<String>,
     },
     /// Walking the content tree for candidate files failed.
     #[error("failed to walk the content tree while checking declared os.features")]
@@ -431,7 +580,8 @@ impl crate::cli::ClassifyExitCode for LibcLintError {
             | Self::AgnosticPlatformClaim { .. }
             | Self::UnparseableElf { .. }
             | Self::UnrecognizedInterpreter { .. }
-            | Self::UnscannableScanScope { .. } => Some(crate::cli::ExitCode::DataError),
+            | Self::UnresolvableScanScope { .. }
+            | Self::NothingInspected { .. } => Some(crate::cli::ExitCode::DataError),
             // A file we could not read is an I/O fault, not bad data.
             Self::Read { .. } => Some(crate::cli::ExitCode::IoError),
             // Delegate to the inner cause via the chain walker.
@@ -897,38 +1047,83 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn refuses_a_package_whose_path_shape_leaves_nothing_to_inspect() {
-            // A bare `${installPath}` puts the package root on PATH — a legal
-            // shape the scanner cannot resolve to a directory, so the file set
-            // comes back empty. Passing that as "checked everything, found no
-            // libc requirement" is the same false negative as the bug this
-            // lint closes: a verified claim that nothing verified.
-            let (dir, metadata) = tree_with_env(&path_var("${installPath}"));
+        async fn refuses_a_path_segment_it_cannot_resolve_to_a_directory() {
+            // A root-escaping segment names this package's install path and
+            // still resolves to no directory, so its files went uninspected.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}/../etc"));
             glibc_binary(dir.path(), "bazel");
 
             let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
                 .await
-                .expect_err("an unlookable scan scope must be refused, not passed");
+                .expect_err("an unresolvable segment must be refused, not skipped");
             assert!(
-                matches!(error, LibcLintError::UnscannableScanScope { .. }),
-                "expected UnscannableScanScope, got {error:?}"
+                matches!(error, LibcLintError::UnresolvableScanScope { .. }),
+                "expected UnresolvableScanScope, got {error:?}"
             );
         }
 
         #[tokio::test]
-        async fn refuses_a_joined_path_value_it_cannot_resolve() {
-            // The other unscannable shape: a `:`-joined value combining a
-            // `${deps.*}` segment.
+        async fn scans_the_package_segment_of_a_joined_path_value() {
+            // A `PATH` value is a separator-joined list. The package's own
+            // segment is inspected; the dependency's tree is not this
+            // package's to check. Refusing the whole value would block a
+            // legal shape, and scanning nothing would pass one silently.
             let (dir, metadata) = tree_with_env(&path_var("${installPath}/bin:${deps.other.installPath}/bin"));
             std::fs::create_dir_all(dir.path().join("bin")).expect("create bin/");
             glibc_binary(&dir.path().join("bin"), "bazel");
 
             let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
                 .await
-                .expect_err("a joined PATH value must be refused, not silently half-scanned");
+                .expect_err("the package's own segment must still be scanned");
             assert!(
-                matches!(error, LibcLintError::UnscannableScanScope { .. }),
-                "expected UnscannableScanScope, got {error:?}"
+                matches!(error, LibcLintError::UndeclaredLibc { .. }),
+                "expected the libc mismatch from bin/, got {error:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn scans_the_content_root_for_a_bare_install_path() {
+            // `${installPath}` puts the package root on PATH — a legal,
+            // validated shape. It must be scanned, never refused as illegal.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}"));
+            glibc_binary(dir.path(), "bazel");
+
+            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("a root-level binary must be read, not refused for its PATH shape");
+            assert!(
+                matches!(error, LibcLintError::UndeclaredLibc { .. }),
+                "expected the libc mismatch from the content root, got {error:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn admits_a_bare_install_path_whose_root_binaries_need_nothing() {
+            // The same legal shape must be able to PASS, or the test above
+            // would be satisfied by a lint that refuses it for any reason.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}"));
+            static_binary(dir.path(), "tool");
+
+            check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect("a bare ${installPath} with a static binary is a clean publish");
+        }
+
+        #[tokio::test]
+        async fn refuses_when_the_declared_path_directory_does_not_exist() {
+            // The shape resolves; the directory is simply absent. Zero files
+            // inspected, so the os.features claim was checked against
+            // nothing — the same false pass as an unresolvable shape,
+            // reached by a different route.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}/bin"));
+            glibc_binary(dir.path(), "stray");
+
+            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("an absent PATH directory must not report success");
+            assert!(
+                matches!(error, LibcLintError::NothingInspected { .. }),
+                "expected NothingInspected, got {error:?}"
             );
         }
 
@@ -1012,7 +1207,10 @@ mod tests {
         async fn ignores_files_outside_the_interface_path() {
             // Scope statement, locked in: a glibc binary that the package
             // does not put on a consumer's PATH is not a subject.
-            let (dir, _bin, metadata) = content_tree();
+            let (dir, bin, metadata) = content_tree();
+            // `bin/` must hold something, or this would pass on the empty-scan
+            // refusal instead of on the scope rule it means to pin.
+            static_binary(&bin, "tool");
             let private = dir.path().join("libexec");
             std::fs::create_dir_all(&private).expect("create libexec/");
             glibc_binary(&private, "helper");

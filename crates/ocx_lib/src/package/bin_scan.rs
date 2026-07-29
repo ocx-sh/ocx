@@ -56,84 +56,16 @@ pub async fn scan_interface_binaries(
         .collect())
 }
 
-/// Every regular file the package puts on an interface-visible `PATH`
-/// directory, executable or not, in a deterministic (name-sorted) order.
-///
-/// The third projection of [`collect_candidates`]' single walk, beside
-/// [`scan_interface_binaries`] and [`verify_declared_binaries`]. Consumed by
-/// [`super::libc_lint`], which asks what a file *is* (an ELF, and what
-/// dynamic loader it names) rather than whether the filesystem marks it
-/// runnable — so it deliberately keeps the non-executable candidates too. A
-/// missing exec bit is a packaging slip; the libc a file demands is a fact
-/// about its bytes either way, and dropping unmarked files here would make
-/// the lint pass green on a host that cannot read POSIX permission bits at
-/// all (see [`host_can_scan`]).
-///
-/// # Errors
-///
-/// Propagates directory-walk I/O failures via [`crate::Error`], exactly like
-/// [`scan_interface_binaries`].
-pub async fn scan_interface_files(
-    content_root: &Path,
-    metadata: &AuthoringMetadata,
-    platform: &Platform,
-) -> crate::Result<Vec<PathBuf>> {
-    let candidates = collect_candidates(content_root, metadata, platform).await?;
-    Ok(candidates.into_values().flat_map(|candidate| candidate.paths).collect())
-}
-
-/// The raw values of interface-visible `Path` vars that **reference this
-/// package's install path** yet whose shape [`classify_install_path_rooted_dir`]
-/// cannot resolve to a directory — a bare `${installPath}`, a `:`-joined value
-/// combining `${deps.*}`, a token that does not lead the value, or a
-/// root-escaping `..`.
-///
-/// For [`scan_interface_binaries`] these are a best-effort scope exclusion
-/// (ADR §2 step 1). For [`super::libc_lint`] they are the difference between
-/// "checked every file the package puts on `PATH`" and "could not look at
-/// what the package puts on `PATH`" — two states an empty candidate set
-/// otherwise renders indistinguishable.
-///
-/// The `${installPath}` reference is what makes a value a subject at all. A
-/// var naming a system directory (`/bin`, `/usr/bin`) or another package's
-/// tree (`${deps.other.installPath}/bin`) is unresolvable *by intent*: this
-/// package ships nothing there, so nothing of its went uninspected. Flagging
-/// those would refuse a legitimate package for declaring a system `PATH`
-/// entry. Pure: reads metadata, never the filesystem.
-pub fn unscannable_interface_paths(metadata: &AuthoringMetadata) -> Vec<String> {
-    const INSTALL_PATH_TOKEN: &str = "${installPath}";
-    let AuthoringMetadata::Bundle(bundle) = metadata;
-    (&bundle.env)
-        .into_iter()
-        .filter(|var| var.visibility.has_interface())
-        .filter_map(|var| match &var.modifier {
-            Modifier::Path(path_var) => Some(&path_var.value),
-            Modifier::Constant(_) => None,
-        })
-        .filter(|value| value.contains(INSTALL_PATH_TOKEN) && classify_install_path_rooted_dir(value).is_none())
-        .cloned()
-        .collect()
-}
-
-/// One naming candidate discovered while scanning target directories: **every**
-/// on-disk path that claims the name, and whether any of them satisfies
-/// `platform`'s executable-file convention.
-///
-/// `paths` is a `Vec`, not a single path, because two interface `PATH`
-/// directories can both ship a file of the same name (`bin/foo` and
-/// `tools/foo`). For the name-keyed projections that is a benign merge — the
-/// *name* is claimed either way. For [`scan_interface_files`] it is not: a
-/// dropped sibling is a file that ships and never gets its ELF loader read,
-/// so [`super::libc_lint`] would pass green over an unchecked binary.
-///
-/// A non-executable regular file with a grammar-valid name is still recorded —
-/// [`scan_interface_binaries`] filters to executable candidates only, but
-/// [`verify_declared_binaries`] and [`scan_interface_files`] need the
-/// non-executable ones too, to distinguish "declared name present but not
-/// executable" from "declared name simply absent from disk" (ADR §2 mode
-/// table, Verify row).
+/// One naming candidate discovered while scanning a target directory: its
+/// on-disk path (diagnostic context) and whether it satisfies `platform`'s
+/// executable-file convention. A non-executable regular file with a
+/// grammar-valid name is still recorded — [`scan_interface_binaries`]
+/// filters to executable candidates only, but [`verify_declared_binaries`]
+/// needs the non-executable ones too, to distinguish "declared name present
+/// but not executable" from "declared name simply absent from disk" (ADR §2
+/// mode table, Verify row).
 struct Candidate {
-    paths: Vec<PathBuf>,
+    path: PathBuf,
     executable: bool,
 }
 
@@ -178,7 +110,7 @@ async fn collect_candidates(
 /// returned directory is already confirmed to exist: [`DirWalker`] only
 /// discovers real directories via `readdir`, so a missing wildcard level
 /// yields an empty list rather than an error.
-async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> crate::Result<Vec<PathBuf>> {
+pub async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> crate::Result<Vec<PathBuf>> {
     let classify = move |dir: &Path, depth: usize| -> WalkDecision<PathBuf> {
         if depth < strip {
             WalkDecision::descend()
@@ -244,14 +176,8 @@ async fn collect_directory_candidates(
         };
         candidates
             .entry(name)
-            .and_modify(|existing| {
-                existing.executable |= executable;
-                existing.paths.push(path.clone());
-            })
-            .or_insert_with(|| Candidate {
-                paths: vec![path],
-                executable,
-            });
+            .and_modify(|existing| existing.executable |= executable)
+            .or_insert(Candidate { path, executable });
     }
     Ok(())
 }
@@ -345,13 +271,11 @@ pub async fn verify_declared_binaries(
     let candidates = collect_candidates(content_root, metadata, platform).await?;
     let declared_names: BTreeSet<&BinaryName> = declared.iter().collect();
 
-    // A name claimed by several directories reports its first-discovered path;
-    // the diagnostic identifies the name, the path is context.
     for (name, candidate) in &candidates {
         if candidate.executable && !declared_names.contains(name) {
             return Err(BinScanError::UndeclaredBinary {
                 name: name.clone(),
-                path: candidate.paths.first().cloned().unwrap_or_default(),
+                path: candidate.path.clone(),
             });
         }
     }
@@ -361,7 +285,7 @@ pub async fn verify_declared_binaries(
         {
             return Err(BinScanError::DeclaredNotExecutable {
                 name: name.clone(),
-                path: candidate.paths.first().cloned().unwrap_or_default(),
+                path: candidate.path.clone(),
             });
         }
     }
