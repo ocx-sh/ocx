@@ -725,4 +725,31 @@ mod tests {
             "message must name the user remedy `ocx lock`; got {rendered:?}"
         );
     }
+
+    /// `ManifestEditParse` (the on-disk `ocx.toml` failed to parse as an
+    /// editable document during a format-preserving write-back) is a config
+    /// fault the user can edit their way out of — pin it to `ConfigError`
+    /// (78), same class as a `TomlParse` failure.
+    #[test]
+    fn manifest_edit_parse_classifies_as_config_error() {
+        let err = crate::project::Error::Project(ProjectError::new(
+            PathBuf::from("/tmp/ocx.toml"),
+            ProjectErrorKind::ManifestEditParse("[tools\n".parse::<toml_edit::DocumentMut>().unwrap_err()),
+        ));
+        assert_eq!(err.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// `ManifestEditDiverged` (the format-preserving writer produced a
+    /// document that no longer describes the staged configuration) is a
+    /// fail-closed writer-side guard, not something the user can fix by
+    /// editing `ocx.toml` — pin it to `Failure` (1), distinct from the
+    /// `ConfigError` (78) class above.
+    #[test]
+    fn manifest_edit_diverged_classifies_as_failure() {
+        let err = crate::project::Error::Project(ProjectError::new(
+            PathBuf::from("/tmp/ocx.toml"),
+            ProjectErrorKind::ManifestEditDiverged,
+        ));
+        assert_eq!(err.classify(), Some(ExitCode::Failure));
+    }
 }

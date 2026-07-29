@@ -273,10 +273,16 @@ impl MutationGuard {
     ///
     /// # Errors
     ///
-    /// Returns the underlying I/O / serialisation error from whichever
-    /// write fails. On rollback, only the *original* error is
-    /// surfaced; rollback failures log at WARN and do not mask the
-    /// primary failure. This matches the design principle that
+    /// The lock leg fails with the underlying I/O / serialisation error
+    /// from [`ProjectLock::save`]. The manifest leg fails with
+    /// [`ProjectErrorKind::ManifestEditParse`] (the on-disk `ocx.toml` no
+    /// longer parses as an editable document) or
+    /// [`ProjectErrorKind::ManifestEditDiverged`] (the format-preserving
+    /// edit produced a document that no longer describes the staged
+    /// configuration) — either way the just-written lock is rolled back to
+    /// its predecessor before the error is returned. On rollback, only the
+    /// *original* error is surfaced; rollback failures log at WARN and do
+    /// not mask the primary failure. This matches the design principle that
     /// callers should always see the first thing that went wrong.
     pub async fn commit(mut self, staged: StagedMutation, new_lock: ProjectLock) -> Result<MutationCommit, Error> {
         // Defense-in-depth coherence gate: the lock the caller hands us
