@@ -122,7 +122,7 @@ Two complementary harnesses with different platform reach:
 
 | Harness | Platforms | Use for |
 |---------|-----------|---------|
-| Pytest (`test/tests/test_*.py`) | Linux + macOS + Windows (per `.github/workflows/verify-deep.yml`) | JSON-output assertions, structured fixtures, Windows junction / `.exe` resolution, anything where Python expressivity beats shell |
+| Pytest (`test/tests/test_*.py`) | **Linux only in CI.** The `acceptance-tests` job in `.github/workflows/verify-deep.yml` matrices a single `ubuntu-latest` leg — macOS runners lack the nested virtualization Docker/Colima needs, and the embedded `registry:2` image is unreliable on `windows-latest` (Linux container under Hyper-V routing issues); see the job's inline comment. Windows/macOS-only assertions in this suite (junction resolution, `.exe` shim behaviour, etc.) are real `skipif`-gated tests that currently run on **no** CI leg — treat them as unverified, not as coverage. | JSON-output assertions, structured fixtures, anything where Python expressivity beats shell |
 | Shell scenarios (`test/scenarios/*.sh`) | Linux + macOS only (Windows skipped via `pytestmark` in `test_scenarios_smoke.py`) | Exec output, marker grep, file/dir existence, exit-code branches — bash is the natural language |
 
 When extending shell scenarios, reuse the harness in `test/src/scenarios/__init__.py` (`Scenario` base class, `# scenario: <Name>` header, registered subclasses for pre-publish state). Do not duplicate setup logic — extend the existing `Scenario` API.

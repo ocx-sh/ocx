@@ -15,7 +15,7 @@
 //!   defaults to scratch and is guard- + symlink-rechecked; `stdin` is a
 //!   per-call child stdin string (independent of `--script -`);
 //!   `kill_on_drop(true)` + SIGINT/SIGTERM forwarding (parity with
-//!   `child_process::spawn_and_wait`); child awaited via
+//!   `launch::child_process::spawn_and_wait`); child awaited via
 //!   `Handle::current().block_on(...)` under the per-child wall-clock kill
 //!   deadline. Refuses to spawn a program resolving to an `ocx` binary in v1.
 //! - `ocx.env(name) -> str | None` — read one var from the composed env.
@@ -113,7 +113,7 @@ fn slash_path(p: &Path) -> String {
 /// via `block_in_place`, so the child is awaited via
 /// `Handle::current().block_on(...)`, NOT `.await` / `spawn_blocking`. The
 /// child sets `kill_on_drop(true)` and (Unix) forwards SIGINT/SIGTERM —
-/// parity with `child_process::spawn_and_wait` (Codex C4).
+/// parity with `launch::child_process::spawn_and_wait` (Codex C4).
 fn spawn_capture(
     program: &Path,
     args: &[String],

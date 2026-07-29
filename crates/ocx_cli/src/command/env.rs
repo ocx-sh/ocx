@@ -117,8 +117,11 @@ impl Env {
             manager.find_symlink_all(identifiers, kind).await?
         } else {
             manager
-                .find_or_install_all(identifiers, platform, context.concurrency())
+                .find_or_install_all(&identifiers, platform, context.concurrency())
                 .await?
+                .into_iter()
+                .map(|found| found.info)
+                .collect()
         };
 
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =

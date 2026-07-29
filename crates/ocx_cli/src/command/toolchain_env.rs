@@ -286,10 +286,10 @@ impl ToolchainEnv {
                 let identifiers: Vec<ocx_lib::oci::Identifier> =
                     composed.into_iter().map(|tool| tool.identifier).collect();
                 manager
-                    .find_or_install_all(identifiers, target.clone(), context.concurrency())
+                    .find_or_install_all(&identifiers, target.clone(), context.concurrency())
                     .await?
                     .into_iter()
-                    .map(Arc::new)
+                    .map(|found| Arc::new(found.info))
                     .collect()
             } else {
                 // `--no-pull`: probe the local object store only, never the

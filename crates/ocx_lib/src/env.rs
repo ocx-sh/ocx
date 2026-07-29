@@ -31,7 +31,10 @@ pub mod keys {
     pub const OCX_CONFIG: &str = "OCX_CONFIG";
     /// Boolean — when truthy, skip the discovered config-tier chain
     /// (system / user / `$OCX_HOME`). Explicit `--config` / [`OCX_CONFIG`]
-    /// paths still load.
+    /// paths still load; a SYSTEM-scope lock survives regardless.
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`], so a launcher re-entry stays as hermetic as
+    /// the frame that spawned it instead of re-reading the whole chain.
     pub const OCX_NO_CONFIG: &str = "OCX_NO_CONFIG";
     /// Path to an explicit project `ocx.toml` (project-tier toolchain config).
     /// Mirrors `--project`.
@@ -118,6 +121,23 @@ pub mod keys {
     /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
     /// `ocx config update` still works when this is set.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
+    /// Directory execution records are written to — the env tier of `[records]
+    /// dir` / `--records-dir`. Absent ⇒ recording is off.
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`], so every frame of one launch chain (an
+    /// `ocx run` and the `ocx launcher exec` it spawns) records into the sink
+    /// the outermost invocation resolved. Read back by [`crate::env::records`];
+    /// `OCX_RECORDS_DIR=""` is treated as unset (matches [`OCX_CONFIG`]).
+    pub const OCX_RECORDS_DIR: &str = "OCX_RECORDS_DIR";
+    /// Filename template for each execution record — the env tier of
+    /// `[records] name` / `--records-name`. Forwarded alongside
+    /// [`OCX_RECORDS_DIR`], because a collector that globs or parses filenames
+    /// depends on the pattern exactly as much as on the directory.
+    ///
+    /// There is deliberately no `OCX_RECORDS_REQUIRED`. The fail-closed posture
+    /// is an operator decision read from the config file at every tier, never
+    /// from the environment or a flag.
+    pub const OCX_RECORDS_NAME: &str = "OCX_RECORDS_NAME";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -188,6 +208,16 @@ pub struct OcxConfigView {
     /// [`keys::OCX_MANAGED_CONFIG`] so a launcher re-entry resolves the same
     /// managed tier. `None` when no managed-config source is in effect.
     pub managed_config_source: Option<String>,
+    /// The resolved `[records]` sink and filename template, forwarded to child
+    /// ocx processes via [`Env::apply_ocx_config`] as
+    /// [`keys::OCX_RECORDS_DIR`] / [`keys::OCX_RECORDS_NAME`].
+    ///
+    /// Only `dir` and `name` travel: they are the two fields with an
+    /// environment peer. `required` is config-file-only at every tier and
+    /// `system_locked` is loader-set provenance, so setting either here
+    /// forwards nothing — a child re-reads both from the config chain it
+    /// resolves for itself.
+    pub records: crate::record::RecordsOptions,
 }
 
 impl OcxConfigView {
@@ -205,6 +235,7 @@ impl OcxConfigView {
             patches: None,
             patch_snapshot: None,
             managed_config_source: None,
+            records: crate::record::RecordsOptions::default(),
         }
     }
 }
@@ -339,10 +370,12 @@ impl Env {
     /// child ocx process sees the same policy the parent saw.
     ///
     /// Always sets [`keys::OCX_BINARY_PIN`]. Sets [`keys::OCX_OFFLINE`] /
-    /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] only
+    /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] /
+    /// [`keys::OCX_NO_CONFIG`] only
     /// when the corresponding flag is true so the child env stays minimal. Sets
     /// [`keys::OCX_CONFIG`] /
-    /// [`keys::OCX_INDEX`] only when the parent had an explicit value;
+    /// [`keys::OCX_INDEX`] / [`keys::OCX_RECORDS_DIR`] /
+    /// [`keys::OCX_RECORDS_NAME`] only when the parent had an explicit value;
     /// otherwise removes any inherited setting so a stale parent-shell export
     /// cannot beat the outer ocx's parsed state.
     ///
@@ -399,6 +432,18 @@ impl Env {
             Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
             None => self.remove(keys::OCX_MANAGED_CONFIG),
         }
+        // Sink and template forward independently, each set-or-remove: a
+        // resolved sink with a defaulted template must not pick the parent
+        // shell's pattern back up, or a collector's glob matches files the
+        // operator never described.
+        match &cfg.records.dir {
+            Some(path) => self.set(keys::OCX_RECORDS_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_RECORDS_DIR),
+        }
+        match &cfg.records.name {
+            Some(template) => self.set(keys::OCX_RECORDS_NAME, template.as_str()),
+            None => self.remove(keys::OCX_RECORDS_NAME),
+        }
         // Unconditional clear, never a set: the forwarded project env is NOT a
         // resolution-affecting config field and deliberately does not live on
         // `OcxConfigView`. This half of the contract guarantees a stale
@@ -407,6 +452,20 @@ impl Env {
         // genuinely has a payload writes it afterwards, through
         // [`Self::apply_child_env`].
         self.remove(keys::OCX_ENV);
+        // Hermetic must stay hermetic across the hop. Without this the parent
+        // prunes the discovered config chain and the child — a fresh process —
+        // re-reads it in full, so the two frames of one launch resolve against
+        // different configuration. The already-forwarded `OCX_RECORDS_*` do not
+        // cover it: `required` has no environment peer at all, so an unlocked
+        // `[records]` posture the parent never saw would still reach the child.
+        // Same ambient-read shape as `OCX_ALLOW_YANKED` below — a pure env
+        // opt-in with no `ContextOptions` / CLI counterpart, so the authoritative
+        // value IS the ambient env the outer ocx read at the loader seam.
+        if flag(keys::OCX_NO_CONFIG, false) {
+            self.set(keys::OCX_NO_CONFIG, "1");
+        } else {
+            self.remove(keys::OCX_NO_CONFIG);
+        }
         // Resolution-affecting, but a pure env opt-in with no `ContextOptions`
         // / CLI counterpart (unlike the flags above): its authoritative value
         // IS the ambient env, which the outer ocx read the same way at the
@@ -892,6 +951,36 @@ pub fn forwarded_env() -> Result<Vec<crate::package::metadata::env::entry::Entry
         });
     }
     Ok(out)
+}
+
+/// Reads the environment tier of the `[records]` fold —
+/// [`keys::OCX_RECORDS_DIR`] and [`keys::OCX_RECORDS_NAME`] — into the same
+/// shape the config file and the CLI flags produce, so
+/// [`crate::record::resolve_records`] merges like with like.
+///
+/// An absent **or empty** value is unset, following [`keys::OCX_MANAGED_CONFIG`]
+/// and [`keys::OCX_CONFIG`]: an exported-but-empty variable is how a shell
+/// spells "no value", and reading `OCX_RECORDS_DIR=""` as a sink would scatter
+/// records across whatever directory each tool happened to run in.
+///
+/// Infallible by construction — the two values are a path and a template
+/// string, so there is nothing to reject here. A malformed *template* is a
+/// resolve-time error raised by [`crate::record::NameTemplate::parse`], which
+/// sees the merged value and can therefore name the tier that won.
+///
+/// `required` is never populated from this tier. There is no
+/// `OCX_RECORDS_REQUIRED` env var, and the fold refuses the field from a
+/// non-config tier regardless of the shape it receives — recording posture is
+/// an operator decision, not a per-invocation one.
+pub fn records() -> crate::record::RecordsOptions {
+    crate::record::RecordsOptions {
+        dir: var(keys::OCX_RECORDS_DIR)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        name: var(keys::OCX_RECORDS_NAME).filter(|value| !value.is_empty()),
+        required: None,
+        system_locked: false,
+    }
 }
 
 /// Parses `OCX_INSECURE_REGISTRIES` into a list of registry hostnames.
@@ -1582,6 +1671,55 @@ mod tests {
         }
     }
 
+    /// A hermetic parent spawns a hermetic child. Without the forward the child
+    /// re-reads the discovered config chain the parent pruned, and the two
+    /// frames of one launch resolve `[records]` (and everything else) against
+    /// different configuration.
+    #[test]
+    fn apply_ocx_config_forwards_no_config_optin_from_ambient() {
+        let guard = crate::test::env::lock();
+
+        guard.set(keys::OCX_NO_CONFIG, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_NO_CONFIG).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_NO_CONFIG must forward to the child env"
+        );
+    }
+
+    /// The remove half of set-or-remove: the parent's parsed bool is the sole
+    /// authority, so a value inherited on the child env is stripped when this
+    /// frame resolved the flag false. Without it a stale `OCX_NO_CONFIG=1`
+    /// export makes a child hermetic that the parent never was.
+    #[test]
+    fn apply_ocx_config_removes_stale_no_config_when_falsy() {
+        let guard = crate::test::env::lock();
+
+        // Falsy ambient value, and an unparseable one — both resolve to false,
+        // and neither may survive onto the child env in any spelling.
+        for ambient in ["0", "not-a-boolean"] {
+            guard.set(keys::OCX_NO_CONFIG, ambient);
+            let mut env = Env::clean();
+            env.set(keys::OCX_NO_CONFIG, "1");
+            env.apply_ocx_config(&view("/abs/ocx"));
+            assert!(
+                env.get(keys::OCX_NO_CONFIG).is_none(),
+                "an inherited OCX_NO_CONFIG must be removed when the ambient value is `{ambient}`"
+            );
+        }
+
+        guard.remove(keys::OCX_NO_CONFIG);
+        let mut env = Env::clean();
+        env.set(keys::OCX_NO_CONFIG, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_NO_CONFIG).is_none(),
+            "an inherited OCX_NO_CONFIG must be removed when the flag is absent"
+        );
+    }
+
     #[test]
     fn apply_ocx_config_forwards_yanked_optin_from_ambient() {
         let guard = crate::test::env::lock();
@@ -2137,6 +2275,180 @@ mod tests {
             env.get(keys::OCX_PATCH_SNAPSHOT).is_none(),
             "patch_snapshot=None must remove any stale OCX_PATCH_SNAPSHOT from the child env"
         );
+    }
+
+    // ── OCX_RECORDS_* — env as input, and env as forwarded output ────────────
+
+    /// The resolved sink and template forward to the child env, so every frame
+    /// of one launch chain records into the same place under the same grammar.
+    #[test]
+    fn apply_ocx_config_forwards_records_dir_and_name_when_set() {
+        let mut cfg = view("/abs/ocx");
+        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
+        cfg.records.name = Some("{time}-{host}-{pid}.json".to_string());
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        assert_eq!(
+            env.get(keys::OCX_RECORDS_DIR).unwrap(),
+            "/var/log/ocx-records",
+            "a resolved sink must forward as OCX_RECORDS_DIR"
+        );
+        assert_eq!(
+            env.get(keys::OCX_RECORDS_NAME).unwrap(),
+            "{time}-{host}-{pid}.json",
+            "the resolved template must forward as OCX_RECORDS_NAME"
+        );
+    }
+
+    /// The remove half of set-or-remove: with no sink resolved, an inherited
+    /// value is actively stripped rather than left alone. Without this, one
+    /// operator's `OCX_RECORDS_DIR` export survives into a child that resolved
+    /// recording off — records written under a policy nobody configured.
+    #[test]
+    fn apply_ocx_config_removes_inherited_records_dir_and_name_when_unset() {
+        let cfg = view("/abs/ocx");
+        assert!(cfg.records.dir.is_none(), "the default view resolves recording off");
+
+        let mut env = Env::clean();
+        env.set(keys::OCX_RECORDS_DIR, "/stale/sink");
+        env.set(keys::OCX_RECORDS_NAME, "{time}-stale.json");
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_RECORDS_DIR).is_none(),
+            "an inherited OCX_RECORDS_DIR must be removed, not left to survive"
+        );
+        assert!(
+            env.get(keys::OCX_RECORDS_NAME).is_none(),
+            "an inherited OCX_RECORDS_NAME must be removed, not left to survive"
+        );
+    }
+
+    /// `name` is removed independently of `dir`: a sink with a defaulted
+    /// template must not inherit a stale pattern from the parent shell, or the
+    /// collector's glob silently matches files the operator never described.
+    #[test]
+    fn apply_ocx_config_removes_stale_records_name_even_with_a_sink() {
+        let mut cfg = view("/abs/ocx");
+        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
+        assert!(cfg.records.name.is_none());
+
+        let mut env = Env::clean();
+        env.set(keys::OCX_RECORDS_NAME, "{time}-stale.json");
+        env.apply_ocx_config(&cfg);
+
+        assert_eq!(env.get(keys::OCX_RECORDS_DIR).unwrap(), "/var/log/ocx-records");
+        assert!(
+            env.get(keys::OCX_RECORDS_NAME).is_none(),
+            "an inherited OCX_RECORDS_NAME must be removed even when a sink is set"
+        );
+    }
+
+    /// `required` has no environment peer, in either direction. Nothing reads
+    /// an `OCX_RECORDS_REQUIRED`, and nothing writes one — the fail-closed
+    /// posture is an operator decision that lives in the config file, so a
+    /// forwarded env var would hand it to any caller who can set one.
+    #[test]
+    fn records_required_is_never_an_env_var() {
+        const NOT_A_KEY: &str = "OCX_RECORDS_REQUIRED";
+
+        let guard = crate::test::env::lock();
+        guard.set(NOT_A_KEY, "1");
+        guard.set(keys::OCX_RECORDS_DIR, "/var/log/ocx-records");
+
+        // Read side: the env tier never populates `required`, whatever the
+        // ambient environment claims.
+        let from_env = records();
+        assert!(
+            from_env.required.is_none(),
+            "the env tier must leave `required` absent; OCX_RECORDS_REQUIRED is not consulted"
+        );
+        assert_eq!(
+            from_env.dir.as_deref(),
+            Some(std::path::Path::new("/var/log/ocx-records"))
+        );
+
+        // Write side: a view carrying `required` forwards nothing for it.
+        let mut cfg = view("/abs/ocx");
+        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
+        cfg.records.required = Some(true);
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+        assert!(
+            env.get(NOT_A_KEY).is_none(),
+            "`required` must never be forwarded to a child env"
+        );
+    }
+
+    /// The env tier reads both variables into the shape the fold merges.
+    #[test]
+    fn records_reads_dir_and_name_from_the_environment() {
+        let guard = crate::test::env::lock();
+        guard.set(keys::OCX_RECORDS_DIR, "/var/log/ocx-records");
+        guard.set(keys::OCX_RECORDS_NAME, "{time}-{pid}-{rand}.json");
+
+        let options = records();
+        assert_eq!(
+            options.dir.as_deref(),
+            Some(std::path::Path::new("/var/log/ocx-records"))
+        );
+        assert_eq!(options.name.as_deref(), Some("{time}-{pid}-{rand}.json"));
+        assert!(
+            !options.system_locked,
+            "SYSTEM-scope provenance is loader-set; the env tier can never claim it"
+        );
+    }
+
+    /// Absent or empty is unset. An exported-but-empty variable is how a shell
+    /// spells "no value" — reading it as a sink named `""` would write records
+    /// into whatever directory each tool happened to run in.
+    #[test]
+    fn records_treats_absent_and_empty_as_unset() {
+        let guard = crate::test::env::lock();
+
+        guard.remove(keys::OCX_RECORDS_DIR);
+        guard.remove(keys::OCX_RECORDS_NAME);
+        let absent = records();
+        assert!(absent.dir.is_none());
+        assert!(absent.name.is_none());
+
+        guard.set(keys::OCX_RECORDS_DIR, "");
+        guard.set(keys::OCX_RECORDS_NAME, "");
+        let empty = records();
+        assert!(empty.dir.is_none(), "OCX_RECORDS_DIR=\"\" must read as unset");
+        assert!(empty.name.is_none(), "OCX_RECORDS_NAME=\"\" must read as unset");
+    }
+
+    /// Round-trip across the process boundary: what `apply_ocx_config` writes
+    /// onto a child env is exactly what the child's env tier reads back. The
+    /// two halves are one contract — a launcher re-entry must resolve the same
+    /// sink and template its parent did.
+    #[test]
+    fn records_round_trip_from_forwarded_child_env() {
+        let guard = crate::test::env::lock();
+
+        let mut cfg = view("/abs/ocx");
+        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
+        cfg.records.name = Some("{time}-{host}-{pid}-{rand}.json".to_string());
+
+        let mut child = Env::clean();
+        child.apply_ocx_config(&cfg);
+        for key in [keys::OCX_RECORDS_DIR, keys::OCX_RECORDS_NAME] {
+            let value = child
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} must be set on the child env"))
+                .to_str()
+                .expect("a forwarded records value must be valid UTF-8")
+                .to_string();
+            guard.set(key, value);
+        }
+
+        let parsed = records();
+        assert_eq!(parsed.dir, cfg.records.dir, "the sink must survive the hop");
+        assert_eq!(parsed.name, cfg.records.name, "the template must survive the hop");
+        assert!(parsed.required.is_none(), "no posture rides along");
     }
 
     /// `resolve_command` must find a well-known binary that exists on PATH.

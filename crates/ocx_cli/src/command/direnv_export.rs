@@ -146,7 +146,7 @@ impl DirenvExport {
                 // the prompt.
                 match context
                     .manager()
-                    .find_or_install_all(to_install, platform.clone(), context.concurrency())
+                    .find_or_install_all(&to_install, platform.clone(), context.concurrency())
                     .await
                 {
                     Ok(_) => applied = collect_applied(&offline, &project.lock, &platform, &expanded).await?,

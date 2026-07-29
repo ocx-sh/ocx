@@ -272,6 +272,7 @@ pub use concurrency::Concurrency;
 pub use error::DependencyError;
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
+pub use tasks::find_or_install::{FoundPackage, Materialization};
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::{
     ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, EntrypointConflict, InspectClosure, InspectOptions,

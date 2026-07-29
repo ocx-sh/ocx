@@ -42,6 +42,15 @@ impl PackageManager {
             log::debug!("Package not found locally for '{}'.", identifier);
             PackageErrorKind::NotFound
         })?;
+        // Stamp what the resolution learned — the selected platform and the
+        // registry the content is fetched from — exactly as the pull path does
+        // in `setup_owned`. Without it the same artefact describes itself
+        // differently depending on whether this invocation happened to find it
+        // in the store or had to fetch it: a cached find would report no
+        // platform and no content registry at all.
+        let info = info
+            .with_platform(resolved.platform.clone())
+            .with_transport_registry(resolved.transport_pinned.registry());
 
         // Upsert the resolution chain into the installed package's `refs/blobs/`
         // — idempotent, covers legacy installs and alt-tag resolves that walked

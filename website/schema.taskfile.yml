@@ -14,13 +14,12 @@ vars:
   PROJECT_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project"
   PROJECT_LOCK_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project-lock"
   PATCH_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/patch"
+  EXECUTION_RECORD_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/execution-record"
 
 tasks:
   generate:
     desc: Generate JSON Schema for metadata.json
     sources: *schema-sources
-    status:
-      - test -f {{.METADATA_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.METADATA_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json
@@ -28,8 +27,6 @@ tasks:
   generate-config:
     desc: Generate JSON Schema for config.toml
     sources: *schema-sources
-    status:
-      - test -f {{.CONFIG_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.CONFIG_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json
@@ -37,8 +34,6 @@ tasks:
   generate-project:
     desc: Generate JSON Schema for ocx.toml
     sources: *schema-sources
-    status:
-      - test -f {{.PROJECT_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.PROJECT_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json
@@ -46,8 +41,6 @@ tasks:
   generate-project-lock:
     desc: Generate JSON Schema for ocx.lock
     sources: *schema-sources
-    status:
-      - test -f {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
     cmds:
       - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
@@ -55,11 +48,16 @@ tasks:
   generate-patch:
     desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)
     sources: *schema-sources
-    status:
-      - test -f {{.PATCH_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.PATCH_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json
+
+  generate-execution-record:
+    desc: Generate JSON Schema for execution records (ocx run / package exec / launcher exec)
+    sources: *schema-sources
+    cmds:
+      - mkdir -p {{.EXECUTION_RECORD_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- execution-record > {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json
 
   default:
     desc: Generate all schemas
@@ -69,3 +67,4 @@ tasks:
       - task: generate-project
       - task: generate-project-lock
       - task: generate-patch
+      - task: generate-execution-record
