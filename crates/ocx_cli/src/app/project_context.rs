@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::package::metadata::env::entry::Entry;
 use ocx_lib::project::{
-    DEFAULT_GROUP, MutationGuard, ProjectConfig, ProjectLock, acquire_project_lock_for_file, lock::lock_path_for,
+    DEFAULT_GROUP, ManifestSnapshot, MutationGuard, ProjectConfig, ProjectLock, acquire_project_lock_for_file,
+    lock::lock_path_for,
 };
 
 /// Result of resolving the project tier: owned paths, parsed config, parsed lock.
@@ -523,6 +524,17 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         ))
     })?;
     let config = ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.clone())?;
+    // Keep the verbatim text alongside the parsed form: the commit path edits
+    // the document the user wrote rather than re-serializing the struct, so
+    // comments and declaration order survive the mutation. Parsing above
+    // already established the bytes are UTF-8.
+    let text = String::from_utf8(bytes).map_err(|e| {
+        ocx_lib::project::Error::Project(ocx_lib::project::error::ProjectError::new(
+            config_path.clone(),
+            ocx_lib::project::error::ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        ))
+    })?;
+    let manifest = ManifestSnapshot { config, text };
 
     // Optional predecessor lock — `None` is the bootstrap case. Capture the
     // raw on-disk bytes verbatim alongside the parsed lock so the commit
@@ -549,7 +561,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         config_path,
         lock_path,
         home,
-        config,
+        manifest,
         previous_lock,
         previous_lock_bytes,
     ))

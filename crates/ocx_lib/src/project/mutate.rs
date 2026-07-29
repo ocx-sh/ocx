@@ -18,18 +18,6 @@ use crate::project::Error;
 use crate::project::error::{ProjectError, ProjectErrorKind};
 use crate::project::project_lock::acquire_project_lock_for_file;
 
-// ── TOML serialisation for ocx.toml ──────────────────────────────────────
-
-/// Serialise `ProjectConfig` to a TOML string suitable for writing as
-/// `ocx.toml`.
-///
-/// Uses `toml::to_string_pretty` so the output is human-readable.  Entries
-/// inside each group are sorted by key for deterministic output.
-fn config_to_toml_string(config: &crate::project::config::ProjectConfig) -> Result<String, Error> {
-    toml::to_string_pretty(config)
-        .map_err(|e| ProjectError::new(PathBuf::new(), ProjectErrorKind::TomlSerialize(e)).into())
-}
-
 /// Atomic write of `content` to `path` via a tempfile + rename in the same
 /// directory — mirrors `ProjectLock::save`'s tempfile-and-rename pattern.
 ///
@@ -118,10 +106,14 @@ fn validate_group_name(name: &str) -> bool {
 /// locked range by other handles. Reading through `guard` (the lock owner)
 /// avoids the second handle. Enforces the same 64 KiB size cap as the former
 /// `load_config`.
+///
+/// Returns the verbatim text alongside the parsed config: the write-back path
+/// edits that document rather than re-serializing the parsed form, so the
+/// user's comments and declaration order survive the mutation.
 async fn read_config_via_guard(
     guard: &mut crate::utility::fs::LockedFile,
     config_path: &Path,
-) -> Result<crate::project::config::ProjectConfig, Error> {
+) -> Result<(String, crate::project::config::ProjectConfig), Error> {
     let bytes = guard.read_bytes().await.map_err(|e| {
         Error::Project(ProjectError::new(
             config_path.to_path_buf(),
@@ -144,7 +136,8 @@ async fn read_config_via_guard(
             ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         ))
     })?;
-    crate::project::config::ProjectConfig::from_toml_str(&text)
+    let config = crate::project::config::ProjectConfig::from_toml_str(&text)?;
+    Ok((text, config))
 }
 
 /// Apply an `add` binding mutation to a [`crate::project::config::ProjectConfig`]
@@ -266,12 +259,12 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 
     let mut guard = acquire_project_lock_for_file(config_path).await?;
 
-    let mut config = read_config_via_guard(&mut guard, config_path).await?;
+    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
 
     // Compose: in-memory mutation + write-back through the lock-owning handle.
     add_binding_in_memory(&mut config, config_path, identifier, group)?;
 
-    let serialized = config_to_toml_string(&config)?;
+    let serialized = super::document::render_preserving(&original, &config, config_path)?;
     // Rewrite ocx.toml IN PLACE through the lock-owning handle. A tempfile +
     // rename would rotate the file's inode and strand the lock fd on the
     // orphan, breaking mutual exclusion on Windows (where LockFileEx is
@@ -316,11 +309,11 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 pub async fn remove_binding(config_path: &Path, identifier: &Identifier, group: Option<&str>) -> Result<(), Error> {
     let mut guard = acquire_project_lock_for_file(config_path).await?;
 
-    let mut config = read_config_via_guard(&mut guard, config_path).await?;
+    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
 
     remove_binding_in_memory(&mut config, config_path, identifier, group)?;
 
-    let serialized = config_to_toml_string(&config)?;
+    let serialized = super::document::render_preserving(&original, &config, config_path)?;
     // Rewrite in place through the lock-owning handle (see add_binding).
     guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
         Error::Project(ProjectError::new(
@@ -427,8 +420,8 @@ pub fn remove_binding_in_memory(
 
 /// Create a minimal project config file at `config_path`. Idempotent
 /// failure: returns an error variant if a file already exists. The
-/// default content is one registry declaration line and an empty
-/// `[tools]` table — non-interactive, backend-first per
+/// default content is a schema directive and an empty `[tools]` table —
+/// non-interactive, backend-first per
 /// `.claude/artifacts/research_cli_package_manager_conventions.md`
 /// section 6.
 ///
@@ -465,17 +458,20 @@ pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
         )));
     }
 
-    // Minimal non-interactive content: schema-server hint + registry
-    // comment + empty `[tools]` table. The first-line comment is
-    // recognized by the YAML/TOML language servers (`taplo`, `yaml-
-    // language-server`) and IDE plugins (VS Code, Zed) as a pointer to
-    // the canonical JSON Schema at the published URL — gives schema-
-    // aware autocompletion and validation out of the box.
+    // Minimal non-interactive content: schema-server hint + empty `[tools]`
+    // table. The first-line comment is recognized by the YAML/TOML language
+    // servers (`taplo`, `yaml-language-server`) and IDE plugins (VS Code, Zed)
+    // as a pointer to the canonical JSON Schema at the published URL — gives
+    // schema-aware autocompletion and validation out of the box.
     // Intentionally kept under 10 non-blank lines per research §6.4.
+    //
+    // No `registry` hint: `ocx.toml` has no such key (`RawProjectConfig` is
+    // `deny_unknown_fields`), so the commented form used to be a line that
+    // broke the file the moment anyone uncommented it. The default registry is
+    // `[registry] default` in `config.toml` (`crate::config`).
     let content = "\
 #:schema https://ocx.sh/schemas/project/v1.json
 # OCX project toolchain — managed by `ocx add` / `ocx remove`
-# registry = \"ocx.sh\"
 
 [tools]
 ";

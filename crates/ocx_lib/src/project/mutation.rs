@@ -58,6 +58,21 @@ use super::config::ProjectConfig;
 use super::error::{ProjectError, ProjectErrorKind};
 use super::lock::ProjectLock;
 
+/// The `ocx.toml` a guard was opened on: the parsed configuration and the
+/// verbatim text it came from.
+///
+/// The two travel together because the commit path needs both — the parsed form
+/// to stage a mutation against, the text to apply that mutation to *as a
+/// document*, so comments, declaration order and spacing survive (issue #256).
+/// A parsed config alone cannot reconstruct the file the user wrote; same
+/// motivation as [`MutationGuard::previous_lock`]'s byte-verbatim companion.
+pub struct ManifestSnapshot {
+    /// Parsed `ocx.toml`.
+    pub config: ProjectConfig,
+    /// The exact text `config` was parsed from.
+    pub text: String,
+}
+
 /// RAII handle to an in-flight project-tier mutation transaction.
 ///
 /// Holds the exclusive advisory flock on `ocx.toml` itself, an
@@ -92,8 +107,9 @@ pub struct MutationGuard {
     /// `$OCX_HOME` — propagated so commit can register the lock with
     /// `ProjectRegistry` when the file is materialised for the first time.
     home: PathBuf,
-    /// Snapshot of `ocx.toml` parsed at guard-acquisition time.
-    config: ProjectConfig,
+    /// Snapshot of `ocx.toml` — parsed form plus the text it was parsed from —
+    /// taken at guard-acquisition time.
+    manifest: ManifestSnapshot,
     /// Predecessor `ocx.lock`. `None` when the lock file does not exist
     /// yet (bootstrapping path: `ocx add` on a freshly initialised
     /// project, `ocx init` itself).
@@ -164,7 +180,7 @@ impl MutationGuard {
     /// callers use this to reason about the pre-mutation state
     /// (e.g. detecting a no-op `ocx remove` before resolving anything).
     pub fn config(&self) -> &ProjectConfig {
-        &self.config
+        &self.manifest.config
     }
 
     /// Read-only access to the predecessor `ocx.lock`, if one existed
@@ -218,7 +234,7 @@ impl MutationGuard {
     where
         F: FnOnce(&mut ProjectConfig) -> Result<(), Error>,
     {
-        let mut candidate = self.config.clone();
+        let mut candidate = self.manifest.config.clone();
         mutate(&mut candidate)?;
         Ok(StagedMutation {
             candidate,
@@ -328,7 +344,8 @@ impl MutationGuard {
             // manifest — lock-only commits (`lock`, `update`) legitimately
             // want to leave ocx.toml byte-identical.
             if staged.manifest_changed {
-                let serialized = config_to_toml_string(&staged.candidate)?;
+                let serialized =
+                    super::document::render_preserving(&self.manifest.text, &staged.candidate, &self.config_path)?;
                 self.flock.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
                     ProjectError::new(self.config_path.clone(), ProjectErrorKind::Io(std::io::Error::other(e)))
                 })?;
@@ -418,8 +435,10 @@ impl MutationGuard {
     ///
     /// Callers MUST have already acquired the exclusive advisory flock on
     /// `ocx.toml` via [`crate::project::acquire_project_lock`]
-    /// and loaded both the current [`ProjectConfig`] and the optional
-    /// predecessor [`ProjectLock`]. `previous_lock_bytes` carries the raw
+    /// and loaded both the current [`ManifestSnapshot`] (parsed config plus the
+    /// verbatim text it was parsed from — the commit path edits that document
+    /// instead of re-serializing the parsed form) and the optional predecessor
+    /// [`ProjectLock`]. `previous_lock_bytes` carries the raw
     /// on-disk bytes of that predecessor (captured verbatim so the rollback
     /// path can restore it byte-for-byte instead of re-serializing); it MUST
     /// be `Some` exactly when `previous_lock` is `Some`. The constructor does
@@ -437,7 +456,7 @@ impl MutationGuard {
         config_path: PathBuf,
         lock_path: PathBuf,
         home: PathBuf,
-        config: ProjectConfig,
+        manifest: ManifestSnapshot,
         previous_lock: Option<ProjectLock>,
         previous_lock_bytes: Option<Vec<u8>>,
     ) -> Self {
@@ -446,7 +465,7 @@ impl MutationGuard {
             config_path,
             lock_path,
             home,
-            config,
+            manifest,
             previous_lock,
             previous_lock_bytes,
         }
@@ -584,13 +603,4 @@ async fn rollback_lock_after_failure(lock_path: &Path, previous_lock_bytes: Opti
             }
         }
     }
-}
-
-/// Serialise a [`ProjectConfig`] to a TOML string. Mirrors
-/// [`crate::project::mutate::config_to_toml_string`] privately —
-/// duplicated here to avoid making the helper `pub(crate)` for one
-/// caller. Single 4-line inline.
-fn config_to_toml_string(config: &ProjectConfig) -> Result<String, Error> {
-    toml::to_string_pretty(config)
-        .map_err(|e| ProjectError::new(PathBuf::new(), ProjectErrorKind::TomlSerialize(e)).into())
 }

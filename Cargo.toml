@@ -58,6 +58,8 @@ serde_json_canonicalizer = "0.3.2"
 serde_repr = "0.1.20"
 serde_yaml_ng = "0.10.0"
 toml = "1.1.2"
+# Format-preserving TOML editing (`ocx.toml` mutations keep comments + order).
+toml_edit = "0.25"
 
 # CLI
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
