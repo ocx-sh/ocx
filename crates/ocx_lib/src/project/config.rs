@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::env::ProjectEnv;
 use super::error::{ProjectError, ProjectErrorKind};
 use crate::oci::Identifier;
-use crate::oci::identifier::error::IdentifierErrorKind;
+use crate::oci::identifier::error::{IdentifierError, IdentifierErrorKind};
 
 /// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
 ///
@@ -73,7 +73,7 @@ pub struct PackageSettings {
 ///
 /// Bare-repo entries with no tag and no digest (e.g.
 /// `cmake = "ocx.sh/cmake"`) parse with `:latest` injected at the
-/// schema boundary — see [`parse_tool_map`] for the contract. The
+/// schema boundary — see [`parse_tool_value`] for the contract. The
 /// default does not apply to digest-pinned entries
 /// (`tool = "ghcr.io/acme/tool@sha256:..."`); the digest is the
 /// canonical pin.
@@ -625,29 +625,45 @@ fn parse_project_env(scope: &str, raw: &toml::Table, path: &Path) -> Result<Proj
     ProjectEnv::from_table(scope, raw).map_err(|kind| ProjectError::new(path.to_path_buf(), kind).into())
 }
 
-/// Walk a raw `(name → value)` map and validate every value as a
-/// fully-qualified [`Identifier`]. Splits
-/// [`IdentifierErrorKind::MissingRegistry`] from other identifier
-/// failures so the project-tier diagnostic can name the offending
-/// binding without losing the underlying [`crate::oci::identifier::error::IdentifierError`]
-/// for non-registry failures.
+/// Parse one `[tools]` value into the [`Identifier`] the schema boundary
+/// promises.
 ///
 /// Bare identifiers — registry + repository, no tag and no digest
-/// (e.g. `"ocx.sh/cmake"`) — get `:latest` injected at this boundary
-/// so resolution always has an advisory tag to look up. The default is
-/// applied here, not on [`Identifier`] itself, so CLI args without a
-/// tag still surface as `tag = None`. Digest-pinned entries
-/// (`@sha256:...`) keep `tag = None`; the digest is the canonical pin.
+/// (e.g. `"ocx.sh/cmake"`) — get `:latest` injected here so resolution always
+/// has an advisory tag to look up. The default is applied at this boundary,
+/// not on [`Identifier`] itself, so CLI args without a tag still surface as
+/// `tag = None`. Digest-pinned entries (`@sha256:...`) keep `tag = None`; the
+/// digest is the canonical pin.
+///
+/// Named rather than inlined into [`parse_tool_map`] because it is the only
+/// definition of "what this text means": the format-preserving renderer
+/// ([`super::document`]) asks it whether a line on disk already says what the
+/// candidate says, and a text comparison would call the injected `:latest` a
+/// change and rewrite a line the mutation never targeted.
+///
+/// # Errors
+///
+/// Propagates [`Identifier::parse`] verbatim — callers map the kinds onto
+/// their own diagnostics.
+pub(super) fn parse_tool_value(value: &str) -> Result<Identifier, IdentifierError> {
+    let identifier = Identifier::parse(value)?;
+    if identifier.tag().is_none() && identifier.digest().is_none() {
+        return Ok(identifier.clone_with_tag("latest"));
+    }
+    Ok(identifier)
+}
+
+/// Walk a raw `(name → value)` map and validate every value as a
+/// fully-qualified [`Identifier`] via [`parse_tool_value`]. Splits
+/// [`IdentifierErrorKind::MissingRegistry`] from other identifier
+/// failures so the project-tier diagnostic can name the offending
+/// binding without losing the underlying [`IdentifierError`]
+/// for non-registry failures.
 fn parse_tool_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTreeMap<String, Identifier>, super::Error> {
     let mut out: BTreeMap<String, Identifier> = BTreeMap::new();
     for (name, value) in raw {
-        match Identifier::parse(value) {
+        match parse_tool_value(value) {
             Ok(id) => {
-                let id = if id.tag().is_none() && id.digest().is_none() {
-                    id.clone_with_tag("latest")
-                } else {
-                    id
-                };
                 out.insert(name.clone(), id);
             }
             Err(e) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {

@@ -236,8 +236,12 @@ pub fn add_binding_in_memory(
 ///   outside `[a-zA-Z0-9_-]`, is empty, or contains path traversal sequences.
 /// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
 /// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
-/// - [`ProjectErrorKind::TomlParse`] / [`ProjectErrorKind::TomlSerialize`] —
-///   the config could not be parsed from or serialised back to TOML.
+/// - [`ProjectErrorKind::TomlParse`] — the config could not be parsed from TOML.
+/// - [`ProjectErrorKind::ManifestEditParse`] — the on-disk `ocx.toml` did not
+///   parse as an editable document during the format-preserving write-back.
+/// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
+///   produced a document that no longer describes the staged configuration;
+///   the write is abandoned rather than falling back to a whole-file rewrite.
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the derived binding key
 ///   already exists in the target group. The same name may exist in other
 ///   groups without error.
@@ -297,8 +301,12 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 ///
 /// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
 /// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
-/// - [`ProjectErrorKind::TomlParse`] / [`ProjectErrorKind::TomlSerialize`] —
-///   the config could not be parsed from or serialised back to TOML.
+/// - [`ProjectErrorKind::TomlParse`] — the config could not be parsed from TOML.
+/// - [`ProjectErrorKind::ManifestEditParse`] — the on-disk `ocx.toml` did not
+///   parse as an editable document during the format-preserving write-back.
+/// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
+///   produced a document that no longer describes the staged configuration;
+///   the write is abandoned rather than falling back to a whole-file rewrite.
 /// - [`ProjectErrorKind::BindingNotFound`] — the derived binding key was not
 ///   found in the targeted group (or any group when `group` is `None`).
 /// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the

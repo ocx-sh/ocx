@@ -390,6 +390,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 | Code | Meaning |
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
+| 1 | The in-place `ocx.toml` edit could not be expressed safely (rare); the command aborts rather than falling back to a lossy rewrite. |
 | 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
@@ -1477,6 +1478,7 @@ Pass `--global` **before** the subcommand: `ocx --global remove ripgrep`. See [`
 | Code | Meaning |
 |------|---------|
 | 0 | Binding removed, lock rewritten. |
+| 1 | The in-place `ocx.toml` edit could not be expressed safely (rare); the command aborts rather than falling back to a lossy rewrite. |
 | 64 | No `ocx.toml` found in scope, binding name is ambiguous across groups (use `--group`), or `--global` combined with `--project`. |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this remove — run `ocx lock` to reconcile. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |

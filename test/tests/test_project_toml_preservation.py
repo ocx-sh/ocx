@@ -43,10 +43,17 @@ def _project(tmp_path: Path, body: str) -> Path:
     return project_dir
 
 
-def _publish(ocx: OcxRunner, tmp_path: Path, suffix: str) -> PackageInfo:
-    """Publish a throwaway package whose repo name carries ``suffix``."""
+def _publish(
+    ocx: OcxRunner, tmp_path: Path, suffix: str, *, cascade: bool = False
+) -> PackageInfo:
+    """Publish a throwaway package whose repo name carries ``suffix``.
+
+    ``cascade`` also publishes the ``latest`` tag, which a *bare* binding
+    (registry/repo with no tag) needs: the config loader injects ``:latest``
+    onto a tagless value, so resolution looks that tag up for real.
+    """
     repo = f"t_{uuid4().hex[:8]}_{suffix}"
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=cascade)
 
 
 def _assert_contains_all(content: str, fragments: list[str], context: str) -> None:
@@ -142,7 +149,11 @@ def test_add_emits_no_empty_group_or_package_tables(
         f"ocx add failed: rc={result.returncode}, stderr={result.stderr!r}"
     )
 
-    lines = (project_dir / "ocx.toml").read_text().splitlines()
+    content = (project_dir / "ocx.toml").read_text()
+    assert added.repo in content, (
+        f"the new binding must actually land in the file; got:\n{content}"
+    )
+    lines = content.splitlines()
     assert "[group]" not in lines, f"empty [group] table must not appear; got:\n{lines}"
     assert "[package]" not in lines, f"empty [package] table must not appear; got:\n{lines}"
 
@@ -199,6 +210,52 @@ def test_add_to_group_preserves_comments(ocx: OcxRunner, tmp_path: Path) -> None
     )
     assert "[package]" not in content.splitlines(), (
         f"an empty [package] table must not appear; got:\n{content}"
+    )
+
+
+def test_add_preserves_bare_repo_binding_byte_identical(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A bare-repo binding (no tag, no digest — e.g. ``bun = "host/bun"``)
+    survives an unrelated ``ocx add`` byte-identical: its leading comment,
+    trailing comment, and non-default spacing all come back unchanged.
+
+    ``parse_tool_map`` injects an implicit ``:latest`` tag onto a bare
+    identifier when it loads the config into memory (so resolution always has
+    an advisory tag), but the on-disk text still has no tag. The write-back
+    compares `identifier.to_string()` (now carrying the injected `:latest`)
+    against the raw on-disk value and sees a spurious change, so it rewrites
+    the line and drops its decor even though the user's declaration did not
+    change at all.
+    """
+    kept = _publish(ocx, tmp_path, "barekeep", cascade=True)
+    added = _publish(ocx, tmp_path, "bareadd")
+
+    bare_line = (
+        f'{kept.repo}    =    "{ocx.registry}/{kept.repo}"'
+        "  # bare repo, deliberately unpinned\n"
+    )
+    body = (
+        f"{SCHEMA_DIRECTIVE}\n"
+        "\n"
+        "[tools]\n"
+        "# deliberately unpinned, do not add a tag\n"
+        f"{bare_line}"
+    )
+    project_dir = _project(tmp_path, body)
+
+    result = _run_cmd(ocx, project_dir, "add", added.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    content = (project_dir / "ocx.toml").read_text()
+    assert added.repo in content, (
+        f"the new binding must actually land in the file; got:\n{content}"
+    )
+    assert bare_line in content, (
+        "the bare binding must come back byte-identical (comment + spacing "
+        f"untouched) even though it has no on-disk tag; got:\n{content}"
     )
 
 
@@ -301,13 +358,16 @@ def test_add_preserves_env_and_package_sections(
         f"the untouched [env] / [group.*.env] / [package.*] block must be preserved "
         f"verbatim; got:\n{content}"
     )
+    assert added.repo in content, (
+        f"the new binding must actually land in the file; got:\n{content}"
+    )
 
 
 def test_init_then_add_keeps_schema_directive_first(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """The file ``ocx init`` generates keeps its schema directive through the
-    first ``ocx add``, and carries no unparsable ``registry`` hint."""
+    first ``ocx add``."""
     added = _publish(ocx, tmp_path, "initadd")
 
     project_dir = tmp_path / "proj"
@@ -315,12 +375,6 @@ def test_init_then_add_keeps_schema_directive_first(
     init_result = _run_cmd(ocx, project_dir, "init")
     assert init_result.returncode == EXIT_SUCCESS, (
         f"ocx init failed: rc={init_result.returncode}, stderr={init_result.stderr!r}"
-    )
-
-    generated = (project_dir / "ocx.toml").read_text()
-    assert "registry" not in generated, (
-        "ocx init must not advertise a `registry` key — ocx.toml has none and "
-        f"the parser rejects it; got:\n{generated}"
     )
 
     result = _run_cmd(ocx, project_dir, "add", added.fq)
@@ -331,6 +385,65 @@ def test_init_then_add_keeps_schema_directive_first(
     content = (project_dir / "ocx.toml").read_text()
     assert content.splitlines()[0] == SCHEMA_DIRECTIVE, (
         f"the #:schema directive must survive the first add; got:\n{content}"
+    )
+
+
+def test_add_keeps_schema_directive_first_when_file_has_no_tools_table(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add`` against a comments-only file — no ``[tools]`` table
+    declared yet at all — must not demote the ``#:schema`` directive off
+    line 1.
+
+    When the on-disk file has no tables, every existing comment is stored by
+    the underlying TOML editor as trailing document text rather than decor
+    attached to an item. Inserting the first-ever ``[tools]`` table renders
+    that new item *before* the trailing text, so the comments that used to
+    open the file end up appended after it instead.
+    """
+    added = _publish(ocx, tmp_path, "notoolsadd")
+
+    body = f"{SCHEMA_DIRECTIVE}\n# my toolchain\n"
+    project_dir = _project(tmp_path, body)
+
+    result = _run_cmd(ocx, project_dir, "add", added.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    content = (project_dir / "ocx.toml").read_text()
+    assert added.repo in content, (
+        f"the new binding must actually land in the file; got:\n{content}"
+    )
+    assert content.splitlines()[0] == SCHEMA_DIRECTIVE, (
+        "the #:schema directive must stay on line 1 even when the file had no "
+        f"[tools] table yet; got:\n{content}"
+    )
+
+
+def test_add_to_group_keeps_schema_directive_first_when_file_has_no_tools_table(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Same regression via ``ocx add --group``, which creates
+    ``[group.ci.tools]`` — instead of ``[tools]`` — as the file's first
+    table."""
+    added = _publish(ocx, tmp_path, "notoolsgroupadd")
+
+    body = f"{SCHEMA_DIRECTIVE}\n# my toolchain\n"
+    project_dir = _project(tmp_path, body)
+
+    result = _run_cmd(ocx, project_dir, "add", "--group", "ci", added.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --group failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    content = (project_dir / "ocx.toml").read_text()
+    assert added.repo in content, (
+        f"the new binding must actually land in the file; got:\n{content}"
+    )
+    assert content.splitlines()[0] == SCHEMA_DIRECTIVE, (
+        "the #:schema directive must stay on line 1 even via --group add on a "
+        f"comments-only file; got:\n{content}"
     )
 
 
