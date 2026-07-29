@@ -56,14 +56,40 @@ pub async fn scan_interface_binaries(
         .collect())
 }
 
+/// Every regular file the package puts on an interface-visible `PATH`
+/// directory, executable or not, in a deterministic (name-sorted) order.
+///
+/// The third projection of [`collect_candidates`]' single walk, beside
+/// [`scan_interface_binaries`] and [`verify_declared_binaries`]. Consumed by
+/// [`super::libc_lint`], which asks what a file *is* (an ELF, and what
+/// dynamic loader it names) rather than whether the filesystem marks it
+/// runnable — so it deliberately keeps the non-executable candidates too. A
+/// missing exec bit is a packaging slip; the libc a file demands is a fact
+/// about its bytes either way, and dropping unmarked files here would make
+/// the lint pass green on a host that cannot read POSIX permission bits at
+/// all (see [`host_can_scan`]).
+///
+/// # Errors
+///
+/// Propagates directory-walk I/O failures via [`crate::Error`], exactly like
+/// [`scan_interface_binaries`].
+pub async fn scan_interface_files(
+    content_root: &Path,
+    metadata: &AuthoringMetadata,
+    platform: &Platform,
+) -> crate::Result<Vec<PathBuf>> {
+    let candidates = collect_candidates(content_root, metadata, platform).await?;
+    Ok(candidates.into_values().map(|candidate| candidate.path).collect())
+}
+
 /// One naming candidate discovered while scanning a target directory: its
 /// on-disk path (diagnostic context) and whether it satisfies `platform`'s
 /// executable-file convention. A non-executable regular file with a
 /// grammar-valid name is still recorded — [`scan_interface_binaries`]
 /// filters to executable candidates only, but [`verify_declared_binaries`]
-/// needs the non-executable ones too, to distinguish "declared name present
-/// but not executable" from "declared name simply absent from disk" (ADR §2
-/// mode table, Verify row).
+/// and [`scan_interface_files`] need the non-executable ones too, to
+/// distinguish "declared name present but not executable" from "declared
+/// name simply absent from disk" (ADR §2 mode table, Verify row).
 struct Candidate {
     path: PathBuf,
     executable: bool,

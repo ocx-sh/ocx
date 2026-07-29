@@ -10,6 +10,7 @@ pub mod error;
 pub mod info;
 pub mod install_info;
 pub mod install_status;
+pub mod libc_lint;
 pub mod metadata;
 pub mod resolved_package;
 pub mod tag;

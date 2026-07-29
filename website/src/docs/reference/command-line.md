@@ -2196,6 +2196,36 @@ reused layer added later at `push` time was never part of the content tree `crea
 cases need the publisher to hand-author `binaries` instead. See
 [Executables][reference-binaries] for the full field semantics.
 
+##### Checking the declared libc {#package-create-libc-check}
+
+For a Linux target, `create` also checks the [`os.features`][reference-platforms] the
+`--platform` value declares against what the packaged binaries actually need. Under subset
+matching an **empty** feature list is a positive claim that the artifact demands nothing of the
+host — so a glibc-linked binary published without `libc.glibc` resolves on a musl-only host and
+then fails to start with a bare `No such file or directory`, the kernel reporting a missing ELF
+interpreter for a file that is plainly there.
+
+The check reads the ELF `PT_INTERP` header of every file the package puts on an interface
+`PATH` directory — the same scan scope as `--bin-scan`, but every regular file rather than only
+the executable ones, since the libc a file needs is a fact about its bytes. It is not gated on
+`--bin-scan`: that flag governs the `binaries` claim, this governs the `os.features` claim.
+
+| Condition | Result |
+|---|---|
+| Statically linked (no `PT_INTERP`) | Needs no declaration |
+| Needs a libc the declared platform requires | Passes |
+| Needs a libc the declared platform does not require | Exit 65; the message names the file, the loader, and a paste-ready `--platform` value |
+| Dynamically linked, but the platform is `any` | Exit 65 — `any` claims every host can run it |
+| Carries an ELF header but will not parse, or names an unrecognised loader | Exit 65 — an undeterminable requirement is never treated as "needs nothing" |
+| Not an ELF object (scripts, data, docs) | Not a subject of the check |
+
+The check runs before the archive is written, so a refusal leaves no bundle on disk.
+
+It reads only the dynamic loader. A binary that needs `libicu`, `libstdc++` or any other shared
+library still passes, as does one built against a newer glibc than the host provides —
+`os.features` carries libc *family*, not version. Targets other than Linux are not checked: macOS
+has a single C library, and OCX defines no `libc.*` feature for the Windows CRTs.
+
 **Usage**
 
 ```shell
@@ -2209,7 +2239,7 @@ ocx package create [OPTIONS] <PATH>
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
-- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename.
+- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename. For a Linux target its `os.features` are checked against the packaged binaries — see [Checking the declared libc](#package-create-libc-check).
 - `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
 - `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Requires `--platform` (see above); dependencies without a digest are pinned to that platform's manifest digests, and the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.

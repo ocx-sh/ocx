@@ -57,7 +57,9 @@ Each per-platform manifest's digest depends only on its own bytes. Push the *sam
 
 ## libc Differentiation {#libc}
 
-Linux ships two major libc implementations: [glibc][glibc] (the GNU C Library, used by Ubuntu, Debian, Fedora, and most distributions) and [musl][musl] (used by Alpine Linux and similar minimal environments). A binary compiled against glibc requires glibc at runtime; the wrong libc produces a clean failure at loader time (`version 'GLIBC_X.Y' not found`) before any code runs.
+Linux ships two major libc implementations: [glibc][glibc] (the GNU C Library, used by Ubuntu, Debian, Fedora, and most distributions) and [musl][musl] (used by Alpine Linux and similar minimal environments). A binary compiled against glibc requires glibc at runtime, and the failure when it is absent is not a helpful one: if the host has *some* glibc but too old a one you get `version 'GLIBC_X.Y' not found`, but if the host has no glibc at all — the Alpine case — the kernel cannot find the ELF interpreter the binary names and reports `No such file or directory` for a file that is plainly there.
+
+Declaring the requirement is what avoids this, and OCX will not let you skip it: an undeclared libc is a positive claim of universality, so [`ocx package create`][cmd-package-create-libc-check] reads the packaged binaries and refuses a Linux platform whose `os.features` do not cover what they actually need.
 
 If your tool ships both a glibc build and a musl build, you can publish both under the same tag and let OCX pick the right one automatically. The mechanism is the [OCI `os.features` field][oci-image-index]: mark each manifest entry with `libc.glibc` or `libc.musl` and OCX's index resolution selects the one that matches the installing host.
 
@@ -236,6 +238,7 @@ Projecting a pin map onto the platform being published or run against uses the s
 <!-- commands -->
 [exit-codes]: ../reference/command-line.md#exit-codes
 [cmd-package-create]: ../reference/command-line.md#package-create
+[cmd-package-create-libc-check]: ../reference/command-line.md#package-create-libc-check
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-index-update]: ../reference/command-line.md#index-update
 [cmd-install]: ../reference/command-line.md#package-install

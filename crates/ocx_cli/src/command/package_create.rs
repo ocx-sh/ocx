@@ -26,6 +26,12 @@ pub struct PackageCreate {
     /// and `ocx package test` default to the recorded value and reject a
     /// `--platform` that disagrees. Resolution honors `--remote`,
     /// `--offline`, and `--frozen`. Also used to infer the output filename.
+    ///
+    /// For a Linux target the declared `os.features` are checked against what
+    /// the packaged binaries actually need: a binary linked against a libc
+    /// this value does not require is refused (exit 65), because an
+    /// undeclared libc claims the package runs on hosts that cannot execute
+    /// it. Static binaries need no declaration.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -89,6 +95,18 @@ impl PackageCreate {
                 let metadata = AuthoringMetadata::read_json(metadata_source).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
                 let metadata = self.resolve_binaries(metadata, &platform).await?;
+                // Check what the packaged binaries actually demand of a host
+                // against what `--platform` claims they demand. Runs after
+                // the binaries scan (both read the same content tree) and,
+                // like every other step in this arm, before the archive is
+                // written — a refused artifact leaves no bundle on disk.
+                //
+                // Not gated on `--bin-scan`: that flag governs the `binaries`
+                // metadata claim, while this governs the `os.features` claim.
+                // A publisher passing `--no-bin-scan` is declining to have
+                // their binary list filled in, not declining to have a false
+                // libc claim caught.
+                package::libc_lint::check_declared_libc(&self.path, &metadata, &platform).await?;
                 // Validate the projection the publisher will actually push:
                 // run the publish-time env/entrypoint checks against the
                 // declared platform.

@@ -120,6 +120,12 @@ The relation is not symmetric, and the asymmetry is deliberate:
 The [libc differentiation][authoring-libc] page walks through the dual-libc case end to end,
 including how OCX detects which libc families a host provides.
 
+Because the inversion makes an **empty** `os.features` a positive claim — "this artifact demands
+nothing of the host, so every host matches" — omitting a feature is never a neutral act.
+[`ocx package create`][cmd-package-create-libc-check] enforces that for the libc namespace on
+Linux targets: it reads the packaged binaries' dynamic loader and refuses a platform whose
+`os.features` do not cover what they need.
+
 ### Scoring {#compatibility-scoring}
 
 An image index can offer more than one compatible manifest for the same requirement — a bare
