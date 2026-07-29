@@ -275,6 +275,69 @@ impl Platform {
             os_features: super::host_capabilities::cached_os_features(),
         })
     }
+
+    /// This platform with every `os.features` entry in `feature`'s namespace
+    /// **replaced** by `feature`. `Display` sorts and dedupes, so the rendered
+    /// result is canonical and round-trips through `FromStr` — which is what
+    /// makes the result paste-ready as a `--platform` value.
+    ///
+    /// A feature's namespace is the text before its first `.`
+    /// ([`feature_namespace`]), so `libc.glibc` replaces every `libc.*` entry
+    /// and leaves `win32k` — or any future namespace — untouched. A dotless
+    /// tag has no namespace and is never replaced by a dotted feature: a
+    /// declared bare `libc` survives `libc.glibc`, because it is a feature the
+    /// publisher wrote, not a member of the `libc.*` family.
+    ///
+    /// **Replace, never union.** `os.features` are ANDed by subset matching
+    /// ([`is_compatible`]), so a value carrying both `libc.glibc` and
+    /// `libc.musl` names a platform no single-libc host can satisfy —
+    /// unresolvable, and worse than saying nothing because it looks
+    /// authoritative. A namespace like `libc` is single-valued per artifact;
+    /// the honest statement for a glibc binary under a musl declaration is
+    /// "this is a glibc artifact", not "declare both".
+    ///
+    /// [`Any`](Self::Any) carries no fields, so there is nothing to add and it
+    /// is returned unchanged — total rather than panicking.
+    pub fn with_os_feature(&self, feature: &str) -> Self {
+        let Self::Specific {
+            os,
+            arch,
+            variant,
+            os_features,
+        } = self
+        else {
+            return Self::Any;
+        };
+        let namespace = feature_namespace(feature);
+        let mut os_features: Vec<String> = os_features
+            .iter()
+            // A dotless feature names no namespace, so it evicts nothing —
+            // stated on both sides, or two bare tags would collide on `None`
+            // and one would silently evict the other.
+            .filter(|tag| namespace.is_none() || feature_namespace(tag) != namespace)
+            .cloned()
+            .collect();
+        os_features.push(feature.to_string());
+        Self::Specific {
+            os: *os,
+            arch: *arch,
+            variant: variant.clone(),
+            os_features,
+        }
+    }
+}
+
+/// The namespace an `os.features` tag belongs to: the text before its first
+/// `.`, or `None` for a tag carrying no dot (`libc.glibc` → `Some("libc")`,
+/// `win32k` → `None`).
+///
+/// `os.features` is an open string namespace whose only structure is this
+/// dotted prefix — the convention `libc.*` follows and any future family will.
+/// A dotless tag is a bare tag, **not** the namespace it happens to spell: a
+/// declared `libc` is not a member of the `libc.*` family, and treating it as
+/// one would evict a feature the publisher wrote.
+fn feature_namespace(feature: &str) -> Option<&str> {
+    feature.split_once('.').map(|(namespace, _leaf)| namespace)
 }
 
 /// Defaults to [`Platform::Any`] (platform-agnostic).
@@ -773,6 +836,93 @@ impl<'de> Deserialize<'de> for Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- with_os_feature: namespace replacement, round-tripping ---
+
+    #[test]
+    fn with_os_feature_renders_a_paste_ready_platform() {
+        let declared: Platform = "linux/amd64".parse().expect("parses");
+        let suggested = declared.with_os_feature("libc.glibc");
+        assert_eq!(suggested.to_string(), "linux/amd64+libc.glibc");
+        // Paste-ready means exactly this: the rendered value parses back to
+        // the same platform, so a user can hand it to `--platform` verbatim.
+        assert_eq!(
+            suggested.to_string().parse::<Platform>().expect("round-trips"),
+            suggested
+        );
+    }
+
+    #[test]
+    fn with_os_feature_replaces_the_namespace_rather_than_anding_it() {
+        // Unioning would emit `linux/arm64/v8+libc.glibc,libc.musl`, which
+        // subset matching ANDs — no single-libc host resolves it, so the
+        // paste-ready value would be unresolvable while looking authoritative.
+        let declared: Platform = "linux/arm64/v8+libc.musl".parse().expect("parses");
+        assert_eq!(
+            declared.with_os_feature("libc.glibc").to_string(),
+            "linux/arm64/v8+libc.glibc",
+            "the result must name one member of the namespace, never two ANDed"
+        );
+    }
+
+    #[test]
+    fn with_os_feature_preserves_other_namespaces() {
+        // Only the incoming feature's own namespace is replaced; any other
+        // feature the publisher declared is theirs and survives.
+        let declared: Platform = "windows/amd64+win32k".parse().expect("parses");
+        assert_eq!(
+            declared.with_os_feature("libc.glibc").to_string(),
+            "windows/amd64+libc.glibc,win32k"
+        );
+    }
+
+    #[test]
+    fn with_os_feature_replaces_every_member_of_the_namespace_not_a_known_list() {
+        // The filter is the dotted namespace, not an enumeration of the
+        // families OCX happens to model today: an unrecognised `libc.*` tag
+        // is still a libc claim and must be replaced, or the result ANDs two
+        // libc families and resolves nowhere.
+        let declared: Platform = "linux/amd64+libc.musl,libc.uclibc,gpu.cuda".parse().expect("parses");
+        assert_eq!(
+            declared.with_os_feature("libc.glibc").to_string(),
+            "linux/amd64+gpu.cuda,libc.glibc",
+            "every `libc.*` entry goes, and only the `libc` namespace"
+        );
+    }
+
+    #[test]
+    fn with_os_feature_keeps_a_dotless_tag_that_spells_a_namespace() {
+        // `libc` is a bare feature the publisher declared, not a member of the
+        // `libc.*` family, so `libc.glibc` must not evict it. Treating a
+        // dotless tag as its own namespace drops it — the one input on which
+        // the namespace filter and the `libc.`-prefix filter it replaced can
+        // disagree, and `declared_libcs` still uses the other one.
+        let declared: Platform = "linux/amd64+libc".parse().expect("parses");
+        assert_eq!(
+            declared.with_os_feature("libc.glibc").to_string(),
+            "linux/amd64+libc,libc.glibc",
+            "a dotless tag has no namespace and cannot be evicted by a dotted feature"
+        );
+    }
+
+    #[test]
+    fn with_os_feature_on_any_is_unchanged() {
+        // `any` carries no fields; total rather than panicking.
+        assert_eq!(Platform::Any.with_os_feature("libc.glibc"), Platform::Any);
+    }
+
+    #[test]
+    fn feature_namespace_splits_on_the_first_dot_only() {
+        assert_eq!(feature_namespace("libc.glibc"), Some("libc"));
+        assert_eq!(feature_namespace("a.b.c"), Some("a"));
+        assert_eq!(feature_namespace("win32k"), None, "no dot: no namespace at all");
+        assert_eq!(
+            feature_namespace("libc"),
+            None,
+            "spelling a namespace is not being in one"
+        );
+        assert_eq!(feature_namespace(""), None);
+    }
 
     // --- D1: is_compatible / compatibility_score / select_best ---
 
