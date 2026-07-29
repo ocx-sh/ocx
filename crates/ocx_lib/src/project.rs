@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod config;
+mod document;
 pub mod env;
 pub mod error;
 pub mod hash;
@@ -31,7 +32,7 @@ pub use mutate::{
     add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
     remove_binding_in_memory,
 };
-pub use mutation::{MutationCommit, MutationGuard, StagedMutation};
+pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
 pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};

@@ -74,6 +74,20 @@ pub enum ProjectErrorKind {
     #[error("TOML serialization error")]
     TomlSerialize(#[source] toml::ser::Error),
 
+    /// The on-disk `ocx.toml` did not parse as an editable document during a
+    /// format-preserving mutation (see `crate::project::document`).
+    #[error("ocx.toml is not an editable TOML document")]
+    ManifestEditParse(#[source] toml_edit::TomlError),
+
+    /// A format-preserving `ocx.toml` edit produced a document that no longer
+    /// describes the staged configuration.
+    ///
+    /// Fail-closed guard, not a user-input fault: the write is abandoned rather
+    /// than falling back to a whole-file rewrite, which is what used to discard
+    /// comments and ordering (issue #256).
+    #[error("edited ocx.toml no longer matches the staged configuration")]
+    ManifestEditDiverged,
+
     /// A lock `[[tool]]` `repository` carried a tag or digest. The lock
     /// shape stores bare registry/repo coordinates only — the per-platform
     /// pull id is reconstructed from `repository` + the per-platform leaf
@@ -467,7 +481,14 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::EnvUnknownModifier { .. }
                 | ProjectErrorKind::EnvInvalidValue { .. }
                 | ProjectErrorKind::EnvUnknownValueField { .. }
-                | ProjectErrorKind::LockRepositoryNotBare { .. } => ExitCode::ConfigError,
+                | ProjectErrorKind::LockRepositoryNotBare { .. }
+                // The file on disk is valid TOML by the serde parser's reckoning
+                // but not an editable document — same class, same remedy.
+                | ProjectErrorKind::ManifestEditParse(_) => ExitCode::ConfigError,
+                // Not a config fault: the format-preserving writer could not
+                // express the staged mutation. Nothing the user can edit their
+                // way out of, so no sysexits code would tell the truth.
+                ProjectErrorKind::ManifestEditDiverged => ExitCode::Failure,
                 ProjectErrorKind::EmptyGroupFilter
                 | ProjectErrorKind::UnknownGroup { .. }
                 | ProjectErrorKind::DuplicateToolAcrossSelectedGroups { .. }

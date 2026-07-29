@@ -971,7 +971,7 @@ Home       /home/user/.ocx
 
 Creates a minimal `ocx.toml` in the current directory.
 
-The generated file contains a commented-out `registry` declaration and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly.
+The generated file contains a [`#:schema` directive][config-schemas] and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly; comments and declaration order in the file survive every mutation.
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
 
@@ -3572,6 +3572,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
 [config-project-env]: ./configuration.md#project-config-env
+[config-schemas]: ./configuration.md#schemas
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [user-guide-managed-config]: ../user-guide.md#managed-config

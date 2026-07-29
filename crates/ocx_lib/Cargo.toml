@@ -54,6 +54,7 @@ sha2.workspace = true
 hex.workspace = true
 indexmap.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 flate2.workspace = true
 zstd.workspace = true
 tar.workspace = true

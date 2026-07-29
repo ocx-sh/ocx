@@ -80,6 +80,28 @@ def test_init_idempotent_error_when_file_exists(ocx: OcxRunner, tmp_path: Path) 
     )
 
 
+def test_init_advertises_no_key_the_parser_rejects(ocx: OcxRunner, tmp_path: Path) -> None:
+    """The generated template contains no commented-out ``registry`` key.
+
+    ``ocx.toml`` has no such field and its parser is ``deny_unknown_fields``, so
+    the hint the template used to carry broke the file for anyone who took it up
+    on the offer. The default registry lives in ``config.toml``
+    (``[registry] default``), not in the project manifest.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    result = _run_init(ocx, project_dir)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx init failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    content = (project_dir / "ocx.toml").read_text()
+    assert "registry" not in content, (
+        f"ocx init must not advertise a `registry` key in ocx.toml; got:\n{content}"
+    )
+
+
 def test_init_emits_schema_directive_on_first_line(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx init`` writes a ``#:schema https://ocx.sh/schemas/project/v1.json``
     directive on the first line so taplo / VS Code / Zed pick up the
