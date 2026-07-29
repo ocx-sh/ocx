@@ -9,5 +9,6 @@
       "required": true,
       "visibility": "public"
     }
-  ]
+  ],
+  "binaries": ["ocx"]
 }
