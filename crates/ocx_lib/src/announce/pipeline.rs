@@ -579,11 +579,61 @@ pub fn regenerate(committed: &Value, observed: &[Observed], now: &str) -> Value 
     }
     let mut new_root = committed.clone();
     if let Some(root) = new_root.as_object_mut() {
+        // Order matters: `variants` is placed relative to `tags`, so it has to
+        // be written while the committed `tags` key is still in position.
+        apply_variants(root, &new_tags);
         // Replacing an existing key keeps its position (preserve_order), so
         // `tags` stays the last field per CONTRACTS §14.
         root.insert("tags".to_string(), Value::Object(new_tags));
     }
     new_root
+}
+
+/// Record the package's variant set on the rebuilt root, in the index bot's
+/// slot — after `source`, immediately before `tags` (CONTRACTS §14 keeps
+/// `tags` last). The byte gate re-serializes the committed root through the
+/// bot's own codec and rejects any other position.
+///
+/// The value is a **projection** of [`crate::package::version::variant_names`]
+/// over the regenerated tag names, never a second derivation, so a published
+/// root and `ocx index list --variants` cannot disagree. It is recomputed from
+/// `new_tags` rather than carried over for the same reason `source` is: a
+/// variant whose last tag disappeared upstream must leave the root in the same
+/// run, or the field outlives the tags that justified it.
+///
+/// An empty set **removes** the key rather than writing `[]`. Two spellings for
+/// one state is drift a projection cannot afford, the index schema's
+/// `minItems: 1` refuses the other one — and, decisively, an unconditional
+/// `"variants": []` would change the bytes of every root published before this
+/// field existed, so the next announce of each would fail the C6 unchanged
+/// short-circuit and open a pull request per package.
+fn apply_variants(root: &mut Map<String, Value>, new_tags: &Map<String, Value>) {
+    let variants = crate::package::version::variant_names(new_tags.keys().map(String::as_str));
+    if variants.is_empty() {
+        // `shift_remove`, never `remove`: under `preserve_order` the latter is
+        // `swap_remove`, which fills the hole from the end. Today that is
+        // indistinguishable — `variants` sits immediately before `tags`, the
+        // last key, so both spellings produce the same document and no test
+        // here can tell them apart. `shift_remove` is chosen because it stays
+        // correct without that coincidence: it does not depend on `variants`
+        // being second-to-last, which is a contract of the *bot's* serializer,
+        // not something this function is in a position to check.
+        root.shift_remove("variants");
+        return;
+    }
+    let value = Value::Array(variants.into_iter().map(Value::String).collect());
+    match root.get_mut("variants") {
+        // Replacing in place keeps the committed position, so a root the bot
+        // wrote and a root announce rewrites agree byte-for-byte.
+        Some(slot) => *slot = value,
+        // First time: insert immediately before `tags`. A root with no `tags`
+        // key at all is not a shape the index serves (it is `required`), but
+        // appending is the only sane fallback if one ever appears.
+        None => {
+            let index = root.keys().position(|key| key == "tags").unwrap_or(root.len());
+            root.shift_insert(index, "variants".to_string(), value);
+        }
+    }
 }
 
 /// A fresh `{content, observed}` tag entry, carrying a preserved yank marker
@@ -1458,6 +1508,152 @@ mod tests {
         assert_eq!(
             new_cas_count(&committed, std::slice::from_ref(&observed("1.0.0", 'a'))),
             0
+        );
+    }
+
+    // ── regenerate: the `variants` projection ────────────────────────────────
+
+    #[test]
+    fn regenerate_records_the_variant_set_and_places_it_before_tags() {
+        // The index bot's serializer emits `variants` after `source` and
+        // immediately before `tags`; a different position fails the byte gate.
+        let committed = committed_root("oci://ghcr.io/x/y");
+        let regenerated = regenerate(
+            &committed,
+            &[observed("1.0.0", 'a'), observed("slim-1.0.0", 'b')],
+            "2099-12-31T00:00:00Z",
+        );
+        assert_eq!(regenerated["variants"], serde_json::json!(["slim"]));
+        let fields: Vec<&str> = regenerated
+            .as_object()
+            .expect("the root is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            &fields[fields.len() - 2..],
+            &["variants", "tags"],
+            "variants must land immediately before tags, got {fields:?}"
+        );
+    }
+
+    #[test]
+    fn regenerate_omits_variants_entirely_when_only_the_default_ships() {
+        // Not `"variants": []`. Writing the empty array would change the bytes
+        // of every root published before this field existed, so the next
+        // announce of each would miss the C6 short-circuit and open a pull
+        // request per package.
+        let committed = committed_root("oci://ghcr.io/x/y");
+        let regenerated = regenerate(&committed, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
+        assert!(
+            regenerated.get("variants").is_none(),
+            "an empty variant set must omit the key, got {:?}",
+            regenerated.get("variants")
+        );
+        assert!(
+            !String::from_utf8(serialize_root(&regenerated))
+                .expect("ASCII")
+                .contains("variants")
+        );
+    }
+
+    #[test]
+    fn regenerate_matches_the_shared_derivation_over_the_recorded_tags() {
+        // The invariant that makes the recorded field safe to read instead of
+        // re-derive — and the reason `ocx index list --variants` and a
+        // published root cannot disagree: one function answers both.
+        let committed = committed_root("oci://ghcr.io/x/y");
+        let entries = [
+            observed("1.0.0", 'a'),
+            observed("slim-1.0.0", 'b'),
+            observed("slim-1.0", 'b'),
+            observed("musl-1.0.0-rc1", 'c'),
+            observed("latest", 'a'),
+            observed("nightly", 'd'),
+        ];
+        let regenerated = regenerate(&committed, &entries, "2099-12-31T00:00:00Z");
+        let recorded: Vec<String> = regenerated["variants"]
+            .as_array()
+            .expect("variants is an array")
+            .iter()
+            .map(|value| value.as_str().expect("a variant name is a string").to_string())
+            .collect();
+        let tag_names: Vec<&str> = regenerated["tags"]
+            .as_object()
+            .expect("tags is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(recorded, crate::package::version::variant_names(tag_names));
+        assert_eq!(recorded, vec!["musl", "slim"]);
+    }
+
+    #[test]
+    fn regenerate_drops_a_variant_whose_last_tag_left_the_curated_set() {
+        // Carried over verbatim, the field would outlive the tags that
+        // justified it and the root would claim a variant it no longer ships.
+        let mut committed = committed_root("oci://ghcr.io/x/y");
+        committed["tags"]["slim-1.0.0"] =
+            serde_json::json!({ "content": digest_string('b'), "observed": "2026-02-02T00:00:00Z" });
+        let first = regenerate(
+            &committed,
+            &[observed("1.0.0", 'a'), observed("slim-1.0.0", 'b')],
+            "2099-12-31T00:00:00Z",
+        );
+        assert_eq!(first["variants"], serde_json::json!(["slim"]));
+
+        let second = regenerate(&first, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
+        assert!(
+            second.get("variants").is_none(),
+            "the slim tag is gone, so the variant must be too"
+        );
+    }
+
+    #[test]
+    fn regenerate_rewrites_variants_in_place_keeping_the_committed_position() {
+        // A root the index bot already wrote carries `variants` in its own
+        // slot; replacing the value must not move the key, or announce and the
+        // bot disagree byte-for-byte on the same content.
+        let mut committed = committed_root("oci://ghcr.io/x/y");
+        let object = committed.as_object_mut().expect("root object");
+        let index = object.keys().position(|key| key == "tags").expect("tags key");
+        object.shift_insert(index, "variants".to_string(), serde_json::json!(["musl"]));
+
+        let regenerated = regenerate(
+            &committed,
+            &[observed("1.0.0", 'a'), observed("slim-1.0.0", 'b')],
+            "2099-12-31T00:00:00Z",
+        );
+        assert_eq!(regenerated["variants"], serde_json::json!(["slim"]));
+        let fields: Vec<&str> = regenerated
+            .as_object()
+            .expect("root object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(&fields[fields.len() - 2..], &["variants", "tags"]);
+    }
+
+    #[test]
+    fn regenerate_removing_variants_does_not_reorder_the_root() {
+        // `Map::remove` is `swap_remove` under `preserve_order` — it would drop
+        // `tags` into the vacated slot and silently reorder the document.
+        let mut committed = committed_root("oci://ghcr.io/x/y");
+        let object = committed.as_object_mut().expect("root object");
+        let index = object.keys().position(|key| key == "tags").expect("tags key");
+        object.shift_insert(index, "variants".to_string(), serde_json::json!(["slim"]));
+
+        let regenerated = regenerate(&committed, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
+        let fields: Vec<&str> = regenerated
+            .as_object()
+            .expect("root object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["name", "repository", "owners", "status", "created", "desc", "tags"],
+            "dropping variants must leave every other field where it was"
         );
     }
 
