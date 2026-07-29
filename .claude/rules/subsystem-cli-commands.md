@@ -75,7 +75,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `package announce` | Observe an owner-curated tag set and publish the rebuilt entry into the index (write locally or open/update a fork pull request) | `--package`, `--tags`/`--tags-from-file`/`--tags-from-registry`/`--refresh`, `--out`/`--fork`, `--index-repo`, `--yank`/`--unyank`/`--yank-reason` |
+| `package announce` | Observe an owner-curated tag set and publish the rebuilt entry into the index — write locally (`--out`), or open/update a pull request from a fork (`--fork`) or from a branch on the index repo itself (neither flag; needs push access, verified up front, exit 80 naming repo + permission) | `--package`, `--tags`/`--tags-from-file`/`--tags-from-registry`/`--refresh`, `--out`/`--fork` (both optional), `--index-repo`, `--yank`/`--unyank`/`--yank-reason` |
 | `package install PKGS...` | Download and install packages (no `ocx.toml` touched) | `-s/--select`, `-p/--platform` |
 | `package uninstall PKGS...` | Remove candidate symlink | `-d/--deselect`, `--purge` |
 | `package select PKGS...` | Set `current` symlink | `-p` |

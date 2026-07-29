@@ -8,10 +8,17 @@
 //! repository. It observes an owner-curated set of registry tags, rebuilds the
 //! package's index root byte-exactly (CONTRACTS §14, via
 //! [`crate::oci::index::serialize_root`]) and stores each observed tag's image
-//! index verbatim as a content-addressed object, then either writes the result
-//! locally (`--out`) or opens/updates a fork pull request against the index
-//! (`--fork`). Server-side privileged verification (ownership, claim
-//! re-derivation) happens in the index CI, never here.
+//! index verbatim as a content-addressed object, then writes the result locally
+//! (`--out`), opens/updates a pull request from a fork of the index (`--fork`),
+//! or opens the same pull request from a branch on the index repository itself
+//! (neither flag — for a publisher whose credential can already push there).
+//! Server-side privileged verification (ownership, claim re-derivation) happens
+//! in the index CI, never here.
+//!
+//! Every remote mode ends in a **pull request** — the fork-free path narrows
+//! design register S3 ("always fork") to "always a reviewed pull request",
+//! because GitHub cannot fork a repository into the organization that owns it,
+//! so first-party publishers had no working path at all.
 //!
 //! The pipeline behaviourally matches the Python reference tool
 //! (`ocx-sh/index` `bot/cli/announce.py`, design register FP-9), with the
@@ -48,9 +55,10 @@ const INDEX_BASE_REF: &str = "main";
 /// Announce one package (design register C11/C12 — one package per call).
 ///
 /// `forge` is `Some` for every mode that reaches a remote: it reads the
-/// committed root (C10) and, for [`AnnounceTarget::Fork`], commits and opens the
-/// pull request. A `None` forge cannot read the committed root, so announce
-/// returns [`AnnounceError::ForgeRequired`].
+/// committed root (C10) and, for [`AnnounceTarget::Fork`] and
+/// [`AnnounceTarget::Direct`], commits and opens the pull request. A `None`
+/// forge cannot read the committed root, so announce returns
+/// [`AnnounceError::ForgeRequired`].
 ///
 /// # Errors
 ///
@@ -73,26 +81,38 @@ pub async fn announce(
     //    <owner>/<repo>` may name one renamed away from the upstream's
     //    repository name. Deliberately read-only (`find_fork`, never
     //    `ensure_fork`): an unchanged run must not provoke a fork create (C6).
-    let existing_fork = match &request.target {
-        AnnounceTarget::Fork(target) => forge.find_fork(&request.index_repo, target).await?,
+    let fork_target = match &request.target {
+        AnnounceTarget::Fork(target) => Some(target),
+        AnnounceTarget::Direct | AnnounceTarget::Out(_) => None,
+    };
+    let existing_fork = match fork_target {
+        Some(target) => forge.find_fork(&request.index_repo, target).await?,
+        None => None,
+    };
+    // Where the announce branch lives *right now*: a fork that already exists,
+    // the index repository itself on the fork-free path, nowhere for `--out`.
+    // Every later endpoint is built from this one value, so the fork and direct
+    // paths share the whole branch-state / root-read / commit sequence below.
+    let branch_repo = match &request.target {
+        AnnounceTarget::Direct => Some(request.index_repo.clone()),
+        AnnounceTarget::Fork(_) => existing_fork.as_ref().map(ForkIdentity::coordinate),
         AnnounceTarget::Out(_) => None,
     };
-    let fork_coordinate = existing_fork.as_ref().map(ForkIdentity::coordinate);
 
     // 0b. Is the announce branch still carrying work, or is it residue?
     //     The branch is per package (C4) and outlives every pull request opened
     //     from it, so its mere existence says nothing. Accumulating onto a spent
     //     branch re-proposes already-merged commits and the pull request
     //     conflicts on the root file every announce edits (#228).
-    let branch_state = resolve_branch_state(forge, &request.index_repo, fork_coordinate.as_ref(), &branch).await?;
+    let branch_state = resolve_branch_state(forge, &request.index_repo, branch_repo.as_ref(), &branch).await?;
 
-    // 1. Read the committed root (C10), from the fork branch head while the
+    // 1. Read the committed root (C10), from the announce branch head while the
     //    branch is live (C4) so sequential announces accumulate, else from the
     //    index main.
     let root_read = read_committed_root(
         forge,
         &request.index_repo,
-        fork_coordinate.as_ref().filter(|_| branch_state.is_live()),
+        branch_repo.as_ref().filter(|_| branch_state.is_live()),
         &root_path,
         &branch,
     )
@@ -131,7 +151,8 @@ pub async fn announce(
     let message = format!("announce: curate {package}");
     let pull_request_body = format!("Publisher-curated tag update for `{package}`.");
 
-    // 7. Dispatch: write locally (`--out`) or open/update a fork PR (`--fork`).
+    // 7. Dispatch: write locally (`--out`), or commit and open/update the pull
+    //    request — from a fork (`--fork`) or from the index repository itself.
     match &request.target {
         AnnounceTarget::Out(directory) => {
             // `--out` writes on EVERY run, unchanged included. C6 is scoped to
@@ -151,9 +172,9 @@ pub async fn announce(
                 desc_status,
             })
         }
-        AnnounceTarget::Fork(target) => {
+        AnnounceTarget::Fork(_) | AnnounceTarget::Direct => {
             if unchanged {
-                // C6: a pure no-op — unless a prior fork announce left commits
+                // C6: a pure no-op — unless a prior announce left commits
                 // on the branch that the index base does not have. Such a run
                 // may have committed content whose pull request then failed to
                 // open, stranding the update; ensure an open PR exists so it is
@@ -163,13 +184,13 @@ pub async fn announce(
                 // away from the base carries nothing unmerged, and opening a
                 // pull request for it produces the unmergeable one #228 is
                 // about.
-                if let Some(fork) = &existing_fork
+                if let Some(repo) = &branch_repo
                     && root_read.branch_sha.is_some()
                 {
                     let pull_request = forge
                         .open_or_update_pull_request(
                             &request.index_repo,
-                            &fork.owner,
+                            &repo.owner,
                             &branch,
                             INDEX_BASE_REF,
                             &message,
@@ -180,7 +201,7 @@ pub async fn announce(
                         package,
                         status,
                         pull_request: Some(pull_request),
-                        fork: Some(fork.clone()),
+                        fork: existing_fork,
                         written_paths: Vec::new(),
                         reserved_tags_dropped: reserved_dropped,
                         desc_status,
@@ -202,9 +223,23 @@ pub async fn announce(
             // SHA (C8 — first announce, and equally a spent branch, whose head
             // `read_committed_root` was told to ignore) — one atomic multi-file
             // commit (C15).
-            let fork = match existing_fork {
-                Some(fork) => fork,
-                None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
+            //
+            // Both resolutions sit AFTER the unchanged short-circuit on purpose:
+            // C6 says a run that moves nothing must provoke no fork create, and
+            // symmetrically must not demand push permission the direct path only
+            // needs in order to write.
+            let (commit_repo, fork) = match fork_target {
+                Some(target) => {
+                    let fork = match existing_fork {
+                        Some(fork) => fork,
+                        None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
+                    };
+                    (fork.coordinate(), Some(fork))
+                }
+                None => {
+                    forge.ensure_push_access(&request.index_repo).await?;
+                    (request.index_repo.clone(), None)
+                }
             };
             let base_sha = match root_read.branch_sha {
                 Some(sha) => sha,
@@ -222,7 +257,7 @@ pub async fn announce(
             // never overwritten.
             match forge
                 .commit_files(
-                    &fork.coordinate(),
+                    &commit_repo,
                     &branch,
                     &base_sha,
                     &message,
@@ -234,16 +269,16 @@ pub async fn announce(
                 Ok(_) => {}
                 Err(crate::forge::ForgeError::NonFastForward { .. }) => {
                     let head_sha = forge
-                        .get_ref_sha(&fork.coordinate(), &format!("heads/{branch}"))
+                        .get_ref_sha(&commit_repo, &format!("heads/{branch}"))
                         .await?
                         .ok_or_else(|| AnnounceError::MissingBaseRef {
-                            repo: fork.full_name.clone(),
+                            repo: commit_repo.full_name(),
                         })?;
                     let head_bytes = forge
-                        .get_file_contents(&fork.coordinate(), &root_path, &head_sha)
+                        .get_file_contents(&commit_repo, &root_path, &head_sha)
                         .await?
                         .ok_or_else(|| AnnounceError::MissingHeadRoot {
-                            repo: fork.full_name.clone(),
+                            repo: commit_repo.full_name(),
                             path: root_path.clone(),
                             sha: head_sha.clone(),
                         })?;
@@ -277,7 +312,7 @@ pub async fn announce(
                             // CAS-checked, since a third announce could have
                             // advanced the branch again while we regenerated.
                             .commit_files(
-                                &fork.coordinate(),
+                                &commit_repo,
                                 &branch,
                                 &head_sha,
                                 &message,
@@ -294,7 +329,7 @@ pub async fn announce(
             let pull_request = forge
                 .open_or_update_pull_request(
                     &request.index_repo,
-                    &fork.owner,
+                    &commit_repo.owner,
                     &branch,
                     INDEX_BASE_REF,
                     &message,
@@ -305,7 +340,7 @@ pub async fn announce(
                 package,
                 status,
                 pull_request: Some(pull_request),
-                fork: Some(fork),
+                fork,
                 written_paths: Vec::new(),
                 reserved_tags_dropped: reserved_dropped,
                 desc_status,

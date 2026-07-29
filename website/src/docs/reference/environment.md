@@ -91,13 +91,13 @@ nested `ocx run` calls — honor the same opt-in.
 
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
-A GitHub personal access token, read only by [`ocx package announce`][cmd-package-announce] when opening or updating a fork pull request against the index repository (`--fork`). Writing locally with `--out` does not need one.
+A GitHub personal access token, read only by [`ocx package announce`][cmd-package-announce] when it opens or updates a pull request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
 
 ```sh
 export OCX_ANNOUNCE_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a bearer header on requests to the index's forge, never logged or placed in a URL. `--fork` without this variable set fails immediately rather than falling back to an unauthenticated attempt.
+This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a bearer header on requests to the index's forge, never logged or placed in a URL. Any mode other than `--out` fails immediately without this variable rather than falling back to an unauthenticated attempt. Without `--fork` the token must also carry push permission on the index repository, which announce verifies before writing anything.
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 

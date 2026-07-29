@@ -617,6 +617,40 @@ impl GitHubForge {
         Ok(identity)
     }
 
+    /// Verify the credential may push a branch to `repo`, before anything is
+    /// written there.
+    ///
+    /// The fork-free announce path commits onto the index repository itself, so
+    /// a credential without push permission fails partway through the git-data
+    /// sequence — and GitHub reports an unauthorised write as 404 at least as
+    /// often as 403, which [`Self::commit_files`] would then mistake for the
+    /// fresh-fork provisioning race, sleep 3s, replay the whole sequence, and
+    /// finally surface a bare status code naming a URL. One read of the
+    /// repository's own `permissions.push` collapses all of that into a named
+    /// error before any write is attempted.
+    ///
+    /// `permissions` is only present on an authenticated read, and a repository
+    /// the credential cannot see answers 404 rather than 403 — both mean the same
+    /// thing to the caller, so both land on the same error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForgeError::PushAccessDenied`] when the repository is invisible
+    /// to the credential or reports no push permission, or any other
+    /// [`ForgeError`] on transport, status, or decode failure.
+    pub async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<(), ForgeError> {
+        let url = self.url(&format!("/repos/{}/{}", repo.owner, repo.repo));
+        let allowed = self
+            .get_json_optional(&url)
+            .await?
+            .and_then(|body| body.get("permissions")?.get("push")?.as_bool())
+            .unwrap_or(false);
+        if allowed {
+            return Ok(());
+        }
+        Err(ForgeError::PushAccessDenied { repo: repo.full_name() })
+    }
+
     /// Commit `files` atomically onto `branch` at `base_sha`, returning the new
     /// commit SHA. One commit carries the root plus every CAS file via the git
     /// data API — never a loop over the single-file contents API (design

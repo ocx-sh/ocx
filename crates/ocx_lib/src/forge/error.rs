@@ -87,6 +87,16 @@ pub enum ForgeError {
     #[error("forge compare {url} returned an unmodelled status {status}")]
     UnknownCompareStatus { url: String, status: String },
 
+    /// The credential cannot push a branch to the repository the fork-free
+    /// announce path commits to.
+    ///
+    /// Raised by an up-front probe rather than by the first rejected write:
+    /// GitHub answers an unauthorised write with 404 as readily as 403, and a
+    /// 404 mid-sequence is indistinguishable from the fresh-fork provisioning
+    /// race [`super::GitHubForge::commit_files`] retries for.
+    #[error("no push access to {repo}: the announce credential is missing write (push) permission on that repository")]
+    PushAccessDenied { repo: String },
+
     /// A fast-forward-only ref update was rejected — a concurrent announce
     /// advanced the branch (design register C4, compare-and-swap). The caller
     /// re-reads the new head, regenerates, and retries.
@@ -101,6 +111,9 @@ impl ClassifyExitCode for ForgeError {
             // or lacks scope. The fix is a credential, not a config file or a
             // retry (design register C13).
             Self::Status { status, .. } if *status == 401 || *status == 403 => Some(ExitCode::AuthError),
+            // Same class as the 403 above, reached by a probe instead of a
+            // rejected write: the fix is a credential with more permission.
+            Self::PushAccessDenied { .. } => Some(ExitCode::AuthError),
             // 429 — a secondary rate limit. The request was well-formed and the
             // credential is fine; the same call succeeds after a backoff, so a
             // CI wrapper must be able to tell it apart from bad input.

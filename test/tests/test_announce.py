@@ -1399,3 +1399,107 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
         extra_env={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},127.0.0.1:{port}"},
     )
     assert report["status"] == "updated"
+
+
+# ── fork-free path: the announce branch lives on the index repository ──────
+
+
+def test_announce_direct_commits_the_branch_to_the_index_repo_and_opens_a_pull_request(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """With neither `--out` nor `--fork`, the announce branch is committed onto
+    the INDEX repository itself and the pull request is opened from there — no
+    fork is looked up, created, or written to anywhere.
+
+    Two assertions carry the contract and neither is redundant. That the root
+    landed on `ocx-sh/index@<announce branch>` proves the commit reached the
+    index repo; that `ocx-sh/index@main` is byte-for-byte the SHA it was before
+    the run proves the change still goes through a pull request rather than
+    straight onto the default branch, which is what the index's governance gate
+    and its `refresh`/`new-package` labelling run on.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    main_before = fake_forge.branch_head(INDEX_OWNER, INDEX_REPO, "main")
+    assert main_before is not None, "the seeded index root must give main a head to compare against"
+
+    report = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL
+    )
+
+    assert report["status"] == "updated"
+    assert report["pull_request_url"]
+    assert report["fork"] is None, "the fork-free path has no fork to report"
+    # The rebuilt root is on the index repo's announce branch...
+    branch = branch_name(package)
+    committed = fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch=branch)
+    assert committed is not None, f"no root committed to {INDEX_FULL}@{branch}"
+    assert "1.0.0" in json.loads(committed)["tags"]
+    # ...and NOT on the index's default branch.
+    assert fake_forge.branch_head(INDEX_OWNER, INDEX_REPO, "main") == main_before, (
+        "the direct path must open a pull request, never commit to the index default branch"
+    )
+    # No fork was consulted or created at any point.
+    assert fake_forge.request_count("POST", f"/repos/{INDEX_FULL}/forks") == 0
+    assert not [path for _, path in fake_forge.requests if "/forkuser/" in path], (
+        f"the direct path must touch no fork: {fake_forge.requests}"
+    )
+    assert fake_forge.request_count("POST", f"/repos/{INDEX_FULL}/pulls") == 1
+
+
+def test_announce_direct_without_push_access_fails_closed_naming_repo_and_permission(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A credential that can read the index but not push to it must be refused
+    with exit 80 (`AuthError`) BEFORE anything is written, and the message must
+    name the repository and the missing permission.
+
+    The probe exists because GitHub answers an unauthorised write with 404 as
+    readily as 403, and a mid-sequence 404 is indistinguishable from the
+    fresh-fork provisioning race `commit_files` sleeps and retries for — so
+    without it this failure is a delayed, bare status code naming a URL.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    fake_forge.no_push_access.add(INDEX_FULL)
+
+    result = announce(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL, check=False
+    )
+
+    assert result.returncode == 80, f"expected AuthError (80), got {result.returncode}: {result.stderr}"
+    assert INDEX_FULL in result.stderr, f"the error must name the repository: {result.stderr}"
+    assert "push" in result.stderr, f"the error must name the missing permission: {result.stderr}"
+    # Fail-closed: refused before any write, so no branch and no pull request.
+    assert fake_forge.branch_head(INDEX_OWNER, INDEX_REPO, branch_name(package)) is None
+    assert fake_forge.request_count("POST", f"/repos/{INDEX_FULL}/git/blobs") == 0
+    assert fake_forge.request_count("POST", f"/repos/{INDEX_FULL}/pulls") == 0
+
+
+def test_announce_requires_the_credential_for_every_mode_that_writes(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`OCX_ANNOUNCE_TOKEN` gates writing, not forking: `--out` is the one mode
+    that runs without it, and the fork-free path — which has no `--fork` to key
+    a credential check off — is refused just like `--fork` is."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    shared = ["--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL]
+
+    tokenless_direct = announce(ocx, fake_forge, *shared, token=None, check=False)
+    assert tokenless_direct.returncode == 80, (
+        f"the fork-free path writes, so it needs the credential: {tokenless_direct.stderr}"
+    )
+    assert "OCX_ANNOUNCE_TOKEN" in tokenless_direct.stderr
+
+    tokenless_out = announce(ocx, fake_forge, *shared, "--out", str(tmp_path / "out"), token=None, check=False)
+    assert tokenless_out.returncode == 0, f"--out writes nothing remote and must still run: {tokenless_out.stderr}"
