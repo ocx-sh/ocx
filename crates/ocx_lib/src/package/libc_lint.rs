@@ -1063,6 +1063,23 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn admits_a_path_that_only_names_a_dependency_tree() {
+            // The review's probe: a sidecar whose only interface PATH var
+            // points at a pinned dependency's tree. Legal, publish-validated
+            // metadata, and nothing of THIS package ships there — so there is
+            // nothing for this lint to inspect and nothing to refuse. The
+            // remedy an unresolvable-scope error would name is impossible
+            // here: a dependency's directory can never be respelled
+            // `${installPath}/<dir>`.
+            let (dir, metadata) = tree_with_env(&path_var("${deps.jdk.installPath}/bin"));
+            glibc_binary(dir.path(), "stray");
+
+            check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect("a dependency-only PATH is not this package's to inspect");
+        }
+
+        #[tokio::test]
         async fn scans_the_package_segment_of_a_joined_path_value() {
             // A `PATH` value is a separator-joined list. The package's own
             // segment is inspected; the dependency's tree is not this
