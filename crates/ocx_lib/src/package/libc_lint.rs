@@ -265,6 +265,14 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
 /// is the only evidence a cross-build has, and it is the evidence every
 /// toolchain writes deliberately.
 ///
+/// Do not "unify" the two. Beyond the banner probe being unrunnable here, the
+/// host module's loader-name fragments are `#[cfg]`-gated to the **build
+/// host's** architecture, so reusing them would misclassify precisely the
+/// foreign-arch artifact this exists to check. The seam the two modules do
+/// share is the one that shows up on the wire — [`LibcFlavor`] and its
+/// `os_feature_tag` / `from_os_feature_tag` round trip — not the strategy for
+/// arriving at a family.
+///
 /// Returns `None` for a loader OCX cannot attribute, which the caller turns
 /// into a hard error rather than a silent pass.
 fn classify_interpreter(interpreter: &str) -> Option<LibcFlavor> {
