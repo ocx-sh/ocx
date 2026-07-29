@@ -117,24 +117,14 @@ pub async fn check_declared_libc(
         });
     }
 
-    let files = collect_scan_files(content_root, metadata, &scope.directories).await?;
-    // Fail-closed on an empty result, not on an enumerated list of bad input
-    // shapes. Emptiness is what actually matters and every route to it —
-    // a directory that does not exist, one that exists and is empty, a
-    // wildcard level the strip count never reaches — arrives here the same
-    // way. Checking the result catches them all at once; checking the inputs
-    // catches whichever one was thought of.
-    if !scope.directories.is_empty() && files.is_empty() {
-        return Err(LibcLintError::NothingInspected {
-            directories: scope
-                .directories
-                .iter()
-                .map(|dir| dir.as_path().display().to_string())
-                .collect(),
-        });
-    }
-
-    for path in files {
+    // No empty-result refusal. The invariant is that the lint may only pass
+    // when it inspected the file set it was supposed to inspect — and a
+    // resolved scope holding nothing IS that set, inspected. A package that
+    // puts no file on PATH has no libc requirement, so an empty `os.features`
+    // is true and there is nothing to contradict. Only an *unresolvable*
+    // scope (above) means the lint looked nowhere. Conflating the two refused
+    // `binaries`-declared-but-absent, which ADR §2 rules legal.
+    for path in collect_scan_files(content_root, metadata, &scope.directories).await? {
         // Blocking file I/O (`ElfStream` needs `Read + Seek`), so it goes to
         // the blocking pool. Sequential rather than fanned out: the subjects
         // are one `PATH` directory's entries, and a `JoinSet` here would buy
@@ -547,20 +537,6 @@ pub enum LibcLintError {
         /// The unresolvable `PATH` segments.
         values: Vec<String>,
     },
-    /// The package declares directories on an interface `PATH` and not one
-    /// file was found in them, so the declared `os.features` were checked
-    /// against nothing. Refused rather than reported as verified — an empty
-    /// result and a clean result are the same value, and only one of them is
-    /// evidence.
-    #[error(
-        "found no file to inspect in {}, so the declared os.features were checked against nothing; \
-         the directories the package puts on PATH are absent or empty",
-        directories.join(", ")
-    )]
-    NothingInspected {
-        /// The `${installPath}`-relative directories that yielded no files.
-        directories: Vec<String>,
-    },
     /// Walking the content tree for candidate files failed.
     #[error("failed to walk the content tree while checking declared os.features")]
     Scan(#[from] crate::Error),
@@ -580,8 +556,7 @@ impl crate::cli::ClassifyExitCode for LibcLintError {
             | Self::AgnosticPlatformClaim { .. }
             | Self::UnparseableElf { .. }
             | Self::UnrecognizedInterpreter { .. }
-            | Self::UnresolvableScanScope { .. }
-            | Self::NothingInspected { .. } => Some(crate::cli::ExitCode::DataError),
+            | Self::UnresolvableScanScope { .. } => Some(crate::cli::ExitCode::DataError),
             // A file we could not read is an I/O fault, not bad data.
             Self::Read { .. } => Some(crate::cli::ExitCode::IoError),
             // Delegate to the inner cause via the chain walker.
@@ -1127,21 +1102,30 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn refuses_when_the_declared_path_directory_does_not_exist() {
-            // The shape resolves; the directory is simply absent. Zero files
-            // inspected, so the os.features claim was checked against
-            // nothing — the same false pass as an unresolvable shape,
-            // reached by a different route.
+        async fn admits_a_declared_path_directory_that_does_not_exist() {
+            // Case 2: the scope RESOLVES and the directory is absent. The
+            // lint looked, and the package puts no file on PATH — so it has
+            // no libc requirement and an empty `os.features` is true. ADR §2
+            // rules a declared-but-absent directory legal; refusing it here
+            // would overrule a decision the project already made.
             let (dir, metadata) = tree_with_env(&path_var("${installPath}/bin"));
             glibc_binary(dir.path(), "stray");
 
-            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+            check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
                 .await
-                .expect_err("an absent PATH directory must not report success");
-            assert!(
-                matches!(error, LibcLintError::NothingInspected { .. }),
-                "expected NothingInspected, got {error:?}"
-            );
+                .expect("a resolved scope holding nothing is an inspected scope");
+        }
+
+        #[tokio::test]
+        async fn admits_a_declared_path_directory_that_is_empty() {
+            // The sibling route to the same empty: the directory exists and
+            // ships nothing. Same verdict, same reason.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}/bin"));
+            std::fs::create_dir_all(dir.path().join("bin")).expect("create bin/");
+
+            check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect("an empty declared directory is not a failure to inspect");
         }
 
         #[tokio::test]
