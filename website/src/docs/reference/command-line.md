@@ -2044,11 +2044,13 @@ The `version` key is the only field the [self update](#self-update) parser reads
 
 #### `announce` {#package-announce}
 
-Observes an owner-curated set of registry tags for one package and publishes the rebuilt entry into the index: either written to a local directory (`--out`) or opened as a pull request against a fork of the index repository (`--fork`).
+Observes an owner-curated set of registry tags for one package and publishes the rebuilt entry into the index: written to a local directory (`--out`), or opened as a pull request against the index repository.
 
-A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced against the same fork updates the existing pull request in place rather than opening a second one.
+The pull request comes from a fork with `--fork`. Omit `--fork` and the announce branch is pushed to `--index-repo` itself — for a publisher whose credential can already push there, which is the only working path when the publishing repository and the index share an owner, since a repository cannot be forked into the organization that already owns it. Either way the change arrives as a pull request; `announce` never commits to the index's default branch.
 
-An unchanged run normally opens no pull request either. The one exception is a `--fork` run whose announce branch still carries commits the index repository does not have: an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded.
+A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced from the same branch updates the existing pull request in place rather than opening a second one.
+
+An unchanged run normally opens no pull request either. The one exception is a run whose announce branch still carries commits the index repository does not have: an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded.
 
 `--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
 
@@ -2061,7 +2063,7 @@ A tag that is not a version — the OCX-internal `__ocx` namespace, or a canonic
 **Usage**
 
 ```shell
-ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) (--out <DIRECTORY> | --fork <OWNER>/<REPO>) [OPTIONS]
+ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <OWNER>/<REPO>] [OPTIONS]
 ```
 
 **Options**
@@ -2073,8 +2075,8 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | `--tags-from-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
 | `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
 | `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
-| `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`; exactly one is required. | — |
-| `--fork <OWNER>/<REPO>` | Open (or update) a pull request against this fork. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
+| `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`, and the one mode that needs no credential. | — |
+| `--fork <OWNER>/<REPO>` | Open (or update) the pull request from this fork. Omit it to push the announce branch straight to `--index-repo`, which needs push access on that repository. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
 | `--index-repo <OWNER>/<REPO>` | Index repository the pull request targets. | `ocx-sh/index` |
 | `--yank <TAG>` | Mark a tag as yanked — a publisher signal that content should no longer be installed, not a delete. Repeatable. Requires `--yank-reason`; only applies to a tag already in the curated set. | — |
 | `--unyank <TAG>` | Clear the yanked marker from a tag. Repeatable. | — |
@@ -2086,7 +2088,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | Condition | Exit code |
 |---|---|
 | A curated tag's physical host resolves to a private, loopback, link-local, or metadata address — add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow | 78 |
-| `--fork` given without [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] set, or the token was rejected (401/403) | 80 |
+| Any mode other than `--out` run without [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] set, the token was rejected (401/403), or — without `--fork` — the token cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
 | The physical registry could not be resolved (DNS failure), or the forge is unreachable or returned a 5xx | 69 |
 | A curated tag does not resolve on the physical registry — check for a typo | 79 |
 | The namespace is unclaimed — no committed root exists for the package yet. Claiming one is a human-lane action, never something announce performs | 79 |
@@ -2109,7 +2111,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 }
 ```
 
-`status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; in `--fork` mode they are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in `--fork` mode. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
+`status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; otherwise `pull_request_url`/`pull_request_number` are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it, and `fork` is `null` whenever `--fork` was not given. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in every mode that opens a pull request. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
 
 ::: tip
 [`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-from-file` reads, so a publish pipeline can feed one straight into the other:
@@ -2177,11 +2179,13 @@ needs no sidecar either way, since it never scans.
 Filling or verifying the field needs a scan, and a scan needs a host that can evaluate the
 **target platform's** executable-file convention. The Windows extension allowlist is pure string
 matching — any host can apply it — but the Unix exec-bit convention can only be read on a Unix
-host. When the host cannot (e.g. a Windows host creating a `linux/amd64`-targeted package),
-`--bin-scan` fails with exit 65 (`UnsupportedHostScan`); under the Auto default the same
-situation is not an error — the field is left undeclared (absent, not `[]`) rather than risk a
-false "publisher asserts zero" claim. Hand-author `binaries` or pass `--no-bin-scan` to work
-around a cross-host scan gap.
+host. In practice that means a Windows host targeting anything but Windows: `linux/*`, `darwin/*`
+and `--platform any` alike — `any` names no native OS convention of its own, so it is scanned by
+the Unix exec bit like the rest. There, every mode that would have scanned fails with exit 65
+(`UnsupportedHostScan`) — `--bin-scan`, and the Auto default with `binaries` absent. A host that
+cannot check the claim says so rather than publish an unchecked one quietly. Hand-author
+`binaries`, or pass `--no-bin-scan` to declare the gap deliberately; the error names both. A Unix
+host is unaffected in every mode and for every target.
 
 An unreadable scan-target directory (e.g. permission denied) fails with exit 74
 ([`IoError`][exit-codes]) rather than silently producing an empty list; only a target directory
@@ -2196,6 +2200,49 @@ reused layer added later at `push` time was never part of the content tree `crea
 cases need the publisher to hand-author `binaries` instead. See
 [Executables][reference-binaries] for the full field semantics.
 
+##### Checking the declared libc {#package-create-libc-check}
+
+Whenever `--metadata` is given and the target is a Linux one or `any`, `create` also checks the
+[`os.features`][reference-platforms] the
+`--platform` value declares against what the packaged binaries actually need. Under subset
+matching an **empty** feature list is a positive claim that the artifact demands nothing of the
+host — so a glibc-linked binary published without `libc.glibc` resolves on a musl-only host and
+then fails to start with a bare `No such file or directory`, the kernel reporting a missing ELF
+interpreter for a file that is plainly there.
+
+The check reads the ELF `PT_INTERP` header of every file the package puts on an interface
+`PATH` directory — the same scan scope as `--bin-scan`, but every regular file rather than only
+the executable ones, since the libc a file needs is a fact about its bytes. It is not gated on
+`--bin-scan`: that flag governs the `binaries` claim, this governs the `os.features` claim.
+
+| Condition | Result |
+|---|---|
+| Statically linked (no `PT_INTERP`) | Needs no declaration |
+| Needs a libc the declared platform requires | Passes |
+| Needs a libc the declared platform does not require | Exit 65; the message names the file, the loader, and a paste-ready `--platform` value |
+| Dynamically linked, but the platform is `any` | Exit 65 — `any` claims every host can run it |
+| Carries an ELF header but will not parse, or names an unrecognised loader | Exit 65 — an undeterminable requirement is never treated as "needs nothing" |
+| Not an ELF object (scripts, data, docs) | Not a subject of the check |
+
+The check runs before the archive is written, so a refusal leaves no bundle on disk.
+
+It reads only the dynamic loader. A binary that needs `libicu`, `libstdc++` or any other shared
+library still passes, as does one built against a newer glibc than the host provides —
+`os.features` carries libc *family*, not version. Targets other than Linux are not checked: macOS
+has a single C library, and OCX defines no `libc.*` feature for the Windows CRTs.
+
+`--no-libc-lint` skips the check entirely, including its scan-scope refusal. It is an escape
+hatch rather than a convenience: the check reads bytes off disk, and a wrong answer from it would
+otherwise block every `create` for a Linux target with no way through. Skipping it leaves the
+declared `os.features` unverified — an artifact this section would refuse can then be published,
+and it will resolve on hosts that cannot execute it — so a warning naming the declared platform is
+printed to stderr. The warning follows the check's own scope — `--metadata` with a Linux target or
+`--platform any`. Anywhere the check never inspects (a bare `create` with no sidecar, or a
+non-Linux *concrete* target) the flag suppresses nothing, so nothing is said. Passing it on every
+leg of a per-platform matrix therefore stays quiet except where it actually skipped something.
+Nothing else changes: the same metadata and the same layers are written either
+way.
+
 **Usage**
 
 ```shell
@@ -2209,13 +2256,14 @@ ocx package create [OPTIONS] <PATH>
 **Options**
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
-- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename.
+- `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename. With `--metadata`, a Linux target or `any` also has its `os.features` checked against the packaged binaries — see [Checking the declared libc](#package-create-libc-check).
 - `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
 - `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Requires `--platform` (see above); dependencies without a digest are pinned to that platform's manifest digests, and the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
 - `--bin-scan`, `--no-bin-scan`: Scan the content tree for executables the package puts on `PATH` to fill or verify the [`binaries`][reference-binaries] metadata claim — see the mode table above. Paired, last-wins flags; neither given (the default) fills an absent claim and passes a declared one through untouched.
+- `--no-libc-lint`: Skip the libc check on the packaged binaries — see [Checking the declared libc](#package-create-libc-check). The escape hatch for a false refusal: the declared `os.features` then go unverified and a warning naming the platform is printed wherever the check would have run, but nothing about what gets written changes.
 - `-h`, `--help`: Print help information.
 
 #### `pull` {#package-pull}

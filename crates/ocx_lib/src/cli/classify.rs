@@ -99,6 +99,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package::bin_scan::BinScanError;
     use crate::package::dependency_pinning::DependencyPinningError;
     use crate::package::error::Error as PackageError;
+    use crate::package::libc_lint::LibcLintError;
     use crate::package::metadata::authoring::AuthoringError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::patch::PatchError;
@@ -154,6 +155,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(AuthoringError);
     try_downcast!(DependencyPinningError);
     try_downcast!(BinScanError);
+    try_downcast!(LibcLintError);
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
