@@ -110,7 +110,7 @@ async fn collect_candidates(
 /// returned directory is already confirmed to exist: [`DirWalker`] only
 /// discovers real directories via `readdir`, so a missing wildcard level
 /// yields an empty list rather than an error.
-async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> crate::Result<Vec<PathBuf>> {
+pub async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> crate::Result<Vec<PathBuf>> {
     let classify = move |dir: &Path, depth: usize| -> WalkDecision<PathBuf> {
         if depth < strip {
             WalkDecision::descend()
@@ -121,19 +121,30 @@ async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> crate::Resul
     DirWalker::new(content_root, classify).max_depth(strip).walk().await
 }
 
-/// Lists `dir`'s immediate entries (not recursive — a `PATH` directory never
-/// contributes its subdirectories) and records a candidate for each regular
-/// file whose name is grammar-valid, merging into `candidates`. A *missing*
-/// `dir` contributes zero candidates, not an error (ADR §2 step 3,
-/// "existence probed before walk") — but any other I/O failure (permission
-/// denied, transient error) propagates: a scan that cannot read its target
-/// must never silently bake `binaries: []` into the sidecar, and Verify mode
-/// must not pass green without actually reading the content tree.
-async fn collect_directory_candidates(
-    dir: &Path,
-    platform: &Platform,
-    candidates: &mut BTreeMap<BinaryName, Candidate>,
-) -> crate::Result<()> {
+/// Every regular file directly under `dir`, each paired with its
+/// symlink-followed metadata — the one directory walk behind both create-time
+/// content-tree scans.
+///
+/// **Yields candidates, applies no filter.** The two callers want different
+/// subsets of the same files and each states its own predicate at the call
+/// site: this scan keeps what `platform`'s executable convention claims (see
+/// [`claim_name`]), while [`super::libc_lint`] keeps every file, because a
+/// bundled `.so` or a name [`BinaryName`] rejects still has a dynamic loader
+/// that matters. Pushing either filter in here would silently narrow the
+/// other.
+///
+/// Not recursive — a `PATH` directory never contributes its subdirectories.
+///
+/// # Errors
+///
+/// A *missing* or non-directory `dir` yields zero files, not an error (ADR §2
+/// step 3, "existence probed before walk"), and a dangling symlink is skipped
+/// the same way. Any other I/O failure (permission denied, `ELOOP`, transient)
+/// propagates: a scan that cannot read its target must never silently bake
+/// `binaries: []` into the sidecar, pass `--bin-scan` Verify green without
+/// reading the content tree, or report a file's libc requirement as absent
+/// because it could not be read.
+pub async fn scan_directory_files(dir: &Path) -> crate::Result<Vec<(PathBuf, std::fs::Metadata)>> {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(e)
@@ -142,10 +153,11 @@ async fn collect_directory_candidates(
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
         Err(e) => return Err(crate::error::file_error(dir, e)),
     };
+    let mut files = Vec::new();
     while let Some(entry) = entries
         .next_entry()
         .await
@@ -165,6 +177,23 @@ async fn collect_directory_candidates(
         if !file_metadata.is_file() {
             continue;
         }
+        files.push((path, file_metadata));
+    }
+    Ok(files)
+}
+
+/// Records a candidate for each file under `dir` whose name `platform`'s
+/// executable convention claims and whose stem is a grammar-valid
+/// [`BinaryName`], merging into `candidates`.
+///
+/// The walk itself is [`scan_directory_files`]; this is the binaries-claim
+/// filter over it.
+async fn collect_directory_candidates(
+    dir: &Path,
+    platform: &Platform,
+    candidates: &mut BTreeMap<BinaryName, Candidate>,
+) -> crate::Result<()> {
+    for (path, file_metadata) in scan_directory_files(dir).await? {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -322,35 +351,57 @@ pub enum ScanMode {
 /// under `Verify` mode with a declared claim that disagrees with the content
 /// tree; [`BinScanError::Binary`] if a freshly scanned set fails the
 /// case-fold-collision check; [`BinScanError::Scan`] on a directory-walk I/O
-/// failure; [`BinScanError::UnsupportedHostScan`] under `Verify` mode when
-/// this host cannot evaluate `platform`'s executable-file convention.
+/// failure; [`BinScanError::UnsupportedHostScan`] whenever a scan is required
+/// — `Verify`, or `Auto` with no declared claim — and this host cannot
+/// evaluate `platform`'s executable-file convention.
 pub async fn resolve_binaries(
     content_root: &Path,
     metadata: AuthoringMetadata,
     platform: &Platform,
     mode: ScanMode,
 ) -> Result<AuthoringMetadata, BinScanError> {
+    resolve_binaries_on_host(content_root, metadata, platform, mode, host_can_scan(platform)).await
+}
+
+/// Host-injectable core of [`resolve_binaries`], taking the scan-capability
+/// verdict explicitly.
+///
+/// Same seam shape, and the same reason, as [`Platform::host_can_run_on`]:
+/// [`host_can_scan`] folds `cfg!(unix)` to a compile-time constant, so on a
+/// Unix build the "cannot scan" arms are unreachable through the public entry
+/// point and a `#[cfg(not(unix))]` test of them never compiles — a green
+/// indistinguishable from a check that never ran.
+async fn resolve_binaries_on_host(
+    content_root: &Path,
+    metadata: AuthoringMetadata,
+    platform: &Platform,
+    mode: ScanMode,
+    host_can_scan: bool,
+) -> Result<AuthoringMetadata, BinScanError> {
     // Decoupled from `metadata` up front so later arms are free to move
     // `metadata` without fighting a borrow held by this match scrutinee.
     let declared = metadata.binaries().cloned();
 
     // Every arm that actually scans (`scan_interface_binaries` /
-    // `verify_declared_binaries`) is guarded by `host_can_scan(platform)` —
-    // `Off` and `Auto` with a declared field never scan by design (ADR §2
-    // mode table) and so carry no such guard. Keeping the check inline here,
-    // rather than as a standalone up-front predicate, keeps this match the
-    // single source of truth for which combinations scan.
+    // `verify_declared_binaries`) is guarded by `host_can_scan` — and the
+    // guard arm refuses, never degrades. `Off` and `Auto` with a declared
+    // field never scan by design (ADR §2 mode table) and so carry no such
+    // guard. Keeping the check inline here, rather than as a standalone
+    // up-front predicate, keeps this match the single source of truth for
+    // which combinations scan.
     match (mode, declared) {
         (ScanMode::Off, _) => Ok(metadata),
-        // Verify always needs a trustworthy scan (to fill or to diff) — fail
-        // closed rather than risk a false pass or a false diff.
-        (ScanMode::Verify, _) if !host_can_scan(platform) => Err(BinScanError::UnsupportedHostScan {
+        // Both scanning combinations fail closed on a host that cannot
+        // evaluate the target's executable convention. Verify would risk a
+        // false pass or a false diff; Auto would publish with `binaries`
+        // silently absent, which reads downstream as "this publisher never
+        // declared any" and is indistinguishable from a deliberate omission.
+        // A host that cannot check the claim must say so rather than ship an
+        // unchecked artifact quietly — `--no-bin-scan` is the deliberate way
+        // through, and the error names it.
+        (ScanMode::Verify, _) | (ScanMode::Auto, None) if !host_can_scan => Err(BinScanError::UnsupportedHostScan {
             platform: platform.clone(),
         }),
-        // Auto with an absent field on a host that can't scan: leave it
-        // undeclared (`None`) rather than baking a false `Some([])`
-        // "publisher asserts zero" claim.
-        (ScanMode::Auto, None) if !host_can_scan(platform) => Ok(metadata),
         // Nothing declared: fill, regardless of Auto vs Verify — verification
         // needs a declaration to verify against (ADR §2 Verify row).
         (_, None) => {
@@ -390,10 +441,13 @@ pub enum BinScanError {
     /// The directory-walk scan itself failed (I/O error).
     #[error("interface-binaries scan failed")]
     Scan(#[from] crate::Error),
-    /// `Verify` mode needs a scan, but this host cannot evaluate `platform`'s
-    /// executable-file convention (the Unix exec-bit convention scanned from
-    /// a non-Unix host — there is no portable API to read POSIX permission
-    /// bits off-Unix).
+    /// A scan is required — `Verify`, or `Auto` with no declared claim — but
+    /// this host cannot evaluate `platform`'s executable-file convention (the
+    /// Unix exec-bit convention scanned from a non-Unix host: there is no
+    /// portable API to read POSIX permission bits off-Unix).
+    ///
+    /// The message names both ways through, because an error that states a
+    /// problem without its remedy costs the reader a documentation lookup.
     #[error("cannot scan for '{platform}' executables on this host; hand-author binaries or pass --no-bin-scan")]
     UnsupportedHostScan { platform: Platform },
 }
@@ -937,42 +991,91 @@ mod tests {
         assert!(host_can_scan(&windows_platform()));
     }
 
-    /// Regression (review W2 / Codex#3): scanning a Unix-convention platform
-    /// from a non-Unix host must never bake a false `Some([])` claim — Auto
-    /// mode leaves the field undeclared instead.
-    #[cfg(not(unix))]
+    // The four arms below run on **every** host, Unix included, by calling
+    // `resolve_binaries_on_host` with the verdict injected. Through the public
+    // `resolve_binaries`, `host_can_scan` folds `cfg!(unix)` to a compile-time
+    // `true` here, so a `#[cfg(not(unix))]` test of these arms would never
+    // compile on this host and its green would be indistinguishable from never
+    // having run — the exact shape `quality-core.md` "Unchecked Green" names.
+
+    /// A host that cannot evaluate the target's executable convention must
+    /// refuse `Auto` with an absent claim, not publish it silently.
+    ///
+    /// Leaving `binaries` undeclared reads downstream as "this publisher
+    /// declared none" — indistinguishable from a deliberate omission, so the
+    /// artifact ships with an unchecked claim and nothing said so.
     #[tokio::test]
-    async fn resolve_binaries_auto_leaves_field_undeclared_when_host_cannot_scan_unix_convention() {
+    async fn resolve_binaries_auto_fails_closed_when_the_host_cannot_scan() {
         let dir = tempfile::tempdir().unwrap();
         let metadata = interface_path_metadata("bin", "interface", None);
 
-        let resolved = resolve_binaries(dir.path(), metadata, &linux_platform(), ScanMode::Auto)
+        let err = resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Auto, false)
             .await
-            .expect("Auto mode must not error when the host cannot evaluate the target convention");
+            .expect_err("Auto with an absent claim must refuse rather than publish unchecked");
         assert!(
-            resolved.binaries().is_none(),
-            "Auto must leave the field undeclared (None), never bake a false Some([]) claim: {:?}",
+            matches!(err, BinScanError::UnsupportedHostScan { .. }),
+            "unexpected: {err}"
+        );
+        assert!(
+            err.to_string().contains("--no-bin-scan"),
+            "the refusal must name the way through, or it costs a docs lookup: {err}"
+        );
+    }
+
+    /// `--bin-scan` Verify mode must fail closed rather than pass green on an
+    /// untrustworthy scan (every candidate would otherwise report as
+    /// non-executable, which either hides real undeclared binaries or falsely
+    /// flags a genuinely executable declared name as `DeclaredNotExecutable`).
+    #[tokio::test]
+    async fn resolve_binaries_verify_fails_closed_when_the_host_cannot_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = interface_path_metadata("bin", "interface", None);
+
+        let err = resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Verify, false)
+            .await
+            .expect_err("Verify must fail closed instead of silently trusting an unevaluable scan");
+        assert!(
+            matches!(err, BinScanError::UnsupportedHostScan { .. }),
+            "unexpected: {err}"
+        );
+        assert!(err.to_string().contains("--no-bin-scan"), "unexpected: {err}");
+    }
+
+    /// The control that keeps the refusal narrow: `Auto` with a claim already
+    /// declared never scans by design, so an unscannable host has nothing to
+    /// refuse. Without this, widening the guard to every `Auto` would pass.
+    #[tokio::test]
+    async fn resolve_binaries_auto_passes_a_declared_claim_through_when_the_host_cannot_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = interface_path_metadata("bin", "interface", None)
+            .with_binaries(Binaries::try_from(BTreeSet::from([BinaryName::try_from("tool").unwrap()])).unwrap());
+
+        let resolved = resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Auto, false)
+            .await
+            .expect("a declared claim needs no scan, so an unscannable host is irrelevant");
+        assert_eq!(
+            resolved.binaries().map(|binaries| binaries.iter().count()),
+            Some(1),
+            "the declared claim must pass through verbatim: {:?}",
             resolved.binaries()
         );
     }
 
-    /// Regression (review W2 / Codex#3): `--bin-scan` Verify mode must fail
-    /// closed rather than pass green on an untrustworthy scan (every
-    /// candidate would otherwise report as non-executable, which either
-    /// hides real undeclared binaries or falsely flags a genuinely
-    /// executable declared name as `DeclaredNotExecutable`).
-    #[cfg(not(unix))]
+    /// The other control: `--no-bin-scan` never scans, so it stays a way
+    /// through on exactly the host that cannot scan. This is the remedy the
+    /// two refusals above name, so it must actually work.
     #[tokio::test]
-    async fn resolve_binaries_verify_errors_when_host_cannot_scan_unix_convention() {
+    async fn resolve_binaries_off_still_passes_through_when_the_host_cannot_scan() {
         let dir = tempfile::tempdir().unwrap();
         let metadata = interface_path_metadata("bin", "interface", None);
 
-        let err = resolve_binaries(dir.path(), metadata, &linux_platform(), ScanMode::Verify)
+        let resolved = resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Off, false)
             .await
-            .expect_err("Verify mode must fail closed instead of silently trusting a non-Unix scan");
+            .expect("--no-bin-scan is the documented way past an unscannable host");
         assert!(
-            matches!(err, BinScanError::UnsupportedHostScan { .. }),
-            "unexpected: {err}"
+            resolved.binaries().is_none(),
+            "Off passes the field through verbatim, undeclared included: {:?}",
+            resolved.binaries()
         );
     }
 }
