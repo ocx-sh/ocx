@@ -106,6 +106,17 @@ pub async fn check_declared_libc(
         Platform::Specific { .. } => return Ok(()),
     };
 
+    // Fail-closed on an unlookable scan scope. An empty candidate set is
+    // otherwise indistinguishable between "read every file the package puts
+    // on PATH, none needed a libc" and "could not resolve where the package
+    // puts anything, so read nothing" — and passing the second as the first
+    // is the same false-negative class this lint exists to close, one level
+    // up: a verified claim that nothing verified.
+    let unscannable = crate::package::bin_scan::unscannable_interface_paths(metadata);
+    if !unscannable.is_empty() {
+        return Err(LibcLintError::UnscannableScanScope { values: unscannable });
+    }
+
     for path in crate::package::bin_scan::scan_interface_files(content_root, metadata, platform).await? {
         // Blocking file I/O (`ElfStream` needs `Read + Seek`), so it goes to
         // the blocking pool. Sequential rather than fanned out: the subjects
@@ -153,10 +164,20 @@ fn declared_libcs(os_features: &[String]) -> BTreeSet<LibcFlavor> {
         .collect()
 }
 
-/// `platform` with `feature` added to its `os.features` — the paste-ready
-/// `--platform` value the error message suggests. [`Platform`]'s `Display`
-/// sorts and dedupes features, so the rendered result is canonical whatever
-/// order they land in here.
+/// `platform` with its `libc.*` features **replaced** by `feature` — the
+/// paste-ready `--platform` value the error message suggests. Non-libc
+/// features (`win32k`, any future namespace) are preserved; [`Platform`]'s
+/// `Display` sorts and dedupes, so the rendered result is canonical.
+///
+/// Replace, never union: `os.features` are ANDed by subset matching, so a
+/// suggestion carrying both `libc.glibc` and `libc.musl` names a platform no
+/// single-libc host can satisfy — unresolvable, and worse than no suggestion
+/// because it looks authoritative. An artifact belongs to one libc family;
+/// the honest advice for a glibc binary under a musl declaration is "this is
+/// a glibc artifact", not "declare both". A genuinely mixed tree therefore
+/// gets one truthful suggestion per offending binary across successive runs,
+/// which is the correct signal that its two halves cannot ship under one
+/// platform key.
 fn with_os_feature(platform: &Platform, feature: &str) -> Platform {
     match platform {
         Platform::Specific {
@@ -165,7 +186,11 @@ fn with_os_feature(platform: &Platform, feature: &str) -> Platform {
             variant,
             os_features,
         } => {
-            let mut os_features = os_features.clone();
+            let mut os_features: Vec<String> = os_features
+                .iter()
+                .filter(|tag| LibcFlavor::from_os_feature_tag(tag).is_none())
+                .cloned()
+                .collect();
             os_features.push(feature.to_string());
             Platform::Specific {
                 os: *os,
@@ -373,8 +398,22 @@ pub enum LibcLintError {
         #[source]
         source: std::io::Error,
     },
-    /// The content-tree scan that produces the candidate files failed.
-    #[error("interface-binaries scan failed")]
+    /// The package puts something on an interface `PATH`, but the declaring
+    /// value's shape cannot be resolved to a directory, so no file could be
+    /// inspected. Refused rather than passed: a claim nothing could check is
+    /// not a checked claim.
+    #[error(
+        "cannot determine what the package puts on PATH, so its declared os.features could not be \
+         checked against any binary: {} names no single `${{installPath}}/<dir>` directory; rewrite \
+         it in that form, or split a joined value into one entry per directory",
+        values.join(", ")
+    )]
+    UnscannableScanScope {
+        /// The interface `Path` values whose shape could not be resolved.
+        values: Vec<String>,
+    },
+    /// Walking the content tree for candidate files failed.
+    #[error("failed to walk the content tree while checking declared os.features")]
     Scan(#[from] crate::Error),
 }
 
@@ -391,7 +430,8 @@ impl crate::cli::ClassifyExitCode for LibcLintError {
             Self::UndeclaredLibc { .. }
             | Self::AgnosticPlatformClaim { .. }
             | Self::UnparseableElf { .. }
-            | Self::UnrecognizedInterpreter { .. } => Some(crate::cli::ExitCode::DataError),
+            | Self::UnrecognizedInterpreter { .. }
+            | Self::UnscannableScanScope { .. } => Some(crate::cli::ExitCode::DataError),
             // A file we could not read is an I/O fault, not bad data.
             Self::Read { .. } => Some(crate::cli::ExitCode::IoError),
             // Delegate to the inner cause via the chain walker.
@@ -484,12 +524,30 @@ mod tests {
             with_os_feature(&declared, "libc.glibc").to_string(),
             "linux/amd64+libc.glibc"
         );
+    }
 
-        // Preserves a variant and merges into existing features canonically.
+    #[test]
+    fn with_os_feature_replaces_a_declared_libc_rather_than_anding_it() {
+        // Unioning would emit `linux/arm64/v8+libc.glibc,libc.musl`, which
+        // subset matching ANDs — no single-libc host resolves it, so the
+        // paste-ready suggestion would be unresolvable while looking
+        // authoritative.
         let declared: Platform = "linux/arm64/v8+libc.musl".parse().expect("parses");
         assert_eq!(
             with_os_feature(&declared, "libc.glibc").to_string(),
-            "linux/arm64/v8+libc.glibc,libc.musl"
+            "linux/arm64/v8+libc.glibc",
+            "the suggestion must name one libc family, never two ANDed"
+        );
+    }
+
+    #[test]
+    fn with_os_feature_preserves_non_libc_features() {
+        // Only the `libc.*` namespace is replaced; any other feature the
+        // publisher declared is theirs and survives.
+        let declared: Platform = "windows/amd64+win32k".parse().expect("parses");
+        assert_eq!(
+            with_os_feature(&declared, "libc.glibc").to_string(),
+            "windows/amd64+libc.glibc,win32k"
         );
     }
 
@@ -821,6 +879,111 @@ mod tests {
                     .await
                     .unwrap_or_else(|error| panic!("{spec} must not be checked, got {error:?}"));
             }
+        }
+
+        /// A content tree with a metadata sidecar built from raw env-var
+        /// JSON, for the shapes `content_tree`'s single `${installPath}/bin`
+        /// var cannot express.
+        fn tree_with_env(env_json: &str) -> (tempfile::TempDir, AuthoringMetadata) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let metadata: AuthoringMetadata =
+                serde_json::from_str(&format!(r#"{{"type":"bundle","version":1,"env":[{env_json}]}}"#))
+                    .expect("fixture metadata parses");
+            (dir, metadata)
+        }
+
+        fn path_var(value: &str) -> String {
+            format!(r#"{{"key":"PATH","type":"path","value":"{value}","required":false,"visibility":"interface"}}"#)
+        }
+
+        #[tokio::test]
+        async fn refuses_a_package_whose_path_shape_leaves_nothing_to_inspect() {
+            // A bare `${installPath}` puts the package root on PATH — a legal
+            // shape the scanner cannot resolve to a directory, so the file set
+            // comes back empty. Passing that as "checked everything, found no
+            // libc requirement" is the same false negative as the bug this
+            // lint closes: a verified claim that nothing verified.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}"));
+            glibc_binary(dir.path(), "bazel");
+
+            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("an unlookable scan scope must be refused, not passed");
+            assert!(
+                matches!(error, LibcLintError::UnscannableScanScope { .. }),
+                "expected UnscannableScanScope, got {error:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn refuses_a_joined_path_value_it_cannot_resolve() {
+            // The other unscannable shape: a `:`-joined value combining a
+            // `${deps.*}` segment.
+            let (dir, metadata) = tree_with_env(&path_var("${installPath}/bin:${deps.other.installPath}/bin"));
+            std::fs::create_dir_all(dir.path().join("bin")).expect("create bin/");
+            glibc_binary(&dir.path().join("bin"), "bazel");
+
+            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("a joined PATH value must be refused, not silently half-scanned");
+            assert!(
+                matches!(error, LibcLintError::UnscannableScanScope { .. }),
+                "expected UnscannableScanScope, got {error:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn reads_every_same_named_file_across_two_interface_path_dirs() {
+            // `collect_candidates` keys on the bare name, so a second
+            // directory shipping the same filename used to be dropped. For
+            // the binaries scan that merge is benign — the name is claimed
+            // either way. Here the dropped sibling is a file that ships and
+            // never gets its loader read.
+            let (dir, metadata) = tree_with_env(&format!(
+                "{},{}",
+                path_var("${installPath}/bin"),
+                path_var("${installPath}/tools")
+            ));
+            std::fs::create_dir_all(dir.path().join("bin")).expect("create bin/");
+            std::fs::create_dir_all(dir.path().join("tools")).expect("create tools/");
+            // Only the *second* directory's file needs a libc; the first is
+            // static, so a first-wins map hides the offender entirely.
+            static_binary(&dir.path().join("bin"), "tool");
+            glibc_binary(&dir.path().join("tools"), "tool");
+
+            let error = check_declared_libc(dir.path(), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("the same-named sibling in the second PATH dir must still be read");
+            let LibcLintError::UndeclaredLibc { path, required, .. } = &error else {
+                panic!("expected UndeclaredLibc, got {error:?}");
+            };
+            assert_eq!(required, "libc.glibc");
+            assert!(
+                path.ends_with("tools/tool"),
+                "the offender must be the tools/ sibling, got {path:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn reads_a_file_the_binaries_scan_would_skip_as_non_executable() {
+            // The lint asks what a file *is*, not whether the filesystem
+            // marks it runnable: a glibc-linked object in an interface dir
+            // matters to the loader even without the exec bit, and a host
+            // that cannot read permission bits at all would otherwise see
+            // every candidate as non-executable.
+            use std::os::unix::fs::PermissionsExt;
+            let (_dir, bin, metadata) = content_tree();
+            let binary = bin.join("bazel");
+            glibc_binary(&bin, "bazel");
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).expect("drop the exec bit");
+
+            let error = check_declared_libc(bin.parent().expect("tree root"), &metadata, &platform("linux/amd64"))
+                .await
+                .expect_err("a non-executable ELF on the interface PATH must still be read");
+            assert!(
+                matches!(error, LibcLintError::UndeclaredLibc { .. }),
+                "expected UndeclaredLibc, got {error:?}"
+            );
         }
 
         #[tokio::test]
