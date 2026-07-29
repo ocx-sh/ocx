@@ -304,6 +304,34 @@ impl Version {
     }
 }
 
+/// The distinct variant names observed across `tags`, sorted and deduplicated.
+///
+/// A tag contributes a variant only when [`Version::parse`] accepts it *and*
+/// the parsed version carries a prefix, so `latest`, an unprefixed `3.28.1`,
+/// and any tag that is not a version at all contribute nothing. The default
+/// variant is the *absence* of a prefix and therefore has no name here —
+/// `ocx index list --variants` renders it with its own empty-string
+/// placeholder, which is a display artifact and never reaches the wire.
+///
+/// A bare rolling tag (`slim`) is invisible here: it is not a version. Reading
+/// it as a variant pointer because a versioned `slim-*` sibling exists is a
+/// second-pass display inference, not part of this derivation.
+///
+/// This is the **one** implementation of the rule. `ocx index list --variants`
+/// and the `variants` field `ocx package announce` records on an index root
+/// both call it, so the CLI and a published root cannot disagree about what a
+/// tag set means. Its cross-language counterpart is the index bot's
+/// `core/version_order.py::variant_names`, pinned to this function by the
+/// vendored `with-variants.json` conformance vector.
+pub fn variant_names<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    tags.into_iter()
+        .filter_map(Version::parse)
+        .filter_map(|version| version.variant().map(str::to_string))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 impl Ord for Version {
     fn cmp(&self, rhs: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
@@ -466,6 +494,58 @@ impl<'de> Deserialize<'de> for Version {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── variant_names ────────────────────────────────────────────────────
+
+    #[test]
+    fn variant_names_is_empty_when_only_the_default_variant_ships() {
+        assert!(variant_names(["latest", "3", "3.28", "3.28.1"]).is_empty());
+    }
+
+    #[test]
+    fn variant_names_sorts_and_deduplicates() {
+        let tags = ["musl-3", "slim-3.28", "musl-3.28.1", "slim-3", "3.28.1"];
+        assert_eq!(variant_names(tags), vec!["musl", "slim"]);
+    }
+
+    #[test]
+    fn variant_names_never_yields_the_reserved_latest_prefix() {
+        // `Version::parse` refuses `latest` as a prefix outright, so the tag
+        // is not a version and contributes nothing.
+        assert!(variant_names(["latest-3.28.1"]).is_empty());
+    }
+
+    #[test]
+    fn variant_names_ignores_a_bare_rolling_tag() {
+        // `slim` alone is not a version. It becomes legible as a variant
+        // pointer only next to a versioned sibling, and even then this
+        // function reads the sibling, never the bare tag.
+        assert!(variant_names(["slim", "latest"]).is_empty());
+        assert_eq!(variant_names(["slim", "slim-3.28.1"]), vec!["slim"]);
+    }
+
+    #[test]
+    fn variant_names_survives_prerelease_and_build_suffixes() {
+        // The index bot's narrower `_VERSION_RE` stops at `major.minor.patch`;
+        // this is the case that would silently drop `slim` if either side
+        // reused it for this derivation.
+        assert_eq!(variant_names(["slim-3.28.1-rc1"]), vec!["slim"]);
+        assert_eq!(variant_names(["slim-3.28.1_20260101"]), vec!["slim"]);
+        assert_eq!(variant_names(["slim-3.28.1+20260101"]), vec!["slim"]);
+    }
+
+    #[test]
+    fn variant_names_treats_a_dotted_prefix_as_one_variant() {
+        assert_eq!(variant_names(["pgo.lto-3.28.1"]), vec!["pgo.lto"]);
+    }
+
+    #[test]
+    fn variant_names_ignores_tags_that_are_not_versions() {
+        assert!(variant_names(["__ocx.desc", "v3.28.1", "nightly", "SLIM-3.28.1"]).is_empty());
+        // A leading-zero component is not a version, so its prefix is not a
+        // variant either.
+        assert!(variant_names(["slim-01.2.3"]).is_empty());
+    }
 
     #[test]
     fn with_build_attaches_to_variant_prerelease() {

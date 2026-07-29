@@ -579,6 +579,23 @@ pub fn regenerate(committed: &Value, observed: &[Observed], now: &str) -> Value 
     }
     let mut new_root = committed.clone();
     if let Some(root) = new_root.as_object_mut() {
+        // `variants` is the index bot's to derive from `tags`; it no longer
+        // reads a stored field, and its pull-request gate always accepts an
+        // absent one. ocx therefore records none — and must actively *remove*
+        // the key rather than merely stop writing it, because `committed` is
+        // cloned verbatim: a stored set would ride through unchanged, and the
+        // first time a variant's last tag left upstream it would stop matching
+        // the derivation and the gate would reject every announce.
+        //
+        // `shift_remove`, never `remove`: under `preserve_order` the latter is
+        // `swap_remove`, which fills the hole from the end. Today that is
+        // indistinguishable — `variants` sits immediately before `tags`, the
+        // last key, so both spellings produce the same document and no test
+        // here can tell them apart. `shift_remove` is chosen because it stays
+        // correct without that coincidence: it does not depend on `variants`
+        // being second-to-last, which is a contract of the *bot's* serializer,
+        // not something this function is in a position to check.
+        root.shift_remove("variants");
         // Replacing an existing key keeps its position (preserve_order), so
         // `tags` stays the last field per CONTRACTS §14.
         root.insert("tags".to_string(), Value::Object(new_tags));
@@ -1458,6 +1475,59 @@ mod tests {
         assert_eq!(
             new_cas_count(&committed, std::slice::from_ref(&observed("1.0.0", 'a'))),
             0
+        );
+    }
+
+    // ── regenerate: the vestigial `variants` key ─────────────────────────────
+
+    #[test]
+    fn regenerate_records_no_variants_even_when_the_tags_carry_one() {
+        // The index bot derives `variants` from `tags` and no longer reads a
+        // stored field, so recording one would be a second source of truth
+        // that can only ever drift. Not `"variants": []` either — the key is
+        // absent, and its absence is what the index gate accepts.
+        let committed = committed_root("oci://ghcr.io/x/y");
+        let regenerated = regenerate(
+            &committed,
+            &[observed("1.0.0", 'a'), observed("slim-1.0.0", 'b')],
+            "2099-12-31T00:00:00Z",
+        );
+        assert!(
+            regenerated.get("variants").is_none(),
+            "the variant set is the index's to derive, got {:?}",
+            regenerated.get("variants")
+        );
+        assert!(
+            !String::from_utf8(serialize_root(&regenerated))
+                .expect("ASCII")
+                .contains("variants")
+        );
+    }
+
+    #[test]
+    fn regenerate_removes_a_committed_variants_key_without_reordering_the_root() {
+        // Removal, not merely "stop writing": `regenerate` clones the committed
+        // root, so a stored set would ride through verbatim and, once a
+        // variant's last tag left upstream, stop matching the bot's derivation
+        // and be rejected. `Map::remove` is `swap_remove` under
+        // `preserve_order` — it would drop `tags` into the vacated slot and
+        // silently reorder the document.
+        let mut committed = committed_root("oci://ghcr.io/x/y");
+        let object = committed.as_object_mut().expect("root object");
+        let index = object.keys().position(|key| key == "tags").expect("tags key");
+        object.shift_insert(index, "variants".to_string(), serde_json::json!(["slim"]));
+
+        let regenerated = regenerate(&committed, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
+        let fields: Vec<&str> = regenerated
+            .as_object()
+            .expect("root object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["name", "repository", "owners", "status", "created", "desc", "tags"],
+            "the committed key must go and every other field stay where it was"
         );
     }
 
