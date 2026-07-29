@@ -26,6 +26,14 @@ pub struct PackageCreate {
     /// and `ocx package test` default to the recorded value and reject a
     /// `--platform` that disagrees. Resolution honors `--remote`,
     /// `--offline`, and `--frozen`. Also used to infer the output filename.
+    ///
+    /// With `--metadata`, a Linux target or `any` also has its declared
+    /// `os.features` checked against what the packaged binaries actually
+    /// need: a binary linked against a libc this value does not require is
+    /// refused (exit 65), because an undeclared libc claims the package runs
+    /// on hosts that cannot execute it. `any` requires no libc at all, so
+    /// under it every dynamically linked binary is refused. Static binaries
+    /// need no declaration.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -52,6 +60,22 @@ pub struct PackageCreate {
     /// `--bin-scan`/`--no-bin-scan`.
     #[clap(flatten)]
     bin_scan: options::BinScan,
+    /// Skip the libc check on the packaged binaries
+    ///
+    /// An escape hatch, not a convenience: a false refusal from the check
+    /// would otherwise block every `ocx package create` for a Linux target
+    /// with no way through. Skipping it leaves the declared `os.features`
+    /// unverified, so a binary needing a libc the platform does not require
+    /// can be published and will then resolve on hosts that cannot execute
+    /// it; a warning naming the platform is printed wherever the check would
+    /// have run, which is `--metadata` with a Linux target or `--platform
+    /// any`. Anywhere else the check inspects nothing, so the flag
+    /// suppresses nothing and says nothing. Nothing else changes - the same
+    /// metadata and the same layers are written either way. See
+    /// https://ocx.sh/docs/reference/command-line#package-create-libc-check
+    /// for what the check does.
+    #[clap(long)]
+    no_libc_lint: bool,
 }
 
 impl PackageCreate {
@@ -89,6 +113,43 @@ impl PackageCreate {
                 let metadata = AuthoringMetadata::read_json(metadata_source).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
                 let metadata = self.resolve_binaries(metadata, &platform).await?;
+                // Check what the packaged binaries actually demand of a host
+                // against what `--platform` claims they demand. Runs after
+                // the binaries scan (both read the same content tree) and,
+                // like every other step in this arm, before the archive is
+                // written — a refused artifact leaves no bundle on disk.
+                //
+                // Not gated on `--bin-scan`: that flag governs the `binaries`
+                // metadata claim, while this governs the `os.features` claim.
+                // A publisher passing `--no-bin-scan` is declining to have
+                // their binary list filled in, not declining to have a false
+                // libc claim caught.
+                //
+                // `--no-libc-lint` skips the whole call, refusals and
+                // scan-scope failures alike. A partial bypass would leave a
+                // bug in the un-bypassed half still able to block publishing,
+                // which is the availability failure the flag exists to
+                // prevent. Everything below still runs, so the flag suppresses
+                // one check and nothing else.
+                if self.no_libc_lint {
+                    // Gated on the lint's own scope predicate, not on the flag
+                    // alone: `check_declared_libc` returns `Ok(())` for a
+                    // target whose libc OCX does not model, so on `darwin/*`
+                    // or `windows/*` the two runs are behaviourally identical
+                    // and a warning would name a verification that was never
+                    // going to happen. In the per-platform matrix a shared
+                    // create step carries this flag on every leg, and a
+                    // warning that fires where nothing was suppressed dilutes
+                    // exactly the loudness the escape hatch depends on.
+                    if package::libc_lint::checks_declared_libc(&platform) {
+                        context.ui().warn(format!(
+                            "--no-libc-lint: skipped the libc check, so the os.features declared by \
+                             {platform} are unverified against the packaged binaries"
+                        ));
+                    }
+                } else {
+                    package::libc_lint::check_declared_libc(&self.path, &metadata, &platform).await?;
+                }
                 // Validate the projection the publisher will actually push:
                 // run the publish-time env/entrypoint checks against the
                 // declared platform.
