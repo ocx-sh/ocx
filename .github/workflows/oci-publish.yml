@@ -53,6 +53,10 @@ on:
         required: true
       REGISTRY_TOKEN:
         required: true
+      OCX_ANNOUNCE_TOKEN:
+        description: GitHub credential the index announce pull request is opened
+          with. Absent (fork build, dev publish) means publish without announcing.
+        required: false
 
 permissions:
   contents: read
@@ -147,6 +151,7 @@ jobs:
           TARGETS_JSON: ${{ inputs.targets }}
           OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -169,10 +174,18 @@ jobs:
           export "OCX_AUTH_${auth_key}_USER=${OCX_AUTH_REGISTRY_USER}"
           export "OCX_AUTH_${auth_key}_TOKEN=${OCX_AUTH_REGISTRY_TOKEN}"
 
+          # The glibc rows carry `+libc.glibc` because a `-gnu` build is
+          # dynamically linked against glibc; `ocx package create` reads the
+          # binary and refuses a platform that does not declare it. The musl
+          # rows stay bare: those builds are fully static, so an empty
+          # `os.features` is a true claim of universality. Declaring the
+          # feature is also what lets a gnu and a musl build of the same
+          # arch coexist under one tag — as identical `linux/amd64` keys the
+          # second would evict the first from the image index.
           declare -A PLATFORM_MAP=(
-            ["x86_64-unknown-linux-gnu"]="linux/amd64"
+            ["x86_64-unknown-linux-gnu"]="linux/amd64+libc.glibc"
             ["x86_64-unknown-linux-musl"]="linux/amd64"
-            ["aarch64-unknown-linux-gnu"]="linux/arm64"
+            ["aarch64-unknown-linux-gnu"]="linux/arm64+libc.glibc"
             ["aarch64-unknown-linux-musl"]="linux/arm64"
             ["x86_64-apple-darwin"]="darwin/amd64"
             ["aarch64-apple-darwin"]="darwin/arm64"
@@ -185,6 +198,51 @@ jobs:
           # The UTC build-metadata segment is already baked into VERSION_TAG by
           # the caller (deploy-dev.yml / post-release-oci-publish.yml). --cascade
           # still derives the rolling X.Y.Z / X.Y / X / latest tags users install.
+
+          # Publish the just-pushed tags into the ocx-sh/index entry for the
+          # package. No `--fork`: this repository lives in the organization that
+          # owns the index, and GitHub refuses to fork a repository into its own
+          # owning organization, so the announce branch is pushed to the index
+          # directly. It still lands as a pull request, which is what the index's
+          # governance gate and its refresh/new-package labelling run on.
+          # `package announce` and `push --announce-file` shipped together, so
+          # one probe answers for both. It has to gate the PUSH flag too: an
+          # older ocx rejects an unknown flag with exit 64, which would fail the
+          # publish itself rather than just skipping the announce. That is
+          # reachable here — re-publishing an old tag installs that tag's own ocx.
+          if ocx package announce --help >/dev/null 2>&1; then
+            announce_supported=1
+          else
+            announce_supported=0
+            echo "::notice::this ocx has no 'package announce'; publishing without announcing"
+          fi
+
+          announce_package() {
+            local repo_path="$1" tags_file="$2"
+            if (( ! announce_supported )); then
+              return 0
+            fi
+            # The announce re-observes each curated tag on the physical
+            # repository the index root points at, which is the PROD registry —
+            # a dev tag simply does not exist there.
+            if [[ "$REGISTRY" != "ocx.sh" ]]; then
+              echo "::notice::skipping index announce for ${repo_path}: ${REGISTRY} is not the registry ocx-sh/index points at"
+              return 0
+            fi
+            if [[ -z "${OCX_ANNOUNCE_TOKEN:-}" ]]; then
+              echo "::notice::skipping index announce for ${repo_path}: OCX_ANNOUNCE_TOKEN is unavailable"
+              return 0
+            fi
+            if [[ ! -s "$tags_file" ]]; then
+              echo "::error::no published tags recorded for ${repo_path}; refusing to announce nothing"
+              return 1
+            fi
+            echo "==> Announcing ${repo_path} into ocx-sh/index"
+            ocx package announce \
+              --package "${repo_path}" \
+              --tags-from-file "$tags_file" \
+              --index-repo ocx-sh/index
+          }
 
           # variants is a JSON array of strings; iterate.
           mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
@@ -201,6 +259,12 @@ jobs:
               bin_stem="ocx-${variant}"
               repo_path="${REPO}/${variant}"
             fi
+
+            # Every target leg appends the tags it published (plus the cascade
+            # tags it moved) here; the announce below curates them in one call.
+            announce_tags="$(mktemp)"
+            announce_flag=()
+            (( announce_supported )) && announce_flag=(--announce-file "$announce_tags")
 
             for target in "${TARGETS[@]}"; do
               platform="${PLATFORM_MAP[$target]:-}"
@@ -240,8 +304,33 @@ jobs:
                 --platform "${platform}" \
                 --cascade \
                 --new \
+                "${announce_flag[@]}" \
                 "$ARCHIVE"
 
               rm -rf "$WORK"
             done
+
+            # Repository-level catalog description (`__ocx.desc` tag), pushed
+            # BEFORE the announce so the announce observes it and carries the
+            # readme and logo into the index entry. Version-independent;
+            # refreshed on every publish.
+            #
+            # CATALOG.md, not README.md: the README is written for the GitHub
+            # repository page, so it carries CI badges and repo-relative links
+            # (`./assets/logo.svg`, `LICENSE`, `CONTRIBUTING.md`) that resolve
+            # nowhere in a catalog renderer. Its frontmatter supplies the title,
+            # description and keywords, so no flags are needed here.
+            #
+            # Default variant only: the copy names this package, and a named
+            # variant would need its own. None exists today — ocx-mirror
+            # publishes ocx.sh/ocx/mirror from its own repository.
+            if [[ -z "$variant" ]]; then
+              echo "==> Pushing catalog description for ${REGISTRY}/${repo_path}"
+              ocx package describe "${REGISTRY}/${repo_path}" \
+                --readme packaging/ocx/CATALOG.md \
+                --logo assets/logo.svg
+            fi
+
+            announce_package "$repo_path" "$announce_tags"
+            rm -f "$announce_tags"
           done
