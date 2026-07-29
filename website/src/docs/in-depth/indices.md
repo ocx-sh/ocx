@@ -57,7 +57,7 @@ Every source's subtree under the home is the [index.ocx.sh][index-ocx-sh] wire g
 
 ```
 $OCX_HOME/index/ocx.sh/
-├── config.json                published sources only — {"format_version": 1, "name_segments": 2}
+├── config.json                published sources only — {"format_version": 1}
 ├── c/index.json (+ .etag)     published sources only — catalog + conditional-GET validator
 └── p/<ns>/
     ├── <pkg>.json              root document — repository pointer, tags, publisher status
@@ -178,24 +178,28 @@ logical id (ocx.sh/<ns>/<pkg>[:tag])
 
 `index.ocx.sh` yields **only pointers** — the platform manifest and its layers always come from the physical registry named by `repository`. The `repository` field carries an `oci://` scheme marker identifying it as a physical, transport-only reference; it is never used as a storage key. Locally, OCX keys everything — the local index path, `ocx.lock`, garbage-collection roots — on the *logical* identifier, so a registry migration never orphans a local copy or breaks a committed team lock.
 
-### The index declares which names it can hold {#public-index-declared-names}
+### A configured index owns its whole registry {#public-index-declared-names}
 
-`config.json` carries the wire-format version and, optionally, the index's own statement of its name grammar:
+`config.json` carries the wire-format version, and nothing the client reads decides scope:
 
 ```json
-{ "format_version": 1, "name_segments": 2 }
+{ "format_version": 1 }
 ```
 
-`name_segments` is the slash-separated segment count a package name must have *within* the namespace. `index.ocx.sh` publishes `2`: its root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so `ocx.sh/kitware/cmake` is expressible and `ocx.sh/go-task` is not — there is no path in the wire layout where a root for a flat name could live.
+If a namespace names an index in [`[registries.<name>]`][config-registries], **only what that index holds is discoverable through it**. A reference the index has no root for is a hard miss: OCX does not fall back to the plain OCI registry the index points at, even when that registry serves a repository under the same name. The refusal names the index that was consulted, so a package that has not been announced yet reads as exactly that:
 
-The declaration decides what a **missing root means**, never whether OCX asks for one. OCX still requests the root for a name of the declared-impossible shape: if the index serves one, the index has an opinion about that name and stays authoritative for it, declaration or not. Only when the root is genuinely absent does the declaration take effect — the miss falls through to a plain OCI registry reference instead of stopping the chain. That is the index operator's published statement, not a guess the client makes; nothing about it is inferred from the URL shape or the name itself.
+```
+'ocx.sh/go-task:3.44' is not in the index at https://index.ocx.sh, which is authoritative
+for every name in registry 'ocx.sh'; announce it there with `ocx package announce`, or take
+the namespace off the index with `[registries."ocx.sh"] index = ""`
+```
 
-Deciding on the served root rather than on the declaration is what keeps `name_segments` **not a security control**. It is an unsigned, cacheable integer travelling on the same channel as the roots, so a wrong value — a bad deploy, a stale CDN edge — must not be able to make OCX stop asking about a name the index does hold a (possibly yanking) root for. Because the root wins whenever it exists, a wrong `name_segments` narrows nothing; an older ocx that ignores the field behaves the same, and neither the yank gate, the object digest verify, nor the authoritative stop is delegated to it. The cost is one request per declined name that answers `404`, cached for the rest of the run.
+The scope is the registry, not a name shape. `index.ocx.sh`'s own root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so a flat `ocx.sh/<tool>` can never hold a root there — but that is the index operator's constraint, enforced when a package is announced, not a rule the client applies. An index that does serve a root for a flat name resolves it normally.
 
-The field is optional and its absence means "serves every name". A private index that publishes no `name_segments` stays authoritative for every reference in its namespace, flat names included, so its refusals keep the fail-loud behaviour below unchanged. If the index cannot be reached, or serves a malformed or unrecognised `config.json`, OCX keeps it authoritative rather than assuming it serves nothing; an index outage must not silently downgrade a namespace to plain OCI.
+This is what makes the yank and deprecation gate reachable at all: a tag the index yanks cannot be obtained by asking the registry underneath instead. It also means **completeness matters** — a package missing from the index is unresolvable through it, by design.
 
 ::: warning An index that breaks fails loud, not silent
-A namespace that names an index in [`[registries.<name>]`][config-registries] — `ocx.sh` by default — has that source as its authority for every name it [can hold](#public-index-declared-names): a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name. So an `index.ocx.sh` outage blocks `ocx.sh/…` resolution rather than quietly resolving it somewhere else. Namespaces on other registries are untouched.
+The same authority makes every failure terminal: a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name. So an `index.ocx.sh` outage blocks `ocx.sh/…` resolution rather than quietly resolving it somewhere else. An outage is never reported as an absent package — the error names the endpoint that failed. Namespaces on other registries are untouched.
 
 Two things opt `ocx.sh` out: [`index = ""`][config-registries-index], and pinning the namespace at a [`[mirrors]` registry endpoint](#mirroring), which suppresses the compiled-in default so a site that already routes `ocx.sh` elsewhere never gains a host it did not allow-list. A mirror keyed on the *index* host is the opposite move — it redirects the index endpoint rather than replacing it, so the verified two-hop path stays, served by that host. Only a config file the operator controls suppresses: neither the [managed tier][config-managed] nor a forwarded `OCX_MIRRORS` can revoke the verified path, though both still redirect traffic.
 :::

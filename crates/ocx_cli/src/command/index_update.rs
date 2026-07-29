@@ -40,13 +40,11 @@ impl IndexUpdate {
             // Route to the index source that will answer for this package, if
             // any; otherwise refresh against the registry. Asking `jurisdiction`
             // rather than comparing namespaces keeps this from being a second,
-            // independent guess: a registry mismatch already answers `Outside`,
-            // and so does a name the source's published `config.json` says its
-            // grammar cannot express — which then reroutes to the registry
-            // instead of dying in `refresh_derived`.
+            // independent guess about who owns a name — the chain routes a
+            // resolve by exactly the same verdict.
             let mut selected = None;
             for source in index_sources {
-                if source.jurisdiction(identifier).await != index::Jurisdiction::Outside {
+                if source.jurisdiction(identifier) != index::Jurisdiction::Outside {
                     selected = Some(index::Index::from_source(source.clone()));
                     break;
                 }

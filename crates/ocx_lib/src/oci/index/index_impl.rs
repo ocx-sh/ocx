@@ -123,16 +123,20 @@ pub trait IndexImpl: Send + Sync {
     /// fail-closed format mismatch) and its clean miss both stop the chain walk
     /// — neither may fall through to a lower source that could answer the same
     /// name and both bypass the refusal and leak the induced-error traffic to
-    /// that source. An [`Outside`](super::Jurisdiction::Outside) source is
-    /// skipped entirely: it has declared it cannot express the name, so it is
-    /// never asked and its silence decides nothing.
+    /// that source. An [`Outside`](super::Jurisdiction::Outside) source serves
+    /// another registry entirely, so it is never asked and its silence decides
+    /// nothing.
     ///
-    /// Async because the declaration lives in the source's published
-    /// `config.json`; it rides the fetch the resolve would have made anyway.
+    /// Synchronous and I/O-free: every verdict is decided from the identifier's
+    /// registry alone. It used to be `async` because a source could consult its
+    /// own published `config.json` to decline an individual name; that
+    /// declaration is gone (ocx#251 — a configured index is authoritative for
+    /// its whole registry), and with it the only reason to await here.
+    ///
     /// The default is [`FallThrough`](super::Jurisdiction::FallThrough) (a
     /// plain registry claims nothing); only [`super::OcxIndex`] and
     /// [`ChainedIndex`](super::chained_index::ChainedIndex) override it.
-    async fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
+    fn jurisdiction(&self, identifier: &oci::Identifier) -> super::Jurisdiction {
         let _ = identifier;
         super::Jurisdiction::FallThrough
     }
@@ -151,6 +155,22 @@ pub trait IndexImpl: Send + Sync {
     fn serves_registry(&self, registry: &str) -> bool {
         let _ = registry;
         false
+    }
+
+    /// The static-file base URL this source resolves against, when it is a
+    /// configured ocx-index — the value a
+    /// [`Jurisdiction::Authoritative`](super::Jurisdiction::Authoritative)
+    /// terminal miss names so the user learns *which* index answered "no"
+    /// (ocx#251).
+    ///
+    /// The effective base is not obvious from the outside: it is merged across
+    /// the compiled-in default, the managed tier, `[registries."<ns>"] index`
+    /// and the `[mirrors."<host>"] index` role override, so an error that only
+    /// named the namespace would still leave the reader guessing which endpoint
+    /// was consulted. The default is `None` — a plain OCI registry is not an
+    /// index and has no base to name; only [`super::OcxIndex`] overrides it.
+    fn index_base_url(&self) -> Option<&str> {
+        None
     }
 
     /// This source's provenance (`adr_index_indirection.md` A2/H — the "two

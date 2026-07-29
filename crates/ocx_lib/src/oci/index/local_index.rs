@@ -127,10 +127,10 @@ impl LocalIndex {
     /// A tagged identifier (`cmake:3.28`) refreshes only that tag; a bare
     /// identifier (`cmake`) first enumerates the source's tags.
     ///
-    /// Jurisdiction-unaware by design: whether `source` can express
-    /// `identifier` at all is the **caller's** call, because the two callers
-    /// want opposite outcomes — [`Self::sync_catalog`] skips a name the source
-    /// declined, while `ocx index update` reroutes it to the registry.
+    /// Jurisdiction-unaware by design: which source answers for `identifier` is
+    /// the **caller's** call — [`Self::sync_catalog`] refreshes against the
+    /// source that published the catalog row, while `ocx index update` picks the
+    /// source that serves the identifier's registry.
     pub async fn refresh_tags(&self, identifier: &oci::Identifier, source: &super::Index) -> Result<()> {
         // One info line per identifier; per-tag detail is debug-only so an index
         // update over a many-tagged package does not flood info logs.
@@ -340,8 +340,8 @@ impl LocalIndex {
         // routes through `fetch_root_document`.
         let source_index = super::Index::from_source(source.clone());
         let mut refreshed: std::collections::HashSet<&String> = std::collections::HashSet::new();
-        // Moved rows that ARE materialized locally but were not re-snapshotted,
-        // for either reason below. Their on-disk root is still the OLD one, so
+        // Moved rows that ARE materialized locally but were not re-snapshotted.
+        // Their on-disk root is still the OLD one, so
         // adopting the fetched (NEW) catalog value in step 4 would manufacture
         // the exact root/catalog straddle A2 forbids, and both continuations of
         // it dead-end: `IndexStore::read_root` self-heals the catalog BACK to
@@ -358,24 +358,7 @@ impl LocalIndex {
                 continue;
             }
             let identifier = oci::Identifier::new_registry(repository.clone(), namespace);
-            // A published index that lists a key its own `config.json` says it
-            // cannot express contradicts itself — and the root its fetched entry
-            // names is unfetchable by construction, since that 404 is what the
-            // `Outside` verdict was read off. Skip the row and keep syncing.
-            // Deliberately NOT hardened into `validate_catalog_key`, which fails
-            // the WHOLE sync closed because a traversal key is a filesystem-escape
-            // risk — a grammar violation is not, and failing there would abort
-            // before the catalog commit, leaving this source permanently stale on
-            // every later `index update`.
-            if source.jurisdiction(&identifier).await == super::Jurisdiction::Outside {
-                log::warn!(
-                    "index source '{namespace}' lists '{repository}', which its declared name grammar \
-                     cannot express — skipping re-snapshot"
-                );
-                stale.insert(repository);
-                continue;
-            }
-            // Non-fatal, for the same reason the skip above is: a per-package
+            // Non-fatal: a per-package
             // refresh failure must never veto the source-wide catalog commit.
             // Publish skew alone reaches this (a catalog regenerated ahead of
             // its roots, or a root rolled back, 404s `p/<key>.json`), and
