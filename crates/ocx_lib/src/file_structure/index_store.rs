@@ -31,6 +31,7 @@ use crate::Result;
 use crate::oci::Digest;
 use crate::oci::index::{CatalogDocument, CatalogIndex};
 use crate::utility::fs::LockedFile;
+use crate::utility::result_ext::ResultExt;
 
 /// Max time to block waiting for another writer to release a source-scoped
 /// index lock (catalog transaction or derived-root read-modify-write). Long
@@ -236,8 +237,7 @@ impl IndexStore {
 // ```text
 // {root}/{slug(source)}/
 //   config.json                       — published indices only
-//   c/index.json (+ .etag)            — published indices only — catalog and
-//                                        conditional-GET validator
+//   c/index.json                      — published indices only — the catalog
 //   p/{ns}/{pkg}.json                 — root doc
 //   p/{ns}/{pkg}/o/{algo}/{hex}.json  — dispatch object CAS (the OCI image
 //                                        index a tag resolved to, verbatim;
@@ -266,8 +266,8 @@ impl IndexStore {
 // re-derivation, logged at info/debug — never a hard error).
 //
 // **Locking contract.** Every catalog mutation for a source — a per-package
-// entry upsert, a whole-catalog reconcile-merge (F2 sync), AND the `.etag`
-// sidecar publication — goes through [`IndexStore::begin_catalog_transaction`],
+// entry upsert and a whole-catalog reconcile-merge (F2 sync) alike — goes
+// through [`IndexStore::begin_catalog_transaction`],
 // which takes the source-scoped `"index-catalog"` lock (machine-global,
 // file-identity-keyed — [`IndexStore::lock_source`]) and re-reads the on-disk
 // catalog before handing it to the caller. All network work (fetching
@@ -311,11 +311,6 @@ impl IndexStore {
     /// [`Self::catalog_path`]'s single global file.
     pub fn source_catalog_path(&self, source: &str) -> PathBuf {
         self.wire_source_dir(source).join("c").join("index.json")
-    }
-
-    /// Path to a source catalog's `ETag` conditional-GET validator sidecar (F2).
-    pub fn source_catalog_etag_path(&self, source: &str) -> PathBuf {
-        self.source_catalog_path(source).with_added_extension("etag")
     }
 
     /// Acquire an exclusive cross-process lock scoped to one source's subtree,
@@ -556,7 +551,7 @@ impl IndexStore {
         transaction
             .catalog
             .insert(repository.to_string(), recovered_entry.clone());
-        transaction.commit(None).await?;
+        transaction.commit().await?;
         Ok((bytes, root, recovered_entry))
     }
 
@@ -642,18 +637,6 @@ impl IndexStore {
         };
         let document: CatalogDocument = serde_json::from_slice(&bytes)?;
         Ok(Some(document.into_packages()?))
-    }
-
-    /// Reads this source's persisted catalog `ETag`, if any (`Ok(None)` when
-    /// absent). The conditional-GET validator for the next catalog sync (F2).
-    pub async fn read_source_catalog_etag(&self, source: &str) -> Result<Option<String>> {
-        Self::ensure_source_contained(source)?;
-        let target = self.source_catalog_etag_path(source);
-        match tokio::fs::read_to_string(&target).await {
-            Ok(etag) => Ok(Some(etag.trim().to_string()).filter(|etag| !etag.is_empty())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(crate::error::file_error(&target, e)),
-        }
     }
 
     /// Writes `bytes` verbatim to a repository's root-document path
@@ -819,9 +802,8 @@ impl IndexStore {
     ///
     /// This is the **single** entry point for every catalog mutation for
     /// `source` — a per-package root+entry upsert
-    /// ([`CatalogTransaction::write_root`]), a whole-catalog reconcile-merge
-    /// (F2 sync, mutate [`CatalogTransaction::catalog`] directly), or `.etag`
-    /// sidecar publication (via [`CatalogTransaction::commit`]) — so no
+    /// ([`CatalogTransaction::write_root`]) or a whole-catalog reconcile-merge
+    /// (F2 sync, mutate [`CatalogTransaction::catalog`] directly) — so no
     /// writer can bypass the re-read. All network work (fetching a remote
     /// root, dispatch object, or catalog) MUST happen before this call.
     pub async fn begin_catalog_transaction(&self, source: &str) -> Result<CatalogTransaction<'_>> {
@@ -836,6 +818,7 @@ impl IndexStore {
             store: self,
             source: source.to_string(),
             lock,
+            original: catalog.clone(),
             catalog,
         })
     }
@@ -895,6 +878,10 @@ pub struct CatalogTransaction<'store> {
     /// read directly, so it needs an explicit dead-code allow.
     #[allow(dead_code)]
     lock: LockedFile,
+    /// The post-lock map as read, before any mutation — so [`Self::commit`] can
+    /// tell a real change from a re-derivation of what is already on disk and
+    /// skip the write entirely.
+    original: CatalogIndex,
     catalog: CatalogIndex,
 }
 
@@ -938,27 +925,42 @@ impl CatalogTransaction<'_> {
         Ok(())
     }
 
-    /// Publishes the (possibly mutated) catalog map — and, when `etag` is
-    /// `Some`, the `.etag` sidecar — atomically, still under the held lock.
-    /// Consumes the guard, releasing the lock on return.
+    /// Publishes the (possibly mutated) catalog map atomically, still under the
+    /// held lock. Consumes the guard, releasing the lock on return.
+    ///
+    /// **A commit that changes nothing writes nothing.** An `ocx index update`
+    /// against an unchanged remote catalog re-derives exactly the map already on
+    /// disk; rewriting it would be byte-identical but would still churn the
+    /// file's mtime, and this tree is a distributable artifact people commit to
+    /// repos and `rsync` (A2).
     ///
     /// Written as the [`CatalogDocument`] envelope, the one shape this format
     /// has: what a local index writes is what the hosted site serves, so a
     /// derived source's catalog and a mirrored one are the same document and
     /// [`IndexStore::read_source_catalog`] needs no second branch to tell them
     /// apart.
-    pub async fn commit(self, etag: Option<&str>) -> Result<()> {
+    pub async fn commit(self) -> Result<()> {
+        // Opportunistic cleanup: ocx used to persist an `index.json.etag`
+        // conditional-GET validator beside the catalog. Nothing reads or writes
+        // one any more, and it is the only per-machine file in a tree that is
+        // otherwise pure served wire content — drop it so it stops travelling in
+        // every copied and committed index tree. Failure is ignored on purpose:
+        // a read-only shipped copy simply keeps the stray file.
+        let stale_etag = self
+            .store
+            .source_catalog_path(&self.source)
+            .with_added_extension("etag");
+        tokio::fs::remove_file(&stale_etag).await.ignore();
+
+        if self.catalog == self.original {
+            return Ok(());
+        }
         let catalog_path = self.store.source_catalog_path(&self.source);
         let catalog_bytes = serde_json::to_vec_pretty(&CatalogDocument::new(self.catalog))?;
         IndexStore::write_bytes_atomic(&catalog_path, catalog_bytes).await?;
 
-        if let Some(etag) = etag {
-            let etag_path = self.store.source_catalog_etag_path(&self.source);
-            IndexStore::write_bytes_atomic(&etag_path, etag.as_bytes().to_vec()).await?;
-        }
-
-        // `self.lock` drops here, releasing the exclusive advisory lock —
-        // held across both the catalog and (when present) the etag write.
+        // `self.lock` drops here, releasing the exclusive advisory lock — held
+        // across the whole read-mutate-write critical section.
         Ok(())
     }
 }
@@ -1047,16 +1049,6 @@ mod wire_grammar_tests {
             s.source_catalog_path("ocx.sh"),
             Path::new("/index/ocx.sh/c/index.json"),
             "must mirror static_index.py's fixture_root/c/index.json"
-        );
-    }
-
-    #[test]
-    fn source_catalog_etag_sidecar_appends_extension() {
-        let s = IndexStore::new("/index");
-        let catalog = s.source_catalog_path("ocx.sh");
-        assert_eq!(
-            s.source_catalog_etag_path("ocx.sh"),
-            catalog.with_added_extension("etag")
         );
     }
 
@@ -1602,7 +1594,7 @@ mod wire_grammar_tests {
         })
         .await
         .unwrap();
-        txn.commit(None).await.unwrap();
+        txn.commit().await.unwrap();
 
         let on_disk_root = tokio::fs::read(s.root_document_path("ocx.sh", "kitware/cmake"))
             .await
@@ -1634,7 +1626,7 @@ mod wire_grammar_tests {
         // Steps 2+3 (F1): root, then the catalog entry, via one transaction.
         let mut txn = s.begin_catalog_transaction("ocx.sh").await.unwrap();
         txn.write_root("kitware/cmake", &root_bytes, |_| Ok(())).await.unwrap();
-        txn.commit(None).await.unwrap();
+        txn.commit().await.unwrap();
 
         assert!(
             tokio::fs::try_exists(s.dispatch_object_path("ocx.sh", "kitware/cmake", &dispatch_digest))
@@ -1861,7 +1853,7 @@ mod wire_grammar_tests {
             transaction
                 .catalog()
                 .insert("kitware/cmake".to_string(), entry_v2_writer);
-            transaction.commit(None).await.unwrap();
+            transaction.commit().await.unwrap();
         });
 
         // Reader: head start so it reads v1 pre-lock, before the writer's
@@ -1948,13 +1940,13 @@ mod wire_grammar_tests {
         txn_a
             .catalog()
             .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
-        txn_a.commit(None).await.unwrap();
+        txn_a.commit().await.unwrap();
 
         let mut txn_b = s.begin_catalog_transaction("ocx.sh").await.unwrap();
         txn_b
             .catalog()
             .insert("stable/tool".to_string(), "sha256:bbb".to_string());
-        txn_b.commit(None).await.unwrap();
+        txn_b.commit().await.unwrap();
 
         let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(catalog.get("kitware/cmake"), Some(&"sha256:aaa".to_string()));
@@ -1971,7 +1963,7 @@ mod wire_grammar_tests {
         txn_b
             .catalog()
             .insert("kitware/cmake".to_string(), "sha256:committed-by-b".to_string());
-        txn_b.commit(None).await.unwrap();
+        txn_b.commit().await.unwrap();
 
         // "Txn A" begins AFTER — begin_catalog_transaction's contract is
         // "re-read the on-disk catalog before handing it to the caller", so
@@ -1986,7 +1978,7 @@ mod wire_grammar_tests {
         txn_a
             .catalog()
             .insert("stable/tool".to_string(), "sha256:added-by-a".to_string());
-        txn_a.commit(None).await.unwrap();
+        txn_a.commit().await.unwrap();
 
         let catalog = catalog_on_disk(&s.source_catalog_path("ocx.sh")).await;
         assert_eq!(
@@ -2011,7 +2003,7 @@ mod wire_grammar_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             txn.catalog()
                 .insert("kitware/cmake".to_string(), "sha256:from-a".to_string());
-            txn.commit(None).await.unwrap();
+            txn.commit().await.unwrap();
         });
         // Give task_a a head start so it opens the transaction first.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2020,7 +2012,7 @@ mod wire_grammar_tests {
             let mut txn = s_b.begin_catalog_transaction("ocx.sh").await.unwrap();
             txn.catalog()
                 .insert("stable/tool".to_string(), "sha256:from-b".to_string());
-            txn.commit(None).await.unwrap();
+            txn.commit().await.unwrap();
         });
 
         task_a.await.unwrap();
@@ -2035,44 +2027,14 @@ mod wire_grammar_tests {
         assert_eq!(catalog.get("stable/tool"), Some(&"sha256:from-b".to_string()));
     }
 
-    // ── 6. Etag coherence ─────────────────────────────────────────────────
+    // ── 6. Commit no-op + stale-sidecar cleanup ───────────────────────────
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn commit_with_etag_writes_catalog_and_etag_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-
-        let mut txn = s.begin_catalog_transaction("ocx.sh").await.unwrap();
-        txn.catalog()
-            .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
-        txn.commit(Some("\"abc123\"")).await.unwrap();
-
-        let etag = tokio::fs::read_to_string(s.source_catalog_etag_path("ocx.sh"))
-            .await
-            .unwrap();
-        assert_eq!(etag.trim(), "\"abc123\"");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn commit_without_etag_leaves_etag_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-
-        let mut txn = s.begin_catalog_transaction("ocx.sh").await.unwrap();
-        txn.catalog()
-            .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
-        txn.commit(None).await.unwrap();
-
-        assert!(
-            !tokio::fs::try_exists(s.source_catalog_etag_path("ocx.sh"))
-                .await
-                .unwrap(),
-            "committing without an etag must not create the sidecar"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn commit_without_etag_leaves_a_previously_set_etag_untouched() {
+    async fn commit_that_changes_nothing_does_not_rewrite_the_catalog() {
+        // An `ocx index update` against an unchanged remote catalog re-derives
+        // exactly the map already on disk. Rewriting it would be byte-identical
+        // but churn the mtime of a tree that gets committed to repos and
+        // rsync'd (A2), so the commit must be a genuine no-op.
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
 
@@ -2080,21 +2042,62 @@ mod wire_grammar_tests {
         first
             .catalog()
             .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
-        first.commit(Some("\"etag-1\"")).await.unwrap();
+        first.commit().await.unwrap();
 
+        let catalog_path = s.source_catalog_path("ocx.sh");
+        let before = tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap();
+
+        // Re-insert the identical entry — the reconcile-merge's steady state.
         let mut second = s.begin_catalog_transaction("ocx.sh").await.unwrap();
         second
             .catalog()
-            .insert("stable/tool".to_string(), "sha256:bbb".to_string());
-        second.commit(None).await.unwrap();
+            .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
+        second.commit().await.unwrap();
 
-        let etag = tokio::fs::read_to_string(s.source_catalog_etag_path("ocx.sh"))
-            .await
-            .unwrap();
         assert_eq!(
-            etag.trim(),
-            "\"etag-1\"",
-            "a commit without an etag must not clobber a previously published etag"
+            tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap(),
+            before,
+            "a commit whose merged map equals the on-disk map must not rewrite the file"
+        );
+
+        // A real change still lands.
+        let mut third = s.begin_catalog_transaction("ocx.sh").await.unwrap();
+        third
+            .catalog()
+            .insert("stable/tool".to_string(), "sha256:bbb".to_string());
+        third.commit().await.unwrap();
+        let catalog = s.read_source_catalog("ocx.sh").await.unwrap().unwrap();
+        assert_eq!(catalog.get("stable/tool"), Some(&"sha256:bbb".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_removes_a_stale_etag_sidecar_left_by_an_older_ocx() {
+        // Older ocx versions persisted an `index.json.etag` conditional-GET
+        // validator beside the catalog — the one per-machine file in a tree that
+        // is otherwise pure served wire content. It is dropped opportunistically
+        // so it stops travelling in copied and committed index trees.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        let mut first = s.begin_catalog_transaction("ocx.sh").await.unwrap();
+        first
+            .catalog()
+            .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
+        first.commit().await.unwrap();
+
+        let stale = s.source_catalog_path("ocx.sh").with_added_extension("etag");
+        tokio::fs::write(&stale, b"\"abc123\"").await.unwrap();
+
+        // Even a no-op commit clears it: an unchanged catalog is the common case.
+        let mut second = s.begin_catalog_transaction("ocx.sh").await.unwrap();
+        second
+            .catalog()
+            .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
+        second.commit().await.unwrap();
+
+        assert!(
+            !tokio::fs::try_exists(&stale).await.unwrap(),
+            "a stale .etag sidecar must be removed by the next catalog commit"
         );
     }
 
@@ -2125,7 +2128,7 @@ mod wire_grammar_tests {
         txn_a
             .catalog()
             .insert("kitware/cmake".to_string(), "sha256:aaa".to_string());
-        txn_a.commit(None).await.unwrap();
+        txn_a.commit().await.unwrap();
 
         let mut txn_b = s.begin_catalog_transaction("ghcr.io").await.unwrap();
         assert!(
