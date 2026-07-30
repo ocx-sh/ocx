@@ -352,6 +352,13 @@ impl Index {
         self.inner.serves_registry(registry)
     }
 
+    /// This source's `trusted_hosts` SSRF exemption set. See
+    /// [`index_impl::IndexImpl::trusted_hosts`]. `oci::index`-internal, like
+    /// [`Self::serves_registry`] — the chain is the only consumer.
+    fn trusted_hosts(&self) -> &[String] {
+        self.inner.trusted_hosts()
+    }
+
     /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`
     /// for an `index.ocx.sh`-style source, `Derived` for everything else. Cheap,
     /// synchronous, no I/O. [`ChainedIndex`](chained_index::ChainedIndex) uses

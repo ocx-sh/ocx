@@ -1145,6 +1145,10 @@ impl index_impl::IndexImpl for OcxIndex {
         OcxIndex::serves_registry(self, registry)
     }
 
+    fn trusted_hosts(&self) -> &[String] {
+        OcxIndex::trusted_hosts(self)
+    }
+
     fn source_kind(&self) -> super::local_index::SourceKind {
         super::local_index::SourceKind::Published
     }
