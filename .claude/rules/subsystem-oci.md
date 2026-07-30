@@ -22,7 +22,7 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/index/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
 | `oci/index/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
 | `oci/index/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
-| `oci/index/index_sync.rs` | `IndexSync`: per-package refresh + per-source catalog conditional-GET sync; no daemon, a policy seam only |
+| `oci/index/index_sync.rs` | `IndexSync`: per-package refresh + per-source catalog digest-diff sync; no daemon, a policy seam only |
 | `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
 | `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
@@ -143,8 +143,8 @@ async fn fetch_manifest_digest(&self, id: &Identifier, op: IndexOperation) -> Re
 
 `LocalIndex` owns the local index **collection**, not a single index — one subtree per source
 under a single home (`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index`, `context.rs`). Each source's
-subtree is the `index.ocx.sh`-hosted wire grammar verbatim: `config.json`, `c/index.json` (+
-`.etag`), `p/<ns>/<pkg>.json` root documents, `p/<ns>/<pkg>/o/<algo>/<hex>.json` dispatch objects —
+subtree is the `index.ocx.sh`-hosted wire grammar verbatim: `config.json`, `c/index.json`,
+`p/<ns>/<pkg>.json` root documents, `p/<ns>/<pkg>/o/<algo>/<hex>.json` dispatch objects —
 no local re-encoding. Two provenance kinds share the grammar and diverge only in who authored the
 bytes:
 
@@ -249,18 +249,24 @@ drop the published root's catalog cross-check. There is no placeholder identifie
 key its own source declares inexpressible, **and** warns-and-continues when `refresh_tags` itself fails
 (publish skew alone reaches that — a catalog regenerated ahead of its roots 404s `p/<key>.json`). Both
 are deliberately **not** in `validate_catalog_key`, which fails the whole sync closed for a traversal
-key; aborting there would skip the step-4 catalog + ETag commit, so the ETag would never advance, no
-other moved package would land, and every later `ocx index update` would repeat it and exit 0 — a
-permanently, silently stale source. A per-package failure is already reported by `ocx index update`'s
+key; aborting there would skip the step-4 catalog commit, so no other moved package would land, and
+every later `ocx index update` would repeat it and exit 0 — a permanently, silently stale source. A per-package failure is already reported by `ocx index update`'s
 own fan-out; it must not veto the source-wide commit.
 
-Non-fatal is not "adopt anyway". Both skips collect the key into a `stale` set, which step 4 reads
-twice: the fetched entry is **not** merged (the on-disk root is still the old one, so adopting the new
-entry manufactures the root/catalog straddle — `read_root` then self-heals the catalog back and serves
-the STALE root past the yank gate), and the ETag is passed as `None` (`CatalogTransaction::commit`
-writes the sidecar only for `Some`), so the previous ETag survives and the next sync gets a `200` and
-re-diffs the failed key. Committing it instead would retire the retry permanently: `304` forever on
-one path, `diff_moved` comparing NEW against NEW on the other. Healthy rows land either way.
+Non-fatal is not "adopt anyway". Both skips collect the key into a `stale` set that step 4 reads when
+merging: the fetched entry is **not** adopted (the on-disk root is still the old one, so adopting the
+new entry manufactures the root/catalog straddle — `read_root` then self-heals the catalog back and
+serves the STALE root past the yank gate). Keeping the old entry IS the retry: the next sync fetches
+the catalog again and re-diffs the failed key against it. Adopting the fetched value instead would
+retire the retry permanently — `diff_moved` would compare NEW against NEW and see no move. Healthy
+rows land either way.
+
+**No HTTP validator anywhere.** The catalog fetch is unconditional and nothing is stored beside
+`c/index.json` — the local tree is a distributable artifact (A2), and a per-machine `.etag` sidecar
+was the one file in it that was neither served nor content-addressed. The digest diff is the whole
+mechanism; `CatalogTransaction::commit` writes nothing when the merged map equals the one it read, so
+an unchanged catalog leaves the tree byte- and mtime-identical, and it opportunistically deletes a
+`c/index.json.etag` left by an older ocx.
 
 `LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
 outcomes (`sync_catalog` skips, `ocx index update` reroutes to the registry).
@@ -304,7 +310,7 @@ to protect against. `adr_index_indirection.md` Decision D.
 | `LocalIndex` | Owns the collection above. Both provenance kinds go through it — the only divergence is catalog source (file vs directory enumeration) — dispatch decode is unconditional, one OCI parse for both provenance kinds. Filesystem mechanics (tempfile+rename CAS, the self-heal write) are an internal, non-headline detail. |
 | `OcxIndex` | Remote client of a **published** ocx-index — root → dispatch object → `select_best`. |
 | `OciIndex` | Remote client that **derives** an index from a plain OCI registry's tags API. |
-| `IndexSync` | Thin wrapper over `LocalIndex`'s two write paths — `refresh_package` (per-package dispatch object + root write, either provenance) and `sync_catalog` (published-source-only conditional-GET digest-diff; a derived source has no catalog). `ocx index update` piggybacks both. No daemon — a policy seam only. |
+| `IndexSync` | Thin wrapper over `LocalIndex`'s two write paths — `refresh_package` (per-package dispatch object + root write, either provenance) and `sync_catalog` (published-source-only digest-diff; a derived source has no catalog). `ocx index update` piggybacks both. No daemon — a policy seam only. |
 | `ChainedIndex` | `LocalIndex` ▸ **exactly one** remote per namespace, chosen by config (`[registries."<ns>"] index` field presence), never probed. |
 
 ADR: `adr_index_indirection.md` Decision H.

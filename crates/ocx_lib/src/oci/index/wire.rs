@@ -26,7 +26,7 @@
 //! the grammar, rather than beside either reader. `config.json`'s own struct
 //! (`IndexFormatConfig` in `ocx_index.rs`) stays next to its one reader.
 //!
-//! Everything else about the format (catalog conditional-GET, dispatch-object
+//! Everything else about the format (catalog digest-diff sync, dispatch-object
 //! decode, `select_best` resolution) is downstream policy, not grammar — see
 //! `adr_index_indirection.md` Decisions A/C/F for that layer.
 

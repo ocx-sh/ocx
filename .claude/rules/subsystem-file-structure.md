@@ -132,7 +132,7 @@ Key store methods: `path(pinned_id)`, `content(pinned_id)`, `metadata(pinned_id)
 
 ### IndexStore — Local index collection
 
-Layout: `{root}/index/<source_slug>/{config.json, c/index.json(+.etag), p/<ns>/<pkg>.json,
+Layout: `{root}/index/<source_slug>/{config.json, c/index.json, p/<ns>/<pkg>.json,
 p/<ns>/<pkg>/o/<algo>/<hex>.json}` — the `index.ocx.sh`-hosted wire grammar verbatim, one subtree
 per source (A2). `FileStructure.index` is the machine-local default; `--index`/`OCX_INDEX`
 construct a second instance elsewhere instead (never through `FileStructure`).

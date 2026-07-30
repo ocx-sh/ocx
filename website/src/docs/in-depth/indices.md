@@ -58,7 +58,7 @@ Every source's subtree under the home is the [index.ocx.sh][index-ocx-sh] wire g
 ```
 $OCX_HOME/index/ocx.sh/
 ├── config.json                published sources only — {"format_version": 1, "name_segments": 2}
-├── c/index.json (+ .etag)     published sources only — catalog + conditional-GET validator
+├── c/index.json               published sources only — the package catalog
 └── p/<ns>/
     ├── <pkg>.json              root document — repository pointer, tags, publisher status
     └── <pkg>/o/sha256/
@@ -206,7 +206,7 @@ Two things opt `ocx.sh` out: [`index = ""`][config-registries-index], and pinnin
 |---|---|---|
 | `p/<ns>/<pkg>.json` root | Volatile — the `repository` pointer can move by maintainer PR, tags are curated | Copy-first: never auto-refreshed under the default mode. A live re-fetch happens only on an explicit [`ocx index update`][cmd-index-update] or a [`--remote`][arg-remote] resolve, which rewrites the local copy and bumps `observed`. |
 | `o/<algo>/<hex>.json` — the OCI image index this tag resolved to, verbatim | Immutable | Fetched once, verified against its own SHA-256 filename, cached forever. |
-| `c/index.json` catalog | Volatile | [`ocx index catalog`][cmd-index-catalog] against an `index.ocx.sh` source sends the ETag from a persisted `c/index.json.etag` sidecar as `If-None-Match`; an unchanged catalog answers `304` with no further work. On a real change, OCX re-snapshots only the packages whose root digest actually moved — one request amortized across the full catalog instead of one probe per package. A package it could not re-snapshot (publish skew: the catalog regenerated ahead of its root) keeps its previous entry and holds the validator back, so the next run fetches the catalog again and retries it rather than answering `304` on a package that never landed. Every other package still lands. |
+| `c/index.json` catalog | Volatile | Fetched whole on an explicit refresh and compared against the local copy: OCX re-snapshots only the packages whose root digest actually moved — one request amortized across the full catalog instead of one probe per package. Nothing else is stored to decide that; the digest diff *is* the mechanism, so the local tree stays pure served content with no per-machine bookkeeping in it. An unchanged catalog re-derives to itself and rewrites nothing. A package OCX could not re-snapshot (publish skew: the catalog regenerated ahead of its root) keeps its previous entry, which is exactly what makes the next run diff it again and retry. Every other package still lands. |
 
 ### Local layout for index.ocx.sh sources {#public-index-layout}
 
@@ -215,7 +215,7 @@ The local index uses the identical `p/<ns>/<pkg>.json` + `o/<algo>/<hex>.json` s
 ```
 $OCX_HOME/index/ocx.sh/
 ├── config.json
-├── c/index.json (+ .etag)
+├── c/index.json
 └── p/kitware/
     ├── cmake.json              root doc — copied verbatim from the hosted site
     └── cmake/o/sha256/

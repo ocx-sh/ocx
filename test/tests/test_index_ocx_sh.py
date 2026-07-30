@@ -653,17 +653,21 @@ def test_deprecated_status_resolves_with_stderr_warning(
 
 
 # ---------------------------------------------------------------------------
-# 6 — catalog sync: conditional GET (304) + moved-only re-snapshot
+# 6 — catalog sync: unconditional GET + moved-only digest diff
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_sync_conditional_get_and_moved_diff(
+def test_catalog_sync_unconditional_get_and_moved_diff(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """Catalog sync: conditional GET (304) + moved-only re-snapshot.
+    """Catalog sync: unconditional GET + moved-only re-snapshot.
+
+    The catalog is fetched whole every run and diffed against the local copy;
+    no HTTP validator is sent or stored, so an unchanged catalog is a `200`
+    that moves nothing rather than a `304`.
 
     Updated for the corrected B3 listing-row contract (F2): a package that is
     merely NEW to the local catalog is recorded as a listing row and NOT
@@ -729,18 +733,34 @@ def test_catalog_sync_conditional_get_and_moved_diff(
         record.path.endswith("/c/index.json") for record in index_server.requests
     )
 
-    # Second sync: catalog content is unchanged -> conditional GET answers
-    # 304, and neither package is touched by the piggyback.
+    # Second sync: catalog content is unchanged -> the GET is re-issued in
+    # full and answered 200, the digest diff is empty, and neither package is
+    # touched by the piggyback. The fixture answers 304 to an `If-None-Match`,
+    # so asserting 200 also proves this binary sends none.
+    catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
+    catalog_before = catalog_path.read_bytes()
     checkpoint = len(index_server.requests)
     ocx.plain("--index", str(index_dir), "index", "update", entry_a.logical_id)
     since = index_server.requests[checkpoint:]
     catalog_requests = [
         record for record in since if record.path.endswith("/c/index.json")
     ]
-    assert catalog_requests, "the second run must still send the conditional GET"
-    assert catalog_requests[-1].status == 304, "an unchanged catalog must answer 304"
+    assert catalog_requests, "the second run must still fetch the catalog"
+    assert all(record.if_none_match is None for record in since), (
+        "nothing may send If-None-Match: "
+        f"{[(r.path, r.if_none_match) for r in since if r.if_none_match]}"
+    )
+    assert catalog_requests[-1].status == 200, (
+        f"an unconditional GET must be answered 200, got {catalog_requests[-1].status}"
+    )
     assert not any(repo_b in record.path for record in since), (
         "pkgB must not be re-fetched by the piggyback when its catalog entry did not move"
+    )
+    assert catalog_path.read_bytes() == catalog_before, (
+        "an unchanged catalog must not be rewritten"
+    )
+    assert not (index_dir / "ocx.sh" / "c" / "index.json.etag").exists(), (
+        "no per-machine validator sidecar may be written into the index tree"
     )
 
     # Third sync: only pkgB's root changes (its catalog digest moves) -> the
@@ -1372,7 +1392,7 @@ def test_piggyback_catalog_sync_snapshots_only_the_named_package(
     fetch storm scaling with catalog size, and an F2 violation.
 
     NOTE (conflict to resolve during the fix): the existing
-    `test_catalog_sync_conditional_get_and_moved_diff` asserts the OPPOSITE for
+    `test_catalog_sync_unconditional_get_and_moved_diff` asserts the OPPOSITE for
     the first sync ("the first catalog sync must re-snapshot pkgB too — it is
     new against an empty previous catalog"). That assertion encodes the buggy
     behavior and must be updated when `diff_moved` is corrected. This test and
