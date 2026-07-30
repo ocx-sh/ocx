@@ -815,6 +815,52 @@ impl LocalIndex {
         }
     }
 
+    /// The **physical** transport location the locally-committed root document
+    /// points at (`adr_index_indirection.md` C2/C3) — the offline counterpart to
+    /// [`OcxIndex::physical_identifier`](super::OcxIndex).
+    ///
+    /// Every root the local copy holds already carries the answer: `repository`
+    /// is the `oci://host/path` pointer, copied verbatim from a published site
+    /// or OCX-authored for a derived source. Reading it here is what lets a
+    /// resolve derive the physical address with zero network; without it the
+    /// [`index_impl::IndexImpl::physical_reference`] default answers `Ok(None)`,
+    /// which the caller reads as "no rewrite" and turns into the LOGICAL
+    /// identifier — an indirected package silently reported as its own
+    /// transport.
+    ///
+    /// The logical digest is carried onto the physical location and the tag is
+    /// dropped — the exact shape [`super::OcxIndex`] mints — so a local answer
+    /// and a source answer for one identifier can never disagree. The physical
+    /// value is transport-only routing (C2), never a storage key.
+    ///
+    /// `Ok(None)` = no root known locally. See
+    /// [`ChainedIndex::physical_reference`](super::chained_index::ChainedIndex)
+    /// for why that stays indistinguishable from "registry-backed, no rewrite".
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MalformedPhysicalRef`](super::error::Error::MalformedPhysicalRef)
+    /// when the committed root's `repository` is not a well-formed `oci://`
+    /// pointer — the same strict C3 parse the root-read hook applies.
+    pub(super) async fn physical_reference(
+        &self,
+        identifier: &oci::Identifier,
+        kind: SourceKind,
+    ) -> Result<Option<oci::Identifier>> {
+        let Some(result) = self
+            .read_root_by_kind(identifier.registry(), identifier.repository(), kind)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let (registry, repository) = super::parse_physical_repository(&result.root.repository)?;
+        let physical = oci::Identifier::new_registry(repository, registry);
+        Ok(Some(match identifier.digest() {
+            Some(digest) => physical.clone_with_digest(digest),
+            None => physical,
+        }))
+    }
+
     /// Persist a PUBLISHED (verbatim-copied) root document — the copy-a-mirror
     /// counterpart to [`Self::commit_root_tag`] (`adr_index_indirection.md`
     /// A2/F1/H). Takes the verbatim `bytes` a published source served
@@ -1056,6 +1102,13 @@ impl index_impl::IndexImpl for LocalIndex {
         // (see the bare-trait-surface note above) and always reports a clean
         // miss.
         Ok(None)
+    }
+
+    async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        // Never take the trait default here: it answers `Ok(None)` = "no
+        // rewrite", which a caller turns into the logical identifier even
+        // though the committed root names a different physical location.
+        LocalIndex::physical_reference(self, identifier, SourceKind::Derived).await
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -2970,5 +3023,121 @@ mod tests {
                 "malformed catalog key {key:?} must be rejected as MalformedCatalogKey"
             );
         }
+    }
+    // ── physical_reference: the local root IS the physical pointer ────────
+
+    /// A published root document whose `repository` names a DIFFERENT physical
+    /// location than the logical identifier — the `index.ocx.sh` indirection
+    /// this method exists to read (`adr_index_indirection.md` C2).
+    fn indirected_root_bytes() -> Vec<u8> {
+        br#"{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{}}"#.to_vec()
+    }
+
+    #[tokio::test]
+    async fn physical_reference_dereferences_the_committed_root_pointer() {
+        let dir = TempDir::new().unwrap();
+        let local = make_index(&dir);
+        local
+            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .await
+            .unwrap();
+
+        // Tag AND digest on the input: the physical value must carry the digest
+        // (content addressing at the physical registry) and drop the tag — the
+        // exact shape `OcxIndex::physical_identifier` mints, so a local answer
+        // and a source answer can never disagree.
+        let (_, digest) = image_manifest_bytes();
+        let logical = tagged_id("3.28").clone_with_digest(digest.clone());
+        let physical = local
+            .physical_reference(&logical, SourceKind::Published)
+            .await
+            .unwrap()
+            .expect("a committed root's `repository` pointer is the physical address");
+
+        assert_eq!(physical.registry(), "ghcr.io");
+        assert_eq!(physical.repository(), "ocx-contrib/cmake");
+        assert_eq!(physical.digest(), Some(digest));
+        assert_eq!(
+            physical.tag(),
+            None,
+            "the physical reference is digest-addressed, never tagged"
+        );
+        assert_ne!(
+            physical.registry(),
+            REGISTRY,
+            "reporting the LOGICAL registry as its own transport is the defect"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_reference_carries_no_digest_when_the_logical_reference_has_none() {
+        let dir = TempDir::new().unwrap();
+        let local = make_index(&dir);
+        local
+            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .await
+            .unwrap();
+
+        let physical = local
+            .physical_reference(&tagged_id("3.28"), SourceKind::Published)
+            .await
+            .unwrap()
+            .expect("the root is present");
+        assert_eq!(physical.digest(), None);
+        assert_eq!(physical.tag(), None);
+        assert_eq!(physical.to_string(), "ghcr.io/ocx-contrib/cmake");
+    }
+
+    #[tokio::test]
+    async fn physical_reference_of_a_derived_root_equals_the_logical_identifier() {
+        // A plain OCI registry publishes no index, so OCX authors the root with
+        // `oci://<logical registry>/<logical repository>` — physical == logical.
+        // The rewrite is a no-op there, which is exactly why `Ok(None)` (no root)
+        // and `Some(physical)` (a derived root) are indistinguishable downstream.
+        let dir = TempDir::new().unwrap();
+        let local = make_index(&dir);
+        let (_, digest) = image_manifest_bytes();
+        local.commit_root_tag(&tagged_id("3.28"), &digest).await.unwrap();
+
+        let logical = repo_id().clone_with_digest(digest.clone());
+        let physical = local
+            .physical_reference(&logical, SourceKind::Derived)
+            .await
+            .unwrap()
+            .expect("the derived root is present");
+        assert_eq!(physical, logical, "a derived rewrite must be the identity");
+    }
+
+    #[tokio::test]
+    async fn physical_reference_is_none_without_a_local_root() {
+        let dir = TempDir::new().unwrap();
+        let local = make_index(&dir);
+        assert!(
+            local
+                .physical_reference(&repo_id(), SourceKind::Derived)
+                .await
+                .unwrap()
+                .is_none(),
+            "no local root means no rewrite is known — the registry-backed answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_reference_trait_surface_does_not_fall_through_to_the_none_default() {
+        // The trait default returns `Ok(None)` for every identifier; that default
+        // reaching `LocalIndex` is the whole defect. Drive the trait surface, not
+        // the inherent method, so a deleted `impl` reds here.
+        let dir = TempDir::new().unwrap();
+        let local = make_index(&dir);
+        local
+            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .await
+            .unwrap();
+
+        let physical = IndexImpl::physical_reference(&local, &repo_id())
+            .await
+            .unwrap()
+            .expect("the trait surface must answer from the committed root, not the None default");
+        assert_eq!(physical.registry(), "ghcr.io");
     }
 }

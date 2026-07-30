@@ -1048,15 +1048,74 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
+    /// The physical transport identifier for `identifier` (`adr_index_indirection.md`
+    /// C2): sources in priority order first (only `OcxIndex` answers), the local
+    /// copy's committed root second.
+    ///
+    /// **Deliberately NOT the local-first shape [`Self::fetch_manifest`] and
+    /// [`Self::fetch_blob`] use.** Those read *content*, digest-verified on the
+    /// way out, so a local hit is exactly as trustworthy as a fetch. This reads a
+    /// *pointer* that lives in remote-controlled data: the answer `OcxIndex`
+    /// mints has passed the SSRF floor
+    /// ([`oci::ssrf::resolve_and_validate`](crate::oci::ssrf::resolve_and_validate),
+    /// ocx#218) against that namespace's `trusted_hosts`, while the layer pull
+    /// that consumes the result runs on the shared, unguarded client. Reading the
+    /// local root ahead of a reachable source would skip that pre-flight on every
+    /// warm-cache resolve — and buy nothing, because the same resolve has already
+    /// fetched and memoized that very root to resolve the tag.
+    ///
+    /// The local copy therefore answers exactly when no source can:
+    ///
+    /// - **`--offline`** — `self.sources` is empty by construction, so the loop
+    ///   is a no-op and the local root decides. This is why there is **no**
+    ///   `ChainMode::Offline` early return here, unlike
+    ///   [`Self::fetch_manifest_raw_bytes`]: ahead of the local read it would
+    ///   reproduce the bug it looks like it guards — `Ok(None)` reads as "no
+    ///   rewrite", so an indirected package reports the LOGICAL identifier as
+    ///   its own transport, indistinguishable from a genuinely registry-backed
+    ///   one; after the local read it is unreachable.
+    /// - **the index site is unreachable** — the walk's error is held rather
+    ///   than propagated, so a warm store still resolves instead of exiting 69
+    ///   on a `GET /config.json` that would only have re-derived a pointer the
+    ///   committed root already carries. It is re-raised when the local copy has
+    ///   no root either, so a genuine outage still fails loudly.
+    ///
+    /// `Ok(None)` = no rewrite, physical == logical. That is deliberately not
+    /// distinguished from "indirected, but no local root": for a registry-backed
+    /// package a present root names the identifier itself, so `Some(physical)`
+    /// there is equal to the input and the two outcomes are observationally
+    /// identical. The remaining combination cannot produce a usable wrong
+    /// answer — an unpinned resolve without the local root is already refused
+    /// upstream ([`Self::ensure_locally_resolvable`] → `PolicyResolutionBlocked`,
+    /// exit 81), and a source outage re-raises above.
     async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
-        // Delegate to the sources in priority order; the first that maps the
-        // identifier to a physical location wins (only `OcxIndex` does).
+        let mut last_error: Option<crate::Error> = None;
         for (source, _) in self.candidate_sources(identifier).await {
-            if let Some(physical) = source.physical_reference(identifier).await? {
-                return Ok(Some(physical));
+            match source.physical_reference(identifier).await {
+                Ok(Some(physical)) => return Ok(Some(physical)),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Source physical_reference failed for '{identifier}': {e}");
+                    last_error = Some(e);
+                }
             }
         }
-        Ok(None)
+        // A local-index read failure is a miss, never fatal — same tolerance
+        // [`Self::walk_chain`] gives its own local read. An unreadable or
+        // half-written index home (a broken `OCX_INDEX`, a shipped copy on a
+        // failing mount) must not turn a resolve that was already going to
+        // succeed into a hard error; without this the physical lookup would be
+        // the one place a damaged cache is fatal.
+        match self
+            .local_index
+            .physical_reference(identifier, self.kind_for(identifier))
+            .await
+        {
+            Ok(Some(physical)) => return Ok(Some(physical)),
+            Ok(None) => {}
+            Err(e) => log::warn!("Local index physical reference read failed for '{identifier}': {e}"),
+        }
+        last_error.map_or(Ok(None), Err)
     }
 
     async fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
@@ -3215,6 +3274,225 @@ mod chain_refs_tests {
             registry_spy.calls(),
             0,
             "the registry source must never be queried once the authoritative source reported a clean miss"
+        );
+    }
+
+    // ── physical_reference: local root answers when no source can ─────────
+
+    const PHYSICAL_REGISTRY: &str = "ghcr.io";
+    const PHYSICAL_REPO: &str = "ocx-contrib/cmake";
+
+    /// A published root whose `repository` points somewhere OTHER than the
+    /// logical identifier — the `index.ocx.sh` indirection (C2). Seeded through
+    /// the same verbatim-copy write path a resolve or `ocx index update` uses.
+    async fn seed_indirected_root(cache: &LocalIndex) {
+        let bytes = format!(r#"{{"repository":"oci://{PHYSICAL_REGISTRY}/{PHYSICAL_REPO}","tags":{{}}}}"#);
+        cache
+            .persist_published_root(&Identifier::new_registry(REPO, REGISTRY), bytes.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Assert `physical` is the indirected address, not the logical one. The
+    /// negative half is the load-bearing one: `Ok(None)` from
+    /// `physical_reference` makes `resolve_transport_pinned` report the LOGICAL
+    /// identifier as its own transport, which succeeds just as loudly as a
+    /// correct answer.
+    fn assert_is_physical(physical: &Identifier) {
+        assert_eq!(physical.registry(), PHYSICAL_REGISTRY);
+        assert_eq!(physical.repository(), PHYSICAL_REPO);
+        assert_eq!(
+            physical.digest(),
+            Some(digest_a()),
+            "the logical digest must be carried onto the physical location"
+        );
+        assert_ne!(
+            physical.registry(),
+            REGISTRY,
+            "the logical identifier reported as its own transport is the defect"
+        );
+    }
+
+    /// A source that is asked but cannot answer: every physical dereference
+    /// fails the way `OcxIndex` does with no network — its `GET
+    /// <base>/config.json` never completes.
+    #[derive(Clone)]
+    struct UnreachableSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for UnreachableSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn physical_reference(&self, _: &Identifier) -> Result<Option<Identifier>> {
+            Err(super::super::error::Error::IndexHttpFailed {
+                url: "https://index.example.com/config.json".to_string(),
+                source: "connection refused".into(),
+            }
+            .into())
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A source that answers with its own distinct physical address — stands in
+    /// for the `OcxIndex` whose answer has passed the SSRF pre-flight.
+    #[derive(Clone)]
+    struct PhysicalSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for PhysicalSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+            let mut physical = Identifier::new_registry("mirror.example.com/from-source", "mirror.example.com");
+            if let Some(digest) = identifier.digest() {
+                physical = physical.clone_with_digest(digest);
+            }
+            Ok(Some(physical))
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// `--offline` builds the chain with NO sources, so the source loop cannot
+    /// answer and the committed root is the only thing that knows the physical
+    /// address. Without a local answer this returns `Ok(None)` and the caller
+    /// silently reports the logical identifier as its own transport.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_physical_reference_reports_the_physical_address_from_the_local_root() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("the committed root's `repository` pointer is the physical address");
+        assert_is_physical(&physical);
+    }
+
+    /// No policy flag, no network: the source is asked, its dereference fails
+    /// mid-walk, and the committed root answers instead of the walk's error
+    /// escaping as exit 69.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreachable_source_falls_back_to_the_local_root_instead_of_failing() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("a warm local copy must answer when the index site is unreachable");
+        assert_is_physical(&physical);
+    }
+
+    /// Ordering lock: a source that CAN answer wins over the local root. The
+    /// source answer is the one that has passed the SSRF pre-flight
+    /// (`OcxIndex::physical_identifier`), and the layer pull that consumes the
+    /// result runs on the shared, unguarded client — so a local-first read here
+    /// would skip that floor on every warm-cache resolve.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reachable_source_answers_ahead_of_the_local_root() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(PhysicalSource)], ChainMode::Default);
+        let physical = chained.physical_reference(&digest_only_id()).await.unwrap().unwrap();
+        assert_eq!(
+            physical.registry(),
+            "mirror.example.com",
+            "the source's answer must win while it is reachable"
+        );
+    }
+
+    /// A registry-backed package has no local root and no source rewrite:
+    /// `Ok(None)` = physical == logical, the answer `resolve_transport_pinned`
+    /// turns into the logical identifier on purpose.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_local_root_and_no_source_is_a_clean_no_rewrite() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        assert!(
+            chained.physical_reference(&digest_only_id()).await.unwrap().is_none(),
+            "no root anywhere means no known rewrite"
+        );
+    }
+
+    /// A damaged index home is a miss, never fatal. `OCX_INDEX` can point at a
+    /// half-written directory, a failing mount, or (as here) a plain file — the
+    /// physical lookup must not be the one place that turns a resolve which was
+    /// going to succeed into a hard error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_index_home_is_a_miss_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        // A file where the index home directory belongs: every read under it
+        // fails with ENOTDIR rather than reporting a clean absence.
+        std::fs::write(dir.path().join("index"), b"not a directory").unwrap();
+
+        let chained = Index::from_chained(make_local_index(&dir), vec![], ChainMode::Offline);
+        assert!(
+            chained
+                .physical_reference(&digest_only_id())
+                .await
+                .expect("an unreadable index home must not fail the lookup")
+                .is_none(),
+            "an unreadable index home knows no rewrite"
+        );
+    }
+
+    /// The held source error is re-raised when the local copy cannot answer
+    /// either — a genuine outage still fails loudly instead of silently
+    /// degrading to the logical address.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreachable_source_still_errors_when_the_local_copy_has_no_root() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("with no local root the source failure must surface");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::IndexHttpFailed { .. })
+            ),
+            "expected the source's own transport error, got: {error:?}"
         );
     }
 }
