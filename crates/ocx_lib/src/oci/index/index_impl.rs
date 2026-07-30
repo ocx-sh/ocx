@@ -137,6 +137,20 @@ pub trait IndexImpl: Send + Sync {
         super::Jurisdiction::FallThrough
     }
 
+    /// This source's SSRF escape hatch — the `[registries."<ns>"].trusted_hosts`
+    /// entry it was built with (ocx#218). Cheap, synchronous, no I/O.
+    ///
+    /// Exposed on the trait so
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) can apply the SSRF
+    /// floor to a physical target the LOCAL copy minted with the SAME trust set
+    /// [`super::OcxIndex::physical_identifier`] applies to its own answer — one
+    /// config value, one meaning, never a second trusted-hosts notion. The
+    /// default is empty (guard every host); only [`super::OcxIndex`] overrides
+    /// it.
+    fn trusted_hosts(&self) -> &[String] {
+        &[]
+    }
+
     /// Whether this source is the configured owner of `registry` — a cheap,
     /// no-I/O ownership test, deliberately distinct from the per-name
     /// [`Self::jurisdiction`].
