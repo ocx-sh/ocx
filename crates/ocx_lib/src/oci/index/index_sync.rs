@@ -46,7 +46,7 @@ impl IndexSync {
         self.local_index.refresh_tags(identifier, source).await
     }
 
-    /// Conditional-GET-diffs `source`'s catalog against the persisted copy
+    /// Fetches `source`'s catalog, digest-diffs it against the persisted copy
     /// and re-snapshots only the packages whose root moved
     /// (`adr_index_indirection.md` F2). See [`LocalIndex::sync_catalog`] for
     /// the full read-diff-reconcile contract.
@@ -54,7 +54,7 @@ impl IndexSync {
     /// # Errors
     ///
     /// Propagates transport failures reaching the catalog and any local
-    /// write/lock failure while reconciling the catalog + ETag.
+    /// write/lock failure while reconciling the catalog.
     pub async fn sync_catalog(&self, source: &OcxIndex) -> Result<CatalogSyncOutcome> {
         self.local_index.sync_catalog(source).await
     }

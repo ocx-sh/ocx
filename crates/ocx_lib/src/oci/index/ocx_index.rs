@@ -138,11 +138,8 @@ fn redact_url(url: &str) -> String {
 /// A single static-file fetch outcome.
 #[derive(Debug)]
 pub enum IndexFetch {
-    /// `200 OK` — the response body and its `ETag`, when the server supplied one.
-    Found { bytes: Vec<u8>, etag: Option<String> },
-    /// `304 Not Modified` — only returned for a conditional GET whose
-    /// `If-None-Match` matched.
-    NotModified,
+    /// `200 OK` — the response body.
+    Found { bytes: Vec<u8> },
     /// `404 Not Found` — the object is absent (a normal miss, not an error).
     NotFound,
 }
@@ -155,9 +152,9 @@ pub enum IndexFetch {
 /// [`ReqwestIndexTransport`].
 #[async_trait]
 pub trait IndexTransport: Send + Sync {
-    /// `GET url`. When `if_none_match` is set, the request is conditional
-    /// (`If-None-Match`) so an unchanged catalog can answer `304`.
-    async fn get(&self, url: &str, if_none_match: Option<&str>) -> Result<IndexFetch>;
+    /// `GET url`. Unconditional — nothing here sends `If-None-Match`, so a
+    /// `304` is a protocol violation and surfaces as an error, never a miss.
+    async fn get(&self, url: &str) -> Result<IndexFetch>;
 
     fn box_clone(&self) -> Box<dyn IndexTransport>;
 }
@@ -232,26 +229,27 @@ impl Default for ReqwestIndexTransport {
 
 #[async_trait]
 impl IndexTransport for ReqwestIndexTransport {
-    async fn get(&self, url: &str, if_none_match: Option<&str>) -> Result<IndexFetch> {
-        let mut request = self.client.get(url);
-        if let Some(etag) = if_none_match {
-            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
-        let mut response = request
-            .send()
-            .await
-            .map_err(|source| super::error::Error::IndexHttpFailed {
-                url: redact_url(url),
-                source: Box::new(source),
-            })?;
+    async fn get(&self, url: &str) -> Result<IndexFetch> {
+        let mut response =
+            self.client
+                .get(url)
+                .send()
+                .await
+                .map_err(|source| super::error::Error::IndexHttpFailed {
+                    url: redact_url(url),
+                    source: Box::new(source),
+                })?;
 
         let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Ok(IndexFetch::NotModified);
-        }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(IndexFetch::NotFound);
         }
+        // Everything else — including a `304` answering this unconditional
+        // `GET` (RFC 9110 §15.4.5, a misbehaving edge) — is an error. Only a
+        // confirmed `404` above may read as absence: that `None` is what
+        // [`OcxIndex::jurisdiction`] settles an `Outside` verdict off, and the
+        // verdict is memoized, so one bad response would decide a name for the
+        // rest of the process.
         if !status.is_success() {
             return Err(super::error::Error::IndexHttpFailed {
                 url: redact_url(url),
@@ -273,12 +271,6 @@ impl IndexTransport for ReqwestIndexTransport {
             }
             .into());
         }
-
-        let etag = response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
 
         // Stream the body under a hard cap (CWE-400): a server that omits or lies
         // about Content-Length (chunked transfer, or a hostile endpoint) still
@@ -303,7 +295,7 @@ impl IndexTransport for ReqwestIndexTransport {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(IndexFetch::Found { bytes: body, etag })
+        Ok(IndexFetch::Found { bytes: body })
     }
 
     fn box_clone(&self) -> Box<dyn IndexTransport> {
@@ -354,13 +346,9 @@ pub fn parse_physical_repository(value: &str) -> Result<(String, String)> {
 pub struct CatalogSyncOutcome {
     /// The catalog to persist as the next diff basis + offline listing source.
     pub catalog: CatalogIndex,
-    /// The new `ETag`, when the CDN supplied one (persist alongside the catalog).
-    pub etag: Option<String>,
     /// Packages whose root digest moved (or appeared) versus the previous
     /// catalog — the exact set to re-snapshot. Sorted, deduplicated.
     pub moved: Vec<String>,
-    /// The conditional GET answered `304`; nothing changed, `moved` is empty.
-    pub unchanged: bool,
 }
 
 /// Diffs a freshly fetched catalog against the previously persisted (local)
@@ -697,8 +685,8 @@ impl OcxIndex {
             return Ok(FormatVersionState::Confirmed(config.clone()));
         }
         let url = format!("{}/config.json", self.base_url);
-        let config = match self.transport.get(&url, None).await? {
-            IndexFetch::Found { bytes, .. } => {
+        let config = match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => {
                 let config: IndexFormatConfig = parse_document(&bytes, &url)?;
                 if config.format_version != SUPPORTED_FORMAT_VERSION {
                     return Err(super::error::Error::UnsupportedIndexFormat {
@@ -711,7 +699,7 @@ impl OcxIndex {
             // Absent config: not a version-pinned OCX index at this base URL.
             // Do NOT cache and do NOT let roots resolve — fail-closed (F1),
             // re-checked every call so a later-deployed config.json is picked up.
-            IndexFetch::NotFound | IndexFetch::NotModified => return Ok(FormatVersionState::NotAnIndex),
+            IndexFetch::NotFound => return Ok(FormatVersionState::NotAnIndex),
         };
         self.cache.write().await.config = Some(config.clone());
         Ok(FormatVersionState::Confirmed(config))
@@ -724,9 +712,10 @@ impl OcxIndex {
     ///
     /// # Errors
     ///
-    /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) when the
-    /// endpoint answers `304` to this unconditional `GET` — see the arm below
-    /// for why that must not read as a miss.
+    /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) for any
+    /// non-404 failure the transport surfaces. Only a *confirmed* 404 reads as a
+    /// miss: this `None` is what [`Self::jurisdiction`] settles an `Outside`
+    /// verdict off, and it is memoized, so no other status may fold into it.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         // An absent config.json makes the base a non-index — no root resolves
         // (fail-closed, F1), never a pass that consumes a valid-looking root.
@@ -738,26 +727,12 @@ impl OcxIndex {
             return Ok(root.clone());
         }
         let url = format!("{}/p/{}.json", self.base_url, repository);
-        let root = match self.transport.get(&url, None).await? {
-            IndexFetch::Found { bytes, .. } => {
+        let root = match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
                 Some(Arc::new(parsed))
             }
             IndexFetch::NotFound => None,
-            // The request carried no `If-None-Match`, so a `304` answers a
-            // question nobody asked (RFC 9110 §15.4.5) — a misbehaving CDN, not
-            // a confirmed absence. It must NOT fold into the 404 miss: this
-            // `None` is what [`Self::jurisdiction`] reads an `Outside` verdict
-            // off, and the whole design rests on only a *confirmed* 404 being
-            // able to hand a name to plain OCI. The miss is memoized too, so one
-            // bad response would decide the name for the rest of the process.
-            IndexFetch::NotModified => {
-                return Err(super::error::Error::IndexHttpFailed {
-                    url: redact_url(&url),
-                    source: "304 Not Modified answered an unconditional GET".into(),
-                }
-                .into());
-            }
         };
         self.cache
             .write()
@@ -797,9 +772,9 @@ impl OcxIndex {
             digest.algorithm().prefix(),
             digest.hex()
         );
-        let bytes = match self.transport.get(&url, None).await? {
-            IndexFetch::Found { bytes, .. } => bytes,
-            IndexFetch::NotFound | IndexFetch::NotModified => return Ok(None),
+        let bytes = match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => bytes,
+            IndexFetch::NotFound => return Ok(None),
         };
 
         // Trust boundary: re-derive the digest OCX did not mint and compare.
@@ -882,51 +857,37 @@ impl OcxIndex {
 
     // ── catalog sync (F2) ────────────────────────────────────────────────────
 
-    /// Syncs `c/index.json` with a conditional GET and diffs per-package root
-    /// digests against `previous`, returning only the packages whose root moved.
+    /// Fetches `c/index.json` and diffs per-package root digests against
+    /// `previous`, returning only the packages whose root moved.
     ///
-    /// A `304` short-circuits to `unchanged` with `previous` carried forward; a
-    /// `404` yields an empty catalog. The returned catalog is what the caller
-    /// persists at `{index-home}/c/index.json` — both the offline listing source
-    /// and the next diff basis (F2).
-    pub async fn sync_catalog(
-        &self,
-        previous: &CatalogIndex,
-        previous_etag: Option<&str>,
-    ) -> Result<CatalogSyncOutcome> {
+    /// The digest diff **is** the sync mechanism (F2) — the catalog is small and
+    /// fetched once per `ocx index update`, so the fetch is unconditional and no
+    /// HTTP validator is stored anywhere. A `404` yields an empty catalog. The
+    /// returned catalog is what the caller persists at
+    /// `{index-home}/c/index.json` — both the offline listing source and the
+    /// next diff basis.
+    pub async fn sync_catalog(&self, previous: &CatalogIndex) -> Result<CatalogSyncOutcome> {
         // No config.json ⇒ not a version-pinned index: nothing to list, an
         // empty catalog (fail-closed, F1) — never a walk of an unversioned base.
         if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
             return Ok(CatalogSyncOutcome {
                 catalog: CatalogIndex::new(),
-                etag: None,
                 moved: Vec::new(),
-                unchanged: false,
             });
         }
         let url = format!("{}/c/index.json", self.base_url);
-        match self.transport.get(&url, previous_etag).await? {
-            IndexFetch::NotModified => Ok(CatalogSyncOutcome {
-                catalog: previous.clone(),
-                etag: previous_etag.map(str::to_owned),
-                moved: Vec::new(),
-                unchanged: true,
-            }),
+        match self.transport.get(&url).await? {
             IndexFetch::NotFound => Ok(CatalogSyncOutcome {
                 catalog: CatalogIndex::new(),
-                etag: None,
                 moved: Vec::new(),
-                unchanged: false,
             }),
-            IndexFetch::Found { bytes, etag } => {
+            IndexFetch::Found { bytes } => {
                 let document: CatalogDocument = parse_document(&bytes, &url)?;
                 let fetched = document.into_packages()?;
                 let moved = diff_moved(previous, &fetched);
                 Ok(CatalogSyncOutcome {
                     catalog: fetched,
-                    etag,
                     moved,
-                    unchanged: false,
                 })
             }
         }
@@ -992,7 +953,7 @@ impl index_impl::IndexImpl for OcxIndex {
         if registry != self.namespace {
             return Ok(Vec::new());
         }
-        let outcome = self.sync_catalog(&CatalogIndex::new(), None).await?;
+        let outcome = self.sync_catalog(&CatalogIndex::new()).await?;
         let mut repositories: Vec<String> = outcome.catalog.into_keys().collect();
         repositories.sort();
         repositories.dedup();
@@ -1115,13 +1076,13 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(None);
         }
         let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
-        match self.transport.get(&url, None).await? {
-            IndexFetch::Found { bytes, .. } => {
+        match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => {
                 let root: IndexRoot = parse_document(&bytes, &url)?;
                 Ok(Some((bytes, root)))
             }
-            // A 404 (or a 304 with no cached body) is a clean miss, never an error.
-            IndexFetch::NotFound | IndexFetch::NotModified => Ok(None),
+            // A 404 is a clean miss, never an error.
+            IndexFetch::NotFound => Ok(None),
         }
     }
 
@@ -1175,10 +1136,10 @@ mod tests {
 
     // ── HTTP boundary stub (mirrors the StubTransport pattern) ───────────────
 
-    /// url → (body bytes, optional ETag). A present entry is a `200`.
-    type StubResponses = Arc<Mutex<HashMap<String, (Vec<u8>, Option<String>)>>>;
-    /// Recorded `(url, if_none_match)` requests, for assertions.
-    type StubRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+    /// url → body bytes. A present entry is a `200`, an absent one a `404`.
+    type StubResponses = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+    /// Recorded request URLs, for assertions.
+    type StubRequests = Arc<Mutex<Vec<String>>>;
 
     #[derive(Clone, Default)]
     struct StubIndexTransport {
@@ -1186,9 +1147,6 @@ mod tests {
         requests: StubRequests,
         /// URLs that return a transport error (simulate a dead endpoint).
         failures: Arc<Mutex<std::collections::HashSet<String>>>,
-        /// URLs that answer `304` to EVERY request, conditional or not —
-        /// a misbehaving CDN edge.
-        not_modified: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl StubIndexTransport {
@@ -1197,34 +1155,15 @@ mod tests {
         }
 
         fn insert(&self, url: &str, bytes: &[u8]) {
-            self.responses
-                .lock()
-                .unwrap()
-                .insert(url.to_string(), (bytes.to_vec(), None));
-        }
-
-        fn insert_with_etag(&self, url: &str, bytes: &[u8], etag: &str) {
-            self.responses
-                .lock()
-                .unwrap()
-                .insert(url.to_string(), (bytes.to_vec(), Some(etag.to_string())));
+            self.responses.lock().unwrap().insert(url.to_string(), bytes.to_vec());
         }
 
         fn fail(&self, url: &str) {
             self.failures.lock().unwrap().insert(url.to_string());
         }
 
-        fn always_not_modified(&self, url: &str) {
-            self.not_modified.lock().unwrap().insert(url.to_string());
-        }
-
         fn request_urls(&self) -> Vec<String> {
-            self.requests
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(url, _)| url.clone())
-                .collect()
+            self.requests.lock().unwrap().clone()
         }
 
         fn request_count(&self, url: &str) -> usize {
@@ -1232,18 +1171,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(requested, _)| requested == url)
+                .filter(|requested| *requested == url)
                 .count()
         }
     }
 
     #[async_trait]
     impl IndexTransport for StubIndexTransport {
-        async fn get(&self, url: &str, if_none_match: Option<&str>) -> Result<IndexFetch> {
-            self.requests
-                .lock()
-                .unwrap()
-                .push((url.to_string(), if_none_match.map(str::to_owned)));
+        async fn get(&self, url: &str) -> Result<IndexFetch> {
+            self.requests.lock().unwrap().push(url.to_string());
             if self.failures.lock().unwrap().contains(url) {
                 return Err(super::super::error::Error::IndexHttpFailed {
                     url: url.to_string(),
@@ -1251,22 +1187,9 @@ mod tests {
                 }
                 .into());
             }
-            if self.not_modified.lock().unwrap().contains(url) {
-                return Ok(IndexFetch::NotModified);
-            }
             let responses = self.responses.lock().unwrap();
             match responses.get(url) {
-                Some((bytes, etag)) => {
-                    if let (Some(requested), Some(stored)) = (if_none_match, etag.as_deref())
-                        && requested == stored
-                    {
-                        return Ok(IndexFetch::NotModified);
-                    }
-                    Ok(IndexFetch::Found {
-                        bytes: bytes.clone(),
-                        etag: etag.clone(),
-                    })
-                }
+                Some(bytes) => Ok(IndexFetch::Found { bytes: bytes.clone() }),
                 None => Ok(IndexFetch::NotFound),
             }
         }
@@ -2026,16 +1949,15 @@ mod tests {
         );
     }
 
-    // ── catalog sync (F2): conditional GET + digest diff ─────────────────────
+    // ── catalog sync (F2): digest diff ───────────────────────────────────────
 
     #[tokio::test]
     async fn sync_catalog_diff_returns_only_moved_packages() {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(
+        transport.insert(
             &catalog_url(),
             &catalog_body(r#"{"kitware/cmake":"sha256:new","stable/tool":"sha256:same","fresh/pkg":"sha256:brand"}"#),
-            "etag-v2",
         );
         let source = make_source(transport, false);
 
@@ -2043,9 +1965,7 @@ mod tests {
         previous.insert("kitware/cmake".to_string(), "sha256:old".to_string());
         previous.insert("stable/tool".to_string(), "sha256:same".to_string());
 
-        let outcome = source.sync_catalog(&previous, Some("etag-v1")).await.unwrap();
-        assert!(!outcome.unchanged);
-        assert_eq!(outcome.etag.as_deref(), Some("etag-v2"));
+        let outcome = source.sync_catalog(&previous).await.unwrap();
         assert_eq!(
             outcome.moved,
             vec!["kitware/cmake".to_string()],
@@ -2059,24 +1979,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_catalog_not_modified_is_unchanged() {
+    async fn sync_catalog_against_an_unchanged_catalog_moves_nothing() {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(
-            &catalog_url(),
-            &catalog_body(r#"{"kitware/cmake":"sha256:x"}"#),
-            "etag-1",
-        );
+        transport.insert(&catalog_url(), &catalog_body(r#"{"kitware/cmake":"sha256:x"}"#));
         let source = make_source(transport, false);
 
         let mut previous = CatalogIndex::new();
         previous.insert("kitware/cmake".to_string(), "sha256:x".to_string());
 
-        // The conditional GET matches the stored ETag → 304.
-        let outcome = source.sync_catalog(&previous, Some("etag-1")).await.unwrap();
-        assert!(outcome.unchanged, "a matching ETag must short-circuit to unchanged");
+        // The fetch is unconditional; the DIGEST DIFF is what decides there is
+        // nothing to do — no validator is consulted or stored anywhere.
+        let outcome = source.sync_catalog(&previous).await.unwrap();
         assert!(outcome.moved.is_empty());
-        assert_eq!(outcome.catalog, previous, "the previous catalog is carried forward");
+        assert_eq!(outcome.catalog, previous, "an unchanged remote catalog diffs to itself");
     }
 
     // ── physical reference parsing (C3, one-way door) ────────────────────────
@@ -2252,9 +2168,29 @@ mod tests {
             "the re-snapshot must persist the image index as a dispatch object"
         );
 
-        // A second sync with the catalog unchanged re-snapshots nothing.
+        // A second sync with the catalog unchanged re-snapshots nothing AND
+        // rewrites nothing. The digest diff is the entire sync mechanism (F2):
+        // the catalog fetch is unconditional, so "nothing to do" has to fall out
+        // of the diff and the commit's no-op check, never out of a `304`. A
+        // byte-identical rewrite would still churn the mtime of a tree that gets
+        // committed to repos and rsync'd (A2).
+        let catalog_path = snapshot.source_catalog_path(NAMESPACE);
+        let root_path = snapshot.root_document_path(NAMESPACE, "ns/pkg");
+        let catalog_before = tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap();
+        let root_before = tokio::fs::metadata(&root_path).await.unwrap().modified().unwrap();
+
         let again = local.sync_catalog(&source).await.unwrap();
         assert!(again.moved.is_empty(), "an unchanged catalog must re-snapshot nothing");
+        assert_eq!(
+            tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap(),
+            catalog_before,
+            "an unchanged catalog must not be rewritten"
+        );
+        assert_eq!(
+            tokio::fs::metadata(&root_path).await.unwrap().modified().unwrap(),
+            root_before,
+            "an unchanged catalog must leave every root document untouched"
+        );
     }
 
     // ── catalog-entry precedence: moved = root-derived, unmoved = fetched ─────
@@ -2289,7 +2225,7 @@ mod tests {
         let mut seed = snapshot.begin_catalog_transaction(NAMESPACE).await.unwrap();
         seed.catalog()
             .insert("unmoved/pkg".to_string(), "sha256:oldunmoved".to_string());
-        seed.commit(None).await.unwrap();
+        seed.commit().await.unwrap();
 
         let outcome = local.sync_catalog(&source).await.unwrap();
         assert_eq!(
@@ -2407,7 +2343,7 @@ mod tests {
         let stale = br#"{"repository":"oci://ghcr.io/stale/root","tags":{}}"#;
         let mut transaction = snapshot.begin_catalog_transaction(NAMESPACE).await.unwrap();
         transaction.write_root(repo, stale, |_| Ok(())).await.unwrap();
-        transaction.commit(None).await.unwrap();
+        transaction.commit().await.unwrap();
     }
 
     fn registry_manifest() -> (Vec<u8>, oci::Digest) {
@@ -2763,93 +2699,6 @@ mod tests {
         );
     }
 
-    // ── ETag: LocalIndex catalog sync sends If-None-Match, handles 304 (item 5) ─
-
-    #[tokio::test]
-    async fn local_index_sync_catalog_persists_etag_and_honors_304() {
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:root"}"#), "etag-1");
-        // Serve the moved package so the first sync can re-snapshot it.
-        seed_empty_index(&transport, "ns/pkg", "1.0");
-        let source = make_source(transport.clone(), false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let local = local_index(&dir);
-        let snapshot = crate::file_structure::IndexStore::new(dir.path().join("index"));
-        // Materialize `ns/pkg` (stale digest) so the remote's newer digest is a
-        // MOVE of an existing local root — the F2 shape that re-snapshots.
-        seed_stale_root(&snapshot, "ns/pkg").await;
-
-        // First sync: full GET, persists catalog + ETag, re-snapshots the package.
-        let first = local.sync_catalog(&source).await.unwrap();
-        assert_eq!(first.moved, vec!["ns/pkg".to_string()]);
-        assert_eq!(
-            snapshot.read_source_catalog_etag(NAMESPACE).await.unwrap().as_deref(),
-            Some("etag-1"),
-            "the per-source ETag must be persisted for the next conditional GET"
-        );
-
-        // Second sync: the persisted ETag is sent; the stub returns 304 → no
-        // re-snapshot, catalog carried forward unchanged.
-        let second = local.sync_catalog(&source).await.unwrap();
-        assert!(second.unchanged, "a matching ETag must yield a 304 unchanged sync");
-        assert!(second.moved.is_empty(), "a 304 sync must re-snapshot nothing");
-        assert!(
-            transport
-                .requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(url, inm)| url == &catalog_url() && inm.as_deref() == Some("etag-1")),
-            "the second catalog sync must send If-None-Match with the persisted ETag"
-        );
-    }
-
-    /// A `W/"..."`-prefixed weak ETag round-trips `sync_catalog` opaquely: OCX
-    /// never parses or normalizes the validator (strong vs weak comparison is
-    /// an HTTP semantics distinction OCX does not implement), it is stored and
-    /// echoed back verbatim in the next `If-None-Match`.
-    #[tokio::test]
-    async fn sync_catalog_round_trips_weak_etag_opaquely() {
-        const WEAK_ETAG: &str = "W/\"abc123\"";
-
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:root"}"#), WEAK_ETAG);
-        seed_empty_index(&transport, "ns/pkg", "1.0");
-        let source = make_source(transport.clone(), false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let local = local_index(&dir);
-        let snapshot = crate::file_structure::IndexStore::new(dir.path().join("index"));
-        // Materialize `ns/pkg` (stale digest) so the remote's newer digest is a
-        // MOVE of an existing local root — the F2 shape that re-snapshots.
-        seed_stale_root(&snapshot, "ns/pkg").await;
-
-        let first = local.sync_catalog(&source).await.unwrap();
-        assert_eq!(first.moved, vec!["ns/pkg".to_string()]);
-        assert_eq!(
-            snapshot.read_source_catalog_etag(NAMESPACE).await.unwrap().as_deref(),
-            Some(WEAK_ETAG),
-            "a weak validator must be persisted verbatim, `W/` prefix and quotes intact"
-        );
-
-        // Second sync: the persisted weak ETag is echoed back exactly; the
-        // stub matches it byte-for-byte and answers 304.
-        let second = local.sync_catalog(&source).await.unwrap();
-        assert!(second.unchanged, "a matching weak ETag must yield a 304 unchanged sync");
-        assert!(
-            transport
-                .requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(url, inm)| url == &catalog_url() && inm.as_deref() == Some(WEAK_ETAG)),
-            "the second catalog sync must send If-None-Match with the weak ETag, unmodified"
-        );
-    }
-
     // ── fetch_root_document: verbatim published-root fetch (A2/F1, C1 stub) ───
     //
     // Specification tests for the `OcxIndex::fetch_root_document` override
@@ -2983,14 +2832,16 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_confirmed_404_settles_a_declined_name_as_outside() {
-        // The root request carries no `If-None-Match`, so a `304` is a
-        // misbehaving edge, not an absence. Folding it into the 404 miss would
-        // let one bad response hand a declined name to plain OCI — and memoize
-        // that verdict for the process. Fail-closed instead: `resolve_root`
-        // errors, and an errored root keeps the source authoritative.
+        // A root fetch that FAILS is not an absence. Folding any non-404 answer
+        // into the 404 miss would let one bad response hand a declined name to
+        // plain OCI — and memoize that verdict for the process. Fail-closed
+        // instead: `resolve_root` errors, and an errored root keeps the source
+        // authoritative. (`IndexFetch` carries exactly `Found` and `NotFound`,
+        // so every other status — a `304` from a misbehaving edge included —
+        // reaches here as an error by construction.)
         let transport = StubIndexTransport::new();
         seed_with_config(&transport, br#"{"format_version":1,"name_segments":2}"#);
-        transport.always_not_modified(&flat_root_url());
+        transport.fail(&flat_root_url());
         let source = make_source(transport, false);
 
         assert_eq!(
@@ -3001,7 +2852,7 @@ mod tests {
         let error = source
             .resolve_root(FLAT_REPO)
             .await
-            .expect_err("a 304 answering an unconditional GET is a protocol violation, not a miss");
+            .expect_err("a failed root fetch is a protocol failure, not a miss");
         assert!(
             error.to_string().contains(&flat_root_url()),
             "unexpected error: {error}"
@@ -3289,9 +3140,9 @@ mod tests {
     async fn sync_catalog_neither_advances_nor_retires_an_out_of_jurisdiction_catalog_key() {
         // R2: the flat key HAS a local root on disk, so without the guard step 3
         // calls `refresh_tags` -> `refresh_derived` -> `list_tags` -> `Ok(None)`
-        // -> `RemoteManifestNotFound`, whose `?` aborts before the catalog + ETag
-        // commit. The ETag then never advances and every later `ocx index update`
-        // aborts identically, swallowed as a non-fatal warn.
+        // -> `RemoteManifestNotFound`, whose `?` aborts before the catalog
+        // commit — and every later `ocx index update` aborts identically,
+        // swallowed as a non-fatal warn.
         //
         // The row is skipped, but its FETCHED value must not be adopted either:
         // the root that value names is unfetchable by construction (its 404 is
@@ -3299,11 +3150,7 @@ mod tests {
         // the on-disk root and the catalog straddled.
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert_with_etag(
-            &catalog_url(),
-            &catalog_body(r#"{"go-task":"sha256:moved"}"#),
-            "etag-jurisdiction",
-        );
+        transport.insert(&catalog_url(), &catalog_body(r#"{"go-task":"sha256:moved"}"#));
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();
@@ -3327,11 +3174,6 @@ mod tests {
             before,
             "the entry must still describe the root actually on disk"
         );
-        assert_eq!(
-            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
-            None,
-            "committing the ETag would answer 304 forever and retire the retry"
-        );
     }
 
     #[tokio::test]
@@ -3345,15 +3187,14 @@ mod tests {
         // moved package on every later `ocx index update`). It must not advance
         // the failed row either — the on-disk root is still the old one, so the
         // fetched entry would straddle them, `read_root` would self-heal the
-        // catalog back and serve the STALE root past the yank gate. And with the
-        // entry kept, the ETag must be held back, or the next sync answers 304,
-        // diffs nothing, and the row is never retried at all.
+        // catalog back and serve the STALE root past the yank gate. Keeping the
+        // old entry IS the retry: the next sync re-diffs it against the fetched
+        // catalog and tries again.
         let transport = StubIndexTransport::new();
         seed_empty_index(&transport, "ns/pkg", "1.0");
-        transport.insert_with_etag(
+        transport.insert(
             &catalog_url(),
             &catalog_body(r#"{"ns/pkg":"sha256:moved","ns/skewed":"sha256:moved"}"#),
-            "etag-skew",
         );
         let source = make_source(transport.clone(), false);
         let skewed_root_url = format!("{BASE}/p/ns/skewed.json");
@@ -3385,11 +3226,6 @@ mod tests {
             skewed_before,
             "the failed row must keep the entry matching the root actually on disk"
         );
-        assert_eq!(
-            local.index_store().read_source_catalog_etag(NAMESPACE).await.unwrap(),
-            None,
-            "the ETag must be withheld while a moved row is stale"
-        );
         let attempts = transport.request_count(&skewed_root_url);
         assert!(
             attempts > 0,
@@ -3398,8 +3234,8 @@ mod tests {
         );
 
         // The whole point: the next update re-diffs the failed key and tries
-        // again. With the fetched entry adopted and the ETag committed, the
-        // second sync would get a `304`, diff nothing, and never touch it.
+        // again. Had the fetched entry been adopted, the second sync would diff
+        // NEW against NEW, see no move, and never touch it.
         local
             .sync_catalog(&source)
             .await
@@ -3417,7 +3253,7 @@ mod tests {
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
         seed_empty_index(&transport, "ns/pkg", "1.0");
         transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert_with_etag(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:moved"}"#), "etag-ok");
+        transport.insert(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:moved"}"#));
         let source = make_source(transport.clone(), false);
 
         let dir = tempfile::tempdir().unwrap();

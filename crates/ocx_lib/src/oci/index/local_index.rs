@@ -277,27 +277,29 @@ impl LocalIndex {
     /// live at `<home>/<source>/c/index.json`, keyed by this source's namespace.
     /// The flow, in F2's contract order:
     ///
-    /// 1. Read the persisted per-source catalog + ETag as the diff basis.
-    /// 2. Conditional-GET the remote catalog **outside** any lock — a `304`
-    ///    short-circuits with nothing to do; a `200` diffs the per-package root
-    ///    digests against the persisted map.
+    /// 1. Read the persisted per-source catalog as the diff basis.
+    /// 2. GET the remote catalog **outside** any lock and diff the per-package
+    ///    root digests against the persisted map. The digest diff is the whole
+    ///    sync mechanism — there is no HTTP validator anywhere.
     /// 3. Re-snapshot only the moved (or new) packages via [`Self::refresh_tags`]
     ///    — the published grow path (root + dispatch objects).
-    /// 4. Reconcile-commit the catalog + ETag coherently under the source lock:
+    /// 4. Reconcile-commit the catalog under the source lock:
     ///    [`IndexStore::begin_catalog_transaction`](crate::file_structure::IndexStore::begin_catalog_transaction)
     ///    re-reads the on-disk map first, then the fetched entries are merged in
     ///    — **never** a wholesale replace from the pre-lock read, so a concurrent
     ///    per-package upsert is never clobbered. A moved row step 3 could not
-    ///    re-snapshot keeps its on-disk entry and holds the ETag back, so the
-    ///    next sync re-diffs it (see the loop below).
+    ///    re-snapshot keeps its on-disk entry, which is exactly what makes the
+    ///    next sync re-diff and retry it (see the loop below). A commit that
+    ///    changes nothing writes nothing, so an unchanged catalog leaves the
+    ///    tree byte- and mtime-identical.
     ///
-    /// Returns the sync outcome (moved set, unchanged flag) for reporting;
-    /// remote-catalog drift a caller did not re-snapshot is staleness ("update
-    /// available"), never an error (F1).
+    /// Returns the sync outcome (the moved set) for reporting; remote-catalog
+    /// drift a caller did not re-snapshot is staleness ("update available"),
+    /// never an error (F1).
     pub async fn sync_catalog(&self, source: &super::OcxIndex) -> Result<super::CatalogSyncOutcome> {
         let namespace = source.namespace();
 
-        // Step 1 — the per-source catalog + ETag are the diff basis (F2). The
+        // Step 1 — the per-source catalog is the diff basis (F2). The
         // reconcile-commit below re-reads under the lock, so this pre-lock read is
         // only a basis for the network diff, never the map that gets written.
         let previous = self
@@ -305,10 +307,9 @@ impl LocalIndex {
             .read_source_catalog(namespace)
             .await?
             .unwrap_or_default();
-        let previous_etag = self.index_store.read_source_catalog_etag(namespace).await?;
 
         // Step 2 — network work happens OUTSIDE the transaction lock.
-        let outcome = source.sync_catalog(&previous, previous_etag.as_deref()).await?;
+        let outcome = source.sync_catalog(&previous).await?;
 
         // Boundary validation (CWE-22, F2 "surfaces, never silently acts"): a
         // published index's `c/index.json` keys are attacker-controlled for a
@@ -349,8 +350,8 @@ impl LocalIndex {
         // the new one is never surfaced — while a resolve-free run leaves the
         // NEW value committed, and the next sync diffs NEW against NEW and sees
         // no move. Either way the row is never retried. Keeping the on-disk
-        // entry (step 4) AND holding the ETag back (below) is what makes the
-        // next `ocx index update` re-diff it and try again.
+        // entry (step 4) is what makes the next `ocx index update` re-diff it
+        // and try again.
         let mut stale: std::collections::HashSet<&String> = std::collections::HashSet::new();
         for repository in &outcome.moved {
             if !crate::utility::fs::path_exists_lossy(&self.index_store.root_document_path(namespace, repository)).await
@@ -381,8 +382,8 @@ impl LocalIndex {
             // its roots, or a root rolled back, 404s `p/<key>.json`), and
             // aborting here would leave every OTHER moved package unlanded —
             // permanently, since each later `ocx index update` repeats it
-            // identically and exits 0. It does hold this run's ETag back (see
-            // step 4), which is the retry, not a veto.
+            // identically and exits 0. Keeping the row's old entry (step 4) is
+            // the retry, not a veto.
             if let Err(error) = self.refresh_tags(&identifier, &source_index).await {
                 log::warn!(
                     "index source '{namespace}': re-snapshot of '{repository}' failed, \
@@ -394,9 +395,10 @@ impl LocalIndex {
             refreshed.insert(repository);
         }
 
-        // Step 4 — reconcile-commit the fetched catalog + ETag in ONE transaction
-        // under the source lock. A `304` (`unchanged`) has nothing to persist.
-        if !outcome.unchanged {
+        // Step 4 — reconcile-commit the fetched catalog in ONE transaction under
+        // the source lock. `commit` writes nothing when the merge changed
+        // nothing, so an unchanged catalog is a genuine no-op on disk.
+        {
             let mut transaction = self.index_store.begin_catalog_transaction(namespace).await?;
             // Merge the fetched entries into the freshly re-read on-disk map, but
             // SKIP the re-snapshotted packages: step 3's refresh already committed
@@ -418,18 +420,7 @@ impl LocalIndex {
                 }
                 transaction.catalog().insert(repository.clone(), catalog_entry.clone());
             }
-            // Hold the ETag back while any moved row is stale: `commit` writes the
-            // sidecar only for `Some`, so the previous ETag survives and the next
-            // sync gets a `200` and re-diffs. Committing it would answer `304`
-            // forever and retire the retry — the row would stay stale for good.
-            // Every healthy row still lands either way; one failed package must
-            // not veto them.
-            let etag = if stale.is_empty() {
-                outcome.etag.as_deref()
-            } else {
-                None
-            };
-            transaction.commit(etag).await?;
+            transaction.commit().await?;
         }
         Ok(outcome)
     }
@@ -891,7 +882,7 @@ impl LocalIndex {
                 super::parse_physical_repository(&root.repository).map(|_| ())
             })
             .await?;
-        transaction.commit(None).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -2794,7 +2785,7 @@ mod tests {
         let mut seed = store.begin_catalog_transaction(REGISTRY).await.unwrap();
         seed.catalog()
             .insert("other/tool".to_string(), "sha256:existing".to_string());
-        seed.commit(None).await.unwrap();
+        seed.commit().await.unwrap();
 
         let bytes = br#"{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{}}"#.to_vec();
         index.persist_published_root(&tagged_id("3.28"), &bytes).await.unwrap();
@@ -2894,17 +2885,15 @@ mod tests {
 
     #[async_trait]
     impl super::super::IndexTransport for CatalogTransport {
-        async fn get(&self, url: &str, _if_none_match: Option<&str>) -> Result<super::super::IndexFetch> {
+        async fn get(&self, url: &str) -> Result<super::super::IndexFetch> {
             if url.ends_with("/config.json") {
                 return Ok(super::super::IndexFetch::Found {
                     bytes: br#"{"format_version":1}"#.to_vec(),
-                    etag: None,
                 });
             }
             if url.ends_with("/c/index.json") {
                 return Ok(super::super::IndexFetch::Found {
                     bytes: self.catalog_json.clone().into_bytes(),
-                    etag: Some("etag-1".to_string()),
                 });
             }
             Ok(super::super::IndexFetch::NotFound)
