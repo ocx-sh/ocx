@@ -229,7 +229,6 @@ local re-encoding.** A source's subtree is:
 <home>/<source>/
 ├── config.json                 (published indices only — {"format_version": 1})
 ├── c/index.json                (published indices only — catalog: {"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}})
-├── c/index.json.etag           (published indices only — conditional-GET validator sidecar)
 └── p/<ns>/
     ├── <pkg>.json              root doc
     └── <pkg>/o/<algo>/<hex>.json   object CAS (dispatch objects only; A3)
@@ -511,7 +510,7 @@ lands. The client design spec is re-derived against these shapes (handover waiti
 | `config.json` (● `{"format_version": 1}`) | version pin | Read once; reject unknown `format_version` (fail-closed, `DataError`) |
 | `p/<ns>/<pkg>.json` **root** (●) | **volatile** (human-PR `repository` migration, tag curation) | Snapshot-first under Default — **never auto-refreshed** (Invariant 1; local-first-except-`--remote`, `subsystem-oci.md`). The snapshot copy is dated by `observed`. A live re-fetch happens **only** on an explicit `ocx index update` or a `--remote` resolve, which rewrites the snapshot and bumps `observed`. Offline-first (DR1, Principle #2) means a Default-mode resolve never reaches upstream for the root. Every read **verifies `sha256(bytes)` against the `c/index.json` entry** for a source with a synced catalog (below) |
 | `o/sha256/<hex>` **observation object** (●) | **immutable** (CAS) | Fetch once, **verify `sha256(bytes)` == `<hex>`**, cache forever in `o/sha256/` |
-| `c/index.json` (● `{"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}}`) | volatile catalog | Whole-catalog sync via **conditional GET + digest diff** (F2) |
+| `c/index.json` (● `{"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}}`) | volatile catalog | Whole-catalog sync via **digest diff** (F2) |
 | `desc` blobs (`.md`/`.svg`/`.png`) | **frozen-status UNRESOLVED** | **OPEN interop point — record, do not build on it** (F4) |
 
 The obs-object verify step is load-bearing: it is the primary place OCX re-derives a digest OCX did not
@@ -559,16 +558,26 @@ or rsync'd copy), same as everywhere else in this ADR; this check is tamper-evid
 corruption only, and no stronger claim is made. A derived index carries no catalog (A2) — its OCX-authored
 roots are exempt, unchanged filesystem trust.
 
-### F2. Catalog sync — conditional GET first, digest diff
+### F2. Catalog sync — digest diff
 
 `c/index.json` maps `<ns>/<pkg> → sha256(root)` — it is simply the *catalog part* of the same index, at a
 coarser granularity than the per-package roots. `ocx index catalog` reads/syncs this part; `ocx index
 update` writes the per-package parts (root + dispatch object). Every flow that touches the catalog issues
-an **ETag `If-None-Match` conditional GET first**: a `304 Not Modified` is one round trip with no body (as
-cheap as a HEAD, and it hands back a changed body for free when there is one), so the common "nothing
-moved" case costs almost nothing — frequently nothing needs pulling at all.
+a plain unconditional `GET`.
 
-On a `200` (catalog changed), `ocx index catalog` / `ocx index update` against a published index diffs the
+> **Amended 2026-07-30 — the conditional GET is retired.** This clause specified an ETag
+> `If-None-Match` request whose validator was persisted as `c/index.json.etag`, a sibling of the
+> catalog. That sidecar was the only file in an index tree neither served by the index site nor
+> content-addressed: per-machine HTTP bookkeeping inside a tree A2 declares a byte-for-byte mirror of
+> the hosted site, and which repositories commit. It bought a `304` over a `200` on `ocx index update`
+> — the single caller (`command/index_update.rs`) — for a catalog measured in kilobytes, with the round
+> trip paid either way. Measured, it bought less: the catalog was rewritten on **every** run regardless,
+> because the per-package upsert re-entered `commit`, which wrote unconditionally. The sidecar is
+> deleted and `commit` now returns early when the merged map equals what it read, so an unchanged
+> catalog is a genuine no-op — the idempotence the ETag implied but never delivered.
+> **The digest diff below is unchanged; it was always the mechanism.**
+
+`ocx index catalog` / `ocx index update` against a published index diffs the
 remote per-package root digests against the **local** catalog and:
 
 - re-snapshots (via the per-package `ocx index update` path) only the packages whose root digest moved —
@@ -582,8 +591,7 @@ remote per-package root digests against the **local** catalog and:
   available" (staleness, F1), never an error.
 
 This is the offline-first catalog refresh: one conditional request amortized across the whole catalog, no
-per-package polling. The local `c/index.json` (with its `.etag` conditional-GET validator sidecar) is both
-the offline catalog-listing source for `ocx index catalog` and the diff basis for the next sync — the
+per-package polling. The local `c/index.json` is both the offline catalog-listing source for `ocx index catalog` and the diff basis for the next sync — the
 previous file's per-package digests are compared against the freshly-fetched remote map, so no separate
 validator store is needed. In the *complete*-copy (full-mirror) case the local `c/index.json` equals the
 remote catalog byte-for-byte; in the *partial* case it is the same-grammar subset covering the packages
@@ -789,7 +797,7 @@ index.ocx.sh served tree  (● = frozen; the local index-source subtree is a ver
 local index collection (home: --index ▸ OCX_INDEX ▸ $OCX_HOME/index) — one index per <source>
 <home>/<source>/                                  the hosted grammar verbatim (A2)
 ├── config.json                       published index only — verbatim copy of the served config
-├── c/index.json (+ .etag)            published index only — verbatim/partial catalog + conditional-GET validator
+├── c/index.json                     published index only — verbatim/partial catalog
 └── p/<ns>/
     ├── <pkg>.json                    root doc: repository (oci://<physical>), status/superseded_by/…,
     │                                    tags{ "<tag>": { content, observed, yanked } }
@@ -974,7 +982,7 @@ future escape hatch, not a day-one shape.
       manifest from `repository` (verify OCI CAS); the OCI image-index hop is never taken.
 - [ ] Obs object cached forever; the root is copy-first under Default (never auto-refreshed) and
       re-fetched **only** on `ocx index update`/`--remote`, with `observed` bumped on refresh. Catalog
-      flows issue an **ETag `If-None-Match` conditional GET first** (`304` = one round trip, no body); on
+      flows issue a plain unconditional `GET` (F2, amended — the ETag sidecar is retired); on
       change the per-package digest diff re-snapshots only moved-root packages. `ocx index catalog` lists
       a published index from `c/index.json` and a derived index from directory enumeration — **per-source**,
       no global merged catalog.
