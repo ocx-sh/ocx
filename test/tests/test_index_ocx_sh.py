@@ -738,7 +738,7 @@ def test_catalog_sync_unconditional_get_and_moved_diff(
     # touched by the piggyback. The fixture answers 304 to an `If-None-Match`,
     # so asserting 200 also proves this binary sends none.
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    catalog_before = catalog_path.read_bytes()
+    catalog_before = (catalog_path.read_bytes(), catalog_path.stat().st_mtime_ns)
     checkpoint = len(index_server.requests)
     ocx.plain("--index", str(index_dir), "index", "update", entry_a.logical_id)
     since = index_server.requests[checkpoint:]
@@ -756,8 +756,9 @@ def test_catalog_sync_unconditional_get_and_moved_diff(
     assert not any(repo_b in record.path for record in since), (
         "pkgB must not be re-fetched by the piggyback when its catalog entry did not move"
     )
-    assert catalog_path.read_bytes() == catalog_before, (
-        "an unchanged catalog must not be rewritten"
+    assert (catalog_path.read_bytes(), catalog_path.stat().st_mtime_ns) == catalog_before, (
+        "an unchanged catalog must not be rewritten — a byte-identical rewrite still churns the "
+        "mtime of a tree that gets committed and rsync'd, so compare the timestamp too"
     )
     assert not (index_dir / "ocx.sh" / "c" / "index.json.etag").exists(), (
         "no per-machine validator sidecar may be written into the index tree"
