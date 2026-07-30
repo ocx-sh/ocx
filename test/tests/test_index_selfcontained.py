@@ -30,8 +30,8 @@ Covers:
     re-snapshots the SAME moved package — both land coherently.
 11. Catalog concurrency (sync x sync): two concurrent piggyback catalog
     syncs both discover the same brand-new package and race to snapshot
-    it — every catalog entry stays self-consistent and the `.etag`
-    sidecar stays coherent.
+    it — every catalog entry stays self-consistent, and a follow-up run
+    re-diffs the served catalog without any conditional-GET validator.
 12. Root copy-first (F1): a Default-mode resolve of an already-snapshotted
     package never re-fetches or rewrites the root document; only an
     explicit `ocx index update` bumps `observed`.
@@ -836,7 +836,7 @@ def test_catalog_sync_race_direct_update_vs_piggyback_resnapshot_same_package(
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
+def test_catalog_sync_race_two_concurrent_syncs_keep_the_catalog_coherent(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ):
     """Two `ocx index update` calls for DIFFERENT already-known packages
@@ -847,8 +847,9 @@ def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
     materialized — a package new to the local catalog is fetched only when
     first `update`d. The materialized packages' catalog entries must match
     their own on-disk root bytes — no corrupted/torn write from the
-    concurrent reconcile-commits — and the `.etag` sidecar stays coherent
-    (a follow-up sync against the unchanged fixture answers 304).
+    concurrent reconcile-commits — and a follow-up run must re-diff the
+    served catalog coherently with no stored validator: the sync mechanism
+    is the digest diff, and nothing sends `If-None-Match` any more.
     """
     pkg_a = make_package(ocx, f"{unique_repo}a", "1.0.0", tmp_path, new=True, index=False)
     pkg_b = make_package(ocx, f"{unique_repo}b", "1.0.0", tmp_path, new=True, index=False)
@@ -890,7 +891,7 @@ def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
     logical_a = f"ocx.sh/{repo_a}:1.0.0"
     logical_b = f"ocx.sh/{repo_b}:1.0.0"
 
-    # Establish pkgA + pkgB locally (baseline catalog + etag).
+    # Establish pkgA + pkgB locally (baseline catalog).
     ocx.plain("--index", str(index_dir), "index", "update", logical_a)
     ocx.plain("--index", str(index_dir), "index", "update", logical_b)
 
@@ -924,9 +925,8 @@ def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
     assert proc_b.returncode == 0, f"concurrent sync B failed: {err_b}"
 
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    etag_path = index_dir / "ocx.sh" / "c" / "index.json.etag"
-    assert etag_path.is_file() and etag_path.read_text().strip(), (
-        "the .etag sidecar must survive the concurrent reconcile-commits, non-empty"
+    assert not (index_dir / "ocx.sh" / "c" / "index.json.etag").exists(), (
+        "no per-machine validator sidecar may appear in a tree that gets committed and rsync'd"
     )
 
     catalog = static_index.read_catalog(catalog_path)
@@ -954,17 +954,33 @@ def test_catalog_sync_race_two_concurrent_syncs_keep_catalog_and_etag_coherent(
         "pkgC must NOT be materialized by the piggyback — it is a listing row until first updated (F2)"
     )
 
-    # Coherence proof: a follow-up sync against the UNCHANGED fixture must
-    # answer 304 — the locally stored etag genuinely matches the served
-    # catalog's current state, not a torn write from the race.
+    # Coherence proof, validator-free: a follow-up run against the UNCHANGED
+    # fixture re-fetches the catalog unconditionally and re-diffs it against
+    # what the race wrote. The rows it does not name must come through
+    # byte-identical — if the race had left a torn map, the diff would move
+    # them. `index update logical_a` deliberately re-snapshots pkgA (that is
+    # what naming a package does), so only pkgB and pkgC are held invariant.
+    untouched_before = {repo_b: catalog[repo_b], repo_c: catalog[repo_c]}
     checkpoint = len(index_server.requests)
     ocx.plain("--index", str(index_dir), "index", "update", logical_a)
     since = index_server.requests[checkpoint:]
     catalog_requests = [record for record in since if record.path.endswith("/c/index.json")]
-    assert catalog_requests, "the follow-up run must still send the conditional GET"
-    assert catalog_requests[-1].status == 304, (
-        "the etag persisted by the concurrent race must validate against the unchanged "
-        f"fixture (304), got status {catalog_requests[-1].status}"
+    assert catalog_requests, "the follow-up run must still fetch the catalog"
+    assert all(record.if_none_match is None for record in since), (
+        "no request may carry If-None-Match — the fixture would answer 304 to one, and this "
+        f"binary must never send it: {[(r.path, r.if_none_match) for r in since if r.if_none_match]}"
+    )
+    assert catalog_requests[-1].status == 200, (
+        f"an unconditional catalog GET must be answered 200, got {catalog_requests[-1].status}"
+    )
+
+    after = static_index.read_catalog(catalog_path)
+    assert {repo: after.get(repo) for repo in untouched_before} == untouched_before, (
+        "a re-diff of the unchanged served catalog must leave every unnamed row exactly as the race wrote it"
+    )
+    root_a_bytes = (index_dir / "ocx.sh" / "p" / f"{repo_a}.json").read_bytes()
+    assert after[repo_a] == f"sha256:{hashlib.sha256(root_a_bytes).hexdigest()}", (
+        "the re-snapshotted row's entry must still match its own on-disk root bytes"
     )
 
 

@@ -180,8 +180,13 @@ class RequestRecord:
 
 class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
     """Serves `directory` verbatim; every file's ETag is `sha256(bytes)`; a
-    matching `If-None-Match` answers 304 (mirrors a CDN's conditional GET,
-    the mechanism `c/index.json` catalog sync (F2) relies on).
+    matching `If-None-Match` answers 304.
+
+    A real CDN does conditional GET, so this fixture does too — deliberately,
+    even though ocx never sends `If-None-Match` any more: it is what makes
+    `RequestRecord.if_none_match` a falsifiable assertion surface rather than a
+    field nothing could ever populate. The catalog sync (F2) is a digest diff
+    against the local `c/index.json`, not a validator round trip.
     """
 
     server: StaticIndexServer  # narrows the inherited Any-typed attribute

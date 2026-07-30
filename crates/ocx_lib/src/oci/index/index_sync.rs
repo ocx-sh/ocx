@@ -21,7 +21,7 @@ use super::{CatalogSyncOutcome, Index, LocalIndex, OcxIndex};
 ///
 /// Wraps [`LocalIndex::refresh_tags`] (per-package dispatch objects + root
 /// document) and [`LocalIndex::sync_catalog`] (per-source catalog
-/// conditional-GET digest-diff) — the two write paths `ocx index update`
+/// digest-diff) — the two write paths `ocx index update`
 /// piggybacks together. Carries no policy of its own: callers decide when
 /// and what to refresh.
 #[derive(Clone)]

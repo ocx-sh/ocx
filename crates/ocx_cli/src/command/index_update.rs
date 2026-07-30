@@ -86,7 +86,7 @@ impl IndexUpdate {
 
         // ── Piggyback: sync the static-file index catalog when online. ──
         //
-        // Conditional-GET `c/index.json`, re-snapshot only the packages whose
+        // Fetch `c/index.json`, re-snapshot only the packages whose
         // root digest moved, and persist the catalog map at `{index-home}/c/index.json`
         // — the offline catalog source and the next diff basis (F2). Best-effort:
         // an absent index (config.json 404) yields an empty catalog with no error,
