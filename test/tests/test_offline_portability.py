@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -345,4 +347,151 @@ def test_offline_install_missing_blobs_exits_policy_blocked(
     assert "populate" in result.stderr.lower(), (
         f"stderr must mention the missing local cache — distinct from the "
         f"missing-index unpinned-reference message; got:\n{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (f) An INDEX-INDIRECTED package installs from a copied store with no index
+#     configuration at all — the physical transport address comes from the
+#     committed local root
+# ---------------------------------------------------------------------------
+
+# The index-bearing namespace this scenario publishes into. Deliberately NOT
+# `ocx.sh`: that name is index-bearing from the compiled-in defaults tier
+# (`config/loader.rs::builtin_defaults`), so a home with no config would dial
+# the real `index.ocx.sh` and the test's outcome would depend on the internet.
+# A namespace nobody configured gets no index source at all, which is exactly
+# the "no index configuration" the fresh home must survive.
+#
+# It is a second spelling of the loopback test registry so that logical
+# registry == physical registry. That equality is load-bearing: it is the
+# "not a rewrite" carve-out in `ChainedIndex::guard_local_physical`, without
+# which the read-path SSRF floor refuses a loopback physical target — and a
+# home with no index configuration has no source to hold a `trusted_hosts`
+# exemption, so there would be no way to allow it.
+_INDIRECTED_NAMESPACE = "127.0.0.1:5000"
+
+
+def _registry_status(registry: str, repo: str, reference: str) -> int:
+    """The registry's HTTP status for `GET /v2/<repo>/manifests/<reference>`.
+
+    404 for a repository that was never pushed — registry:2 answers
+    `NAME_UNKNOWN` for every endpoint of an absent repository.
+    """
+    request = urllib.request.Request(
+        f"http://{registry}/v2/{repo}/manifests/{reference}",
+        headers={"Accept": "application/vnd.oci.image.index.v1+json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def test_indirected_install_from_copied_store_without_index_configuration(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """An **index-indirected** package — logical name and physical repository
+    are different addresses — installs from a copied store on a machine that
+    carries no index configuration whatsoever.
+
+    The four tests above all use `make_package`, whose logical name IS its
+    physical repository, so they cannot tell a working physical lookup from a
+    missing one: with no rewrite to derive, the logical address is the right
+    answer by accident. This one publishes the root at
+    `127.0.0.1:5000/<ns>/absent` while the content lives at
+    `127.0.0.1:5000/<real repo>`, so the physical address is the only address
+    that works.
+
+    Discriminating **by construction**, not by assertion: the logical
+    repository is never pushed (asserted below), so `physical_reference`
+    answering `None` — which `resolve_transport_pinned` turns back into the
+    logical identifier — cannot succeed by accident. `layers/` is deliberately
+    left behind by the copy for the same reason: the layer-cache fast path
+    (`pull.rs::extract_layer_atomic` step 2) short-circuits before the
+    transport address is ever used, so a store carrying its layers would
+    install identically whether the physical lookup worked or not.
+
+    Regression for `LocalIndex::physical_reference` + `ChainedIndex`'s
+    local-root fallback: without them the only holder of the physical pointer
+    is the index site, and a fresh home has no way to ask it.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    logical_repository = f"{unique_repo}/absent"
+    logical_id = f"{_INDIRECTED_NAMESPACE}/{logical_repository}:1.0.0"
+
+    # The warm home is the only one that knows the index site exists.
+    (ocx.ocx_home / "config.toml").write_text(
+        f'[registries."{_INDIRECTED_NAMESPACE}"]\n'
+        f'index = "{index_server.base_url}"\n'
+        f'trusted_hosts = ["127.0.0.1"]\n'
+    )
+    ocx.env["OCX_INSECURE_REGISTRIES"] = (
+        f"{ocx.registry},{_INDIRECTED_NAMESPACE},{index_server.host}"
+    )
+
+    static_index.write_config(index_server.root)
+    entry = static_index.write_package(
+        index_server.root,
+        repository=logical_repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{_INDIRECTED_NAMESPACE}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+    static_index.write_catalog(index_server.root, {logical_repository: entry.root_digest})
+
+    # The property the whole test rests on: the logical repository does not
+    # exist on the registry, so the transport can only be the physical one.
+    assert _registry_status(ocx.registry, logical_repository, "1.0.0") == 404, (
+        f"the logical repository {logical_repository!r} must be absent from the "
+        f"registry, or a fallback to the logical address could succeed by accident"
+    )
+    assert _registry_status(ocx.registry, pkg.repo, pkg.tag) == 200, (
+        f"the physical repository {pkg.repo!r} must be present, or the install "
+        f"below would fail for the wrong reason"
+    )
+
+    ocx.plain("package", "install", logical_id)
+
+    # Carry the index and the manifest blobs across, but NOT the layers — see
+    # the docstring: the layer cache would otherwise make the fetch, and hence
+    # the physical address, unnecessary.
+    fresh_home = tmp_path / "fresh_home_indirected"
+    _copy_store(ocx.ocx_home, fresh_home, exclude="layers")
+    assert not (fresh_home / "layers").exists(), "precondition: the fresh home must have no layers"
+    copied_root = (
+        fresh_home / "index" / registry_dir(_INDIRECTED_NAMESPACE) / "p" / f"{logical_repository}.json"
+    )
+    assert copied_root.is_file(), "precondition: the copied index must carry the committed root document"
+
+    fresh = _fresh_runner(ocx, fresh_home)
+    # Transport policy only — the loopback registry speaks plain HTTP. No
+    # `config.toml` is written, so the fresh home has no index source, no
+    # `trusted_hosts`, and no knowledge that `index_server` exists.
+    fresh.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{_INDIRECTED_NAMESPACE}"
+    assert not (fresh_home / "config.toml").exists(), "the fresh home must carry no configuration"
+    served_before = len(index_server.requests)
+
+    result = fresh.run("package", "install", "--select", logical_id, check=False)
+    assert result.returncode == 0, (
+        f"an indirected package must install from a copied store with no index "
+        f"configuration; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert_symlink_exists(
+        _candidate_current_path(fresh_home, _INDIRECTED_NAMESPACE, logical_repository),
+        "the install must create the current symlink under the LOGICAL name",
+    )
+    assert (fresh_home / "layers").is_dir(), (
+        "the install must have fetched layer content — without a fetch the "
+        "physical address was never consulted and this proves nothing"
+    )
+    assert len(index_server.requests) == served_before, (
+        "the fresh home must not have reached the index site at all; served: "
+        f"{[r.path for r in index_server.requests[served_before:]]}"
     )
