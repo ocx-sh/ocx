@@ -16,9 +16,15 @@ Early stage. Core lib + CLI implemented.
 
 **Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
 
-**Even interfaces break pre-1.0.** A break is announced in `CHANGELOG.md` and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
+**Even interfaces break pre-1.0.** A break is announced in the changelog and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
 
-Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the CHANGELOG line.
+Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the changelog line — which means the commit subject (see below), never the file.
+
+### ⛔ Never edit `CHANGELOG.md`
+
+`CHANGELOG.md` is **generated**, at release time, by `git-cliff` from the commit history (`task release:prepare`). Editing it by hand is always wrong: the next release overwrites the file, so a hand-written entry is deleted, and until then it is a second source of truth that reads as authoritative. No `docs(changelog):` commits. Do not create the file, append to it, or "fix" an entry in it — not for a feature, not for a breaking change, not when a plan or a rule says to write a CHANGELOG line.
+
+**The changelog entry is the commit subject.** `cliff.toml` renders one bullet per commit from its subject line alone — the body is never read — with the scope as `*(scope)*` and `!` as **BREAKING**. So the subject is the user-facing sentence: write it for someone reading release notes, and put the reasoning in the body where it belongs. `chore:` is excluded from the changelog, which is why AI config and tooling use it.
 
 ## ⛔ MODEL POLICY — NON-NEGOTIABLE
 
