@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::package::metadata::env::entry::Entry;
 use ocx_lib::project::{
-    DEFAULT_GROUP, ManifestSnapshot, MutationGuard, ProjectConfig, ProjectLock, acquire_project_lock_for_file,
-    lock::lock_path_for,
+    DEFAULT_GROUP, ManifestSnapshot, MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool,
+    acquire_project_lock_for_file, lock::lock_path_for,
 };
 
 /// Result of resolving the project tier: owned paths, parsed config, parsed lock.
@@ -408,6 +408,82 @@ pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> 
     Ok(())
 }
 
+/// Narrow a [`select_tool_set`](ocx_lib::project::select_tool_set) result to the
+/// explicitly-requested binding names.
+///
+/// Operates on resolution-free [`SelectedTool`]s, reading only `binding` and
+/// `origin`, so host-leaf resolution happens after the narrowing and an
+/// unrelated, unnamed sibling that ships no leaf for this host never aborts the
+/// command. Run
+/// [`check_duplicate_selection`](ocx_lib::project::check_duplicate_selection)
+/// on the result before resolving.
+///
+/// Empty `names` returns the full set unchanged — every binding in scope
+/// participates. Otherwise user-supplied name order wins: the output preserves
+/// the order of `names`, not of `selected`. A name repeated on the command line
+/// is silently deduplicated (naming one binding twice is not a usage error).
+///
+/// Shared by `ocx run` and `ocx inspect`, the two commands that accept a NAME
+/// subset of the selected groups.
+///
+/// # Errors
+///
+/// Exit 64 ([`ocx_lib::cli::UsageError`]) when a requested name matches nothing
+/// in the selected groups, or when it matches entries in two or more selected
+/// groups that resolve it differently — narrow with `-g <group>`.
+pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> anyhow::Result<Vec<SelectedTool>> {
+    if names.is_empty() {
+        return Ok(selected);
+    }
+
+    // Build a `binding -> Vec<index_into_selected>` lookup once, so each
+    // user-supplied name costs one probe rather than a scan. Hits are stored as
+    // indices so the user-order walk below can clone out of `selected` without
+    // reborrowing it.
+    let mut hits_by_binding: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::with_capacity(selected.len());
+    for (position, tool) in selected.iter().enumerate() {
+        hits_by_binding.entry(tool.binding.as_str()).or_default().push(position);
+    }
+
+    let mut out = Vec::with_capacity(names.len());
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for name in names {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        let hits = hits_by_binding.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+        match hits {
+            [] => {
+                return Err(
+                    ocx_lib::cli::UsageError::new(format!("binding '{name}' not found in selected groups")).into(),
+                );
+            }
+            [single] => out.push(selected[*single].clone()),
+            // Reachable when two selected groups resolve this binding
+            // differently: selection keeps both entries so a NAME filter can
+            // still narrow past a conflict it never named.
+            [_, _, ..] => {
+                let groups: Vec<String> = hits
+                    .iter()
+                    .filter_map(|&position| match &selected[position].origin {
+                        Origin::Group(group) => Some(group.clone()),
+                        Origin::Explicit => None,
+                    })
+                    .collect();
+                let groups_str = groups.join(", ");
+                return Err(ocx_lib::cli::UsageError::new(format!(
+                    "binding '{name}' exists in multiple selected groups: [{groups_str}]; pass `-g <group>` to narrow scope"
+                ))
+                .into());
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 /// Materialize the project's declared `[env]` and the selected groups'
 /// `[group.<name>.env]` as resolved [`Entry`] values, in application order.
 ///
@@ -565,4 +641,118 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         previous_lock,
         previous_lock_bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use ocx_lib::oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_lib::project::ToolSource;
+
+    use super::*;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn pin(repository: &str, marker: char) -> PinnedIdentifier {
+        let digest = Digest::Sha256(std::iter::repeat_n(marker, 64).collect());
+        let identifier = Identifier::new_registry(repository, "ocx.sh").clone_with_digest(digest);
+        PinnedIdentifier::try_from(identifier).expect("digest present")
+    }
+
+    fn tool(binding: &str, marker: char, group: &str) -> SelectedTool {
+        SelectedTool {
+            binding: binding.into(),
+            origin: Origin::Group(group.into()),
+            source: ToolSource::Explicit(pin(binding, marker).into()),
+        }
+    }
+
+    // ── filter_by_names ──────────────────────────────────────────────────────
+
+    /// An empty name list means "every binding in scope", not "nothing".
+    #[test]
+    fn filter_empty_names_returns_full_set() {
+        let selected = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
+        let result = filter_by_names(selected.clone(), &[]).expect("empty names must succeed");
+        assert_eq!(result.len(), selected.len());
+        assert!(result.iter().any(|entry| entry.binding == "cmake"));
+        assert!(result.iter().any(|entry| entry.binding == "ninja"));
+    }
+
+    /// A name with no match in the selected groups is a usage error.
+    #[test]
+    fn filter_unknown_name_errors() {
+        let selected = vec![tool("cmake", 'a', "default")];
+        let error = filter_by_names(selected, &["does-not-exist".into()]).expect_err("unknown name must fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("binding 'does-not-exist' not found in selected groups"),
+            "unexpected message: {rendered}"
+        );
+    }
+
+    /// Two selected groups resolving one binding differently is ambiguous only
+    /// when the user actually names it — and the message lists both groups so
+    /// the `-g` remedy is actionable.
+    #[test]
+    fn filter_ambiguous_name_errors_with_groups_listed() {
+        let selected = vec![tool("tool", 'a', "ci"), tool("tool", 'b', "release")];
+        let error = filter_by_names(selected, &["tool".into()]).expect_err("ambiguous name must fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("binding 'tool' exists in multiple selected groups"),
+            "unexpected message: {rendered}"
+        );
+        assert!(rendered.contains("ci"), "groups must name 'ci': {rendered}");
+        assert!(rendered.contains("release"), "groups must name 'release': {rendered}");
+    }
+
+    /// Happy path: exactly one matching entry survives.
+    #[test]
+    fn filter_unique_name_picks_single_entry() {
+        let selected = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
+        let result = filter_by_names(selected, &["cmake".into()]).expect("ok");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].binding, "cmake");
+    }
+
+    /// User-supplied name order wins over selection order.
+    #[test]
+    fn filter_preserves_user_name_order_not_selection_order() {
+        let selected = vec![
+            tool("a", 'a', "default"),
+            tool("b", 'b', "default"),
+            tool("c", 'c', "default"),
+        ];
+        let names: Vec<String> = vec!["b".into(), "a".into()];
+        let result = filter_by_names(selected, &names).expect("ok");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].binding, "b", "user-order: b must come first");
+        assert_eq!(result[1].binding, "a", "user-order: a must come second");
+    }
+
+    /// Naming one binding twice is a typo, not a usage error.
+    #[test]
+    fn filter_duplicate_names_deduplicated_silently() {
+        let selected = vec![tool("cmake", 'a', "default")];
+        let names: Vec<String> = vec!["cmake".into(), "cmake".into()];
+        let result = filter_by_names(selected, &names).expect("dedup must succeed");
+        assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
+        assert_eq!(result[0].binding, "cmake");
+    }
+
+    /// The whole point of deferring the duplicate check: a conflict between two
+    /// selected groups is dropped by the filter when the user named something
+    /// else, so the surviving set validates clean.
+    #[test]
+    fn filter_drops_an_unnamed_conflict_so_the_check_passes() {
+        let selected = vec![
+            tool("shellcheck", 'a', "ci"),
+            tool("shellcheck", 'b', "lint"),
+            tool("cmake", 'c', "ci"),
+        ];
+        let result = filter_by_names(selected, &["cmake".into()]).expect("naming an unrelated binding must succeed");
+        ocx_lib::project::check_duplicate_selection(&result).expect("the surviving set carries no conflict");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].binding, "cmake");
+    }
 }

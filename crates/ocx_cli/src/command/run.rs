@@ -5,18 +5,18 @@
 //!
 //! `ocx run` is the project-tier counterpart to the OCI-tier `ocx exec`.
 //! Symbols are binding names from `ocx.toml`, not OCI identifiers. The
-//! command selects the bindings in the requested groups (resolution-free,
-//! whole-scope duplicate validation), narrows that selection to the requested
-//! `NAME`s, resolves the host leaf of **only** the named subset through
-//! `ocx.lock` (digest-pinned), composes the child environment from those
-//! packages, and execs the given `ARGV` in that environment — mirroring
-//! `ocx exec`'s child-spawn mechanics but driven entirely by the project
-//! toolchain declaration.
+//! command selects the bindings in the requested groups (resolution-free),
+//! narrows that selection to the requested `NAME`s, resolves the host leaf of
+//! **only** the named subset through `ocx.lock` (digest-pinned), composes the
+//! child environment from those packages, and execs the given `ARGV` in that
+//! environment — mirroring `ocx exec`'s child-spawn mechanics but driven
+//! entirely by the project toolchain declaration.
 //!
-//! Resolution is scoped to the named subset: a tool elsewhere in scope that
-//! ships no leaf for the current host (`NoHostLeaf`, exit 78) only aborts the
-//! run when it is among the composed tools (the named subset, or every tool in
-//! scope when no `NAME` is given).
+//! Both validations are scoped to the named subset: a tool elsewhere in scope
+//! that ships no leaf for the current host (`NoHostLeaf`, exit 78) or that two
+//! selected groups resolve differently (`DuplicateToolAcrossSelectedGroups`,
+//! exit 64) only aborts the run when it is among the composed tools — the named
+//! subset, or every tool in scope when no `NAME` is given.
 //!
 //! # NOTE: clap floor
 //!
@@ -29,11 +29,11 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::env;
 use ocx_lib::project::{
-    DEFAULT_GROUP, Origin, SelectedTool, expand_all_keyword, resolve_selected_tools, select_tool_set,
+    DEFAULT_GROUP, check_duplicate_selection, expand_all_keyword, resolve_selected_tools, select_tool_set,
 };
 use ocx_lib::utility::child_process;
 
-use crate::app::project_context::load_project_with_lock;
+use crate::app::project_context::{filter_by_names, load_project_with_lock};
 use crate::options;
 
 /// Run a command with the composed environment from the project toolchain.
@@ -97,11 +97,12 @@ impl Run {
     ///
     /// Resolves the project context (ocx.toml + ocx.lock), expands `-g all`
     /// to the full group union, selects the expanded scope via
-    /// `select_tool_set` (resolution-free; whole-scope duplicate validation),
-    /// narrows the selection to the requested `names`, resolves the host
-    /// leaves of that named subset via `resolve_selected_tools`, and execs
-    /// `argv` with the resulting package environment. Exit code is forwarded
-    /// byte-for-byte from the child process on success.
+    /// `select_tool_set` (resolution-free), narrows the selection to the
+    /// requested `names`, validates the narrowed set via
+    /// `check_duplicate_selection`, resolves its host leaves via
+    /// `resolve_selected_tools`, and execs `argv` with the resulting package
+    /// environment. Exit code is forwarded byte-for-byte from the child process
+    /// on success.
     ///
     /// Composition order: group-selection order (the order of `-g` flags
     /// after `all` expansion, deduplicated), then alphabetical by binding
@@ -116,8 +117,6 @@ impl Run {
     /// - Other exit codes from package-manager / registry errors forwarded
     ///   via the existing `ClassifyExitCode` chain.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        use ocx_lib::cli;
-
         // Strict isolation (C2.6): `run` composes exactly the in-effect
         // project file. Root `--global` only re-targets which single file
         // that is (the global one) — `select_tool_set` below is still fed
@@ -163,28 +162,20 @@ impl Run {
         }
 
         // ── Phase D: resolution-free selection ────────────────────────────
-        // `select_tool_set` performs whole-scope duplicate-across-groups
-        // validation but does NOT resolve host leaves, so an unnamed sibling
-        // with no leaf for this host cannot abort a narrowly-named run. The
-        // host platform is computed here but consumed in Phase F.
+        // `select_tool_set` neither resolves host leaves nor reports a
+        // duplicate binding, so an unnamed sibling — whether it ships no leaf
+        // for this host or collides with another selected group — cannot abort
+        // a narrowly-named run. The host platform is computed here but consumed
+        // in Phase F.
         let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
         let selected = select_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
 
-        // ── Phase E: NAME filter ──────────────────────────────────────────
-
-        let filtered = match filter_by_names(selected, &self.names) {
-            Ok(v) => v,
-            Err(RunFilterError::Unknown { name }) => {
-                return Err(cli::UsageError::new(format!("binding '{name}' not found in selected groups")).into());
-            }
-            Err(RunFilterError::Ambiguous { name, groups }) => {
-                let groups_str = groups.join(", ");
-                return Err(cli::UsageError::new(format!(
-                    "binding '{name}' exists in multiple selected groups: [{groups_str}]; pass `-g <group>` to narrow scope"
-                ))
-                .into());
-            }
-        };
+        // ── Phase E: NAME filter, then duplicate validation ───────────────
+        // Order is load-bearing: the check runs over the narrowed set, so a
+        // collision between two selected groups only fails the run when the
+        // colliding binding is actually being composed.
+        let filtered = filter_by_names(selected, &self.names)?;
+        check_duplicate_selection(&filtered)?;
 
         // ── Phase F: resolve host leaves (named subset) + install ─────────
         // Resolve host leaves for the named subset ONLY — `NoHostLeaf` (78)
@@ -293,220 +284,17 @@ impl Run {
     }
 }
 
-/// Errors from the CLI-layer NAME filter applied after `select_tool_set`.
-///
-/// Both variants correspond to exit 64 (`UsageError`) — the user named a
-/// binding that is either absent from or ambiguous within the composed set.
-/// Private to this module; the command maps these to `eprintln` + return
-/// before surfacing them as `anyhow::Error`.
-#[derive(Debug, thiserror::Error)]
-enum RunFilterError {
-    /// The requested binding name was not found in any tool in the composed set.
-    #[error("binding '{name}' not found in selected groups")]
-    Unknown { name: String },
-
-    /// The requested binding name matched entries in two or more selected
-    /// groups (defense-in-depth — not reachable through normal flow in v1;
-    /// see plan §NAME Filter for rationale).
-    #[error("binding '{name}' exists in multiple selected groups: {groups:?}; pass `-g <group>` to narrow scope")]
-    Ambiguous { name: String, groups: Vec<String> },
-}
-
-/// Filter the selected tool set to the explicitly-requested binding names.
-///
-/// Operates on the resolution-free [`SelectedTool`]s from `select_tool_set`,
-/// reading only `binding` and `origin`; host-leaf resolution happens after
-/// this narrowing so an unrelated, unnamed sibling never participates.
-///
-/// When `names` is empty, the full `selected` set is returned unchanged —
-/// every binding in scope participates.
-///
-/// When `names` is non-empty, user-supplied name order wins: the output
-/// preserves the order of `names`, not the order of `selected`. Duplicate
-/// names in `names` are silently deduplicated (same binding enumerated twice
-/// is not a usage error).
-///
-/// # Errors
-///
-/// - [`RunFilterError::Unknown`] — a requested name has no match in `selected`.
-/// - [`RunFilterError::Ambiguous`] — a requested name matches multiple entries
-///   (defense-in-depth; not reachable through normal v1 flow — see plan §NAME Filter).
-fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> Result<Vec<SelectedTool>, RunFilterError> {
-    if names.is_empty() {
-        return Ok(selected);
-    }
-
-    // Build a `binding -> Vec<index_into_selected>` lookup once. Replaces the
-    // previous O(N·M) `selected.iter().filter` scan with an O(1) probe per
-    // user-supplied name. The hits are stored as indices so we can move out
-    // of `selected` without reborrowing during the user-order walk below.
-    let mut hits_by_binding: std::collections::HashMap<&str, Vec<usize>> =
-        std::collections::HashMap::with_capacity(selected.len());
-    for (i, tool) in selected.iter().enumerate() {
-        hits_by_binding.entry(tool.binding.as_str()).or_default().push(i);
-    }
-
-    // Iterate names in user order. Dedup by tracking seen names.
-    let mut out = Vec::with_capacity(names.len());
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-
-    for name in names {
-        if !seen.insert(name.as_str()) {
-            // Duplicate name — silently skip.
-            continue;
-        }
-        let hit_indices = hits_by_binding.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
-        match hit_indices {
-            [] => return Err(RunFilterError::Unknown { name: name.clone() }),
-            [single] => out.push(selected[*single].clone()),
-            [_, _, ..] => {
-                let groups: Vec<String> = hit_indices
-                    .iter()
-                    .filter_map(|&i| match &selected[i].origin {
-                        Origin::Group(g) => Some(g.clone()),
-                        Origin::Explicit => None,
-                    })
-                    .collect();
-                return Err(RunFilterError::Ambiguous {
-                    name: name.clone(),
-                    groups,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::oci::{Digest, Identifier, PinnedIdentifier, Platform};
-    use ocx_lib::project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock, ToolSource};
+    use ocx_lib::oci::{Digest, Identifier, Platform};
+    use ocx_lib::project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
     use std::collections::BTreeMap;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn sha(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
-    }
-
-    fn pin(repo: &str, tag: Option<&str>, c: char) -> PinnedIdentifier {
-        let mut id = Identifier::new_registry(repo, "ocx.sh");
-        if let Some(t) = tag {
-            id = id.clone_with_tag(t);
-        }
-        let id = id.clone_with_digest(Digest::Sha256(sha(c)));
-        PinnedIdentifier::try_from(id).expect("digest present")
-    }
-
-    fn tool(binding: &str, c: char, group: &str) -> SelectedTool {
-        SelectedTool {
-            binding: binding.into(),
-            origin: Origin::Group(group.into()),
-            source: ToolSource::Explicit(pin(binding, None, c).into()),
-        }
-    }
-
-    // ── filter_by_names ──────────────────────────────────────────────────────
-
-    /// Plan §Phase 3.1: `filter_empty_names_returns_full_set`
-    ///
-    /// When names is empty every binding in scope participates.
-    #[test]
-    fn filter_empty_names_returns_full_set() {
-        let composed = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
-        let result = filter_by_names(composed.clone(), &[]).expect("empty names must succeed");
-        assert_eq!(result.len(), composed.len());
-        assert!(result.iter().any(|r| r.binding == "cmake"));
-        assert!(result.iter().any(|r| r.binding == "ninja"));
-    }
-
-    /// Plan §Phase 3.1: `filter_unknown_name_errors`
-    ///
-    /// A name with no match in the composed set → `RunFilterError::Unknown`.
-    #[test]
-    fn filter_unknown_name_errors() {
-        let composed = vec![tool("cmake", 'a', "default")];
-        let err = filter_by_names(composed, &["does-not-exist".into()]).expect_err("unknown name must fail");
-        assert!(
-            matches!(&err, RunFilterError::Unknown { name } if name == "does-not-exist"),
-            "expected Unknown {{ name: \"does-not-exist\" }}; got: {err}"
-        );
-    }
-
-    /// Plan §Phase 3.1: `filter_ambiguous_name_errors_with_groups_listed`
-    ///
-    /// Synthetic composed set: two entries with same binding but different
-    /// group origins (defense-in-depth — not reachable through normal v1 flow).
-    #[test]
-    fn filter_ambiguous_name_errors_with_groups_listed() {
-        let composed = vec![
-            SelectedTool {
-                binding: "tool".into(),
-                origin: Origin::Group("ci".into()),
-                source: ToolSource::Explicit(pin("tool", None, 'a').into()),
-            },
-            SelectedTool {
-                binding: "tool".into(),
-                origin: Origin::Group("release".into()),
-                source: ToolSource::Explicit(pin("tool", None, 'b').into()),
-            },
-        ];
-        let err = filter_by_names(composed, &["tool".into()]).expect_err("ambiguous name must fail");
-        let RunFilterError::Ambiguous { name, groups } = &err else {
-            panic!("expected Ambiguous; got: {err}");
-        };
-        assert_eq!(name, "tool");
-        assert!(
-            groups.contains(&"ci".to_string()),
-            "groups must contain 'ci'; got: {groups:?}"
-        );
-        assert!(
-            groups.contains(&"release".to_string()),
-            "groups must contain 'release'; got: {groups:?}"
-        );
-    }
-
-    /// Plan §Phase 3.1: `filter_unique_name_picks_single_entry`
-    ///
-    /// Happy path: exactly one matching entry is returned.
-    #[test]
-    fn filter_unique_name_picks_single_entry() {
-        let composed = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
-        let result = filter_by_names(composed, &["cmake".into()]).expect("ok");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].binding, "cmake");
-    }
-
-    /// Plan §Phase 3.1: `filter_preserves_compose_order` — actually user order wins.
-    ///
-    /// When names is non-empty the output preserves user-supplied name order,
-    /// NOT compose order. Composed `[a, b, c]`, names `[b, a]` → output `[b, a]`.
-    #[test]
-    fn filter_preserves_user_name_order_not_compose_order() {
-        let composed = vec![
-            tool("a", 'a', "default"),
-            tool("b", 'b', "default"),
-            tool("c", 'c', "default"),
-        ];
-        let names: Vec<String> = vec!["b".into(), "a".into()];
-        let result = filter_by_names(composed, &names).expect("ok");
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].binding, "b", "user-order: b must come first");
-        assert_eq!(result[1].binding, "a", "user-order: a must come second");
-    }
-
-    /// Plan §Phase 3.1: `filter_duplicate_names_dedupe`
-    ///
-    /// Duplicate names in the names list are silently deduplicated.
-    /// Composed has one `cmake`; names `[cmake, cmake]` → output `[cmake]` once.
-    #[test]
-    fn filter_duplicate_names_deduplicated_silently() {
-        let composed = vec![tool("cmake", 'a', "default")];
-        let names: Vec<String> = vec!["cmake".into(), "cmake".into()];
-        let result = filter_by_names(composed, &names).expect("dedup must succeed");
-        assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
-        assert_eq!(result[0].binding, "cmake");
     }
 
     // ── select → filter → resolve (named scope regression) ────────────────────

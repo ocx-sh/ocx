@@ -180,31 +180,34 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
 /// host leaves.
 ///
 /// Pure function — no I/O, no host-platform lookup. This is the **selection**
-/// half of [`compose_tool_set`]: it builds the binding set, performs
-/// whole-scope duplicate-across-groups validation, and applies positional
-/// overrides, but leaves every group entry as an unresolved
+/// half of [`compose_tool_set`]: it builds the binding set and applies
+/// positional overrides, but leaves every group entry as an unresolved
 /// [`ToolSource::Locked`]. A caller that needs only a subset (e.g.
-/// `ocx run NAME`) can filter the result and then resolve just the survivors
-/// via [`resolve_selected_tools`], so a sibling that ships no host leaf for the
-/// current platform never aborts the run.
+/// `ocx run NAME`) can filter the result via [`filter_by_names`] and then
+/// resolve just the survivors via [`resolve_selected_tools`], so a sibling that
+/// ships no host leaf for the current platform never aborts the run.
+///
+/// Selection **detects** a duplicate binding across selected groups but does not
+/// report it — [`check_duplicate_selection`] does, over whatever set survives
+/// the caller's filter. Every caller must run that check before resolving;
+/// [`compose_tool_set`] does it immediately for the unfiltered case.
 ///
 /// Pipeline:
 ///
 /// 1. Build the initial set from `groups` × `lock.tools` (deduplicating group
 ///    names, preserving first-seen order; within a group, lock entry order is
 ///    preserved).
-/// 2. Duplicate-across-groups check, performed at the **lock level**: the same
-///    binding in two selected groups with identical [`LockedTool`]
-///    content (via [`locked_tool_content_equal`]) collapses to the first-seen
-///    entry; differing content errors with
-///    [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`]. This validation
-///    is whole-scope and fires regardless of any later name filter. Because it
-///    compares resolutions — not resolved host leaves — an unnamed sibling with
-///    no host leaf is never resolved here and so cannot error at selection time.
+/// 2. Duplicate-across-groups detection, performed at the **lock level**: the
+///    same binding in two selected groups with identical [`LockedTool`] content
+///    (via [`locked_tool_content_equal`]) collapses to the first-seen entry;
+///    differing content keeps **both** entries so the conflict survives into the
+///    final set. Because it compares resolutions — not resolved host leaves — an
+///    unnamed sibling with no host leaf is never resolved here and so cannot
+///    error at selection time.
 /// 3. Apply positional overrides: right-most wins; a matching binding replaces
-///    the entry (origin becomes [`Origin::Explicit`]), a non-matching one adds
-///    a fresh entry. Positionals also dedup among themselves with
-///    right-most-wins.
+///    the entry in place (origin becomes [`Origin::Explicit`]) and drops any
+///    conflicting sibling kept by step 2, a non-matching one adds a fresh entry.
+///    Positionals also dedup among themselves with right-most-wins.
 ///
 /// `config` is currently unused beyond signature parity.
 pub fn select_tool_set(
@@ -244,11 +247,14 @@ pub fn select_tool_set(
             if entry.group != *raw {
                 continue;
             }
-            // Step 2: duplicate-across-groups check at the lock level. Identical
-            // resolution content in another selected group → collapse silently;
-            // different content → error. No host-leaf resolution happens here,
-            // so an entry with no host leaf for the current platform never
-            // errors at selection time.
+            // Step 2: duplicate-across-groups detection at the lock level.
+            // Identical resolution content in another selected group collapses
+            // silently; differing content keeps BOTH entries so the conflict
+            // survives into the final set for `check_duplicate_selection` to
+            // report — after any caller-side NAME filter has had its say. No
+            // host-leaf resolution happens here, so an entry with no host leaf
+            // for the current platform never errors at selection time.
+            let mut conflicting = false;
             if let Some(&idx) = binding_index.get(&entry.name) {
                 let existing = &selected[idx];
                 let from_other_group = matches!(&existing.origin, Origin::Group(g) if g != raw);
@@ -256,23 +262,11 @@ pub fn select_tool_set(
                     let ToolSource::Locked(existing_tool) = &existing.source else {
                         unreachable!("a Group-origin selection always carries a Locked source");
                     };
-                    let same_content = locked_tool_content_equal(existing_tool, entry);
-                    if !same_content {
-                        let other_group = match &existing.origin {
-                            Origin::Group(g) => g.clone(),
-                            Origin::Explicit => unreachable!("from_other_group implies Group origin"),
-                        };
-                        return Err(super::Error::Project(ProjectError::new(
-                            std::path::PathBuf::new(),
-                            ProjectErrorKind::DuplicateToolAcrossSelectedGroups {
-                                name: entry.name.clone(),
-                                group_a: other_group,
-                                group_b: raw.clone(),
-                            },
-                        )));
+                    if locked_tool_content_equal(existing_tool, entry) {
+                        // Same content in another selected group — silently keep the first.
+                        continue;
                     }
-                    // Same content in another selected group — silently keep the first.
-                    continue;
+                    conflicting = true;
                 }
             }
             let idx = selected.len();
@@ -281,29 +275,93 @@ pub fn select_tool_set(
                 origin: Origin::Group(raw.clone()),
                 source: ToolSource::Locked(entry.clone()),
             });
-            binding_index.insert(entry.name.clone(), idx);
+            // The index keeps pointing at the FIRST occurrence: a conflicting
+            // second entry must not shadow it, or a third selected group would
+            // compare against the wrong sibling and the reported group pair
+            // would drift off the first-seen one.
+            if !conflicting {
+                binding_index.insert(entry.name.clone(), idx);
+            }
         }
     }
 
     // Step 3: positional overrides (right-most wins, including among
-    // positionals themselves).
+    // positionals themselves). An explicit override supersedes EVERY
+    // group-sourced entry for its binding — including a conflicting twin step 2
+    // kept — so a deliberate override resolves that conflict instead of leaving
+    // `check_duplicate_selection` to trip over a stale sibling. The first
+    // matching entry is rewritten in place, so the surviving order is the same
+    // one the group walk produced.
     for pos in positionals {
-        if let Some(&idx) = binding_index.get(&pos.binding) {
-            let existing = &mut selected[idx];
-            existing.origin = Origin::Explicit;
-            existing.source = ToolSource::Explicit(pos.identifier.clone());
-        } else {
-            let idx = selected.len();
+        let mut overridden = false;
+        selected.retain_mut(|tool| {
+            if tool.binding != pos.binding {
+                return true;
+            }
+            if overridden {
+                return false;
+            }
+            overridden = true;
+            tool.origin = Origin::Explicit;
+            tool.source = ToolSource::Explicit(pos.identifier.clone());
+            true
+        });
+        if !overridden {
             selected.push(SelectedTool {
                 binding: pos.binding.clone(),
                 origin: Origin::Explicit,
                 source: ToolSource::Explicit(pos.identifier.clone()),
             });
-            binding_index.insert(pos.binding.clone(), idx);
         }
     }
 
     Ok(selected)
+}
+
+/// Report a binding that two selected groups resolve differently.
+///
+/// The complement to [`select_tool_set`], which *detects* the condition but
+/// keeps both entries rather than reporting it. Splitting the two lets a caller
+/// narrow the selection first — `ocx run go-task` must not fail over a
+/// conflicting binding it never named — while an unfiltered caller gets the
+/// identical whole-scope error by running this immediately (see
+/// [`compose_tool_set`]).
+///
+/// Only group-sourced pairs can conflict: step 3 of `select_tool_set` collapses
+/// an explicitly overridden binding to a single entry, so an override resolves
+/// the conflict rather than tripping it.
+///
+/// # Errors
+///
+/// Returns [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`] naming the
+/// binding and the first two groups that disagree about it.
+pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super::Error> {
+    let mut first_position_by_binding: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(selected.len());
+
+    for (position, tool) in selected.iter().enumerate() {
+        let first = *first_position_by_binding
+            .entry(tool.binding.as_str())
+            .or_insert(position);
+        if first == position {
+            continue;
+        }
+        // `group_a` is the first-seen group, matching the order the group walk
+        // visited them in.
+        let (Origin::Group(group_a), Origin::Group(group_b)) = (&selected[first].origin, &tool.origin) else {
+            continue;
+        };
+        return Err(super::Error::Project(ProjectError::new(
+            std::path::PathBuf::new(),
+            ProjectErrorKind::DuplicateToolAcrossSelectedGroups {
+                name: tool.binding.clone(),
+                group_a: group_a.clone(),
+                group_b: group_b.clone(),
+            },
+        )));
+    }
+
+    Ok(())
 }
 
 /// Resolve a previously [`select_tool_set`]-selected slice to concrete pull
@@ -345,19 +403,20 @@ pub fn resolve_selected_tools(
 /// Pure function — no I/O. Lock load + staleness checks happen at the CLI
 /// boundary; this function trusts the caller to have validated those.
 ///
-/// Thin delegate over [`select_tool_set`] followed by [`resolve_selected_tools`]:
-/// selection performs whole-scope duplicate validation (at the lock level) and
-/// positional overrides, then resolution maps every surviving entry to its
-/// host-platform pull [`Identifier`]. The two concerns are split so a caller
-/// that needs only a subset can filter between the steps; `compose_tool_set`
-/// keeps the original "resolve everything" contract by resolving the entire
-/// selection.
+/// Thin delegate over [`select_tool_set`] → [`check_duplicate_selection`] →
+/// [`resolve_selected_tools`]: selection builds the binding set and applies
+/// positional overrides, the check reports a binding two selected groups
+/// disagree about, then resolution maps every surviving entry to its
+/// host-platform pull [`Identifier`]. The three concerns are split so a caller
+/// that needs only a subset can filter between selection and the check;
+/// `compose_tool_set` keeps the "resolve everything" contract by checking and
+/// resolving the entire selection.
 ///
-/// Note the internal ordering: duplicate validation now fully precedes
-/// host-leaf resolution and compares [`LockedTool`] content rather than
-/// resolved leaves. This is behaviour-preserving for real locks — a lock is
-/// generated from one resolved manifest, so the same repository implies an
-/// identical `platforms` map.
+/// Note the internal ordering: duplicate validation fully precedes host-leaf
+/// resolution and compares [`LockedTool`] content rather than resolved leaves.
+/// This is behaviour-preserving for real locks — a lock is generated from one
+/// resolved manifest, so the same repository implies an identical `platforms`
+/// map.
 ///
 /// `current_platform` is the host platform: each lock entry resolves to its
 /// host-compatible leaf digest for that platform via
@@ -371,6 +430,7 @@ pub fn compose_tool_set(
     current_platform: &Platform,
 ) -> Result<Vec<ResolvedTool>, super::Error> {
     let selected = select_tool_set(config, lock, groups, positionals)?;
+    check_duplicate_selection(&selected)?;
     resolve_selected_tools(&selected, current_platform)
 }
 
@@ -600,6 +660,82 @@ mod tests {
         assert_eq!(name, "shellcheck");
         assert_eq!(group_a, "ci");
         assert_eq!(group_b, "lint");
+    }
+
+    /// Selection must not report the conflict itself — it keeps both entries so
+    /// a caller can filter the colliding binding out before validating. Without
+    /// this, `ocx run cmake` fails over a `shellcheck` it never named.
+    #[test]
+    fn select_keeps_both_entries_for_a_conflicting_binding() {
+        let lock = lock_with(vec![
+            locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
+            locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
+            locked("cmake", "ci", "ocx.sh", "cmake", 'c'),
+        ]);
+        let selected =
+            select_tool_set(&cfg(), Some(&lock), &["ci".into(), "lint".into()], &[]).expect("selection must not error");
+
+        let shellcheck: Vec<_> = selected.iter().filter(|tool| tool.binding == "shellcheck").collect();
+        assert_eq!(shellcheck.len(), 2, "both conflicting entries must survive selection");
+        assert_eq!(shellcheck[0].origin, Origin::Group("ci".into()));
+        assert_eq!(shellcheck[1].origin, Origin::Group("lint".into()));
+
+        // The conflict is real — it only waits for the caller to validate.
+        check_duplicate_selection(&selected).expect_err("the unfiltered set still conflicts");
+
+        // Narrowed to a binding that does not collide, the set validates clean.
+        let narrowed: Vec<_> = selected.into_iter().filter(|tool| tool.binding == "cmake").collect();
+        check_duplicate_selection(&narrowed).expect("a subset without the conflict must pass");
+    }
+
+    /// `group_a` names the first-seen group even when a third group also
+    /// disagrees, so the reported pair does not drift off the group walk order.
+    #[test]
+    fn check_duplicate_selection_reports_the_first_seen_group_pair() {
+        let lock = lock_with(vec![
+            locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
+            locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
+            locked("shellcheck", "release", "ocx.sh", "shellcheck", 'c'),
+        ]);
+        let selected = select_tool_set(
+            &cfg(),
+            Some(&lock),
+            &["ci".into(), "lint".into(), "release".into()],
+            &[],
+        )
+        .expect("selection must not error");
+
+        let err = check_duplicate_selection(&selected).expect_err("conflict");
+        let crate::project::Error::Project(pe) = err;
+        let ProjectErrorKind::DuplicateToolAcrossSelectedGroups { name, group_a, group_b } = &pe.kind else {
+            panic!("expected DuplicateToolAcrossSelectedGroups, got {:?}", pe.kind);
+        };
+        assert_eq!(name, "shellcheck");
+        assert_eq!(group_a, "ci");
+        assert_eq!(group_b, "lint");
+    }
+
+    /// An explicit positional supersedes every group entry for its binding, so
+    /// deliberately overriding a conflicting binding resolves the conflict
+    /// instead of leaving a stale twin for the check to trip over.
+    #[test]
+    fn positional_override_collapses_a_conflicting_binding() {
+        let lock = lock_with(vec![
+            locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
+            locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
+        ]);
+        let positional = parse_positional("shellcheck=ocx.sh/shellcheck:0.11", "ocx.sh").expect("parses");
+        let selected = select_tool_set(
+            &cfg(),
+            Some(&lock),
+            &["ci".into(), "lint".into()],
+            std::slice::from_ref(&positional),
+        )
+        .expect("selection must not error");
+
+        assert_eq!(selected.len(), 1, "the override must collapse both group entries");
+        assert_eq!(selected[0].origin, Origin::Explicit);
+        check_duplicate_selection(&selected).expect("an overridden binding carries no conflict");
     }
 
     #[test]

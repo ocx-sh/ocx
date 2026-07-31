@@ -19,8 +19,8 @@ pub mod registry;
 pub mod resolve;
 
 pub use compose::{
-    Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, compose_tool_set, expand_all_keyword,
-    host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
+    Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, check_duplicate_selection, compose_tool_set,
+    expand_all_keyword, host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
 };
 pub use config::{Group, PackageSettings, ProjectConfig};
 pub use env::{EnvValue, ProjectEnv};
