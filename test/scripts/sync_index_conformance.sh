@@ -48,6 +48,22 @@ unvendored=(
     "dispatch/README.md"
 )
 
+# Names under ${dest} that ocx authors itself. They share the fixture root with
+# the vendored leaves but have no upstream counterpart, so `diff -r` would report
+# every one of them as drift forever. Declaring them here is what keeps the gate
+# answering "did upstream move?" rather than "did ocx add a fixture?" — a new
+# entry is a deliberate statement that these bytes are ours.
+#
+# These become `diff -x` patterns, which match a BASENAME at any depth, not only
+# at the top level. So an upstream file named exactly `README.md`, `SOURCE_COMMIT`
+# or `cpython` *inside* a vendored leaf would be skipped here too. Keep the names
+# specific enough that this stays theoretical, and never add a generic one.
+ocx_authored=(
+    "README.md"     # vendoring provenance, written by hand
+    "SOURCE_COMMIT" # the pin this script maintains
+    "cpython"       # escaping truth table generated against CPython's json
+)
+
 die() {
     echo "sync_index_conformance: $*" >&2
     exit 1
@@ -160,7 +176,8 @@ assert_every_upstream_path_is_claimed() {
 # Fail when ocx-sh/index@main's fixtures differ from the vendored copy. The
 # vendored tree is never written — this is a gate, not a sync.
 check_drift() {
-    local stage_dir="$1" commit scratch
+    local stage_dir="$1" commit scratch name
+    local -a excludes=()
     command -v gh >/dev/null 2>&1 || die "the drift gate needs the gh CLI"
     commit="$(gh api repos/ocx-sh/index/commits/main --jq '.sha')" ||
         die "cannot resolve main on ocx-sh/index"
@@ -170,8 +187,10 @@ check_drift() {
     mkdir -p -- "${scratch}"
     place_leaves "${stage_dir}/${src_rel}" "${scratch}"
     echo "comparing ${dest_rel} against ocx-sh/index@main (${commit})"
-    # README.md and SOURCE_COMMIT are ocx-authored, not vendored bytes.
-    diff -r -x README.md -x SOURCE_COMMIT -- "${scratch}" "${dest}" ||
+    for name in "${ocx_authored[@]}"; do
+        excludes+=(-x "${name}")
+    done
+    diff -r "${excludes[@]}" -- "${scratch}" "${dest}" ||
         die "vendored fixtures differ from ocx-sh/index@main (${commit}); re-run with '--ref main' and review the diff"
     echo "no drift: vendored fixtures match ocx-sh/index@main (${commit})"
 }
