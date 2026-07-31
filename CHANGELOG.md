@@ -5,42 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-31
 
 ### Added
 
-- Declare project and group environment variables in `ocx.toml` via [`[env]` / `[group.<name>.env]`](https://ocx.sh/docs/reference/configuration#project-config-env), composed on top of package env with project/group entries winning on collision *(cli)*
-- Add repeatable `--env KEY[:TYPE]=VALUE` for a one-off, highest-precedence override — `TYPE` is `constant` (the default, replaces) or `path` (prepends, resolving a relative value against the current directory), so a caller that cannot inject shell syntax can still put a directory in front of `PATH`. Available on every command that composes an environment: `ocx run`, `ocx env`, `ocx direnv export`, `ocx package exec`, `ocx package env`, `ocx package test`, `ocx patch test`. `ocx env --env X` composes exactly what `ocx run --env X` executes with, so a backend caller can export the environment it would otherwise execute in — `ocx run` never prints. The flag is a per-invocation argument, not project configuration: the OCI-tier commands still read no `ocx.toml`. See [Project Environment](https://ocx.sh/docs/reference/env-composition#project-env) *(cli)*
-- Add `-g/--group` to `ocx direnv export`, so a group's `[env]` is reachable from a hand-edited `.envrc` (`eval "$(ocx direnv export -g ci)"`). An unknown group exits 64 rather than exporting nothing *(cli)*
-- Reject `OCX_*` and `__OCX_*` keys in `[env]`, `[group.<name>.env]`, and `--env` so a checked-in `ocx.toml` cannot reconfigure how `ocx` itself resolves *(security)*
-- Add `--tags-from-registry` to [`ocx package announce`](https://ocx.sh/docs/reference/command-line#package-announce), adding every tag the package's registry repository currently holds to the committed curated set — additive union, never removes a tag, and a yanked tag stays yanked *(cli)*
-- Make `--fork` optional on [`ocx package announce`](https://ocx.sh/docs/reference/command-line#package-announce): omitting it pushes the announce branch straight to `--index-repo` and opens the pull request from there *(cli)*. A publisher in the organization that owns the index had no working path before — GitHub refuses to fork a repository into its own owning organization, so `--fork` could not be satisfied at all. The change still lands as a pull request, never a commit to the index's default branch, so the index's governance gate and its `refresh`/`new-package` labelling are unaffected. The credential requirement moves with it: every mode except `--out` now needs `OCX_ANNOUNCE_TOKEN`, and the fork-free path additionally verifies the token can push to `--index-repo` **before** writing anything, exiting 80 with the repository and the missing permission named — GitHub answers an unauthorised write with 404 as readily as 403, which would otherwise surface as a delayed, bare status code
-- Add `--no-libc-lint` to [`ocx package create`](https://ocx.sh/docs/reference/command-line#package-create-libc-check) *(cli)*: an escape hatch, not a convenience — a false refusal from the libc check would otherwise block every `create` for a Linux target with no way through. It skips the whole check, so the declared `os.features` go unverified against the packaged binaries; a warning naming the platform is printed either way. Nothing else changes — the same metadata and layers are written whether or not the flag is passed.
+- Unified platform model — one relation, one grammar, lock V3 (#212, #215) **BREAKING**
+- Declared binaries — metadata claims, create auto-scan, env report projection (#177)
+- One index format — local wire-grammar store + index.ocx.sh client (#215, #217) *(index)* **BREAKING**
+- Ocx package inspect --closure *(cli,lib)* **BREAKING**
+- Ocx package announce — curated tag observation into the index *(announce)*
+- Record OCI annotations on the published image index *(push)*
+- User-declarable environment variables in ocx.toml *(project)*
+- Optional type qualifier on ocx run --env *(cli)*
+- Drop --self from ocx run *(cli)* **BREAKING**
+- --env on every env-composing command *(cli)*
+- Make the reserved-tag verdict one source of truth *(tag)* **BREAKING**
+- Store OCI image indices verbatim, deleting the invented object *(index)* **BREAKING**
+- Carry registry bytes verbatim and filter reserved tags once *(announce)* **BREAKING**
+- Report the canonical tag actually written, and cap manifest bodies *(push)*
+- Ship the ocx.sh index as a compiled-in default tier *(config)*
+- Announce every tag the registry holds *(announce)*
+- Observe __ocx.desc into the index root *(announce)*
+- Check the declared libc against the packaged binaries *(create)*
+- Fail closed when the host cannot scan for the target's executables *(package)*
+- Open the pull request without a fork when the actor can push *(announce)*
+- Remove any recorded variants key from the index root *(announce)*
+- Add ocx status and ocx inspect for toolchain introspection *(cli)*
+- Ship third-party license notices with the binary *(dist)*
 
 ### Changed
 
-- Ignore unknown keys inside `[registry]`, `[registries.<name>]`, and `[mirrors."<host>"]` instead of rejecting the file *(cli)*: every table in `config.toml` now tolerates what it does not recognize, the posture the root and `[patches]`/`[managed]` already had. The `[managed]` tier makes one `config.toml` fleet-wide state read by every ocx version at once, so a payload written against a newer ocx has to degrade to the parts an older binary understands. It did not: a single added key inside one of those three tables failed the parse, which took the **whole** payload out of service on every host that had not upgraded — `ocx config update` exited 78 and the load path dropped the snapshot entirely, mirrors and patch registry with it. A `[mirrors."<host>"]` entry left with no role this binary knows (a typo, or a role a later ocx adds) is skipped for that host rather than failing the config. The cost is that a typo silently no-ops; the [config schema](https://ocx.sh/schemas/config/v1.json) still lists every known key and its `additionalProperties: false` on those two objects is gone with the change, so editor validation flags typos where they are cheap to catch. A key whose meaning or value shape changes is not covered by tolerance — publish it under a new tag and migrate fleets as they upgrade, see [Rolling out an incompatible change](https://ocx.sh/docs/user-guide#managed-config-incompatible)
-- Stop recording `variants` on the index root in [`ocx package announce`](https://ocx.sh/docs/reference/command-line#package-announce) *(cli)*: the index derives the set from `root.tags` and no longer reads the stored field, so recording it was a second source of truth that could only drift. The announce now *removes* the key rather than merely not writing it — the rebuilt root is a clone of the committed one, so a stored set would ride through verbatim and, the first time a variant's last tag left upstream, stop matching the derivation and be rejected. Exactly one published root carries the key today; it self-heals on its next announce. `ocx index list --variants` is unaffected — it derives from tags and always did.
-- Rename `ocx package announce --tags-file` to `--tags-from-file` *(cli)* **BREAKING**: the old spelling is no longer accepted. See [`ocx package announce`](https://ocx.sh/docs/reference/command-line#package-announce)
-- Refuse [`ocx package create`](https://ocx.sh/docs/reference/command-line#package-create) on a host that cannot evaluate the target platform's executable-file convention, exiting 65 *(cli)* **BREAKING**: `--bin-scan` already failed closed there; the default (Auto) mode with `binaries` absent exited 0 and published with the field silently undeclared. Downstream that reads as "this publisher declared no interface executables" — indistinguishable from a deliberate omission — so a cross-host build shipped an unchecked claim and nothing said so. The concrete case is a Windows host targeting anything but Windows — `linux/*`, `darwin/*` and `--platform any` alike, since `any` names no native OS convention of its own and is scanned by the Unix exec bit like the rest: that bit has no portable API off-Unix, so every candidate reports as non-executable. Both modes now refuse, naming `--no-bin-scan` as the deliberate way through; hand-authoring `binaries` also still works, since a declared claim is never scanned. A Unix host is unaffected in every mode and for every target.
-- Restructure `[group.<name>]` to hold only `[group.<name>.tools]` and `[group.<name>.env]` sub-tables — see [`[group.<name>]`](https://ocx.sh/docs/reference/configuration#project-config-groups) *(cli)* **BREAKING**: a tool binding declared directly under `[group.<name>]` (the previous flat form) is now a parse error naming the group and pointing at `[group.<name>.tools]`. `[group.default]` and `[group.all]` remain reserved. `ocx.lock`'s `declaration_hash` is unaffected, so a hand-edited `ocx.toml` triggers no re-lock.
-- Observe curated tags concurrently in [`ocx package announce`](https://ocx.sh/docs/reference/command-line#package-announce) *(cli)*: the observe loop issued one manifest fetch at a time, so wall-clock grew linearly with the curated set — a mirror with a hundred versions paid a hundred serial round trips. Capped at 64 in flight, the same cap the local index's tag refresh already uses against the same registries. Output is unchanged: tag order still follows the curated order, and a failure still reports the earliest curated tag rather than whichever request lost the race.
-- Flip `PATH`-style precedence under `--ci=github`/`--ci=gitlab` to match `ocx run` *(cli)* **BREAKING**: CI export used to prepend the whole buffered block and keep the *first* occurrence, so the first-accumulated value held the front of `PATH`. It now folds the same move-to-front operation `ocx run` applies in-process once per value, so the *last*-applied value lands at the front instead. A later pipeline stage can now override an earlier one for `PATH` and other path-type variables — it could not before.
-- Stop writing the `c/index.json.etag` sidecar into the local index tree, and delete one left by an older `ocx` on the next [`ocx index update`](https://ocx.sh/docs/reference/command-line#index-update) *(cli)*: a copy of that tree is a valid complete index ([one wire format, many copies](https://ocx.sh/docs/in-depth/indices)), and repos commit and `rsync` them — the `.etag` was the only file in it that was neither served by the index site nor content-addressed, per-machine HTTP bookkeeping inside a wire-format mirror. It bought a `304` instead of a `200` on one small catalog fetch during an explicit refresh; the sync mechanism is and always was the digest diff against the local catalog. Nothing sends `If-None-Match` any more, so a `304` from a misbehaving edge is now an error rather than a silent miss. An unchanged catalog still rewrites nothing: the commit is skipped when the merged map matches what was read, so file bytes and timestamps are untouched.
+- Extract the --env and --group seams into options/ *(cli)*
+- PatchScope becomes EnvScope *(package-manager)*
+- Observe curated tags concurrently *(announce)*
+- Move with_os_feature onto Platform, keyed by feature namespace *(oci)*
+- Drop the catalog ETag sidecar *(index)*
+- Reshape ocx package inspect --format json into one envelope *(cli)* **BREAKING**
+- Exit 65 from ocx package inspect --closure on an unrealizable surface *(cli)* **BREAKING**
+- Drop closure.deps[].digest from ocx package inspect --closure *(cli)* **BREAKING**
+
+### Documentation
+
+- --env on both tiers, --self gone from ocx run
+- Record the --ci precedence flip and repair the changelog links
+- Teach only the current design, and rebuild the binary when sources change
+- Bank the live acceptance gate — E1, E2a and E2b all pass *(e2e)*
+- Sync inspect/pull examples with narrowed plain output *(cli)*
+- Realign the index-only dispatch record with the shipped code *(adr)*
+- Correct the D4(b) exit code, four stale anchors and OQ2's closure *(adr)*
+- Retarget seven anchors off doc comments onto the code they name *(adr)*
+- Publish and announce a package *(user-guide)*
+- State the shipped default-index behaviour on the publish path *(index)*
+- Name the package-tier form in prose, not the removed root command
+- D5 drops the create-time host platform default *(adr)*
+- Name the declare-vs-assert platform asymmetry at the record site *(create)*
+- The candidate symlink targets the package root, not content/ *(storage)*
+- Record this branch's user-visible changes *(changelog)*
+- Record the ocx.toml preservation fix *(changelog)*
+- Record the catalog ETag sidecar removal
+- Retire the conditional GET from the index-indirection record *(adr)*
+- Mark the lock-records-physical-address ADR rejected *(adr)*
 
 ### Fixed
 
-- Fail a `required = true` [`[managed]`](https://ocx.sh/docs/reference/configuration#keys-managed-required) tier closed when its snapshot is on disk but its payload is not a usable config *(cli)*: the gate compared only the snapshot's provenance against the effective `source`, so a payload the loader could not parse — dropped silently, with a debug line nobody sees — left the tier reporting satisfied while none of its settings were in force. Fail-open in the one place an operator asked to fail closed: every command ran with no mirrors, no patch registry, and no managed default registry, and nothing said so. The gate now reads what actually reached the merged config and raises `SnapshotUnusable` (exit 78, like `SnapshotRequired`) naming the source, which describes the state instead of reporting a snapshot that is sitting right there as absent. Under `required = false` the same state is now a warning rather than a debug line — a broken payload is not the benign absent state the quiet path exists for. Unknown keys and sections are not "unusable" and fold normally.
-- [`ocx add`](https://ocx.sh/docs/reference/command-line#add) and [`ocx remove`](https://ocx.sh/docs/reference/command-line#remove) edit `ocx.toml` in place instead of rewriting it *(cli)*: both used to re-serialize the parsed config over the whole file, so the first mutation discarded every comment — including the `#:schema` directive [`ocx init`](https://ocx.sh/docs/reference/command-line#init) writes, which is what wires taplo-aware editors to the published schema, so autocompletion and validation quietly died on the first `ocx add` — reordered the bindings alphabetically, and appended the empty `[group]` and `[package]` tables the struct serializes to. Only the mutated key is touched now: an unchanged binding's comments, declaration order, spacing, and key quoting come back byte-for-byte, as do the sections a mutation does not target (`[env]`, `[group.<name>.env]`, `[package."<id>"]`); a new binding is appended rather than sorted into place, and adding a binding then removing it restores the file's original bytes. Whether a binding counts as unchanged is decided by parsing the on-disk cell and comparing it against the candidate's identifier, not by comparing rendered text: a bare `registry/repo` binding gets a `:latest` tag injected into the typed model, so a text comparison would call that injection a change and rewrite a line the mutation never targeted, taking its comments with it. Two normalisations remain, as before the change: a CRLF file comes back LF, and a leading UTF-8 byte order mark (PowerShell 5.1 writes one) is stripped. A mutation the in-place writer cannot express now fails the command rather than falling back to the whole-file rewrite — silently dropping the user's content is what this fixes.
-- [`ocx init`](https://ocx.sh/docs/reference/command-line#init) no longer writes a commented-out `registry = "ocx.sh"` line into the generated `ocx.toml` *(cli)*: the project manifest has no `registry` key and rejects unknown ones, so the hint was an invitation to break the file — uncommenting it made every subsequent command exit 78. The default registry is [`[registry] default`](https://ocx.sh/docs/reference/configuration#keys-registry) in `config.toml`, or `OCX_DEFAULT_REGISTRY`.
-- [`ocx package create`](https://ocx.sh/docs/reference/command-line#package-create-libc-check) refuses a Linux platform whose `os.features` do not cover the libc its binaries actually need, exiting 65 *(cli)*: `os.features` subset matching reads an empty feature list as "demands nothing of the host", so publishing a glibc-linked binary without `libc.glibc` was a positive claim of libc universality — it resolved on Alpine and then failed to start with a bare `No such file or directory`, the kernel reporting a missing ELF interpreter for a file that was plainly there, and nothing in the publish path noticed. `create` now reads the `PT_INTERP` header of every file the package puts on an interface `PATH` directory and refuses the mismatch, naming the file, its dynamic loader, and a paste-ready `--platform` value. Static binaries are unaffected; a file that carries an ELF header but cannot be parsed, or names a loader OCX cannot attribute to a libc family, is also refused rather than passing as "needs nothing". Not gated on `--bin-scan`, which governs a different claim. Publishers whose Linux artifacts are dynamically linked must add the feature to `--platform` (e.g. `linux/amd64+libc.glibc`); this makes the glibc and musl builds of one tool two distinct platform keys, which is what lets both coexist under a single tag instead of one silently evicting the other. The check is **not** gated on `--bin-scan`: it runs whenever `--metadata` and `--platform` are given, so it applies to every publisher, not only those who opted into the binaries scan. One further refusal follows from that: a `PATH` segment naming this package's install path in a shape that resolves to no directory (a mid-string token, a `..` escape) — the check could look nowhere, and a claim nothing could check is not a checked claim. A declared directory that is absent or empty is *not* refused: the check looked, the package puts no file on `PATH`, so it has no libc requirement and an empty `os.features` is true. A bare `${installPath}` (the package root) and a `:`-joined value are both handled normally: each `PATH` segment is resolved on its own, and segments naming a system directory or another package's tree are simply not this package's to inspect.
-- [`ocx package describe --logo`](https://ocx.sh/docs/reference/command-line#package-describe) verifies the file's bytes are the image its extension claims, exiting 65 when they are not *(cli)*: only the extension was checked, so a Git LFS pointer left by a checkout without `lfs: true` — or an empty file, or an HTML error page — published as the logo, exited 0, and blanked the catalog entry a good logo had been pushed to.
-- `ocx patch test` can run a base package that declares entrypoints *(cli)*: the launcher `pkg-root` guard allow-listed only `ocx package test`'s scratch root, so re-entry from a generated launcher under `patch test`'s own scratch root was rejected with exit 64 before the command could run.
-- An index-indirected package resolves its physical transport address from the local index copy *(cli)*: only the remote index answered the `repository` pointer, so with no network — and no `--offline` flag — `ocx run`/`env`/`pull` exited 69 on a `GET https://index.ocx.sh/config.json` against a fully warm store, and under `--offline` the lookup returned nothing at all, which reads as "no rewrite" and reported the *logical* identifier (`ocx.sh/<ns>/<pkg>`) as its own transport — indistinguishable from a genuinely registry-backed package. Every committed root document already carries the answer, so the local copy now supplies it whenever no source did. A reachable index source still answers first: its address has passed the SSRF pre-flight, and reading the local copy ahead of it would skip that floor on every warm-cache resolve while saving nothing. The local answer is not a rare fallback — `index.ocx.sh` declares a flat `ocx.sh/<tool>` name outside its jurisdiction, so for those names it is the only answer even fully online — and it now passes the same SSRF floor: a committed root pointing a package at a loopback, private, link-local or metadata address is refused with exit 78 naming the host, unless that host is listed in `[registries."<ns>"].trusted_hosts`. Only a genuine *rewrite* is judged, so a registry naming itself (every plain OCI registry) is unaffected; `--offline` skips the check because it builds no client for anything to follow the pointer with. An index source that *refuses* a target now propagates that refusal instead of being answered around by the local copy — only a transport outage is held.
-
-### Removed
-
-- Drop `--self` from `ocx run` *(cli)* **BREAKING**: the self view is package vocabulary — it selects a package's own private surface, which by construction drops that package's `entrypoints/` from `PATH` because launchers exist for consumers. A toolchain consumer is a consumer of every tool it declares, so `ocx run --self` composed a strictly worse toolchain than the default. The flag stays on [`ocx package exec`](https://ocx.sh/docs/reference/command-line#package-exec), [`ocx package env`](https://ocx.sh/docs/reference/command-line#package-env), [`ocx package test`](https://ocx.sh/docs/reference/command-line#package-test), and [`ocx package deps`](https://ocx.sh/docs/reference/command-line#deps), where a package's own surface is the thing being asked about.
+- Release binaries no longer self-report as dirty builds *(build)*
+- Let push infer the metadata sidecar instead of deriving it *(ci)*
+- Classify the ambiguous 422 on ref update by reading the ref *(forge)*
+- Align CI path export precedence with ocx run *(ci)*
+- Forward env overrides from every spawning command *(cli)*
+- Stop a singleflight waiter masking the leader's exit code *(index)*
+- Refuse an image index that deserialises but is not a valid one *(oci)*
+- Match CPython's DEL escape in the index wire writer *(oci)*
+- Narrow plain-mode output to human-scannable widths *(cli)*
+- Rebuild from the base when the announce branch is spent *(announce)*
+- Repoint embedded doc links at absolute site URLs *(changelog)*
+- Pin run and PR identity to a freshness floor *(e2e)*
+- Floor run and PR identity on GitHub's own counters *(e2e)*
+- Filter the announce PR window server-side *(e2e)*
+- Let the index declare which names it can serve *(index)*
+- Let the served root, not the declaration, settle jurisdiction *(index)*
+- Keep a failed catalog row retryable instead of silently stale *(index)*
+- Let an operator's [mirrors] entry suppress the built-in index *(config)*
+- Let only local config revoke the verified index path *(config)*
+- Chunk blob uploads under GHCR's 4 MiB per-request cap *(oci)*
+- Stop an oversized blob falling back into the bug it just hit *(oci)*
+- Read and write c/index.json as the versioned envelope *(index)*
+- Wrap the three jurisdiction-test catalogs in the envelope *(index)*
+- Select the index root by shape, not by directory order *(test)*
+- Require --platform with --metadata instead of guessing the host *(create)*
+- The install symlink targets the package root, not content/ *(test)*
+- Title a description from the package's last name segment *(announce)*
+- Reject a logo whose bytes are not the format its extension names *(describe)*
+- Answer the physical transport address from the local index *(index)*
+- Apply the SSRF floor to the local physical answer *(index)*
+- Edit ocx.toml in place instead of re-serializing it *(project)*
+- Decide binding equality by parsing, not by comparing text *(project)*
+- Let the index drift gate see ocx-authored fixtures *(test)*
+- Tolerate unknown keys fleet-wide, gate required on what applied *(config)*
+- Check the duplicate-binding gate against the narrowed tool set *(cli)*
 
 ## [0.4.3] - 2026-07-10
 
@@ -75,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve --dry-run previews concurrently *(pull)*
 - Auto-sync patches after a config update *(managed-config)*
 - Place Add and Supported Platforms side by side *(website)*
+
+### Release
+
+- V0.4.3
 
 ## [0.4.2] - 2026-07-05
 
@@ -694,6 +760,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.5.0]: https://github.com/ocx-sh/ocx/compare/v0.4.3..v0.5.0
 [0.4.3]: https://github.com/ocx-sh/ocx/compare/v0.4.2..v0.4.3
 [0.4.2]: https://github.com/ocx-sh/ocx/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/ocx-sh/ocx/compare/v0.4.0..v0.4.1

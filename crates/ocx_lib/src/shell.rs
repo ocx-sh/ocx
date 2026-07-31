@@ -1113,6 +1113,15 @@ mod tests {
     /// Run `script` under `argv` (interpreter + flags), returning trimmed stdout,
     /// or `None` if the interpreter is not installed (so CI without it stays green).
     ///
+    /// A non-zero exit is *not* silently accepted: an interpreter that crashes
+    /// (a pwsh whose .NET runtime segfaults on every script is real) would
+    /// otherwise return empty stdout and fail the caller's assertion as if our
+    /// emitted line were wrong. On failure, re-run `echo ok` — valid in every
+    /// interpreter these tests drive — to tell the two apart: probe broken ⇒
+    /// the interpreter is unusable, skip; probe fine ⇒ our script is at fault,
+    /// panic with its stderr. Never skip on a working interpreter, or a syntax
+    /// error in the emit would pass as green.
+    ///
     /// `#[cfg(unix)]`: the POSIX/fish/pwsh live tests below seed and assert a
     /// colon-separated PATH (POSIX semantics). On Windows the same interpreters
     /// exist but behave differently — git-bash mangles `:` paths via MSYS, and
@@ -1122,13 +1131,24 @@ mod tests {
     #[cfg(unix)]
     fn run_script(argv: &[&str], script: &str) -> Option<String> {
         let (bin, head) = argv.split_first()?;
-        let mut command = Command::new(bin);
-        command.args(head).arg(script);
-        match command.output() {
-            Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string()),
+        let run = |body: &str| match Command::new(bin).args(head).arg(body).output() {
+            Ok(output) => Some(output),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => panic!("failed to spawn {bin}: {error}"),
+        };
+        let output = run(script)?;
+        if !output.status.success() {
+            let probe = run("echo ok")?;
+            if !probe.status.success() || String::from_utf8_lossy(&probe.stdout).trim() != "ok" {
+                return None;
+            }
+            panic!(
+                "{bin} exited {} on:\n{script}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
+        Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
     }
 
     /// POSIX-style readback: seed PATH with the dir mid-list, source twice, print.
@@ -1159,7 +1179,8 @@ mod tests {
     #[cfg(unix)]
     fn awk_dir() -> String {
         // The POSIX awk form needs `awk` resolvable on PATH; keep the real bin dir.
-        std::path::Path::new(&run_script(&["bash", "-c"], "command -v awk").unwrap_or_default())
+        // `|| true`: a missing awk exits 1, which `run_script` now treats as our bug.
+        std::path::Path::new(&run_script(&["bash", "-c"], "command -v awk || true").unwrap_or_default())
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|d| !d.is_empty())
