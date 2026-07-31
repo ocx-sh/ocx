@@ -15,14 +15,24 @@ on:
   workflow_call:
     inputs:
       registry:
-        description: Registry hostname (e.g. `dev.ocx.sh`, `ocx.sh`).
+        description: Registry hostname (e.g. `dev.ocx.sh`, `ghcr.io`).
         required: true
         type: string
       repo:
         description: First-party namespace within the registry (typically `ocx`).
           Default variant publishes to `<repo>/cli`; named variants to `<repo>/<variant>`.
+          This is the LOGICAL package path — the one the index entry is keyed by and
+          `package announce` names. The physical push target prepends `physical_namespace`.
         required: true
         type: string
+      physical_namespace:
+        description: Path segment prepended to `<repo>/<name>` for the push target only,
+          for a registry that namespaces by owner (`ghcr.io` → `ocx-sh`, giving
+          `ghcr.io/ocx-sh/ocx/cli` for the logical `ocx/cli`). Empty for a registry whose
+          root is already the namespace.
+        required: false
+        type: string
+        default: ""
       version_tag:
         description: Fully formed publish tag, including any pre-release and UTC
           build-metadata segments (e.g. `0.3.0-dev_20260514120000`). Callers are
@@ -48,6 +58,13 @@ on:
         required: false
         type: string
         default: bare
+      announce:
+        description: Publish the pushed tags into the index. Only the release publish
+          sets this — a dev tag does not exist on the repository the index root points at,
+          so announcing one would observe nothing.
+        required: false
+        type: boolean
+        default: false
     secrets:
       REGISTRY_USER:
         required: true
@@ -60,6 +77,11 @@ on:
 
 permissions:
   contents: read
+  # GHCR push authenticates as GITHUB_TOKEN. A reusable workflow can only narrow
+  # the caller's grant, so this scope must be listed here AND granted by the
+  # caller — for release.yml that is `github-custom-job-permissions` in
+  # dist-workspace.toml, since the file itself is generated.
+  packages: write
 
 jobs:
   publish:
@@ -146,6 +168,8 @@ jobs:
         env:
           REGISTRY: ${{ inputs.registry }}
           REPO: ${{ inputs.repo }}
+          PHYSICAL_NAMESPACE: ${{ inputs.physical_namespace }}
+          ANNOUNCE: ${{ inputs.announce }}
           VERSION_TAG: ${{ inputs.version_tag }}
           VARIANTS_JSON: ${{ inputs.variants }}
           TARGETS_JSON: ${{ inputs.targets }}
@@ -164,9 +188,17 @@ jobs:
 
           # W9: allowlist defense-in-depth — only permit known registries.
           case "$REGISTRY" in
-            dev.ocx.sh|ocx.sh) ;;
+            dev.ocx.sh|ghcr.io) ;;
             *) echo "::error::registry '$REGISTRY' not in allowlist"; exit 1 ;;
           esac
+
+          # Same validation for the physical namespace: it lands in the push
+          # identifier, so it must not be able to carry shell metacharacters.
+          if [[ -n "${PHYSICAL_NAMESPACE}" ]] && ! [[ "${PHYSICAL_NAMESPACE}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "::error::physical_namespace '${PHYSICAL_NAMESPACE}' contains invalid characters"
+            exit 1
+          fi
+          physical_prefix="${PHYSICAL_NAMESPACE:+${PHYSICAL_NAMESPACE}/}"
 
           # Map secrets to the registry-specific env names ocx reads.
           # Hostname dots become underscores in OCX_AUTH_<host>_USER/TOKEN.
@@ -224,9 +256,11 @@ jobs:
             fi
             # The announce re-observes each curated tag on the physical
             # repository the index root points at, which is the PROD registry —
-            # a dev tag simply does not exist there.
-            if [[ "$REGISTRY" != "ocx.sh" ]]; then
-              echo "::notice::skipping index announce for ${repo_path}: ${REGISTRY} is not the registry ocx-sh/index points at"
+            # a dev tag simply does not exist there. The caller declares which
+            # publish that is; deriving it from the registry hostname went stale
+            # the moment the prod registry moved.
+            if [[ "$ANNOUNCE" != "true" ]]; then
+              echo "::notice::skipping index announce for ${repo_path}: this publish does not announce"
               return 0
             fi
             if [[ -z "${OCX_ANNOUNCE_TOKEN:-}" ]]; then
@@ -304,13 +338,17 @@ jobs:
                 -o "$ARCHIVE" \
                 -p "$platform"
 
-              identifier="${REGISTRY}/${repo_path}:${VERSION_TAG}"
+              identifier="${REGISTRY}/${physical_prefix}${repo_path}:${VERSION_TAG}"
               echo "==> Publishing ${identifier} (${platform})"
+              # `image.source` is what links the GHCR package to this repository
+              # and lets it inherit the repository's permissions; a registry
+              # derives nothing from the path, so it has to be stated.
               ocx package push \
                 --identifier "${identifier}" \
                 --platform "${platform}" \
                 --cascade \
                 --new \
+                --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
                 "${announce_flag[@]}" \
                 "$ARCHIVE"
 
@@ -332,8 +370,8 @@ jobs:
             # variant would need its own. None exists today — ocx-mirror
             # publishes ocx.sh/ocx/mirror from its own repository.
             if [[ -z "$variant" ]]; then
-              echo "==> Pushing catalog description for ${REGISTRY}/${repo_path}"
-              ocx package describe "${REGISTRY}/${repo_path}" \
+              echo "==> Pushing catalog description for ${REGISTRY}/${physical_prefix}${repo_path}"
+              ocx package describe "${REGISTRY}/${physical_prefix}${repo_path}" \
                 --readme packaging/ocx/CATALOG.md \
                 --logo assets/logo.svg
             fi

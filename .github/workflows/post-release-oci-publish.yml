@@ -39,8 +39,13 @@ jobs:
     needs: [compute-tag]
     uses: ./.github/workflows/oci-publish.yml
     with:
-      registry: ocx.sh
+      # Logical name stays `ocx.sh/ocx/cli` — that is what the index entry is
+      # keyed by and what users install. Only the physical home moved to GHCR,
+      # so `repo` (logical) and `physical_namespace` (push target) differ here.
+      registry: ghcr.io
       repo: ocx
+      physical_namespace: ocx-sh
+      announce: true
       version_tag: ${{ needs.compute-tag.outputs.version_tag }}
       # Prod registry carries the default ocx variant only. ocx-mirror
       # releases publish ocx.sh/ocx/mirror from its own repo:
@@ -50,6 +55,7 @@ jobs:
       environment: ocx.sh
       artifact_source: cargo-dist
     secrets:
-      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      # GHCR takes the workflow's own token; no registry credential to provision.
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
