@@ -123,6 +123,29 @@ def _build_trap_script(outputs: dict[str, str], marker: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def inspect_entry(payload: dict, name: str) -> dict:
+    """Pick one entry out of an inspect report's ``packages`` array by ``name``.
+
+    Both inspect commands emit ``{platform, packages: [...], env: [...]}`` where
+    each entry names itself: the raw request string for ``ocx package inspect``,
+    the ``ocx.toml`` binding for ``ocx inspect``. The array preserves order
+    (input order / selection order), which a JSON object keyed by request string
+    could not promise.
+    """
+    matches = [entry for entry in payload["packages"] if entry["name"] == name]
+    assert matches, (
+        f"no inspect entry named {name!r}; "
+        f"got {[entry['name'] for entry in payload['packages']]}"
+    )
+    assert len(matches) == 1, f"inspect entry {name!r} appears {len(matches)} times"
+    return matches[0]
+
+
+def inspect_names(payload: dict) -> list[str]:
+    """The ``name`` of every entry in an inspect report, in emitted order."""
+    return [entry["name"] for entry in payload["packages"]]
+
+
 def make_package(
     ocx: OcxRunner,
     repo: str,

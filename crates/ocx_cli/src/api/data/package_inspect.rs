@@ -13,7 +13,10 @@ use ocx_lib::{
     },
 };
 
-use crate::api::{Printable, data::env::BinaryAttribution};
+use crate::api::{
+    Printable,
+    data::env::{BinaryAttribution, EnvEntry},
+};
 
 /// Semantic role of a tree annotation. Text is stored raw; the [`Theme`]
 /// inks it at render time (`annotations`) so no style is hard-coded here.
@@ -51,24 +54,28 @@ impl SemanticAnnotation {
 }
 
 /// Read-only view of a package. The shape adapts to the requested reference
-/// and whether `--resolve` was given:
+/// and whether `--resolve` was given. Every shape carries `name` (how the
+/// caller addressed this entry — the raw request string for
+/// `ocx package inspect`, the `ocx.toml` binding for `ocx inspect`),
+/// `identifier`, `pinned_identifier` (the identifier with its digest, so a
+/// consumer never has to splice one together) and `pinned_digest`:
 ///
 /// - **candidates** (default mode, ref is an image index): the available
-///   platform children — `{ identifier, pinned_digest, candidates: [...] }`.
+///   platform children — `{ …, candidates: [...] }`.
 /// - **metadata** (default mode, ref is a single manifest): the declared
-///   metadata document plus the manifest's layers —
-///   `{ identifier, pinned_digest, metadata, layers }`.
+///   metadata document plus the manifest's layers — `{ …, metadata, layers }`.
 /// - **resolution** (`--resolve`): platform-selected metadata and layers plus
-///   the OCI resolution chain — `{ identifier, pinned_digest, platform,
-///   metadata, layers, resolution }`. Each `resolution.chain` entry carries
-///   `{ digest, role, media_type, size }` (role ∈ `index` | `manifest` |
-///   `config`); the layers live at the top level, not inside `resolution`.
+///   the OCI resolution chain — `{ …, platform, metadata, layers, resolution }`.
+///   Each `resolution.chain` entry carries `{ digest, role, media_type, size }`
+///   (role ∈ `index` | `manifest` | `config`); the layers live at the entry's
+///   top level, not inside `resolution`.
 ///
 /// Plain format: a tree rooted at the pinned identifier (inked with the
 /// active theme like every other identifier) with the shape-appropriate
 /// section(s). Byte sizes render human-readable (binary units); JSON keeps
 /// the raw integer `size`.
 pub struct PackageInspect {
+    name: String,
     identifier: oci::Identifier,
     pinned_digest: String,
     body: Body,
@@ -312,6 +319,15 @@ fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
 #[derive(Serialize)]
 struct CandidateOut {
     digest: String,
+    /// This candidate as a pullable reference — the entry's identifier with
+    /// this child's digest attached. Emitted for the same reason the entry
+    /// carries `pinned_identifier`: splicing one by hand means knowing where
+    /// the tag goes relative to the digest.
+    ///
+    /// Named `pinned` rather than `pinned_identifier` because a candidate has
+    /// exactly one digest and so nothing to disambiguate against — the same
+    /// reason `resolution.pinned` is spelled that way.
+    pinned: String,
     platform: String,
     media_type: String,
     size: i64,
@@ -362,13 +378,15 @@ impl Layer {
 }
 
 impl PackageInspect {
-    /// Builds the report from the task result. `identifier` is the requested
-    /// identifier (post default-registry expansion); `platform` is the
-    /// platform resolution selected against (only meaningful in `--resolve`
-    /// mode).
-    pub fn new(identifier: oci::Identifier, platform: oci::Platform, result: InspectResult) -> Self {
+    /// Builds one report entry from the task result. `name` is how the caller
+    /// addressed this package (the raw request string, or an `ocx.toml`
+    /// binding); `identifier` is the requested identifier (post
+    /// default-registry expansion); `platform` is the platform resolution
+    /// selected against (only meaningful in `--resolve` mode).
+    pub fn new(name: String, identifier: oci::Identifier, platform: oci::Platform, result: InspectResult) -> Self {
         match result {
             InspectResult::Candidates { pinned, candidates } => Self {
+                name,
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Candidates {
@@ -377,6 +395,7 @@ impl PackageInspect {
                         .into_iter()
                         .map(|c| CandidateOut {
                             digest: c.identifier.digest().to_string(),
+                            pinned: c.identifier.to_string(),
                             platform: c.platform.to_string(),
                             media_type: c.media_type,
                             size: c.size,
@@ -390,6 +409,7 @@ impl PackageInspect {
                 layers,
                 closure,
             } => Self {
+                name,
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Manifest {
@@ -405,6 +425,7 @@ impl PackageInspect {
                 chain,
                 closure,
             } => Self {
+                name,
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Resolved {
@@ -438,18 +459,35 @@ impl Resolution {
     }
 }
 
+impl PackageInspect {
+    /// The pinned identifier every body variant carries — the requested
+    /// identifier with its resolved digest attached.
+    ///
+    /// Emitted as its own field so a consumer never has to splice `identifier`
+    /// and `pinned_digest` back together (and get the `:tag@digest` punctuation
+    /// right) to name the exact artifact.
+    fn pinned_identifier(&self) -> &oci::PinnedIdentifier {
+        match &self.body {
+            Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => pinned,
+        }
+    }
+}
+
 impl Serialize for PackageInspect {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Field count varies by body shape; identifier + pinned_digest are
-        // always present. `closure` is additive-optional (present only under
-        // `--closure`) and nests deps + surface + conflicts under one key.
-        let len = 2 + match &self.body {
+        // Field count varies by body shape; name + identifier +
+        // pinned_identifier + pinned_digest are always present. `closure` is
+        // additive-optional (present only under `--closure`) and nests deps +
+        // surface + conflicts under one key.
+        let len = 4 + match &self.body {
             Body::Candidates { .. } => 1,
             Body::Manifest { closure, .. } => 2 + usize::from(closure.is_some()),
             Body::Resolved { closure, .. } => 4 + usize::from(closure.is_some()),
         };
         let mut s = serializer.serialize_struct("PackageInspect", len)?;
+        s.serialize_field("name", &self.name)?;
         s.serialize_field("identifier", &self.identifier)?;
+        s.serialize_field("pinned_identifier", &self.pinned_identifier().to_string())?;
         s.serialize_field("pinned_digest", &self.pinned_digest)?;
         match &self.body {
             Body::Candidates { candidates, .. } => {
@@ -900,38 +938,67 @@ impl Printable for PackageInspect {
     }
 }
 
-/// One or more [`PackageInspect`] views keyed by the requested identifier.
+/// The report both inspect commands emit: `ocx package inspect` over raw
+/// identifiers, and `ocx inspect` over an `ocx.toml` toolchain selection.
 ///
-/// Plain format: each package's tree rendered in input order (inspect holds the
+/// Plain format: each package's tree rendered in order (inspect holds the
 /// single-table exemption — its output is inherently a nested tree, not a row).
 ///
-/// JSON format: object keyed by the raw request identifier
-/// (`{"<id>": {…inspect…}}`), preserving input order — the same keyed-object
-/// shape `which` uses, applied even for a single package.
-pub struct PackageInspects {
-    entries: Vec<(String, PackageInspect)>,
+/// JSON format: `{ platform?, packages: [...], env: [...] }`.
+///
+/// `platform` is present only when the run actually selected a platform —
+/// `--resolve` / `--closure`, and always for `ocx inspect` (a lock entry
+/// resolves to its host leaf). Default-mode `ocx package inspect` lists an
+/// index's candidates without selecting, so there is no platform to report and
+/// `-p` stays inert, exactly as its help promises.
+///
+/// `packages` is an **array**, not an object keyed by request string: entry
+/// order is meaningful (input order for `ocx package inspect`, selection order
+/// for `ocx inspect`) and JSON object key order is not guaranteed. Each entry
+/// names itself via its `name` field.
+///
+/// `env` is the composed project-tier environment in application order —
+/// `[env]`, then each selected group's `[group.<name>.env]` in `-g` order, then
+/// `--env`. `ocx package inspect` reads no `ocx.toml`, so its `env` carries the
+/// `--env` overrides alone. Package-declared env is NOT here: it lives inside
+/// each entry's `closure.surface.env`, where it is attributed per package and
+/// carries no value (those are `${installPath}`-templated and only concrete
+/// after install). The array is always present, empty when nothing applies.
+pub struct InspectReport {
+    platform: Option<String>,
+    packages: Vec<PackageInspect>,
+    env: Vec<EnvEntry>,
 }
 
-impl PackageInspects {
-    pub fn new(entries: Vec<(String, PackageInspect)>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for PackageInspects {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
-        for (key, inspect) in &self.entries {
-            map.serialize_entry(key, inspect)?;
+impl InspectReport {
+    /// `platform` is `Some` only when the run selected one. Passing it
+    /// unconditionally would make `-p` observable in a default-mode
+    /// `ocx package inspect`, which selects no platform at all — the report
+    /// would then name a platform nothing was resolved against.
+    pub fn new(platform: Option<&oci::Platform>, packages: Vec<PackageInspect>, env: Vec<EnvEntry>) -> Self {
+        Self {
+            platform: platform.map(ToString::to_string),
+            packages,
+            env,
         }
-        map.end()
     }
 }
 
-impl Printable for PackageInspects {
+impl Serialize for InspectReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("InspectReport", 2 + usize::from(self.platform.is_some()))?;
+        if let Some(platform) = &self.platform {
+            s.serialize_field("platform", platform)?;
+        }
+        s.serialize_field("packages", &self.packages)?;
+        s.serialize_field("env", &self.env)?;
+        s.end()
+    }
+}
+
+impl Printable for InspectReport {
     fn print_plain(&self, data: &DataInterface) {
-        for (_, inspect) in &self.entries {
+        for inspect in &self.packages {
             inspect.print_plain(data);
         }
     }
@@ -1128,7 +1195,12 @@ mod tests {
     #[test]
     fn json_closure_key_absent_without_closure_flag() {
         let root = pinned("toolchain", 'a');
-        let report = PackageInspect::new(test_identifier(), test_platform(), manifest_result(root, None));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, None),
+        );
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         assert!(
             !value
@@ -1151,7 +1223,12 @@ mod tests {
             empty_surface(true),
             empty_surface(true),
         );
-        let report = PackageInspect::new(test_identifier(), test_platform(), manifest_result(root, Some(closure)));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
 
         let deps = value["closure"]["deps"].as_array().expect("closure.deps is an array");
@@ -1196,7 +1273,12 @@ mod tests {
             empty_surface(false),
             empty_surface(false),
         );
-        let report = PackageInspect::new(test_identifier(), test_platform(), manifest_result(root, Some(closure)));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let deps = value["closure"]["deps"].as_array().expect("closure.deps is an array");
         let find = |marker: &str| {
@@ -1224,7 +1306,12 @@ mod tests {
     fn json_closure_surface_carries_interface_private_and_conflicts() {
         let root = pinned("root", 'a');
         let closure = closure_of(vec![root_node(root.clone())], empty_surface(true), empty_surface(true));
-        let report = PackageInspect::new(test_identifier(), test_platform(), manifest_result(root, Some(closure)));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let closure_val = value["closure"].as_object().expect("closure is an object");
 
@@ -1272,7 +1359,12 @@ mod tests {
             interface,
             empty_surface(true),
         );
-        let report = PackageInspect::new(test_identifier(), test_platform(), manifest_result(root, Some(closure)));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let env = value["closure"]["surface"]["interface"]["env"]
             .as_array()

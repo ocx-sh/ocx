@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_package, resolved_metadata_path
+from src.helpers import inspect_entry, make_package, resolved_metadata_path
 from src.runner import OcxRunner, current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -477,9 +477,11 @@ def test_binaries_claim_round_trips_through_push_install_inspect(
     registry serves for the platform manifest carries the claim."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["hello", "world"])
 
-    child = ocx.json("package", "inspect", pkg.short)[pkg.short]["candidates"][0]["digest"]
+    child = inspect_entry(ocx.json("package", "inspect", pkg.short), pkg.short)[
+        "candidates"
+    ][0]["digest"]
     digest_ref = f"{unique_repo}@{child}"
-    data = ocx.json("package", "inspect", digest_ref)[digest_ref]
+    data = inspect_entry(ocx.json("package", "inspect", digest_ref), digest_ref)
 
     assert sorted(data["metadata"].get("binaries", [])) == ["hello", "world"], data["metadata"]
 
@@ -494,8 +496,10 @@ def test_declared_binaries_round_trip_through_push_install_inspect(
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["ghost-tool"]
     )
 
-    child = ocx.json("package", "inspect", pkg.short)[pkg.short]["candidates"][0]["digest"]
+    child = inspect_entry(ocx.json("package", "inspect", pkg.short), pkg.short)[
+        "candidates"
+    ][0]["digest"]
     digest_ref = f"{unique_repo}@{child}"
-    data = ocx.json("package", "inspect", digest_ref)[digest_ref]
+    data = inspect_entry(ocx.json("package", "inspect", digest_ref), digest_ref)
 
     assert data["metadata"].get("binaries") == ["ghost-tool"], data["metadata"]

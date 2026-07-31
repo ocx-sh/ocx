@@ -51,6 +51,9 @@ pub struct PackageInspect {
     #[clap(flatten)]
     platform: options::PlatformOption,
 
+    #[clap(flatten)]
+    env: options::EnvOverride,
+
     /// Platform-select through the index and emit the OCI resolution chain
     /// (pinned identifier and walk-order chain digests: index, manifest,
     /// config) alongside the metadata and layers. Without `--resolve` or
@@ -83,11 +86,18 @@ impl PackageInspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         use ocx_lib::package_manager::InspectOptions;
 
-        use crate::api::data::package_inspect::{PackageInspect, PackageInspects};
+        use crate::api::data::package_inspect::{InspectReport, PackageInspect};
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
+
+        // A relative `:path` value anchors to the invocation directory — the one
+        // base a calling script can compute. This command reads no `ocx.toml`,
+        // so `--env` is the whole of its project-tier env surface.
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
+        let env_overrides = self.env.entries(&cwd)?;
 
         let inspect_options = InspectOptions {
             resolve: self.resolve,
@@ -101,20 +111,23 @@ impl PackageInspect {
             .inspect_all(identifiers.clone(), platform.clone(), inspect_options)
             .await?;
 
-        let entries: Vec<(String, PackageInspect)> = self
+        let packages: Vec<PackageInspect> = self
             .packages
             .iter()
             .zip(identifiers)
             .zip(results)
             .map(|((raw, identifier), result)| {
-                (
-                    raw.raw().to_string(),
-                    PackageInspect::new(identifier, platform.clone(), result),
-                )
+                PackageInspect::new(raw.raw().to_string(), identifier, platform.clone(), result)
             })
             .collect();
 
-        context.api().report(&PackageInspects::new(entries))?;
+        // `-p` only applies with `--resolve` / `--closure`; default mode lists an
+        // index's candidates without selecting. Reporting a platform there would
+        // both name one nothing resolved against and make `-p` observable in a
+        // mode its own help calls inert.
+        let selected_platform = (self.resolve || self.closure).then_some(&platform);
+        let report = InspectReport::new(selected_platform, packages, conventions::env_entries(&env_overrides));
+        context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)
     }

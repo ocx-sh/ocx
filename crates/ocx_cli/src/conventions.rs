@@ -214,6 +214,28 @@ pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, en
     Ok(())
 }
 
+/// Project composed env entries into the inspect report's wire shape.
+///
+/// Shared by `ocx package inspect` (where the entries are the `--env`
+/// overrides alone) and `ocx inspect` (where they are `[env]`, the selected
+/// groups' `[group.<name>.env]`, then `--env`, already in application order).
+/// The report keeps entries in that order rather than merging them, so a
+/// consumer sees every contributing declaration instead of a collapsed result;
+/// `ocx env` is what answers "what is the final value".
+pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
+    entries
+        .iter()
+        .map(|entry| crate::api::data::env::EnvEntry {
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+            kind: entry.kind.clone(),
+            // Patch provenance is an `ocx env` concern — the inspect report
+            // carries no package-composed entries to attribute.
+            source: None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{export_ci, merge_tags_file, parse_tags_file, resolve_ci_arg, resolve_shell_arg};

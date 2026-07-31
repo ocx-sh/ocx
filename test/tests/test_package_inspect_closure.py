@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 
 from src import OcxRunner
-from src.helpers import make_package, make_package_with_entrypoints
+from src.helpers import inspect_entry, make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import PackageInfo
 
@@ -85,7 +85,9 @@ def test_inspect_closure_closure_and_surface(
         ],
     )
 
-    data = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     deps = data["closure"]["deps"]
     assert len(deps) == 2, deps
@@ -153,13 +155,15 @@ def test_inspect_closure_offline_after_warm_matches_online(
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
     )
 
-    online = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    online = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     offline_result = ocx.run("--offline", "package", "inspect", "--closure", root.short, format="json")
     assert offline_result.returncode == 0, offline_result.stderr
     import json as _json
 
-    offline = _json.loads(offline_result.stdout)[root.short]
+    offline = inspect_entry(_json.loads(offline_result.stdout), root.short)
 
     assert offline["closure"] == online["closure"]
 
@@ -205,7 +209,9 @@ def test_inspect_closure_image_index_root_selects_platform(
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
     )
 
-    data = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     assert "candidates" not in data
     assert "platform" in data
@@ -237,7 +243,9 @@ def test_inspect_closure_diamond_lists_shared_dep_once(
         ],
     )
 
-    data = ocx.json("package", "inspect", "--closure", app.short)[app.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", app.short), app.short
+    )
     deps = data["closure"]["deps"]
     assert len(deps) == 3, deps  # leaf, left, right — app (root) excluded
     leaf_nodes = [n for n in deps if f"/{unique_repo}_leaf:" in n["identifier"]]
@@ -268,7 +276,9 @@ def test_inspect_closure_undeclared_binaries_makes_aggregate_incomplete(
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
     )
 
-    data = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     dep_node = _node(data["closure"]["deps"], f"{unique_repo}_dep")
     assert "binaries" not in dep_node, "undeclared binaries must be an absent key, not []"
@@ -293,7 +303,9 @@ def test_inspect_closure_declared_empty_binaries_keeps_aggregate_complete(
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
     )
 
-    data = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     dep_node = _node(data["closure"]["deps"], f"{unique_repo}_dep")
     assert dep_node["binaries"] == [], "declared-empty binaries must be a present [] key, not absent"
@@ -323,7 +335,9 @@ def test_inspect_closure_entrypoints_admitted_to_surface(
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
     )
 
-    data = ocx.json("package", "inspect", "--closure", root.short)[root.short]
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
 
     dep_node = _node(data["closure"]["deps"], f"{unique_repo}_ep")
     assert dep_node["entrypoints"] == ["ep-tool"]
@@ -394,7 +408,9 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     # `env` composes from installed packages; install pulls the whole closure.
     ocx.json("package", "install", "--select", app.short)
 
-    surface = ocx.json("package", "inspect", "--closure", app.short)[app.short]["closure"]["surface"]
+    surface = inspect_entry(
+        ocx.json("package", "inspect", "--closure", app.short), app.short
+    )["closure"]["surface"]
     env_consumer = ocx.json("package", "env", app.short)
     env_self = ocx.json("package", "env", "--self", app.short)
 
@@ -421,3 +437,4 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     env_self_keys = {entry["key"] for entry in env_self["entries"]}
     assert "LEAF_B_SECRET" not in insp_private_keys, insp_private_keys
     assert "LEAF_B_SECRET" not in env_self_keys, env_self_keys
+

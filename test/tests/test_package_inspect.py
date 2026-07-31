@@ -26,7 +26,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src import OcxRunner
-from src.helpers import make_package
+from src.helpers import inspect_entry, inspect_names, make_package
 from src.runner import registry_dir
 
 
@@ -36,7 +36,7 @@ def test_inspect_default_lists_index_candidates(
     """Default inspect of an image-index tag lists platform candidates only."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
-    data = ocx.json("package", "inspect", pkg.short)[pkg.short]
+    data = inspect_entry(ocx.json("package", "inspect", pkg.short), pkg.short)
 
     assert "metadata" not in data, "candidate listing must not load metadata"
     assert "resolution" not in data
@@ -48,6 +48,9 @@ def test_inspect_default_lists_index_candidates(
     assert c["platform"]
     assert c["media_type"]
     assert isinstance(c["size"], int)
+    assert c["pinned"].endswith(f"@{c['digest']}"), (
+        "each candidate is a pullable reference, so a caller never splices one"
+    )
 
 
 def test_inspect_rejects_duplicate_references(ocx: OcxRunner) -> None:
@@ -70,10 +73,12 @@ def test_inspect_digest_manifest_shows_metadata(
 ) -> None:
     """A ``<repo>@<digest>`` ref pointing at a child manifest shows metadata."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
-    child = ocx.json("package", "inspect", pkg.short)[pkg.short]["candidates"][0]["digest"]
+    child = inspect_entry(ocx.json("package", "inspect", pkg.short), pkg.short)[
+        "candidates"
+    ][0]["digest"]
 
     digest_ref = f"{unique_repo}@{child}"
-    data = ocx.json("package", "inspect", digest_ref)[digest_ref]
+    data = inspect_entry(ocx.json("package", "inspect", digest_ref), digest_ref)
 
     assert "candidates" not in data
     assert "resolution" not in data
@@ -96,7 +101,7 @@ def test_inspect_resolve_adds_metadata_and_chain(
     """``--resolve`` platform-selects and adds the resolution chain."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
-    data = ocx.json("package", "inspect", "--resolve", pkg.short)[pkg.short]
+    data = inspect_entry(ocx.json("package", "inspect", "--resolve", pkg.short), pkg.short)
 
     assert data["metadata"]["version"] == 1
     resolution = data["resolution"]
@@ -138,11 +143,18 @@ def test_inspect_resolve_platform_selects_child(
     )
     short = f"{unique_repo}:1.0.0"
 
-    listed = {c["platform"] for c in ocx.json("package", "inspect", short)[short]["candidates"]}
+    listed = {
+        c["platform"]
+        for c in inspect_entry(ocx.json("package", "inspect", short), short)["candidates"]
+    }
     assert {"linux/amd64", "linux/arm64"} <= listed, listed
 
-    amd = ocx.json("package", "inspect", "--resolve", "-p", "linux/amd64", short)[short]
-    arm = ocx.json("package", "inspect", "--resolve", "-p", "linux/arm64", short)[short]
+    amd = inspect_entry(
+        ocx.json("package", "inspect", "--resolve", "-p", "linux/amd64", short), short
+    )
+    arm = inspect_entry(
+        ocx.json("package", "inspect", "--resolve", "-p", "linux/arm64", short), short
+    )
     assert amd["pinned_digest"] != arm["pinned_digest"]
 
 
@@ -238,7 +250,9 @@ def test_inspect_default_platform_flag_ignored_without_resolve(
         "-p must be ignored in default mode (byte-identical output expected)\n"
         f"without -p: {without_flag!r}\nwith -p: {with_flag!r}"
     )
-    listed = {c["platform"] for c in json.loads(with_flag)[short]["candidates"]}
+    listed = {
+        c["platform"] for c in inspect_entry(json.loads(with_flag), short)["candidates"]
+    }
     assert {"linux/amd64", "linux/arm64"} <= listed, (
         f"default mode must list ALL platforms even with -p, got {listed}"
     )
@@ -260,9 +274,9 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
     tag_ref = f"{unique_repo}:1.0.0"
-    child = ocx.json(
-        "package", "inspect", tag_ref
-    )[tag_ref]["candidates"][0]["digest"]
+    child = inspect_entry(ocx.json("package", "inspect", tag_ref), tag_ref)[
+        "candidates"
+    ][0]["digest"]
 
     # Retag the child image manifest under a new tag so the tag points
     # directly at a bare image manifest (not an image index).
@@ -280,7 +294,7 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
         f"got {result.returncode}: {result.stderr}"
     )
 
-    data = ocx.json("package", "inspect", flat_ref)[flat_ref]
+    data = inspect_entry(ocx.json("package", "inspect", flat_ref), flat_ref)
 
     assert "candidates" not in data, "flat-tag manifest must not list candidates"
     assert "resolution" not in data, "default mode must not add a resolution chain"
@@ -412,9 +426,9 @@ def test_inspect_multiple_packages_json_keyed_by_raw_identifier(
 
     data = ocx.json("package", "inspect", a.short, b.short)
 
-    assert set(data.keys()) == {a.short, b.short}
-    assert "candidates" in data[a.short]
-    assert "candidates" in data[b.short]
+    assert set(inspect_names(data)) == {a.short, b.short}
+    assert "candidates" in inspect_entry(data, a.short)
+    assert "candidates" in inspect_entry(data, b.short)
 
 
 def test_inspect_single_package_json_still_keyed(
@@ -425,7 +439,7 @@ def test_inspect_single_package_json_still_keyed(
 
     data = ocx.json("package", "inspect", pkg.short)
 
-    assert list(data.keys()) == [pkg.short]
+    assert inspect_names(data) == [pkg.short]
 
 
 def test_inspect_partial_failure_exits_nonzero_and_stable(

@@ -2524,32 +2524,56 @@ ocx package inspect [OPTIONS] <IDENTIFIER>...
 
 - `<IDENTIFIER>...`: One or more package identifiers to inspect. Each is a tag (`repo:tag`) or `@digest`.
 
-With more than one identifier, JSON output is an object keyed by the requested identifier (`{"<id>": {...}}`, keyed even for a single package); plain output renders each package's tree in request order.
+JSON output is one envelope — `{ platform?, packages, env }` — whose `packages` array carries one entry per requested identifier, in request order, each naming itself in its `name` field. Plain output renders each package's tree in the same order.
 
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Platform to select. Applies with `--resolve` and `--closure`; ignored in default mode (the candidate list always shows every platform).
 - `--resolve`: Platform-select through the index and emit the resolution chain — the pinned identifier and the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size) — alongside the metadata and layers (the layers are shown for the selected manifest in both default and `--resolve` mode).
 - `--closure`: Compute the metadata-only dependency closure without installing. Adds one `closure` object to JSON output — `deps` (the transitive dependencies, in transitive-closure order) and `surface` (the `interface` and `private` projections) — and a matching `closure` branch to the plain-text tree. Combining `--closure` with `--resolve` on an image-index reference is redundant but harmless — the platform selection `--closure` already performs is the same one `--resolve` performs.
+- `--env <KEY[:TYPE]=VALUE>`: Set an environment variable for this invocation, surfaced in the report's `env` array. Repeatable. Per-invocation only — this command still reads no `ocx.toml`; for a project's declared environment use [`ocx inspect`](#inspect).
 - `-h`, `--help`: Print help information.
 
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
 
 **JSON shape**
 
-The top-level JSON is an object keyed by the requested identifier — `{"<id>": <per-package>}`, keyed even for a single package. Each value has one of the shapes below.
+The top level is one envelope, shared verbatim with [`ocx inspect`](#inspect):
+
+```json
+{
+  "platform": "linux/amd64",
+  "packages": [ { "name": "mytool:1.0.0", "…": "…" } ],
+  "env": []
+}
+```
+
+- `platform` — the platform the run selected. Present only with `--resolve` / `--closure`: default mode selects none, so `-p` stays inert there and no platform is reported.
+- `packages` — one entry per requested identifier, **in request order**. An array rather than an object keyed by identifier, because order is part of the contract and JSON object key order is not. Each entry's `name` is the identifier exactly as it was requested.
+- `env` — the per-invocation `--env` overrides, in flag order. Always present, empty when none were passed. Package-declared environment is not here: it lives inside each entry's `closure.surface.env`, attributed per package and without values (those are `${installPath}`-templated and only concrete after install).
+
+Each `packages` entry carries `name` and `identifier`, plus `pinned_identifier` (the identifier with its digest already attached) and `pinned_digest` wherever one artifact was selected, plus one of the shapes below.
 
 Default, image index — candidate listing:
 
 ```json
 {
   "identifier": "registry/repo:tag",
+  "pinned_identifier": "registry/repo:tag@sha256:…",
   "pinned_digest": "sha256:…",
   "candidates": [
-    { "digest": "sha256:…", "platform": "linux/amd64", "media_type": "…", "size": 123 }
+    {
+      "digest": "sha256:…",
+      "pinned": "registry/repo:tag@sha256:…",
+      "platform": "linux/amd64",
+      "media_type": "…",
+      "size": 123
+    }
   ]
 }
 ```
+
+A candidate's `pinned` is that child as a pullable reference — the entry's identifier with the child's digest attached — so naming one platform never means splicing a reference by hand. It is spelled `pinned`, not `pinned_identifier`: a candidate has one digest, so there is nothing to disambiguate against — the same reason `resolution.pinned` is spelled that way. The entry's own `pinned_identifier` names the index the candidates came from.
 
 Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 
@@ -2673,7 +2697,9 @@ Each surface carries three attributed arrays plus a completeness flag:
 - `env` — the environment keys exposed on that axis, each entry `{ key, type, package }`. `type` is `path` or `constant`; the value is omitted because it is `${installPath}`-templated and only concrete once the package is installed — the summary answers *which* keys would be set, not *to what*.
 - `binaries_complete` — `false` iff some admitted node on that axis left `binaries` **undeclared** (the key absent from its metadata). A declared-empty claim (`"binaries": []`) is the opposite of a gap — the publisher asserts *zero* binaries — and keeps the aggregate complete; an unknown claim never silently counts as zero. Above, both surfaces admit `zlib` (undeclared) so both read `false` even though `gcc` declared its own claim.
 
-`closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable. `inspect` only reports the condition — it stays exit `0` either way.
+`closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable.
+
+
 
 **Examples**
 
