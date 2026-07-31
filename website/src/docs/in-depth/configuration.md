@@ -89,9 +89,21 @@ The only things that ever touch the network are an explicit sync ([`ocx config u
 
 The tick also skips itself before ever contacting the registry in the same three situations OCX's own [update check][env-ocx-no-update-check] silences itself: inside CI (`CI` set), under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), and whenever stderr is not a terminal. Two more conditions gate it further: an active [pause][cmd-config-update] and the [`interval`][config-managed-interval] throttle window not yet having elapsed. [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] is the explicit kill switch layered on top of all five. The practical consequence is worth calling out: `refresh = "apply"` never auto-converges a CI runner or another headless host, no matter how the tier is configured — those hosts converge only through an explicit [`ocx config update`][cmd-config-update].
 
+### One file, many ocx versions {#managed-forward-compat}
+
+A fleet is never on one ocx version — that is the whole reason this tier exists. So the payload an operator publishes is read by whatever binaries the hosts happen to be running, including ones released before the payload was written.
+
+OCX answers that by [ignoring what it does not recognize][config-unknown-keys]: an unknown section, and an unknown key inside a known section, are skipped, and everything else in the file still applies. The alternative — rejecting the file — is the failure mode worth naming, because it is the one that looks safe: a single new key would take the *entire* payload out of service on every host that had not upgraded yet, and a fleet-wide mirror map and patch registry would vanish at once. Degrading to "the parts I understand" keeps a rollout independent of upgrade order, which is what makes publishing centrally safe at all.
+
+The trade is that a typo silently does nothing rather than failing loudly. Write payloads against the [config schema][config-schema] so your editor catches those where they are cheap to catch, and use [`ocx config update --check`][cmd-config-update] to see what a host actually resolved.
+
+Tolerance handles *added* keys. A key whose meaning or value shape changes needs the other lever — a new tag family, with fleets moving over as they upgrade. See [rolling out an incompatible change][user-guide-managed-config-incompatible].
+
 ### Offline and `required` {#managed-offline}
 
-[`required`][config-managed-required] decides whether an absent-or-mismatched snapshot is fatal, and that decision is made against **local disk state**, not network reachability. `required = true` (the default) fails closed identically online and offline — `SnapshotRequired`, exit 78, until [`ocx config update`][cmd-config-update] syncs one. `required = false` lets the command proceed with the tier contributing nothing, whether or not the registry happens to be reachable at that moment.
+[`required`][config-managed-required] decides whether a tier that contributes nothing is fatal, and that decision is made against **local disk state**, not network reachability. `required = true` (the default) fails closed identically online and offline — `SnapshotRequired`, exit 78, until [`ocx config update`][cmd-config-update] syncs one. `required = false` lets the command proceed with the tier contributing nothing, whether or not the registry happens to be reachable at that moment.
+
+The gate reads what actually reached the merged config, not merely whether a file is present. A snapshot that matches `source` but whose payload is not a usable config applies nothing, so `required = true` fails closed on it too (`SnapshotUnusable`, also exit 78) — an identity check alone would report such a tier satisfied while none of its settings were in force, which is fail-open in the one place an operator asked to fail closed. Unknown keys and sections are not "unusable" — those fold normally, per the section above.
 
 This means a machine that adopted the tier once, then goes fully offline — a laptop on a plane, an air-gapped runner reusing a warm `$OCX_HOME` — resolves configuration identically to when it was last online. The snapshot is the tier's entire runtime state.
 
@@ -221,6 +233,8 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 [config-patches]: ../reference/configuration.md#keys-patches
 [config-managed]: ../reference/configuration.md#keys-managed
 [config-managed-required]: ../reference/configuration.md#keys-managed-required
+[config-unknown-keys]: ../reference/configuration.md#unknown-keys
+[config-schema]: https://ocx.sh/schemas/config/v1.json
 [config-managed-refresh]: ../reference/configuration.md#keys-managed-refresh
 [config-managed-interval]: ../reference/configuration.md#keys-managed-interval
 [config-managed-one-hop]: ../reference/configuration.md#keys-managed-one-hop
@@ -236,3 +250,4 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 [cmd-config-update]: ../reference/command-line.md#config-update
 [cmd-config-push]: ../reference/command-line.md#config-push
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[user-guide-managed-config-incompatible]: ../user-guide.md#managed-config-incompatible

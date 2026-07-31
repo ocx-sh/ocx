@@ -897,6 +897,32 @@ A managed-config snapshot accepts any digest change the registry reports, includ
 If your CI caches `$OCX_HOME` across jobs, the cached snapshot is whatever some earlier job synced — keep the explicit `ocx config update` step in the job so a poisoned or stale cache entry is always reconciled against the registry before any tool resolution happens. The identity gate refuses a snapshot recorded for a different source outright, but only a sync brings a stale same-source snapshot forward.
 :::
 
+### Rolling out an incompatible change {#managed-config-incompatible}
+
+A fleet is never on one ocx version. The payload you publish today is read by whatever binaries your hosts happen to be running, so the question that decides your rollout is: *can an older ocx read this file and do something sensible with it?*
+
+Most of the time it can, because [OCX ignores what it does not recognize][config-unknown-keys]. Add a key a newer ocx understands and older hosts apply the rest of the file and skip that one line. That covers additions, which is most changes — you publish once, and hosts converge whenever they converge.
+
+It does not cover a key whose *meaning* changed, or whose value takes a new shape. An older binary reads that key with its old meaning and acts on it — a silent misconfiguration, which is worse than an error. Nothing in the file format can save you here, because the old binary is not wrong to parse it the way it does.
+
+Use the tag for those. `source` is an ordinary OCI reference, so the payload has the same version algebra as any package:
+
+```toml
+# Hosts still on the old ocx keep reading the old payload.
+[managed]
+source = "internal.company.com/ocx-config:user"
+
+# Hosts that have upgraded move to the new one.
+[managed]
+source = "internal.company.com/ocx-config:user-2"
+```
+
+Publish the incompatible payload under a new tag family and leave the old one serving the old content. Roll the seed forward on a host once that host's ocx is new enough — via your provisioning tool, or `ocx config setup --managed-config internal.company.com/ocx-config:user-2`. The two fleets coexist for as long as they need to; nothing has to happen in lockstep, and no host is ever handed a payload it cannot read correctly.
+
+::: tip Which lever
+Adding a key or a section — publish to the existing tag, older hosts ignore what they do not know. Changing what a key means, or the shape of its value — new tag family, migrate hosts as they upgrade. When in doubt, take the tag: it costs one extra repository tag and rules out silent misreads.
+:::
+
 ### Trust scope {#managed-config-trust}
 
 The trust root for a managed-config package is the operator's own registry — the same trust boundary [`[mirrors]`][config-mirrors] and [`[patches]`][config-patches] already rely on. The payload is verified by content digest, so a tampered or truncated fetch is rejected, but v1 does not verify a publisher signature. Signature verification is deferred to the forthcoming trust-policy work (identity-pinned verify via [`[trust.policy]`][gh-trust-policy] and policy-gated auto-verify, [GitHub #98][gh-trust-policy] / [#99][gh-auto-verify]) — both `[managed]` and `[patches]` become consumers once that lands. Until then, treat write access to the managed-config registry the same way you would treat write access to your `[mirrors]`/`[patches]` registries: a compromise there can redirect any of the three tiers fleet-wide.
@@ -1145,6 +1171,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-patches]: ./reference/configuration.md#keys-patches
 [config-managed]: ./reference/configuration.md#keys-managed
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
+[config-unknown-keys]: ./reference/configuration.md#unknown-keys
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation

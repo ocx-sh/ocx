@@ -11,8 +11,9 @@ mod media_type;
 pub use config::error::Error as ConfigError;
 pub use config::loader::{ConfigInputs, ConfigLoader};
 pub use config::managed::{
-    ManagedConfig, ManagedConfigError, RefreshPolicy, ResolvedManagedConfig, check_locked_managed_override,
-    enforce_required_snapshot, parse_interval, resolve_managed_config, resolve_managed_target, snapshot_matches_source,
+    ManagedConfig, ManagedConfigError, ManagedSnapshotState, RefreshPolicy, ResolvedManagedConfig,
+    check_locked_managed_override, enforce_required_snapshot, parse_interval, resolve_managed_config,
+    resolve_managed_target, snapshot_matches_source,
 };
 pub use config::mirror::{
     MirrorConfig, MirrorConfigError, MirrorValueShape, ParsedMirror, ResolvedMirrors, parse_mirror_value, parse_url,

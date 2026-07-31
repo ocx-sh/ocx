@@ -72,6 +72,13 @@ pub struct LoadedConfig {
     /// reuses this single resolution for the required gate and the snapshot
     /// identity gate instead of resolving the same target two more times.
     pub resolved_managed_config: Option<crate::config::managed::ResolvedManagedConfig>,
+    /// What the managed-config snapshot actually contributed to `merged` —
+    /// the `required` gate's input, reported by the tier that did the folding
+    /// rather than re-derived by the caller. A snapshot whose identity matches
+    /// but whose payload does not parse is
+    /// [`PayloadUnusable`](crate::config::managed::ManagedSnapshotState::PayloadUnusable):
+    /// it is on disk, and none of it is in `merged`.
+    pub managed_snapshot_state: crate::config::managed::ManagedSnapshotState,
 }
 
 /// Configuration loader. Stateless namespace for the discovery and loading
@@ -158,7 +165,7 @@ impl ConfigLoader {
         // `fold_managed_tier`'s doc comment. Merge order is unchanged: the
         // payload folds onto `base`, and `overlay` is applied on top of that
         // afterward, so explicit tiers still beat payload values.
-        let (mut merged, managed_config_snapshot, resolved_managed_config) =
+        let (mut merged, managed_config_snapshot, resolved_managed_config, managed_snapshot_state) =
             Self::fold_managed_tier(base, &local_only).await?;
         merged.merge(overlay);
 
@@ -167,6 +174,7 @@ impl ConfigLoader {
             local_only,
             managed_config_snapshot,
             resolved_managed_config,
+            managed_snapshot_state,
         })
     }
 
@@ -247,11 +255,18 @@ impl ConfigLoader {
     /// what the payload actually folds onto — the overlay is layered on top
     /// by the caller afterward, so explicit tiers still beat payload values.
     ///
-    /// Every absence path — no candidate, missing/unreadable/malformed
-    /// snapshot, identity mismatch — is a silent no-op (`accumulator`
-    /// returned unchanged, debug log only): a wrong-identity snapshot must
-    /// never reach [`Config`], and a benign absent state must not WARN.
-    /// Zero network here, ever.
+    /// Every absence path — no candidate, missing/unreadable snapshot,
+    /// identity mismatch — is a silent no-op (`accumulator` returned
+    /// unchanged, debug log only): a wrong-identity snapshot must never reach
+    /// [`Config`], and a benign absent state must not WARN. An
+    /// identity-matching snapshot whose payload does not parse is the one
+    /// non-benign case and WARNs. Zero network here, ever.
+    ///
+    /// The fourth tuple element reports which of those happened as a
+    /// [`ManagedSnapshotState`](crate::config::managed::ManagedSnapshotState),
+    /// so `Context::try_init`'s `required` gate can fail closed on a snapshot
+    /// that exists but contributed nothing — an identity check alone reports
+    /// such a tier satisfied.
     ///
     /// Also returns the RAW snapshot this call read from disk (before the
     /// identity gate below), so [`Self::load_with_local_view`] can expose it
@@ -276,7 +291,10 @@ impl ConfigLoader {
         Config,
         Option<crate::config::managed::ManagedConfigSnapshot>,
         Option<crate::config::managed::ResolvedManagedConfig>,
+        crate::config::managed::ManagedSnapshotState,
     )> {
+        use crate::config::managed::ManagedSnapshotState;
+
         // Resolve the effective source LOCALLY: env `OCX_MANAGED_CONFIG`
         // (suppressed by `OCX_NO_CONFIG` — hermetic) over `local_only`'s
         // already-folded `managed.source` (base tiers — system/user/home — PLUS
@@ -301,18 +319,18 @@ impl ConfigLoader {
             .ok()
             .flatten()
         else {
-            return Ok((accumulator, None, None));
+            return Ok((accumulator, None, None, ManagedSnapshotState::Unmatched));
         };
 
         // A source resolved — read the snapshot from local state only now, so a
         // non-managed user never pays the stat above.
         let Some(candidate) = Self::managed_snapshot_candidate() else {
-            return Ok((accumulator, None, Some(resolved)));
+            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched));
         };
         let Some(snapshot) = crate::managed_config::read_managed_config_snapshot_at(&candidate).await else {
             // Absent, unreadable, or malformed JSON — treated as absent
             // (benign-state rule, no per-invocation WARN).
-            return Ok((accumulator, None, Some(resolved)));
+            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched));
         };
 
         // Canonical `oci::Identifier` equality (tag/digest significant) —
@@ -326,14 +344,33 @@ impl ConfigLoader {
                 "managed-config snapshot source does not match the effective source '{}'; treating as absent",
                 resolved.source
             );
-            return Ok((accumulator, Some(snapshot), Some(resolved)));
+            return Ok((
+                accumulator,
+                Some(snapshot),
+                Some(resolved),
+                ManagedSnapshotState::Unmatched,
+            ));
         }
 
         let mut parsed: Config = match toml::from_str(&snapshot.config) {
             Ok(parsed) => parsed,
             Err(source) => {
-                log::debug!("managed-config snapshot payload is not valid TOML, treating as absent: {source}");
-                return Ok((accumulator, Some(snapshot), Some(resolved)));
+                // NOT the benign-absent case: a snapshot for THIS source is on
+                // disk and none of it can be applied. Every unknown section and
+                // key is tolerated (see `Config`), so reaching here means the
+                // payload is genuinely broken — worth a WARN even when
+                // `required = false`, where nothing else would report it.
+                log::warn!(
+                    "managed-config snapshot for '{}' is not a usable config and was not applied; re-sync with \
+                     `ocx config update` ({source})",
+                    resolved.source
+                );
+                return Ok((
+                    accumulator,
+                    Some(snapshot),
+                    Some(resolved),
+                    ManagedSnapshotState::PayloadUnusable,
+                ));
             }
         };
         // ADR Decision I (one-hop): a remote payload can never redirect or
@@ -348,7 +385,12 @@ impl ConfigLoader {
 
         let mut accumulator = accumulator;
         accumulator.merge(parsed);
-        Ok((accumulator, Some(snapshot), Some(resolved)))
+        Ok((
+            accumulator,
+            Some(snapshot),
+            Some(resolved),
+            ManagedSnapshotState::Applied,
+        ))
     }
 
     /// Discover the ordered list of config files to load (lowest precedence
@@ -2603,7 +2645,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed even against a locked accumulator");
         assert_eq!(
@@ -2657,7 +2699,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed");
         assert!(
@@ -2670,6 +2712,92 @@ mod tests {
             "a system-locked [managed] source must fold its own snapshot even when OCX_MANAGED_CONFIG names a \
              mismatched source — the identity gate must ignore the same override resolve_managed_target ignores"
         );
+    }
+
+    /// End-to-end half of the required-gate fix: an identity-matching
+    /// snapshot whose payload is not valid TOML folds NOTHING and reports
+    /// [`ManagedSnapshotState::PayloadUnusable`](crate::config::managed::ManagedSnapshotState::PayloadUnusable),
+    /// so `Context::try_init` can fail a `required` tier closed on it. The
+    /// state — not the returned snapshot, which is still `Some` for
+    /// `config update --check` — is what the gate reads.
+    #[tokio::test]
+    async fn managed_snapshot_unparseable_payload_folds_nothing_and_reports_unusable() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(dir.path(), "corp.example.com/ocx-config:user", "not = [valid toml");
+
+        let accumulator = crate::config::Config {
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("corp.example.com/ocx-config:user".to_string()),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("a broken payload must not fail the load");
+        assert!(
+            snapshot.is_some(),
+            "the snapshot is still surfaced so `config update --check` can diagnose it"
+        );
+        assert!(
+            folded.registry.is_none(),
+            "an unparseable payload must contribute nothing to the merged config"
+        );
+        assert_eq!(
+            state,
+            crate::config::managed::ManagedSnapshotState::PayloadUnusable,
+            "the loader must report what it actually applied, not merely that the identity matched"
+        );
+    }
+
+    /// The discriminator for the test above: a payload carrying sections and
+    /// keys this binary does not know still folds, and its known settings
+    /// reach the merged config. `PayloadUnusable` must mean "broken", never
+    /// "unfamiliar" — the latter would fail a fleet closed on every rollout.
+    #[tokio::test]
+    async fn managed_snapshot_payload_from_a_newer_ocx_folds_and_reports_applied() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        write_managed_snapshot(
+            dir.path(),
+            "corp.example.com/ocx-config:user",
+            "[registry]\ndefault = \"corp-registry.example\"\ntimeout = 30\n[toolchain]\nchannel = \"stable\"\n",
+        );
+
+        let accumulator = crate::config::Config {
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some("corp.example.com/ocx-config:user".to_string()),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed");
+        assert_eq!(
+            folded
+                .registry
+                .as_ref()
+                .and_then(|registry| registry.default.as_deref()),
+            Some("corp-registry.example"),
+            "the settings this binary understands must survive the unknown ones"
+        );
+        assert_eq!(state, crate::config::managed::ManagedSnapshotState::Applied);
     }
 
     /// Regression (review round 2): the `[managed]` lock call was missing
@@ -2755,7 +2883,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed even against a locked accumulator");
 

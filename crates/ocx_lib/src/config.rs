@@ -19,9 +19,21 @@ pub use self::registry::RegistryConfig;
 
 /// Root configuration struct.
 ///
-/// No `deny_unknown_fields` — unknown top-level sections are silently ignored
-/// for forward compatibility (future sections like `[patches]`, `[clean]`,
-/// `[toolchain]` should not break existing configs).
+/// No `deny_unknown_fields` anywhere in this tree — unknown sections AND
+/// unknown keys inside a known section are silently ignored. The reason is
+/// fleet forward-compat, not convenience: one `config.toml` is read by many
+/// ocx versions at once (the `[managed]` tier ships an operator's payload to
+/// every binary in a fleet), so a file written for a newer ocx must degrade to
+/// "the parts I understand" on an older one. The alternative — rejecting the
+/// file — takes the WHOLE payload out of service on every older binary, which
+/// is how a central rollout bricks a fleet.
+///
+/// The cost is that a typo'd key silently no-ops. When a change genuinely
+/// cannot degrade (a key whose meaning or value shape changed), the escape
+/// hatch is the tier's own OCI tag: publish the new payload under a new tag
+/// and move fleets onto it as they upgrade — see the 2026-07-31 amendment in
+/// `adr_managed_config_tier.md` and `website/src/docs/user-guide.md`
+/// ("Rolling out an incompatible change").
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct Config {
     /// Global registry-subsystem settings (`[registry]` section).
@@ -88,11 +100,9 @@ pub struct Config {
 
 /// Global registry-subsystem settings (`[registry]` section).
 ///
-/// `deny_unknown_fields` is enforced here so typos inside a known section
-/// fail fast. Forward compatibility is preserved at the root via the absence
-/// of `deny_unknown_fields` on `Config`.
+/// No `deny_unknown_fields` — unknown keys are ignored, like every other
+/// config table (see [`Config`]).
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RegistryDefaults {
     /// Default registry for bare identifiers (e.g. `cmake:3.28` expands to
     /// `<default>/cmake:3.28`). Overridden by the `OCX_DEFAULT_REGISTRY`
@@ -242,13 +252,22 @@ mod tests {
         );
     }
 
+    /// An unknown key inside a `[registries.<name>]` entry is ignored, and the
+    /// known keys of that same entry still take effect.
+    ///
+    /// Fleet forward-compat: one `config.toml` (notably a `[managed]` payload)
+    /// is read by many ocx versions at once, so a per-registry field a newer
+    /// ocx understands must degrade to "ignored" on an older one rather than
+    /// take the whole file out of service.
     #[test]
-    fn parse_unknown_field_inside_registries_entry_is_rejected() {
-        // deny_unknown_fields on RegistryEntry — typos inside a known section fail fast.
-        let result: Result<Config, _> = toml::from_str("[registries.ghcr]\nfoo = \"bar\"");
-        assert!(
-            result.is_err(),
-            "unknown field inside [registries.<name>] should fail due to deny_unknown_fields"
+    fn parse_unknown_field_inside_registries_entry_is_ignored() {
+        let config: Config = toml::from_str("[registries.ghcr]\nindex = \"https://ghcr.example\"\nfoo = \"bar\"\n")
+            .expect("an unknown field inside [registries.<name>] must not fail the parse");
+        let registries = config.registries.expect("registries table must be present");
+        assert_eq!(
+            registries["ghcr"].index.as_deref(),
+            Some("https://ghcr.example"),
+            "the known field must still take effect alongside the ignored one"
         );
     }
 
@@ -284,13 +303,65 @@ mod tests {
         );
     }
 
+    /// The `[registry]` analog of
+    /// [`parse_unknown_field_inside_registries_entry_is_ignored`]: an unknown
+    /// key is ignored and `default` still takes effect.
     #[test]
-    fn parse_unknown_field_inside_registry_is_rejected() {
-        // Plan: Step 3.1 — Unknown field in [registry] → rejected by deny_unknown_fields
-        let result: Result<Config, _> = toml::from_str("[registry]\nfoo = \"bar\"");
+    fn parse_unknown_field_inside_registry_is_ignored() {
+        let config: Config = toml::from_str("[registry]\ndefault = \"ghcr.io\"\nfoo = \"bar\"\n")
+            .expect("an unknown field inside [registry] must not fail the parse");
+        assert_eq!(
+            config.registry.expect("[registry] must be present").default.as_deref(),
+            Some("ghcr.io"),
+            "the known field must still take effect alongside the ignored one"
+        );
+    }
+
+    /// The whole point, end to end: a payload written by a NEWER ocx — an
+    /// unknown top-level section, an unknown key in every table an older ocx
+    /// knows, and a `[mirrors]` entry declaring only a future role — parses,
+    /// and every setting this binary understands survives.
+    ///
+    /// This is the shape a central `[managed]` rollout ships. Before the
+    /// forward-compat posture, any one of these lines took the entire payload
+    /// out of service on every older binary in the fleet.
+    #[test]
+    fn parse_payload_from_a_newer_ocx_keeps_every_known_setting() {
+        let config: Config = toml::from_str(
+            "[registry]\n\
+             default = \"corp.example.com\"\n\
+             timeout = 30\n\
+             [registries.\"corp.example.com\"]\n\
+             index = \"https://index.corp.example.com\"\n\
+             insecure = true\n\
+             [mirrors.\"ghcr.io\"]\n\
+             registry = \"https://mirror.corp/ghcr\"\n\
+             attest = \"https://mirror.corp/attest\"\n\
+             [mirrors.\"quay.io\"]\n\
+             attest = \"https://mirror.corp/attest\"\n\
+             [toolchain]\n\
+             channel = \"stable\"\n",
+        )
+        .expect("a payload from a newer ocx must parse");
+
+        assert_eq!(
+            config.registry.expect("[registry] must survive").default.as_deref(),
+            Some("corp.example.com")
+        );
+        let registries = config.registries.expect("[registries] must survive");
+        assert_eq!(
+            registries["corp.example.com"].index.as_deref(),
+            Some("https://index.corp.example.com")
+        );
+        let mirrors = config.mirrors.expect("[mirrors] must survive");
+        assert_eq!(
+            mirrors["ghcr.io"].registry.as_deref(),
+            Some("https://mirror.corp/ghcr"),
+            "a known role beside an unknown one must still apply"
+        );
         assert!(
-            result.is_err(),
-            "unknown field inside [registry] should fail due to deny_unknown_fields"
+            !mirrors.contains_key("quay.io"),
+            "an entry declaring only a future role contributes nothing, but must not fail the parse"
         );
     }
 

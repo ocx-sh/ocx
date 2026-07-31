@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
+use crate::log;
+
 /// Minimal shape shared by [`toml::Value`] and [`serde_json::Value`] so
 /// [`parse_mirror_value`] can branch on "string vs. table" **once**, then
 /// reuse the same branch logic for a TOML `[mirrors]` table entry and a
@@ -327,21 +329,32 @@ impl MirrorConfig {
 /// [`serde_json::Value`] from the latter, generic over [`MirrorValueShape`] so
 /// neither caller needs a second copy of the branch logic.
 ///
+/// Returns `Ok(None)` for a table that declares no role this binary knows —
+/// an empty table, a typo'd key, or a role added by a later ocx. The entry
+/// contributes nothing and is skipped rather than raised: a `[mirrors]` entry
+/// written for a newer ocx must not fail the whole config it arrives in (see
+/// [`crate::config::Config`] — forward compatibility over typo detection). The
+/// no-op-mirror guard it used to provide survives one layer up, where
+/// [`resolve_mirror_map`] still rejects a role-less merged entry.
+///
 /// # Errors
 ///
 /// Returns [`MirrorConfigError::InvalidShape`] when `value` is neither a
-/// string nor a table, [`MirrorConfigError::NonStringRoleValue`] when a table
-/// field is present but not a string, and [`MirrorConfigError::EmptyEntry`]
-/// when a table declares neither `registry` nor `index`.
-pub fn parse_mirror_value<V: MirrorValueShape>(upstream: &str, value: &V) -> Result<MirrorConfig, MirrorConfigError> {
+/// string nor a table, and [`MirrorConfigError::NonStringRoleValue`] when a
+/// table field is present but not a string — a wrong-typed value on a known
+/// key is a malformed entry, not a forward-compatibility question.
+pub fn parse_mirror_value<V: MirrorValueShape>(
+    upstream: &str,
+    value: &V,
+) -> Result<Option<MirrorConfig>, MirrorConfigError> {
     // Bare string: both traffic roles rewrite to the same endpoint.
     if let Some(url) = value.as_mirror_str() {
-        return Ok(MirrorConfig {
+        return Ok(Some(MirrorConfig {
             registry: Some(url.to_string()),
             index: Some(url.to_string()),
             registry_system_locked: false,
             index_system_locked: false,
-        });
+        }));
     }
 
     if !value.is_mirror_table() {
@@ -373,12 +386,14 @@ pub fn parse_mirror_value<V: MirrorValueShape>(upstream: &str, value: &V) -> Res
     }
 
     if config.registry.is_none() && config.index.is_none() {
-        return Err(MirrorConfigError::EmptyEntry {
-            upstream: upstream.to_string(),
-        });
+        log::debug!(
+            "mirrors.\"{upstream}\" declares no known role (registry, index); entry skipped — a typo, or a role a \
+             later ocx understands"
+        );
+        return Ok(None);
     }
 
-    Ok(config)
+    Ok(Some(config))
 }
 
 /// Deserializes the `[mirrors]` TOML table into normalized [`MirrorConfig`]
@@ -401,8 +416,9 @@ where
     };
     let mut result = HashMap::with_capacity(raw.len());
     for (host, value) in raw {
-        let config = parse_mirror_value(&host, &value).map_err(serde::de::Error::custom)?;
-        result.insert(host, config);
+        if let Some(config) = parse_mirror_value(&host, &value).map_err(serde::de::Error::custom)? {
+            result.insert(host, config);
+        }
     }
     Ok(Some(result))
 }
@@ -918,30 +934,33 @@ mod tests {
     }
 
     /// An unrecognized field inside a `{registry?, index?}` table
-    /// (e.g. `urll = "..."`) must be rejected — a typo in a known section
-    /// fails fast, matching the `deny_unknown_fields` convention every other
-    /// config table follows.
+    /// (e.g. `urll = "..."`) leaves the entry with no declared role, so the
+    /// host is dropped from the map — the whole config still parses. Fleet
+    /// forward-compat over typo detection, matching every other config table
+    /// (see [`crate::config::Config`]).
     #[test]
-    fn mirror_config_unknown_field_rejected() {
+    fn mirror_config_unknown_field_drops_the_entry() {
         let toml_str = "[mirrors.\"ghcr.io\"]\nurll = \"https://company.jfrog.io/ghcr-remote\"\n";
-        let result = toml::from_str::<crate::config::Config>(toml_str);
+        let config = toml::from_str::<crate::config::Config>(toml_str)
+            .expect("an unrecognized field must not fail the whole config");
+        let mirrors = config.mirrors.expect("the [mirrors] table must still be present");
         assert!(
-            result.is_err(),
-            "unrecognized field 'urll' inside a [mirrors.\"<host>\"] table must be rejected, but parse succeeded"
+            !mirrors.contains_key("ghcr.io"),
+            "an entry with no known role must not reach the map, but it did"
         );
     }
 
-    /// A malformed `[mirrors."<host>"]` entry (neither role declared — the
-    /// same `EmptyEntry` shape `parse_mirror_value` raises directly) surfaces
-    /// through the FULL `toml::from_str::<Config>` deserialize path with the
-    /// upstream host still named in the error message, proving
-    /// `deserialize_mirrors_table`'s `serde::de::Error::custom` wrapping does
-    /// not lose the host that `parse_mirror_value` attached.
+    /// A malformed `[mirrors."<host>"]` entry (a role field present but not a
+    /// string) surfaces through the FULL `toml::from_str::<Config>`
+    /// deserialize path with the upstream host still named in the error
+    /// message, proving `deserialize_mirrors_table`'s
+    /// `serde::de::Error::custom` wrapping does not lose the host that
+    /// `parse_mirror_value` attached.
     #[test]
     fn mirror_config_deserialize_error_names_host_via_serde_custom() {
-        let toml_str = "[mirrors.\"ghcr.io\"]\n";
+        let toml_str = "[mirrors.\"ghcr.io\"]\nregistry = 5\n";
         let result = toml::from_str::<crate::config::Config>(toml_str);
-        let err = result.expect_err("an entry declaring neither role must be rejected");
+        let err = result.expect_err("a non-string role value must be rejected");
         let message = err.to_string();
         assert!(
             message.contains("ghcr.io"),
@@ -969,7 +988,9 @@ mod tests {
     #[test]
     fn parse_mirror_value_toml_string_sets_both_roles() {
         let value = toml::Value::String("https://company.jfrog.io/ghcr-remote".to_string());
-        let config = parse_mirror_value("ghcr.io", &value).expect("a bare string must parse");
+        let config = parse_mirror_value("ghcr.io", &value)
+            .expect("a bare string must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://company.jfrog.io/ghcr-remote"));
         assert_eq!(config.index.as_deref(), Some("https://company.jfrog.io/ghcr-remote"));
     }
@@ -980,7 +1001,9 @@ mod tests {
     #[test]
     fn parse_mirror_value_json_string_sets_both_roles() {
         let value = serde_json::Value::String("https://company.jfrog.io/ghcr-remote".to_string());
-        let config = parse_mirror_value("ghcr.io", &value).expect("a bare string must parse");
+        let config = parse_mirror_value("ghcr.io", &value)
+            .expect("a bare string must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://company.jfrog.io/ghcr-remote"));
         assert_eq!(config.index.as_deref(), Some("https://company.jfrog.io/ghcr-remote"));
     }
@@ -995,7 +1018,9 @@ mod tests {
             toml::Value::String("https://mirror.corp/reg".to_string()),
         );
         let value = toml::Value::Table(table);
-        let config = parse_mirror_value("ghcr.io", &value).expect("a registry-only table must parse");
+        let config = parse_mirror_value("ghcr.io", &value)
+            .expect("a registry-only table must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://mirror.corp/reg"));
         assert!(config.index.is_none());
     }
@@ -1005,7 +1030,9 @@ mod tests {
     #[test]
     fn parse_mirror_value_json_table_registry_only() {
         let value = serde_json::json!({"registry": "https://mirror.corp/reg"});
-        let config = parse_mirror_value("ghcr.io", &value).expect("a registry-only object must parse");
+        let config = parse_mirror_value("ghcr.io", &value)
+            .expect("a registry-only object must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://mirror.corp/reg"));
         assert!(config.index.is_none());
     }
@@ -1020,7 +1047,9 @@ mod tests {
             toml::Value::String("https://artifactory.corp/ocx-index".to_string()),
         );
         let value = toml::Value::Table(table);
-        let config = parse_mirror_value("index.ocx.sh", &value).expect("an index-only table must parse");
+        let config = parse_mirror_value("index.ocx.sh", &value)
+            .expect("an index-only table must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.index.as_deref(), Some("https://artifactory.corp/ocx-index"));
         assert!(config.registry.is_none());
     }
@@ -1030,7 +1059,9 @@ mod tests {
     #[test]
     fn parse_mirror_value_json_table_index_only() {
         let value = serde_json::json!({"index": "https://artifactory.corp/ocx-index"});
-        let config = parse_mirror_value("index.ocx.sh", &value).expect("an index-only object must parse");
+        let config = parse_mirror_value("index.ocx.sh", &value)
+            .expect("an index-only object must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.index.as_deref(), Some("https://artifactory.corp/ocx-index"));
         assert!(config.registry.is_none());
     }
@@ -1049,7 +1080,9 @@ mod tests {
             toml::Value::String("https://mirror.corp/idx".to_string()),
         );
         let value = toml::Value::Table(table);
-        let config = parse_mirror_value("index.ocx.sh", &value).expect("a both-field table must parse");
+        let config = parse_mirror_value("index.ocx.sh", &value)
+            .expect("a both-field table must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://mirror.corp/reg"));
         assert_eq!(config.index.as_deref(), Some("https://mirror.corp/idx"));
     }
@@ -1059,50 +1092,65 @@ mod tests {
     #[test]
     fn parse_mirror_value_json_table_both_fields() {
         let value = serde_json::json!({"registry": "https://mirror.corp/reg", "index": "https://mirror.corp/idx"});
-        let config = parse_mirror_value("index.ocx.sh", &value).expect("a both-field object must parse");
+        let config = parse_mirror_value("index.ocx.sh", &value)
+            .expect("a both-field object must parse")
+            .expect("a declared role must yield an entry");
         assert_eq!(config.registry.as_deref(), Some("https://mirror.corp/reg"));
         assert_eq!(config.index.as_deref(), Some("https://mirror.corp/idx"));
     }
 
-    /// An empty TOML table declares neither role — `EmptyEntry` naming the
-    /// upstream host.
+    /// An empty TOML table declares neither role — skipped, not raised.
     #[test]
-    fn parse_mirror_value_toml_empty_table_is_empty_entry() {
+    fn parse_mirror_value_toml_empty_table_is_skipped() {
         let value = toml::Value::Table(toml::Table::new());
-        let err = parse_mirror_value("ghcr.io", &value).expect_err("an empty table must error");
-        assert!(matches!(err, MirrorConfigError::EmptyEntry { ref upstream } if upstream == "ghcr.io"));
+        let config = parse_mirror_value("ghcr.io", &value).expect("an empty table must not error");
+        assert!(config.is_none(), "an entry declaring no role contributes nothing");
     }
 
     /// The JSON analog of the above — an empty object declares neither role.
     #[test]
-    fn parse_mirror_value_json_empty_table_is_empty_entry() {
+    fn parse_mirror_value_json_empty_table_is_skipped() {
         let value = serde_json::json!({});
-        let err = parse_mirror_value("ghcr.io", &value).expect_err("an empty object must error");
-        assert!(matches!(err, MirrorConfigError::EmptyEntry { ref upstream } if upstream == "ghcr.io"));
+        let config = parse_mirror_value("ghcr.io", &value).expect("an empty object must not error");
+        assert!(config.is_none(), "an entry declaring no role contributes nothing");
     }
 
-    /// A TOML table whose only key is unrecognized (a typo, e.g. `urll`)
-    /// declares neither known role, so it degrades to the same `EmptyEntry`
-    /// as a genuinely empty table — no unrecognized field is silently
-    /// accepted as a role.
+    /// A TOML table whose only key is unrecognized — a typo like `urll`, or a
+    /// role a later ocx understands — declares no role THIS binary knows, so
+    /// the entry is skipped instead of failing the whole config it arrived in.
+    /// Fleet forward-compat: a `[mirrors]` entry written for a newer ocx must
+    /// not take an older binary's entire `config.toml` out of service.
     #[test]
-    fn parse_mirror_value_toml_unknown_key_alone_is_empty_entry() {
+    fn parse_mirror_value_toml_unknown_key_alone_is_skipped() {
         let mut table = toml::Table::new();
         table.insert(
             "urll".to_string(),
             toml::Value::String("https://company.jfrog.io/ghcr-remote".to_string()),
         );
         let value = toml::Value::Table(table);
-        let err = parse_mirror_value("ghcr.io", &value).expect_err("an unrecognized-only field must error");
-        assert!(matches!(err, MirrorConfigError::EmptyEntry { ref upstream } if upstream == "ghcr.io"));
+        let config = parse_mirror_value("ghcr.io", &value).expect("an unrecognized-only field must not error");
+        assert!(config.is_none(), "no known role declared, so nothing is contributed");
     }
 
     /// The JSON analog of the above.
     #[test]
-    fn parse_mirror_value_json_unknown_key_alone_is_empty_entry() {
+    fn parse_mirror_value_json_unknown_key_alone_is_skipped() {
         let value = serde_json::json!({"urll": "https://company.jfrog.io/ghcr-remote"});
-        let err = parse_mirror_value("ghcr.io", &value).expect_err("an unrecognized-only field must error");
-        assert!(matches!(err, MirrorConfigError::EmptyEntry { ref upstream } if upstream == "ghcr.io"));
+        let config = parse_mirror_value("ghcr.io", &value).expect("an unrecognized-only field must not error");
+        assert!(config.is_none(), "no known role declared, so nothing is contributed");
+    }
+
+    /// An unknown key ALONGSIDE a known role keeps the known role — the
+    /// forward-compat case that actually matters: a newer ocx adds a third
+    /// role to an entry an older ocx still has to honour for `registry`.
+    #[test]
+    fn parse_mirror_value_unknown_key_beside_known_role_keeps_the_role() {
+        let value = serde_json::json!({"registry": "https://mirror.corp/reg", "attest": "https://mirror.corp/att"});
+        let config = parse_mirror_value("ghcr.io", &value)
+            .expect("a table with a known role must parse")
+            .expect("a known role must yield an entry");
+        assert_eq!(config.registry.as_deref(), Some("https://mirror.corp/reg"));
+        assert!(config.index.is_none(), "an unknown key must not populate another role");
     }
 
     /// A TOML table's `registry` field is present but not a string —

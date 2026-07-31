@@ -148,6 +148,9 @@ impl Context {
         // view) — reused below for the required gate and the snapshot identity
         // gate instead of resolving the same target two more times.
         let resolved_managed_config = loaded_config.resolved_managed_config;
+        // What that snapshot actually contributed to `config` — identity gate
+        // AND payload parse, as observed by the tier that did the folding.
+        let managed_snapshot_state = loaded_config.managed_snapshot_state;
 
         // Resolve the per-host mirror map once via the lib resolver
         // (`ocx_lib::resolve_mirror_map`): `[mirrors]` config merged with the
@@ -359,25 +362,25 @@ impl Context {
             None => None,
         };
 
-        // W2: identity-gate the raw on-disk snapshot ONCE against the effective
-        // source (shared `snapshot_matches_source` predicate) so no CLI consumer
-        // — `config update --check` included — ever reads an identity-mismatched
-        // snapshot as if it belonged to the current tier. Reused by both the
-        // required gate and the snapshot filter below so they can never drift.
-        let snapshot_identity_matches = match (&managed_config_snapshot, &resolved_managed_target) {
-            (Some(snapshot), Some(resolved)) => ocx_lib::snapshot_matches_source(snapshot, &resolved.source),
-            _ => false,
-        };
+        // W2: the loader reports what the snapshot actually contributed ONCE
+        // (identity gate plus payload parse) and both consumers below read that
+        // single value, so no CLI consumer — `config update --check` included —
+        // reads an identity-mismatched snapshot as if it belonged to the current
+        // tier, and the required gate can never drift from the merge.
+        let snapshot_identity_matches = managed_snapshot_state != ocx_lib::ManagedSnapshotState::Unmatched;
 
-        // Required gate: `SnapshotRequired` fails closed (exit 78) for ordinary
-        // commands; `ocx config update` and the `self`/static commands are
-        // exempted here (`enforce_required = false`) because their entire job is
-        // to create or inspect exactly the missing state. Applied via the lib
+        // Required gate: fails closed (exit 78) for ordinary commands; `ocx
+        // config update` and the `self`/static commands are exempted here
+        // (`enforce_required = false`) because their entire job is to create or
+        // inspect exactly the missing state. Applied via the lib
         // `enforce_required_snapshot` so the `#[non_exhaustive]`
-        // `ManagedConfigError` is constructed inside `ocx_lib`.
+        // `ManagedConfigError` is constructed inside `ocx_lib`. Identity alone
+        // is NOT the gate: a snapshot whose payload failed to parse is on disk
+        // but contributes nothing, and a `required` tier must not read as
+        // satisfied by a payload none of whose settings are in force.
         let managed_config = match resolved_managed_target {
             None => None,
-            Some(resolved) => match ocx_lib::enforce_required_snapshot(resolved, snapshot_identity_matches) {
+            Some(resolved) => match ocx_lib::enforce_required_snapshot(resolved, managed_snapshot_state) {
                 Ok(resolved) => Some(resolved),
                 Err(_snapshot_required) if !managed_config_gate.enforce_required => None,
                 Err(source) => return Err(anyhow::Error::new(source)),
@@ -385,7 +388,9 @@ impl Context {
         };
 
         // The required gate above already consumed the raw value; from here on
-        // only the identity-matched snapshot is exposed to CLI consumers.
+        // only the identity-matched snapshot is exposed to CLI consumers — an
+        // unusable payload still surfaces, so `config update --check` can report
+        // the state it is there to diagnose.
         let managed_config_snapshot = managed_config_snapshot.filter(|_| snapshot_identity_matches);
 
         let manager = package_manager::PackageManager::new(

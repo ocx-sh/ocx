@@ -63,6 +63,21 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 
 ## Configuration Keys {#keys}
 
+### Unknown keys and sections {#unknown-keys}
+
+**OCX ignores what it does not recognize** — an unknown top-level section, and an unknown key inside any known section, in every table below. The file still loads, and every setting this ocx does understand takes effect.
+
+This is a deliberate trade, and the reason is the [`[managed]`](#keys-managed) tier: one `config.toml` is read by every ocx version in a fleet at once. A file written against a newer ocx has to degrade to "the parts I understand" on an older binary. Rejecting it instead would take the *whole* file out of service on every host that had not upgraded yet — one new key in a central rollout, and the mirror map and patch registry vanish fleet-wide.
+
+The cost is that a typo silently does nothing. `[registries."ocx.sh"] indx = "..."` sets no index; `[mirrors."ghcr.io"] registr = "..."` mirrors nothing. Two things blunt it:
+
+- A typo never *becomes* the field it resembles, and never widens anything: an unknown key cannot populate [`trusted_hosts`](#keys-registries-trusted-hosts) or any other setting.
+- The [config schema][schema-config] lists every key OCX knows. Point your editor at it and a typo is flagged as you write, which is where you want to catch it.
+
+For a managed payload, [`ocx config update --check`][cmd-config-update] shows what the tier actually resolved to.
+
+**When ignoring is not enough.** Tolerance covers *added* keys. It cannot cover a change in what an existing key means or what shape its value takes — an older binary would read the new value with the old meaning. Those changes travel by tag instead: the tier's `source` is an ordinary OCI reference, so publish the incompatible payload under a new tag (`:user-2`) and leave `:user` serving the old one. Fleets move over as they upgrade; nothing has to happen in lockstep. See [Rolling out an incompatible change][user-guide-managed-config-incompatible].
+
 ### `[registry]` {#keys-registry}
 
 Global settings for the registry subsystem.
@@ -93,7 +108,7 @@ Per-registry settings, keyed by a friendly name. Each entry configures one regis
 The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo's convention][cargo-registries] and avoids a TOML collision with the singular [`[registry]`](#keys-registry) global-settings section.
 
 ::: info v1 scope
-`index` and `trusted_hosts` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are rejected (typo protection); unknown top-level sections are silently ignored (forward compatibility).
+`index` and `trusted_hosts` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are ignored, like unknown keys and sections everywhere else in the file — see [Unknown keys and sections](#unknown-keys).
 :::
 
 #### `index` {#keys-registries-index}
@@ -244,8 +259,10 @@ Older Nexus deployments expose each repository on a per-repository port. Those u
 
 **Plain-HTTP mirrors.** A role value starting with `http://` requires the mirror host to be listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] — the same gate applies to both the registry and index roles. If the mirror host is absent, OCX exits at startup with an actionable error naming the variable and the mirror host — it does not silently downgrade TLS. The check runs before any network activity.
 
-::: info Typo protection
-`[mirrors]` values parse against a named shape — a string, or an object with only `registry`/`index` fields — with per-field errors rather than an opaque "did not match any variant" message. A typo such as `{ registr = "..." }` is a parse error naming the unrecognized field, not a silent no-op.
+::: info Malformed values
+`[mirrors]` values parse against a named shape — a string, or an object with only `registry`/`index` fields — with per-field errors rather than an opaque "did not match any variant" message. A role with a non-string value (`{ registry = 5 }`) is a parse error naming the offending host and field.
+
+An *unrecognized* key is a different case: it is ignored, like unknown keys everywhere else in the file (see [Unknown keys and sections](#unknown-keys)). An entry left with no role OCX recognizes — `{ registr = "..." }`, or an entry declaring only a role a future ocx will understand — contributes no mirror for that host and is skipped. Nothing else in the file is affected.
 :::
 
 #### System-locked {#keys-mirrors-system-lock}
@@ -406,11 +423,10 @@ are configured by hand on every machine, `[managed]` lets an operator publish on
 package (via [`ocx config push`][cmd-config-push]) and have every workstation and CI
 runner converge on it.
 
-Unknown fields inside `[managed]` are ignored, matching every other section — fleet
-forward-compatibility: a seed written for a newer ocx must not break older binaries
-reading the same file. The cost is that a typo'd key silently no-ops;
-[`ocx config update --check`][cmd-config-update] surfaces the tier's effective state for
-diagnosis.
+Unknown fields inside `[managed]` are ignored, and so is everything unrecognized in the
+payload it points at — see [Unknown keys and sections](#unknown-keys), which exists
+because of this tier. A payload written against a newer ocx applies its known parts on
+older fleet binaries instead of taking the whole thing out of service on them.
 
 ```toml
 [managed]
@@ -443,12 +459,14 @@ A `source` pinned by digest (`…@sha256:<hex>`) binds the tier to that exact co
 **Type**: boolean  
 **Default**: `true`
 
-Fail posture when no local snapshot matches `source`.
+Fail posture when the tier contributes nothing.
 
 | Value | Behavior |
 |-------|----------|
 | `true` (default) | Every command fails closed with `SnapshotRequired` (exit 78) until [`ocx config update`][cmd-config-update] (or [`ocx config setup`][cmd-config-setup] / `ocx self setup --managed-config`) syncs a matching snapshot. Identical online and offline — the gate is on local disk state, not network reachability. |
 | `false` | The tier contributes nothing until synced. A throttle-gated stderr hint is printed instead of failing (no per-invocation warning). |
+
+The gate is on what actually reached the merged config, not merely on a file being present. A snapshot that matches `source` but whose payload does not parse as a config applies nothing, so `required = true` fails closed on it too — with `SnapshotUnusable` (also exit 78), which names the real problem instead of reporting a snapshot that is sitting right there as absent. Under `required = false` the same state is a warning and the tier stays empty. Note this is about a *broken* payload: unknown keys and sections are not broken (see [Unknown keys and sections](#unknown-keys)) and fold normally.
 
 #### `refresh` {#keys-managed-refresh}
 
@@ -686,6 +704,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 
 <!-- user guide -->
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[user-guide-managed-config-incompatible]: ../user-guide.md#managed-config-incompatible
 [user-project]: ../user-guide.md#project
 
 <!-- env composition -->

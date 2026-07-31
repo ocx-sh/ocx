@@ -15,10 +15,10 @@ use serde::Deserialize;
 
 /// Configuration for a single `[registries.<name>]` entry.
 ///
-/// Re-exported from [`crate::config`] as `RegistryConfig`. `deny_unknown_fields`
-/// is enforced so typos inside a known section fail fast.
+/// Re-exported from [`crate::config`] as `RegistryConfig`. No
+/// `deny_unknown_fields` — unknown keys are ignored, like every other config
+/// table (see [`crate::config::Config`]).
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
     /// Base URL of the `index.ocx.sh`-protocol index this namespace resolves
     /// through (`adr_index_indirection.md` F5a), e.g.
@@ -270,27 +270,35 @@ mod tests {
     }
 
     /// §6 ratified simplification: `RegistryConfig` no longer has a `url`
-    /// field — `deny_unknown_fields` rejects it like any other typo, proving
-    /// the alias is gone rather than merely unused.
+    /// field. It parses as any other unknown key does — ignored, with no
+    /// effect on the entry — proving the alias is gone rather than merely
+    /// renamed.
     #[test]
-    fn registries_table_rejects_removed_url_field() {
-        let result: Result<crate::config::Config, _> = toml::from_str("[registries.ghcr]\nurl = \"ghcr.io\"\n");
-        assert!(
-            result.is_err(),
-            "a 'url' field inside [registries.<name>] must be rejected — the field was removed (§6)"
-        );
+    fn registries_table_ignores_removed_url_field() {
+        let config: crate::config::Config = toml::from_str("[registries.ghcr]\nurl = \"ghcr.io\"\n")
+            .expect("a removed field must parse as an ignored unknown key");
+        let registries = config.registries.expect("registries table must be present");
+        let entry = registries.get("ghcr").expect("ghcr entry must exist");
+        assert!(entry.index.is_none(), "'url' must not resurrect as another field");
     }
 
-    /// `deny_unknown_fields` still rejects a typo'd field name near `index`
-    /// (e.g. `indx`) — the F5a addition does not loosen the existing
-    /// typo-rejection contract.
+    /// A typo'd field name near `index` (e.g. `indx`) is ignored rather than
+    /// rejected, and — the part that matters — it does NOT become `index`.
+    ///
+    /// The typo-rejection contract was traded away deliberately for fleet
+    /// forward-compat (see [`crate::config::Config`]): a `[registries.<name>]`
+    /// field added by a later ocx must not fail the whole config on an older
+    /// binary. The cost is that this typo silently no-ops.
     #[test]
-    fn registries_table_rejects_typo_of_index_field() {
-        let result: Result<crate::config::Config, _> =
-            toml::from_str("[registries.\"ocx.sh\"]\nindx = \"https://index.ocx.sh\"\n");
+    fn registries_table_ignores_typo_of_index_field() {
+        let config: crate::config::Config =
+            toml::from_str("[registries.\"ocx.sh\"]\nindx = \"https://index.ocx.sh\"\n")
+                .expect("a typo'd field must parse as an ignored unknown key");
+        let registries = config.registries.expect("registries table must be present");
+        let entry = registries.get("ocx.sh").expect("ocx.sh entry must exist");
         assert!(
-            result.is_err(),
-            "a typo'd 'indx' field inside [registries.<name>] must be rejected by deny_unknown_fields"
+            entry.index.is_none(),
+            "a typo'd key must be ignored, never absorbed into the field it resembles"
         );
     }
 
@@ -334,14 +342,19 @@ mod tests {
         );
     }
 
-    /// `deny_unknown_fields` still rejects a typo of `trusted_hosts`.
+    /// A typo of `trusted_hosts` is ignored — and, security-relevant, does not
+    /// widen the trust set: an unknown key can never populate the SSRF escape
+    /// hatch. Ignoring fails safe here; absorbing would not.
     #[test]
-    fn registries_table_rejects_typo_of_trusted_hosts_field() {
-        let result: Result<crate::config::Config, _> =
-            toml::from_str("[registries.\"ocx.sh\"]\ntrusted_host = [\"registry.corp\"]\n");
+    fn registries_table_ignores_typo_of_trusted_hosts_field() {
+        let config: crate::config::Config =
+            toml::from_str("[registries.\"ocx.sh\"]\ntrusted_host = [\"registry.corp\"]\n")
+                .expect("a typo'd field must parse as an ignored unknown key");
+        let registries = config.registries.expect("registries table must be present");
+        let entry = registries.get("ocx.sh").expect("ocx.sh entry must exist");
         assert!(
-            result.is_err(),
-            "a typo'd 'trusted_host' field must be rejected by deny_unknown_fields"
+            entry.trusted_hosts.is_none(),
+            "a typo'd key must never widen the trust set"
         );
     }
 }

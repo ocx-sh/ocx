@@ -983,8 +983,9 @@ pub fn mirrors() -> Result<Vec<(String, crate::config::mirror::MirrorConfig)>, c
 
     let mut result = Vec::with_capacity(map.len());
     for (host, value) in map {
-        let config = crate::config::mirror::parse_mirror_value(&host, &value)?;
-        result.push((host, config));
+        if let Some(config) = crate::config::mirror::parse_mirror_value(&host, &value)? {
+            result.push((host, config));
+        }
     }
     Ok(result)
 }

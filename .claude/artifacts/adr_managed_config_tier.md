@@ -60,6 +60,38 @@
 > Plan: `.claude/state/plans/plan_managed_config_v2.md`. Where any text below conflicts
 > with this amendment, the amendment governs.
 
+> **Forward-compat amendment (2026-07-31, fleet payload tolerance + gate correctness).**
+> Two defects surfaced from the same question — what an older ocx does with a payload a
+> newer one published — and are decided here. Where earlier text conflicts, this governs.
+>
+> - **Payload tolerance is a tier requirement, not a config-parser preference.** No
+>   `deny_unknown_fields` anywhere in the `Config` tree: unknown top-level sections AND
+>   unknown keys inside `[registry]`, `[registries.<name>]`, `[mirrors."<host>"]` are
+>   ignored, joining the root/`[patches]`/`[managed]` posture. Those three tables denied
+>   unknown fields for typo protection, which is the wrong trade for a surface this tier
+>   makes fleet-wide: one added key failed the parse, and a failed parse costs the
+>   *entire* payload on every host that had not upgraded — `ocx config update` exited 78,
+>   and the loader dropped the snapshot whole. Typo detection moves to the published JSON
+>   schema (editor-time, where it is cheap); the `additionalProperties: false` it emitted
+>   for those two objects goes with the change. A `[mirrors."<host>"]` entry left with no
+>   role this binary recognizes is skipped for that host rather than raised (parse-time
+>   `EmptyEntry` deleted; `resolve_mirror_map`'s role-less guard stays).
+> - **The `required` gate reads what was applied, not what exists.** Identity match is
+>   necessary, never sufficient: an identity-matching snapshot whose payload failed to
+>   parse was dropped by the loader while the gate reported the tier satisfied —
+>   fail-open in the one place `required = true` asks to fail closed. The loader now
+>   reports a `ManagedSnapshotState` (`Unmatched` | `PayloadUnusable` | `Applied`) and
+>   `enforce_required_snapshot` consumes it, adding `ManagedConfigError::SnapshotUnusable`
+>   (exit 78, beside `SnapshotRequired`). Decision E's remediation table below gains that
+>   row. `required = false` warns instead of failing — a broken payload is not the benign
+>   absent state the debug-only path exists for.
+> - **The escape hatch for a genuinely incompatible change is the tag, not the parser.**
+>   Tolerance covers added keys; it cannot cover a key whose meaning or value shape
+>   changed, which an older binary would read with the old meaning. Those changes publish
+>   under a new tag family (`:user-2`) with the old tag left serving old content; hosts
+>   move as they upgrade. This is why `source` is a full OCI reference and not a URL —
+>   recorded here because nothing else made the requirement explicit.
+
 ## Metadata
 
 **Status:** Accepted · **Date:** 2026-07-04 · **Deciders:** @michael-herwig, architect (swarm-plan tier=high), Round-1 review panel
@@ -234,6 +266,7 @@ Client surface: shared `fetch_single_layer_artifact(identifier, artifact_type, l
 |---|---|---|
 | EmptySource / InvalidSource / InvalidInterval | 78 | fix seed / env var |
 | SnapshotRequired | 78 | `ocx config update` (or self setup if never adopted); identical online/offline |
+| SnapshotUnusable | 78 | identity-matching snapshot present, payload not parseable as `Config` — re-sync with `ocx config update`, or repair the published payload. Distinct from SnapshotRequired: "absent" would describe the wrong state (2026-07-31 amendment) |
 | update fetch network/auth | 69 / 80 | standard registry remediation; snapshot untouched |
 | resolved source's artifact absent in registry | 79 | fix the ref / publish the artifact (amended post-Codex-gate 2026-07-05: was silently mapped to a `NotConfigured` success + a panic path in setup) |
 | digest mismatch on persist | 65 | tampered/corrupt registry bytes; re-run update |

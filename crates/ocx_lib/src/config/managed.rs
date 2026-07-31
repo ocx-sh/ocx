@@ -257,6 +257,25 @@ pub enum ManagedConfigError {
         effective_source: crate::oci::Identifier,
     },
 
+    /// `required = true` and an identity-matching snapshot IS on disk, but its
+    /// payload does not parse as a [`Config`](crate::config::Config), so the
+    /// tier contributes nothing.
+    ///
+    /// Distinct from [`Self::SnapshotRequired`]: the fix is a re-sync or a
+    /// payload repair, not a first sync. Failing closed here is the point —
+    /// the identity gate alone would report the tier satisfied while its
+    /// settings silently never reached the merged config.
+    #[error(
+        "managed config snapshot for source '{effective_source}' is present but its payload is not a usable \
+         config; re-sync with `ocx config update`"
+    )]
+    SnapshotUnusable {
+        /// The effective managed-config source whose snapshot payload failed
+        /// to parse. Named `effective_source` for the same reason as
+        /// [`Self::SnapshotRequired`]'s field.
+        effective_source: crate::oci::Identifier,
+    },
+
     /// An explicit `ocx self setup --managed-config` value was refused because
     /// the `[managed]` tier is system-locked (declared `required` at the SYSTEM
     /// scope): a lock only tightens, so the flag can neither clear the tier nor
@@ -348,6 +367,9 @@ impl ManagedConfig {
 ///   [`parse_interval`].
 /// - [`ManagedConfigError::SnapshotRequired`] — `required` (effective) is
 ///   `true` and no snapshot provenance matches the effective source.
+/// - [`ManagedConfigError::SnapshotUnusable`] — `required` is `true` and the
+///   matching snapshot's payload does not parse as a
+///   [`Config`](crate::config::Config).
 pub fn resolve_managed_config(
     config: &crate::config::Config,
     env_override: Option<&str>,
@@ -357,14 +379,57 @@ pub fn resolve_managed_config(
         return Ok(None);
     };
 
-    let snapshot_matches = snapshot.is_some_and(|snap| snapshot_matches_source(snap, &resolved.source));
-    Ok(Some(enforce_required_snapshot(resolved, snapshot_matches)?))
+    let state = ManagedSnapshotState::classify(snapshot, &resolved.source);
+    Ok(Some(enforce_required_snapshot(resolved, state)?))
+}
+
+/// What the on-disk managed-config snapshot actually contributed to the merged
+/// config — the input to the `required` gate.
+///
+/// A three-state value rather than "did the identity match": identity is a
+/// *necessary* condition for the tier to take effect, never a sufficient one.
+/// A snapshot whose payload fails to parse is dropped by the loader, so gating
+/// on identity alone reported a `required` tier satisfied while none of its
+/// settings were in force — fail-open exactly where the operator asked to fail
+/// closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedSnapshotState {
+    /// No snapshot on disk (absent, unreadable, or malformed metadata), or one
+    /// whose provenance names a different source. Both are "this tier has
+    /// nothing synced for it" from the gate's perspective, and both are
+    /// answered by the same `ocx config update`.
+    Unmatched,
+    /// Identity matched, but the payload did not parse as a
+    /// [`Config`](crate::config::Config) and was therefore not merged.
+    PayloadUnusable,
+    /// Identity matched and the payload was merged into the effective config.
+    Applied,
+}
+
+impl ManagedSnapshotState {
+    /// Classifies a snapshot against `source` by re-deriving what the loader
+    /// would do with it — identity gate, then payload parse.
+    ///
+    /// Used by [`resolve_managed_config`], whose callers hand it a snapshot
+    /// rather than a loader outcome. The loader itself reports the state it
+    /// observed directly (it has already parsed the payload) instead of
+    /// calling this.
+    #[must_use]
+    pub fn classify(snapshot: Option<&ManagedConfigSnapshot>, source: &crate::oci::Identifier) -> Self {
+        let Some(snapshot) = snapshot.filter(|snap| snapshot_matches_source(snap, source)) else {
+            return Self::Unmatched;
+        };
+        if toml::from_str::<crate::config::Config>(&snapshot.config).is_ok() {
+            Self::Applied
+        } else {
+            Self::PayloadUnusable
+        }
+    }
 }
 
 /// Applies the `required` gate to an already-resolved target: a `required`
-/// tier whose snapshot is absent or identity-mismatched (`!snapshot_matches`)
-/// fails closed with [`ManagedConfigError::SnapshotRequired`]; every other
-/// combination returns the target unchanged.
+/// tier whose snapshot did not reach the merged config fails closed; every
+/// other combination returns the target unchanged.
 ///
 /// Split out so a caller that resolved the target once (e.g. the config loader
 /// threading it into `Context::try_init`) can apply the gate without a second
@@ -373,18 +438,26 @@ pub fn resolve_managed_config(
 ///
 /// # Errors
 ///
-/// [`ManagedConfigError::SnapshotRequired`] when `resolved.required` and not
-/// `snapshot_matches`.
+/// When `resolved.required`: [`ManagedConfigError::SnapshotRequired`] for
+/// [`ManagedSnapshotState::Unmatched`] and
+/// [`ManagedConfigError::SnapshotUnusable`] for
+/// [`ManagedSnapshotState::PayloadUnusable`].
 pub fn enforce_required_snapshot(
     resolved: ResolvedManagedConfig,
-    snapshot_matches: bool,
+    state: ManagedSnapshotState,
 ) -> Result<ResolvedManagedConfig, ManagedConfigError> {
-    if resolved.required && !snapshot_matches {
-        return Err(ManagedConfigError::SnapshotRequired {
-            effective_source: resolved.source,
-        });
+    if !resolved.required {
+        return Ok(resolved);
     }
-    Ok(resolved)
+    match state {
+        ManagedSnapshotState::Applied => Ok(resolved),
+        ManagedSnapshotState::Unmatched => Err(ManagedConfigError::SnapshotRequired {
+            effective_source: resolved.source,
+        }),
+        ManagedSnapshotState::PayloadUnusable => Err(ManagedConfigError::SnapshotUnusable {
+            effective_source: resolved.source,
+        }),
+    }
 }
 
 /// Resolves the `[managed]` tier's effective target — source, `required`
@@ -969,6 +1042,104 @@ mod tests {
             }
             other => panic!("expected SnapshotRequired, got {other:?}"),
         }
+    }
+
+    /// Regression: a `required` tier whose snapshot matches by IDENTITY but
+    /// whose payload does not parse must fail closed.
+    ///
+    /// The identity gate alone reported such a tier satisfied while the loader
+    /// silently dropped the payload — fail-open in the one place an operator
+    /// asked to fail closed. `SnapshotUnusable`, not `SnapshotRequired`: the
+    /// snapshot is present, so "but absent; run `ocx config update`" would
+    /// have described the wrong state.
+    #[test]
+    fn resolve_managed_config_required_true_unparseable_payload_fails_closed() {
+        let config = crate::config::Config {
+            managed: Some(ManagedConfig {
+                source: Some("corp.example.com/ocx-config:user".to_string()),
+                ..ManagedConfig::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let snap = managed_snapshot("corp.example.com/ocx-config:user", "not = [valid toml");
+        match resolve_managed_config(&config, None, Some(&snap)) {
+            Err(ManagedConfigError::SnapshotUnusable { effective_source }) => {
+                assert_eq!(effective_source.to_string(), "corp.example.com/ocx-config:user");
+            }
+            other => panic!("expected SnapshotUnusable, got {other:?}"),
+        }
+    }
+
+    /// The discriminator for the test above: a payload carrying keys this
+    /// binary does not know is NOT unusable — it parses, folds, and satisfies
+    /// the gate. Without this, "fails closed on an unparseable payload" would
+    /// be indistinguishable from "fails closed on anything unfamiliar", which
+    /// is exactly the fleet break the tolerance posture exists to prevent.
+    #[test]
+    fn resolve_managed_config_required_true_unknown_keys_payload_satisfies_gate() {
+        let config = crate::config::Config {
+            managed: Some(ManagedConfig {
+                source: Some("corp.example.com/ocx-config:user".to_string()),
+                ..ManagedConfig::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let snap = managed_snapshot(
+            "corp.example.com/ocx-config:user",
+            "[registry]\ndefault = \"corp.example.com\"\ntimeout = 30\n[toolchain]\nchannel = \"stable\"\n",
+        );
+        let resolved = resolve_managed_config(&config, None, Some(&snap))
+            .expect("a payload from a newer ocx must satisfy the required gate")
+            .expect("configured source must yield Some");
+        assert!(resolved.required);
+    }
+
+    /// `required = false` never fails on an unusable payload — the posture
+    /// governs the gate, not the classification. The tier simply contributes
+    /// nothing (the loader WARNs).
+    #[test]
+    fn enforce_required_snapshot_required_false_tolerates_unusable_payload() {
+        let config = crate::config::Config {
+            managed: Some(ManagedConfig {
+                source: Some("corp.example.com/ocx-config:user".to_string()),
+                required: Some(false),
+                ..ManagedConfig::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let snap = managed_snapshot("corp.example.com/ocx-config:user", "not = [valid toml");
+        resolve_managed_config(&config, None, Some(&snap))
+            .expect("required=false must not fail on an unusable payload")
+            .expect("configured source must yield Some");
+    }
+
+    /// The three states classify exactly as the loader would act on them.
+    #[test]
+    fn managed_snapshot_state_classifies_identity_then_payload() {
+        let source = gate_source("corp.example.com/ocx-config:user");
+        assert_eq!(
+            ManagedSnapshotState::classify(None, &source),
+            ManagedSnapshotState::Unmatched
+        );
+
+        let foreign = managed_snapshot("other.example.com/ocx-config:user", "[registry]\ndefault = \"x\"\n");
+        assert_eq!(
+            ManagedSnapshotState::classify(Some(&foreign), &source),
+            ManagedSnapshotState::Unmatched,
+            "a wrong-identity snapshot is unmatched no matter how good its payload is"
+        );
+
+        let broken = managed_snapshot("corp.example.com/ocx-config:user", "not = [valid toml");
+        assert_eq!(
+            ManagedSnapshotState::classify(Some(&broken), &source),
+            ManagedSnapshotState::PayloadUnusable
+        );
+
+        let good = managed_snapshot("corp.example.com/ocx-config:user", "[registry]\ndefault = \"x\"\n");
+        assert_eq!(
+            ManagedSnapshotState::classify(Some(&good), &source),
+            ManagedSnapshotState::Applied
+        );
     }
 
     // Criterion 8: required=false + absent snapshot -> Ok(Some(resolved)), never fails closed.
