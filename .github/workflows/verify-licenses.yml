@@ -49,3 +49,13 @@ jobs:
           tool: cargo-deny
       - name: Check dependency licenses
         run: task rust:license:deps
+      - name: Install cargo-about
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: cargo-about
+      # LICENSE-THIRD-PARTY.md is committed and ships inside every release
+      # archive and OCX package, so a dependency change that nobody
+      # regenerated must fail here rather than ship a notice that omits a
+      # linked crate. Fix with `task rust:license:notice`.
+      - name: Check third-party notice freshness
+        run: task rust:license:notice:check

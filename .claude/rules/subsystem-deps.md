@@ -16,9 +16,17 @@ Rust dep, license, audit config for OCX.
 |------|---------|--------|------|
 | `cargo-deny` | License allowlist + ban dup versions + source audit | `deny.toml` | `task license:deps` |
 | `hawkeye` | SPDX header enforce on source files | `.licenserc.toml` | `task license:check` |
+| `cargo-about` | Generate `LICENSE-THIRD-PARTY.md` (notice text shipped with the binary) | `about.toml`, `about.hbs` | `task license:notice` / `license:notice:check` |
 | `renovate` | Auto dep update PRs (cargo, npm, actions) + custom regex for baked-template action pins | `renovate.json` | (Renovate App) |
 
-`cargo-deny` and `hawkeye` run in CI via `.github/workflows/verify-licenses.yml` (part of `task verify`); `renovate` runs as a hosted GitHub App on a weekly schedule (not a CI step).
+`cargo-deny`, `hawkeye` and `cargo-about` run in CI via `.github/workflows/verify-licenses.yml` (part of `task verify`); `renovate` runs as a hosted GitHub App on a weekly schedule (not a CI step).
+
+`LICENSE-THIRD-PARTY.md` is **committed**. It ships in every release archive
+(cargo-dist auto-includes `LICENSE*` — no `include` entry needed) and is copied
+into the OCX package by `oci-publish.yml`. Any dependency-graph change makes it
+stale and reds `license:notice:check`; fix with `task rust:license:notice`.
+`about.toml`'s `accepted` list must stay a superset of the licenses cargo-deny
+allows, or generation fails on a crate cargo-deny already waved through.
 
 ## License Policy
 

@@ -1,0 +1,58 @@
+# cargo-about — third-party license notice generation.
+#
+# Produces LICENSE-THIRD-PARTY.md, which ships inside every release archive
+# and inside the OCX package. Regenerate with `task rust:license:notice`.
+#
+# `accepted` mirrors the `allow` list in deny.toml. cargo-deny is the gate
+# (it fails on an unlisted license); this file only decides which arm of a
+# dual expression like `MIT OR Apache-2.0` gets its text reproduced. First
+# match wins, so Apache-2.0 leads to match OCX's own license.
+accepted = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "MIT-0",
+  "Zlib",
+  "EPL-2.0",
+  "MPL-2.0",
+  "BSL-1.0",
+]
+
+# The eight triples cargo-dist builds. Without this cargo-about unions every
+# target Cargo knows about and reproduces notices for crates OCX never
+# compiles (wasm, redox, illumos). With it, the notice is the exact union of
+# what the eight shipped binaries contain — one file, valid for all of them.
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-pc-windows-msvc",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+]
+
+# Build- and dev-dependencies are not linked into the shipped binary, so
+# their terms do not travel with it.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Workspace crates are OCX's own code, covered by the top-level LICENSE.
+# The patched oci-client is NOT private — it is a third-party fork and is
+# reported like any other dependency.
+private = { ignore = true }
+
+# Crates whose license files are not discoverable by the usual filename
+# scan. Each entry is a cargo-about built-in fixup, not a hand-written
+# exception: the license text still comes from the crate's own source.
+workarounds = [
+  "ring",
+  "rustls",
+  "wasmtime",
+]

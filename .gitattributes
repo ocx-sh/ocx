@@ -14,6 +14,12 @@
 *.[tT][aA][rR].[bB][zZ] binary
 *.[tT][aA][rR].[xX][zZ] binary
 
+# Generated third-party notice: reproduces upstream license files verbatim,
+# some of which use CRLF. Without `-text` the `* text=auto eol=lf` rule above
+# rewrites them to LF on checkout while `cargo about` keeps re-rendering CRLF,
+# so `task rust:license:notice:check` would fail on every fresh clone.
+LICENSE-THIRD-PARTY.md -text
+
 # OCX lock files
 ocx.lock merge=union
 

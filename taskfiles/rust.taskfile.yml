@@ -28,6 +28,12 @@ x-shared:
     - '{{.ROOT_DIR}}/rustfmt.toml'
     - '{{.ROOT_DIR}}/clippy.toml'
     - exclude: '{{.ROOT_DIR}}/target/**'
+  # Shared by `license:notice` (writes the committed file) and
+  # `license:notice:check` (writes a temp file and diffs). Both must invoke
+  # cargo-about identically or the check reports drift that isn't there.
+  about-args: &about-args >-
+    --manifest-path '{{.ROOT_DIR}}/crates/ocx_cli/Cargo.toml'
+    '{{.ROOT_DIR}}/about.hbs'
 
 tasks:
   verify:
@@ -38,14 +44,16 @@ tasks:
         2. cargo clippy
         3. hawkeye license headers
         4. cargo-deny license audit
-        5. cargo build --release
-        6. cargo nextest run
+        5. cargo-about third-party notice freshness
+        6. cargo build --release
+        7. cargo nextest run
       Use during review-fix loops when only Rust code changed.
     cmds:
       - task: format:check
       - task: clippy:check
       - task: license:check
       - task: license:deps
+      - task: license:notice:check
       - task: build
       - task: test:unit
 
@@ -133,6 +141,52 @@ tasks:
     deps:
       - install:cargo-deny
     cmd: cargo deny check licenses
+
+  install:cargo-about:
+    internal: true
+    # `--features cli` is not optional: cargo-about gates its own binary
+    # behind that feature, so a plain `cargo install cargo-about` compiles
+    # the crate, installs nothing, and exits with "none of the package's
+    # binaries are available for install using the selected features".
+    # `.ensure-cargo-tool` cannot pass features, hence the local copy.
+    status:
+      - cargo about --version
+    cmds:
+      - cargo install --locked --features cli cargo-about
+
+  license:notice:
+    desc: Regenerate LICENSE-THIRD-PARTY.md from the dependency graph
+    summary: |
+      Rewrites the third-party license notice reproducing the terms of every
+      crate linked into the `ocx` binary. The file is committed, ships inside
+      every release archive (dist auto-includes `LICENSE*`) and inside the
+      OCX package. Run after any change to the dependency graph — CI's
+      `license:notice:check` fails on a stale file.
+    deps:
+      - install:cargo-about
+    cmd: cargo about generate {{.ABOUT_ARGS}} -o '{{.ROOT_DIR}}/LICENSE-THIRD-PARTY.md'
+    vars:
+      ABOUT_ARGS: *about-args
+
+  license:notice:check:
+    desc: Fail if LICENSE-THIRD-PARTY.md is out of date
+    deps:
+      - install:cargo-about
+    vars:
+      ABOUT_ARGS: *about-args
+    # Deliberately no `sources:` — a fingerprint cache would let this skip
+    # on exactly the runs that matter (a dependency resolving differently
+    # without any tracked file changing).
+    cmds:
+      - |
+        set -eu
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        cargo about generate {{.ABOUT_ARGS}} -o "$tmp"
+        if ! diff -u '{{.ROOT_DIR}}/LICENSE-THIRD-PARTY.md' "$tmp"; then
+          echo "LICENSE-THIRD-PARTY.md is stale — run 'task rust:license:notice'" >&2
+          exit 1
+        fi
 
   install:cargo-zigbuild:
     internal: true

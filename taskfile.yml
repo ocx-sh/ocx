@@ -136,6 +136,7 @@ tasks:
     cmds:
       - task: rust:license:check
       - task: rust:license:deps
+      - task: rust:license:notice:check
       - task: rust:build
       - task: rust:test:unit
       - task: test:parallel

@@ -284,6 +284,13 @@ jobs:
               WORK="$(mktemp -d)"
               mkdir -p "$WORK/repackage/bin"
               install -m 0755 "$SRC" "$WORK/repackage/bin/${bin_stem}${ext}"
+              # The OCX package is a redistribution of the same binary the
+              # release archive carries, so it owes recipients the same
+              # notices. cargo-dist auto-includes these in the archive; here
+              # they are placed by hand, at the package root, so the two
+              # channels have the same layout beside `bin/`.
+              install -m 0644 LICENSE "$WORK/repackage/LICENSE"
+              install -m 0644 LICENSE-THIRD-PARTY.md "$WORK/repackage/LICENSE-THIRD-PARTY.md"
 
               ARCHIVE="$WORK/${bin_stem}-${target}.tar.xz"
               # No --metadata below: `push` derives the sidecar path from its

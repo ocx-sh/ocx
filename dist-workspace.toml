@@ -29,6 +29,9 @@ post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", 
 # Extra permissions for custom jobs. The override REPLACES the defaults, so
 # every scope the called workflow needs must be listed.
 github-custom-job-permissions = { docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" } }
+# No `include` for LICENSE-THIRD-PARTY.md: dist's auto-include glob is a
+# prefix match on `LICENSE*`, so it already lands in every archive. Listing
+# it explicitly puts it in twice (verified with `dist plan`).
 # Whether to embed dependency information using cargo-auditable
 cargo-auditable = true
 # Whether to use cargo-cyclonedx to generate an SBOM

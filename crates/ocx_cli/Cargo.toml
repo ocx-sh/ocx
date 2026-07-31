@@ -4,6 +4,15 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 repository = "https://github.com/ocx-sh/ocx"
+# Distributed via GitHub Releases and the ocx.sh registry, never crates.io.
+# Also what makes `cargo about` treat this crate as first-party and keep it
+# out of LICENSE-THIRD-PARTY.md (`private.ignore` in about.toml).
+publish = false
+
+# `publish = false` hides the binary from cargo-dist's workspace scan, which
+# makes `dist plan` fail with "no binaries found". This opts it back in.
+[package.metadata.dist]
+dist = true
 
 [[bin]]
 name = "ocx"
