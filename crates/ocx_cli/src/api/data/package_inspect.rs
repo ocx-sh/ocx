@@ -133,8 +133,10 @@ struct ClosureDepOut {
     /// Short display name — the repository's final path segment (e.g.
     /// `deps-mid`). The flat plain tree labels each dep by this.
     name: String,
+    /// Always digest-pinned — a closure node is a resolved artifact, never a
+    /// tag. There is no separate `digest` key because this one already ends in
+    /// it.
     identifier: String,
-    digest: String,
     /// Composed-from-root visibility — always present (the root, whose axis is
     /// undefined, is excluded from `deps`).
     effective_visibility: String,
@@ -280,7 +282,6 @@ fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
     ClosureDepOut {
         name: node.identifier.as_identifier().name().to_string(),
         identifier: node.identifier.to_string(),
-        digest: node.identifier.digest().to_string(),
         // A non-root node always carries a composed-from-root visibility; the
         // empty fallback is unreachable (the root is filtered out above).
         effective_visibility: node
@@ -1612,7 +1613,6 @@ mod tests {
         ClosureDepOut {
             name: name.to_string(),
             identifier: format!("example.com/{name}:1.0@{}", fake_digest(hex)),
-            digest: fake_digest(hex),
             effective_visibility: visibility.to_string(),
             binaries: None,
             entrypoints: vec![],

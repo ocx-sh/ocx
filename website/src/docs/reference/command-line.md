@@ -2825,7 +2825,6 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
       {
         "name": "zlib",
         "identifier": "registry/zlib@sha256:bbbb…",
-        "digest": "sha256:bbbb…",
         "effective_visibility": "public",
         "entrypoints": ["zfmt"],
         "dependencies": []
@@ -2833,7 +2832,6 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
       {
         "name": "gcc",
         "identifier": "registry/gcc@sha256:dddd…",
-        "digest": "sha256:dddd…",
         "effective_visibility": "private",
         "binaries": ["gcc", "g++"],
         "entrypoints": [],
@@ -2879,7 +2877,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 `closure.deps` lists every package transitively reachable from the reference's declared [dependencies][reference-dependencies], in transitive-closure order — dependencies before the packages that depend on them. The inspected reference itself is never listed here; it is named by the top-level `identifier` and contributes to both surface projections below. A dependency reached through two different paths (a diamond) still appears once, carrying the merge of every path that reaches it. Each entry carries:
 
 - `name` — the dependency repository's short display name (its final path segment).
-- `identifier` / `digest` — the dependency's resolved, digest-pinned identity.
+- `identifier` — the dependency's resolved identity, always digest-pinned. A closure node is a resolved artifact and never a bare tag, so there is no separate `digest` key repeating the tail of this one.
 - `effective_visibility` — the entry's [visibility][reference-visibility] as composed from the root, down every path that reaches it.
 - `binaries` — the same tri-state as [Executables][reference-binaries]: the key is absent when the publisher never declared the field, `[]` when the publisher declared zero, and a populated array when names are declared.
 - `entrypoints` — the entry's own declared [entry-point][guide-entry-points] launcher names. Independent of `binaries`: a package may declare either, both, or neither. A binary is a raw executable the package puts on `PATH`; an entry point is a named launcher that runs one with a fixed argument prefix — the two are separate axes, not a 1:1 pairing. Above, `zlib` declares an entry point but no binaries; `gcc` declares binaries but no entry point.

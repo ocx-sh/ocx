@@ -94,6 +94,13 @@ def test_inspect_closure_closure_and_surface(
     assert not any(f"/{unique_repo}:" in d["identifier"] for d in deps), (
         "the root must never appear in closure.deps"
     )
+    for dep in deps:
+        assert "@sha256:" in dep["identifier"], (
+            f"a closure node is a resolved artifact, never a bare tag: {dep['identifier']}"
+        )
+        assert "digest" not in dep, (
+            f"no separate digest key — it could only repeat the tail of identifier: {dep}"
+        )
 
     pub_node = _node(deps, f"{unique_repo}_pub")
     assert pub_node["effective_visibility"] == "public"
