@@ -17,7 +17,7 @@ The CLI surface splits into two tiers. The split is firm.
 
 | Tier | Commands | Input | Consults `ocx.toml`? |
 |------|----------|-------|----------------------|
-| **Toolchain-tier** | `add`, `remove`, `lock`, `update`, `run`, `env` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
+| **Toolchain-tier** | `add`, `remove`, `lock`, `update`, `run`, `env`, `status`, `inspect` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
 | **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which`, `deps` | OCI identifiers | **Never** |
 | **Bootstrap / mixed** | `init`, `direnv init`, `direnv export`, `about`, `version`, `shell completion` | Varies | — |
 | **Low-level registry** | `package pull`, `package push`, `package describe`, `package info`, `package create`, `index update/list/catalog`, `login`, `logout` | OCI identifiers | Never |
@@ -70,6 +70,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env. No `--self`: the self view is package vocabulary and drops a package's own `entrypoints/` from `PATH`, so it composes a strictly worse toolchain | `-g/--group`, `--clean`, `--env` |
 | `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0); JSON also carries `binaries`/`entrypoints` admitted-claim attribution arrays (never in `--shell`/`--ci` output) | `-g/--group`, `--env`, `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
+| `status` | Report what `ocx.toml` + `ocx.lock` declare; no resolution, no network, no flock, no staleness gate. Missing / stale / unparseable lock are all payload with exit 0 — it is the command that answers on a project the others refuse. Full per-platform digest map (no host-leaf selection), per-scope `[env]` verbatim (relative `path` values NOT anchored), `[package.*]`, both declaration hashes. Absence-as-signal per binding: no `platforms` = unlocked, no `declared` = orphaned. NO selectors by design | — |
+| `inspect [-g GROUP]... [NAME...]` | Toolchain-tier `ocx package inspect`: identical envelope + `--resolve`/`--closure`/`--env`, keyed by binding, plus the project's composed `env` array in application order. Read-only. **Default mode resolves nothing** — each binding lists the platform candidates `ocx.lock` pins for it (no registry, no host-leaf selection, `-p` inert, no entry-level `pinned_*`, no candidate `media_type`/`size`); `--resolve` selects the host leaf exactly as on the OCI tier. `identifier` is the `ocx.toml` declaration verbatim, tag included — the lock's bare `repository` would drop it. Needs a current lock (78 / 65) — a moving tag would make the answer depend on the moment. `--closure` reports cross-tool collisions pre-install; non-empty conflicts exit 65 | `-g/--group`, `-p/--platform`, `--resolve`, `--closure`, `--env` |
 
 ### OCI-Tier Commands (`ocx package`)
 

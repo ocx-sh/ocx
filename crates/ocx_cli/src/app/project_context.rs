@@ -228,6 +228,37 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
     }
 }
 
+/// Resolve the in-scope `ocx.toml` and its sibling `ocx.lock` path, and stop.
+///
+/// The path half of [`load_project_with_lock`], without the loads or the two
+/// gates that helper enforces (`LockMissing` → 78, `StaleLock` → 65). `ocx
+/// status` exists to *describe* both of those states, so it must not be
+/// refused by them; it loads the two files itself and reports what it finds.
+///
+/// The lock path is returned whether or not the file exists — the caller
+/// decides what absence means.
+///
+/// # Errors
+///
+/// [`ProjectContextError::NoProject`] when no `ocx.toml` is reachable through
+/// the precedence chain, or [`ProjectContextError::Config`] for a resolution
+/// I/O failure.
+pub async fn resolve_project_paths(context: &crate::app::Context) -> Result<(PathBuf, PathBuf), ProjectContextError> {
+    use ocx_lib::env;
+    use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
+
+    let cwd = env::current_dir().map_err(|e| {
+        ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
+            std::path::PathBuf::new(),
+            ProjectErrorKind::Io(e),
+        )))
+    })?;
+    let home = context.file_structure().root().to_path_buf();
+    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home), context.global()).await?;
+
+    resolved.ok_or(ProjectContextError::NoProject { cwd })
+}
+
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
     use ocx_lib::env;
     use ocx_lib::project::error::{ProjectError, ProjectErrorKind};

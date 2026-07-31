@@ -25,6 +25,7 @@ pub mod index_catalog;
 pub mod index_list;
 pub mod index_update;
 pub mod init;
+pub mod inspect;
 pub mod install;
 pub mod launcher;
 pub mod lock;
@@ -54,6 +55,7 @@ pub mod select;
 pub mod self_group;
 pub mod shell;
 pub mod shell_completion;
+pub mod status;
 pub mod toolchain_env;
 pub mod uninstall;
 pub mod update;
@@ -134,6 +136,10 @@ pub enum Command {
     /// Manage the OCX installation itself (PATH activation, completions, self-update).
     #[command(name = "self", subcommand)]
     Self_(self_group::SelfGroup),
+    /// Show what ocx.toml and ocx.lock declare, without resolving anything.
+    Status(status::Status),
+    /// Inspect what the project toolchain resolves to, without installing.
+    Inspect(inspect::Inspect),
     /// Print the version of ocx
     Version(version::Version),
     /// External subcommand: dispatched to an `ocx-<name>` binary discovered on PATH.
@@ -165,6 +171,8 @@ impl Command {
             Command::Run(r) => r.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
             Command::Self_(group) => group.execute(context).await,
+            Command::Status(status) => status.execute(context).await,
+            Command::Inspect(inspect) => inspect.execute(context).await,
             Command::Version(_) => unreachable!("Version is handled in the static-command bypass in App::run"),
             Command::External(_) => {
                 // External subcommands are dispatched from `App::run` before

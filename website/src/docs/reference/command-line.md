@@ -968,6 +968,212 @@ Home       /home/user/.ocx
 
 `channel` is present only when baked in (dev-deploy builds). `commit`, `build`, and `ci` blocks are absent on local builds without git or CI context. Use `ocx about` as the first diagnostic when troubleshooting [feature mismatch][faq-gcompat] errors — the `Libc` row shows exactly what the platform detector found.
 
+### `status` {#status}
+
+Reports what `ocx.toml` and `ocx.lock` say, without resolving anything. Offline, read-only, and never writes either file: no registry is contacted, no platform is selected, no package metadata is read, and no relative `path` value is anchored to the project root.
+
+Status answers on projects that other commands refuse. A missing `ocx.lock` exits 78 for [`pull`](#pull) and [`run`](#run); a drifted one exits 65; an unparseable one fails outright. All three are states `status` reports as payload and still exits `0` for — it is the command you reach for when the project is broken.
+
+For what those declarations *resolve to* on this host — the pinned digest per binding, the composed environment, what would land on `PATH` — use [`inspect`](#inspect).
+
+**Usage**
+
+```shell
+ocx status
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+There is no `-g`/`--group` and no NAME argument. The report is a keyed object a caller narrows itself, and a filter here would only hide rows rather than change any answer — unlike in `inspect`, where the selection decides what gets composed.
+
+Honors the global [`--format`][arg-format] and [`--project`][arg-project] / [`--global`][global-flag] flags. [`--offline`][arg-offline] is accepted and inert: this command never reaches the network.
+
+**JSON shape**
+
+```json
+{
+  "project": "/home/you/code/app/ocx.toml",
+  "lock": {
+    "present": true,
+    "current": false,
+    "lock_version": 3,
+    "declaration_hash": "sha256:67d0ab…",
+    "declaration_hash_expected": "sha256:91ffcc…",
+    "generated_by": "ocx 0.4.3",
+    "generated_at": "2026-06-14T23:29:57Z"
+  },
+  "groups": {
+    "default": {
+      "tools": {
+        "go-task": {
+          "declared": "ocx.sh/go-task:3",
+          "platforms": {
+            "linux/amd64": "sha256:fcfad8…",
+            "darwin/arm64": "sha256:7ab019…"
+          }
+        },
+        "newtool": { "declared": "ocx.sh/newtool:1" },
+        "oldtool": { "platforms": { "linux/amd64": "sha256:11c0d6…" } }
+      },
+      "env": { "CI": { "type": "constant", "value": "1" } }
+    },
+    "ci": {
+      "tools": {},
+      "env": { "PATH": { "type": "path", "value": "node_modules/.bin" } }
+    }
+  },
+  "package_settings": { "ocx.sh/foo:1": { "no-patches": true } }
+}
+```
+
+`default` is a group like any other. The top-level `[tools]` and `[env]` tables in `ocx.toml` **are** its tools and env — which is why `default` is a reserved group name — so the report has no separate top-level env.
+
+Each binding under `groups.<name>.tools` reports its state by which keys are present, the same convention [`binaries`][reference-binaries-none-vs-empty] uses:
+
+| `declared` | `platforms` | Meaning |
+|---|---|---|
+| present | present | Declared in `ocx.toml` and locked. |
+| present | absent | Declared but not yet locked — added since the last `ocx lock`. |
+| absent | present | Locked but no longer declared — orphaned in a stale lock. |
+
+`platforms` carries **every** leaf the lock records, not the host's. Picking the host leaf is resolution, which is `inspect`'s job.
+
+`env` values are verbatim: a relative `type = "path"` value stays relative here, because anchoring it to the project root is composition. `inspect` and [`env`](#env-root) show the anchored form.
+
+`lock` describes the lock file itself:
+
+- `present` — whether `ocx.lock` exists.
+- `error` — present only when the file exists but could not be parsed (an unsupported `lock_version`, a corrupt file). The header fields and every `platforms` map are then absent; the declaration half of the report is unaffected.
+- `current` — whether the lock's stored `declaration_hash` still matches the config's. Absent when nothing was parsed.
+- `declaration_hash` (stored) and `declaration_hash_expected` (recomputed) are both reported so a consumer sees *why* `current` is false without recomputing the project's canonicalization itself. Both cover `[tools]` and `[group.*]` only — `[env]` and `[package.*]` are excluded by design, so editing either leaves `current` true.
+
+`package_settings` reports `[package."<id>"]` precisely because it is excluded from the declaration hash: nothing lock-derived can surface it.
+
+**Exit codes**
+
+- `0` — success, including "no lock", "stale lock", and "unreadable lock".
+- `64` (`UsageError`) — no `ocx.toml` in scope, or a selector was passed.
+
+### `inspect` {#inspect}
+
+Inspects what the project toolchain resolves to, without installing. The toolchain-tier counterpart to [`ocx package inspect`](#package-inspect): the same report and the same flags, keyed by `ocx.toml` binding instead of raw identifier, and carrying the project's composed environment alongside.
+
+Selects the bindings in the requested groups, narrows them to any `NAME`s given, and reports each one. Read-only — nothing is installed, no symlink is created, neither project file is written.
+
+`--resolve` is what selects a platform, here exactly as on the OCI-tier command. By default each binding lists the platform **candidates** `ocx.lock` pins for it, so the default report is a pure projection of the two project files: no registry is contacted, no host leaf is chosen, and `-p` stays inert.
+
+Needs a current `ocx.lock`: exit 78 when absent, 65 when it no longer matches `ocx.toml`. Without a pin there is no stable answer — re-resolving declared tags live would make the report depend on where a moving tag points at that moment. Use [`status`](#status) for the declaration itself, including those two states.
+
+**Usage**
+
+```shell
+ocx inspect [OPTIONS] [NAME]...
+```
+
+**Arguments**
+
+- `[NAME]...`: Binding names to inspect. Each is an `ocx.toml` binding key. Defaults to every binding in the selected groups. Only the named bindings are reported, so under `--resolve` an unrelated sibling that ships no leaf for this host does not block the report.
+
+**Options**
+
+- `-g`, `--group <GROUP>`: Restrict the selection to the named group(s). Repeatable and comma-separated. `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Omitted means the default group, not everything — matching [`run`](#run) and [`env`](#env-root).
+- `-p`, `--platform <PLATFORM>`: Platform to resolve each binding's leaf against. Defaults to the host. Applies with `--resolve` and `--closure`; ignored in default mode, where the candidate list always shows every locked platform.
+- `--resolve`: Select this host's leaf and emit its metadata plus the OCI resolution chain. The lock already pins a platform manifest, so the chain starts there and carries no `index` entry.
+- `--closure`: Compute each binding's dependency closure from metadata alone, plus the `interface` / `private` surface projections. Because the walk sees the whole selection at once, it also reports collisions between two *different* tools before either is installed.
+- `--env <KEY[:TYPE]=VALUE>`: Set an environment variable for this invocation. Repeatable; appended last in the report's `env` array, matching where it lands in composition.
+- `-h`, `--help`: Print help information.
+
+Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], [`--format`][arg-format], and [`--project`][arg-project] / [`--global`][global-flag] flags. Default mode reads no registry at all. A cold `--closure` costs one config-blob fetch per selected binding; a warm one is served from the local cache and works under `--offline`.
+
+**JSON shape**
+
+The same envelope [`ocx package inspect`](#package-inspect) emits. Default — the locked candidates for each binding:
+
+```json
+{
+  "packages": [
+    {
+      "name": "shellcheck",
+      "identifier": "ocx.sh/shellcheck:0.11",
+      "candidates": [
+        {
+          "digest": "sha256:5238fe…",
+          "pinned": "ocx.sh/shellcheck:0.11@sha256:5238fe…",
+          "platform": "linux/amd64"
+        },
+        {
+          "digest": "sha256:7ab019…",
+          "pinned": "ocx.sh/shellcheck:0.11@sha256:7ab019…",
+          "platform": "darwin/arm64"
+        }
+      ]
+    }
+  ],
+  "env": [
+    { "key": "CI", "type": "constant", "value": "1" },
+    { "key": "PATH", "type": "path", "value": "/home/you/code/app/node_modules/.bin" },
+    { "key": "CI", "type": "constant", "value": "0" }
+  ]
+}
+```
+
+`--resolve` replaces the candidate list with the selected leaf, and adds `pinned_identifier` / `pinned_digest` to the entry plus `platform` to the envelope:
+
+```json
+{
+  "platform": "linux/amd64",
+  "packages": [
+    {
+      "name": "shellcheck",
+      "identifier": "ocx.sh/shellcheck:0.11",
+      "pinned_identifier": "ocx.sh/shellcheck:0.11@sha256:5238fe…",
+      "pinned_digest": "sha256:5238fe…",
+      "metadata": { "…": "…" },
+      "layers": [ { "digest": "sha256:…", "media_type": "…", "size": 4051232 } ],
+      "resolution": { "…": "…" }
+    }
+  ],
+  "env": []
+}
+```
+
+`name` is the binding, so an entry is addressable by the same key `ocx.toml` uses. `identifier` is the declaration verbatim, tag included. `packages` is in selection order: group order, then lock order within each group.
+
+A candidate carries no `media_type` or `size`, and the entry no `pinned_identifier` or `pinned_digest`: the lock records one leaf digest per platform, never the descriptors that pointed at them nor the index that carried them. Absence is the signal — each candidate's own `pinned` is the pullable reference. Use [`status`](#status) if you want the same map keyed by platform.
+
+`env` is an **ordered array**, in application order: `[env]` first, then each selected group's `[group.<name>.env]` in `-g` order, then `--env` last. Every contributing declaration is kept rather than merged, so one key can legitimately appear more than once — which is why this is an array and `status`'s per-scope view is an object. The array shows *what was declared and in what order*; [`ocx env`](#env-root) is what answers *what the final value is*, and it materializes packages to do so because their values are `${installPath}`-templated.
+
+Package-declared environment is not in this array. It lives inside each entry's `closure.surface.env` under `--closure`, attributed per package and without values, exactly as in `ocx package inspect`.
+
+**Examples**
+
+```shell
+# What does the default group pin, per platform? (offline)
+ocx --format json inspect | jq -r '.packages[] | .name as $n | .candidates[] | "\($n) \(.platform) \(.pinned)"'
+
+# What does it pin on this host?
+ocx --format json inspect --resolve | jq -r '.packages[] | "\(.name) \(.pinned_identifier)"'
+
+# One binding, from a named group.
+ocx --format json inspect -g ci shellcheck
+
+# What would the whole toolchain put on PATH, without installing it?
+ocx --format json inspect -g all --closure | jq '.packages[].closure.surface.interface.binaries'
+
+# Does any pair of tools collide before I install them? (exits 65 if so)
+ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.conflicts.entrypoints != [])'
+```
+
+**Exit codes**
+
+- `0` — success.
+- `64` (`UsageError`) — unknown group, unknown binding name, or a binding two selected groups resolve differently *and* that binding is in the narrowed set.
+- `65` (`DataError`) — `ocx.lock` is stale, or `--closure` found a conflict that makes the surface unrealizable (the conflict is still reported in full).
+- `78` (`ConfigError`) — `ocx.lock` is absent; run `ocx lock`.
+- `81` (`PolicyBlocked`) — `--offline` and a needed manifest or config blob is not cached. Default mode reads no registry, so this needs `--resolve` or `--closure`.
+
 ### `init` {#init}
 
 Creates a minimal `ocx.toml` in the current directory.
@@ -2704,20 +2910,27 @@ A non-empty `conflicts` exits **65** (`DataError`) while still reporting the con
 **Examples**
 
 ```shell
-# List the platforms a multi-platform tag offers (output keyed by identifier).
-ocx --format json package inspect mytool:1.0.0 | jq '.["mytool:1.0.0"].candidates'
+# List the platforms a multi-platform tag offers.
+ocx --format json package inspect mytool:1.0.0 | jq '.packages[0].candidates'
 
-# Inspect several packages at once — one keyed entry each.
-ocx --format json package inspect mytool:1.0.0 othertool:2.0.0
+# Inspect several packages at once — one array entry each, in input order.
+ocx --format json package inspect mytool:1.0.0 othertool:2.0.0 | jq '.packages[].name'
+
+# Pick one entry by the name it was requested under.
+ocx --format json package inspect mytool:1.0.0 othertool:2.0.0 \
+  | jq '.packages[] | select(.name == "othertool:2.0.0")'
 
 # Inspect one platform child by digest (same repo, online or cached).
 ocx package inspect mytool@sha256:abc…
 
 # Platform-select and include the OCI resolution chain.
-ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.["mytool:1.0.0"].resolution'
+ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.packages[0].resolution'
 
 # What would land on PATH without installing it?
-ocx --format json package inspect --closure mytool:1.0.0 | jq '.["mytool:1.0.0"].closure.surface.interface'
+ocx --format json package inspect --closure mytool:1.0.0 | jq '.packages[0].closure.surface.interface'
+
+# The exact artifact, without splicing identifier and digest together.
+ocx --format json package inspect --resolve mytool:1.0.0 | jq -r '.packages[0].pinned_identifier'
 ```
 
 **Plain output**

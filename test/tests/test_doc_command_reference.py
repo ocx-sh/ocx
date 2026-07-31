@@ -50,6 +50,8 @@ NEW_COMMAND_ANCHORS = [
     ("{#env-root}", "env (toolchain-tier)"),
     ("{#env}", "env (package-tier alias)"),
     ("{#package-env}", "package env"),
+    ("{#status}", "status"),
+    ("{#inspect}", "inspect (toolchain-tier)"),
 ]
 
 # Removed/tombstone anchors: these commands were deleted in the

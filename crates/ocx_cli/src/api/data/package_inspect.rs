@@ -56,12 +56,17 @@ impl SemanticAnnotation {
 /// Read-only view of a package. The shape adapts to the requested reference
 /// and whether `--resolve` was given. Every shape carries `name` (how the
 /// caller addressed this entry — the raw request string for
-/// `ocx package inspect`, the `ocx.toml` binding for `ocx inspect`),
-/// `identifier`, `pinned_identifier` (the identifier with its digest, so a
-/// consumer never has to splice one together) and `pinned_digest`:
+/// `ocx package inspect`, the `ocx.toml` binding for `ocx inspect`) and
+/// `identifier`. A shape that selected one artifact also carries
+/// `pinned_identifier` (the identifier with its digest, so a consumer never
+/// has to splice one together) and `pinned_digest`:
 ///
-/// - **candidates** (default mode, ref is an image index): the available
-///   platform children — `{ …, candidates: [...] }`.
+/// - **candidates** (default mode): the available platform children — `{ …,
+///   candidates: [...] }`. `ocx package inspect` reads them off an image index
+///   and pins the index itself; `ocx inspect` projects them from `ocx.lock`,
+///   which records per-platform leaf digests and no index digest, so the two
+///   pinned fields are absent there and each candidate's `media_type` / `size`
+///   with them.
 /// - **metadata** (default mode, ref is a single manifest): the declared
 ///   metadata document plus the manifest's layers — `{ …, metadata, layers }`.
 /// - **resolution** (`--resolve`): platform-selected metadata and layers plus
@@ -70,14 +75,13 @@ impl SemanticAnnotation {
 ///   (role ∈ `index` | `manifest` | `config`); the layers live at the entry's
 ///   top level, not inside `resolution`.
 ///
-/// Plain format: a tree rooted at the pinned identifier (inked with the
-/// active theme like every other identifier) with the shape-appropriate
-/// section(s). Byte sizes render human-readable (binary units); JSON keeps
-/// the raw integer `size`.
+/// Plain format: a tree rooted at the pinned identifier — or at the plain
+/// identifier where nothing was pinned — inked with the active theme like
+/// every other identifier, with the shape-appropriate section(s). Byte sizes
+/// render human-readable (binary units); JSON keeps the raw integer `size`.
 pub struct PackageInspect {
     name: String,
     identifier: oci::Identifier,
-    pinned_digest: String,
     body: Body,
 }
 
@@ -86,6 +90,13 @@ enum Body {
         pinned: oci::PinnedIdentifier,
         candidates: Vec<CandidateOut>,
     },
+    /// A toolchain binding projected straight from `ocx.lock` — the locked
+    /// platform leaves, nothing resolved and nothing fetched.
+    ///
+    /// No `pinned`: the lock records one leaf digest per platform and never
+    /// the index digest that carried them, so there is no single artifact to
+    /// name until `--resolve` picks a platform.
+    Locked { candidates: Vec<CandidateOut> },
     Manifest {
         pinned: oci::PinnedIdentifier,
         metadata: Metadata,
@@ -315,7 +326,7 @@ fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
     }
 }
 
-/// One platform child of an image index.
+/// One platform child of an image index, or one locked platform leaf.
 #[derive(Serialize)]
 struct CandidateOut {
     digest: String,
@@ -329,8 +340,12 @@ struct CandidateOut {
     /// reason `resolution.pinned` is spelled that way.
     pinned: String,
     platform: String,
-    media_type: String,
-    size: i64,
+    /// Absent for a lock-projected candidate: `ocx.lock` records the leaf
+    /// digest per platform, not the descriptor that pointed at it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<i64>,
 }
 
 /// The OCI resolution chain for the selected platform. Carries only the walk
@@ -388,19 +403,18 @@ impl PackageInspect {
             InspectResult::Candidates { pinned, candidates } => Self {
                 name,
                 identifier,
-                pinned_digest: pinned.digest().to_string(),
                 body: Body::Candidates {
-                    pinned,
                     candidates: candidates
                         .into_iter()
                         .map(|c| CandidateOut {
                             digest: c.identifier.digest().to_string(),
                             pinned: c.identifier.to_string(),
                             platform: c.platform.to_string(),
-                            media_type: c.media_type,
-                            size: c.size,
+                            media_type: Some(c.media_type),
+                            size: Some(c.size),
                         })
                         .collect(),
+                    pinned,
                 },
             },
             InspectResult::Manifest {
@@ -411,7 +425,6 @@ impl PackageInspect {
             } => Self {
                 name,
                 identifier,
-                pinned_digest: pinned.digest().to_string(),
                 body: Body::Manifest {
                     pinned,
                     metadata: metadata.into(),
@@ -427,7 +440,6 @@ impl PackageInspect {
             } => Self {
                 name,
                 identifier,
-                pinned_digest: pinned.digest().to_string(),
                 body: Body::Resolved {
                     pinned,
                     platform,
@@ -437,6 +449,35 @@ impl PackageInspect {
                     closure: closure.map(project_closure),
                 },
             },
+        }
+    }
+
+    /// Builds one entry straight from a locked toolchain binding — the
+    /// `ocx inspect` default mode.
+    ///
+    /// `platforms` is the lock entry's platform-to-leaf map, so this is a pure
+    /// projection: no registry read, no host-leaf selection, and therefore no
+    /// pinned artifact at the entry level. Each platform becomes a candidate
+    /// naming the leaf it would resolve to.
+    pub fn locked(
+        name: String,
+        identifier: oci::Identifier,
+        platforms: &std::collections::BTreeMap<String, oci::Digest>,
+    ) -> Self {
+        let candidates = platforms
+            .iter()
+            .map(|(platform, digest)| CandidateOut {
+                digest: digest.to_string(),
+                pinned: identifier.clone_with_digest(digest.clone()).to_string(),
+                platform: platform.clone(),
+                media_type: None,
+                size: None,
+            })
+            .collect();
+        Self {
+            name,
+            identifier,
+            body: Body::Locked { candidates },
         }
     }
 }
@@ -460,37 +501,98 @@ impl Resolution {
 }
 
 impl PackageInspect {
-    /// The pinned identifier every body variant carries — the requested
-    /// identifier with its resolved digest attached.
+    /// The single artifact this entry pinned, when it pinned one — the
+    /// requested identifier with its resolved digest attached.
     ///
     /// Emitted as its own field so a consumer never has to splice `identifier`
     /// and `pinned_digest` back together (and get the `:tag@digest` punctuation
-    /// right) to name the exact artifact.
-    fn pinned_identifier(&self) -> &oci::PinnedIdentifier {
+    /// right) to name the exact artifact. `None` for a lock projection, which
+    /// selects nothing: there the per-candidate `pinned_identifier` is the
+    /// pullable reference.
+    fn pinned_identifier(&self) -> Option<&oci::PinnedIdentifier> {
         match &self.body {
-            Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => pinned,
+            Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => {
+                Some(pinned)
+            }
+            Body::Locked { .. } => None,
         }
+    }
+
+    /// The identifier the plain tree roots at: the pinned one where something
+    /// was pinned, else the identifier as addressed.
+    ///
+    /// A lock projection must root at the DECLARED identifier — the lock
+    /// stores the bare repository shared by every platform leaf, so rooting at
+    /// anything lock-derived would silently drop the `:tag` every other
+    /// inspect view shows.
+    fn root_identifier(&self) -> &oci::Identifier {
+        self.pinned_identifier()
+            .map_or(&self.identifier, oci::PinnedIdentifier::as_identifier)
+    }
+
+    /// The whole plain-format tree for this entry: the root identifier with
+    /// the shape-appropriate section(s) beneath it.
+    fn tree(&self) -> Node {
+        let sections = match &self.body {
+            Body::Candidates { candidates, .. } | Body::Locked { candidates } => vec![candidates_node(candidates)],
+            Body::Manifest {
+                metadata,
+                layers,
+                closure,
+                ..
+            } => {
+                let mut sections = vec![metadata_node(metadata), layers_node(layers)];
+                if let Some(closure) = closure {
+                    sections.push(closure_node(closure));
+                }
+                sections
+            }
+            Body::Resolved {
+                platform,
+                metadata,
+                layers,
+                resolution,
+                closure,
+                ..
+            } => {
+                let mut sections = vec![
+                    metadata_node(metadata),
+                    layers_node(layers),
+                    resolution_node(resolution, platform),
+                ];
+                if let Some(closure) = closure {
+                    sections.push(closure_node(closure));
+                }
+                sections
+            }
+        };
+        Node::identifier_branch(self.root_identifier().clone(), sections)
     }
 }
 
 impl Serialize for PackageInspect {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Field count varies by body shape; name + identifier +
-        // pinned_identifier + pinned_digest are always present. `closure` is
-        // additive-optional (present only under `--closure`) and nests deps +
-        // surface + conflicts under one key.
-        let len = 4 + match &self.body {
-            Body::Candidates { .. } => 1,
-            Body::Manifest { closure, .. } => 2 + usize::from(closure.is_some()),
-            Body::Resolved { closure, .. } => 4 + usize::from(closure.is_some()),
-        };
+        // Field count varies by body shape; name + identifier are always
+        // present, the two pinned fields only when something was pinned.
+        // `closure` is additive-optional (present only under `--closure`) and
+        // nests deps + surface + conflicts under one key.
+        let pinned = self.pinned_identifier();
+        let len = 2
+            + 2 * usize::from(pinned.is_some())
+            + match &self.body {
+                Body::Candidates { .. } | Body::Locked { .. } => 1,
+                Body::Manifest { closure, .. } => 2 + usize::from(closure.is_some()),
+                Body::Resolved { closure, .. } => 4 + usize::from(closure.is_some()),
+            };
         let mut s = serializer.serialize_struct("PackageInspect", len)?;
         s.serialize_field("name", &self.name)?;
         s.serialize_field("identifier", &self.identifier)?;
-        s.serialize_field("pinned_identifier", &self.pinned_identifier().to_string())?;
-        s.serialize_field("pinned_digest", &self.pinned_digest)?;
+        if let Some(pinned) = pinned {
+            s.serialize_field("pinned_identifier", &pinned.to_string())?;
+            s.serialize_field("pinned_digest", &pinned.digest().to_string())?;
+        }
         match &self.body {
-            Body::Candidates { candidates, .. } => {
+            Body::Candidates { candidates, .. } | Body::Locked { candidates } => {
                 s.serialize_field("candidates", candidates)?;
             }
             Body::Manifest {
@@ -679,13 +781,17 @@ fn binaries_node(binaries: &Binaries) -> Node {
 
 fn candidates_node(candidates: &[CandidateOut]) -> Node {
     // No media type: every child of an image index is an image manifest, so the
-    // column is a constant that pushes the size off a narrow terminal.
+    // column is a constant that pushes the size off a narrow terminal. Size is
+    // annotated only when known — a lock projection has no descriptor to read
+    // it from.
     let entries = candidates
         .iter()
         .map(|c| {
-            Node::leaf(c.platform.clone())
-                .with_digest(c.digest.clone())
-                .with_note(human_bytes(c.size))
+            let node = Node::leaf(c.platform.clone()).with_digest(c.digest.clone());
+            match c.size {
+                Some(size) => node.with_note(human_bytes(size)),
+                None => node,
+            }
         })
         .collect();
     Node::branch("candidates", entries)
@@ -900,41 +1006,7 @@ impl Printable for PackageInspect {
     // Inspect output is inherently structured (nested sections), not a single
     // table — same tree exemption `deps` uses.
     fn print_plain(&self, data: &DataInterface) {
-        let (pinned, sections) = match &self.body {
-            Body::Candidates { pinned, candidates } => (pinned, vec![candidates_node(candidates)]),
-            Body::Manifest {
-                pinned,
-                metadata,
-                layers,
-                closure,
-            } => {
-                let mut sections = vec![metadata_node(metadata), layers_node(layers)];
-                if let Some(closure) = closure {
-                    sections.push(closure_node(closure));
-                }
-                (pinned, sections)
-            }
-            Body::Resolved {
-                pinned,
-                platform,
-                metadata,
-                layers,
-                resolution,
-                closure,
-            } => {
-                let mut sections = vec![
-                    metadata_node(metadata),
-                    layers_node(layers),
-                    resolution_node(resolution, platform),
-                ];
-                if let Some(closure) = closure {
-                    sections.push(closure_node(closure));
-                }
-                (pinned, sections)
-            }
-        };
-        let root = Node::identifier_branch(pinned.as_identifier().clone(), sections);
-        data.print_tree(&root);
+        data.print_tree(&self.tree());
     }
 }
 
@@ -947,10 +1019,9 @@ impl Printable for PackageInspect {
 /// JSON format: `{ platform?, packages: [...], env: [...] }`.
 ///
 /// `platform` is present only when the run actually selected a platform —
-/// `--resolve` / `--closure`, and always for `ocx inspect` (a lock entry
-/// resolves to its host leaf). Default-mode `ocx package inspect` lists an
-/// index's candidates without selecting, so there is no platform to report and
-/// `-p` stays inert, exactly as its help promises.
+/// `--resolve` / `--closure`, on either command. Default mode lists candidates
+/// without selecting, so there is no platform to report and `-p` stays inert,
+/// exactly as its help promises.
 ///
 /// `packages` is an **array**, not an object keyed by request string: entry
 /// order is meaningful (input order for `ocx package inspect`, selection order
@@ -993,7 +1064,7 @@ impl InspectReport {
     pub fn has_conflicts(&self) -> bool {
         self.packages.iter().any(|package| {
             let closure = match &package.body {
-                Body::Candidates { .. } => None,
+                Body::Candidates { .. } | Body::Locked { .. } => None,
                 Body::Manifest { closure, .. } | Body::Resolved { closure, .. } => closure.as_ref(),
             };
             closure.is_some_and(|closure| {
@@ -1204,6 +1275,109 @@ mod tests {
             env: vec![],
             binaries_complete,
         }
+    }
+
+    // ── Lock projection (`ocx inspect` default mode) ──────────────────────
+
+    /// The lock's platform-to-leaf map becomes the `candidates` array, one
+    /// entry per platform, each naming the pullable reference so a consumer
+    /// never splices `identifier` and `digest` by hand.
+    #[test]
+    fn json_locked_projects_every_platform_as_a_candidate() {
+        let platforms = std::collections::BTreeMap::from([
+            ("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64))),
+            ("darwin/arm64".to_string(), oci::Digest::Sha256("b".repeat(64))),
+        ]);
+        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+
+        assert_eq!(value["name"], "toolchain", "the entry names itself by binding");
+        assert_eq!(value["identifier"], "example.com/toolchain:1.0");
+        let candidates = value["candidates"].as_array().expect("candidates is an array");
+        assert_eq!(
+            candidates.iter().map(|c| c["platform"].as_str()).collect::<Vec<_>>(),
+            [Some("darwin/arm64"), Some("linux/amd64")],
+            "candidates follow the lock's canonical platform-key order: {candidates:?}"
+        );
+        assert_eq!(
+            candidates[1]["pinned"],
+            format!("example.com/toolchain:1.0@sha256:{}", "a".repeat(64)),
+            "each candidate is a pullable reference"
+        );
+    }
+
+    /// Nothing was selected, so nothing is pinned at the entry level and no
+    /// descriptor was read: `pinned_identifier`, `pinned_digest`, `media_type`
+    /// and `size` are all absent rather than faked.
+    ///
+    /// Absence is the signal — the same convention `ClosureDepOut.binaries`
+    /// uses. A zero size or an empty pinned string would read as a measured
+    /// value.
+    #[test]
+    fn json_locked_omits_what_the_lock_does_not_record() {
+        let platforms =
+            std::collections::BTreeMap::from([("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64)))]);
+        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+        let object = value.as_object().expect("top-level JSON is an object");
+
+        assert!(
+            !object.contains_key("pinned_identifier") && !object.contains_key("pinned_digest"),
+            "a lock projection selects no artifact, so it pins none: {value}"
+        );
+        let candidate = value["candidates"][0].as_object().expect("candidate is an object");
+        assert!(
+            !candidate.contains_key("media_type") && !candidate.contains_key("size"),
+            "the lock records leaf digests, not descriptors: {value}"
+        );
+    }
+
+    /// A lock projection roots its plain tree at the DECLARED identifier —
+    /// tag and all. The lock stores the bare repository, so rooting anywhere
+    /// lock-derived drops the `:tag` every other inspect view shows.
+    ///
+    /// Asserts on `tree()`, the node `print_plain` actually renders, not on a
+    /// hand-assembled equivalent.
+    #[test]
+    fn locked_plain_tree_roots_at_the_declared_identifier() {
+        let platforms =
+            std::collections::BTreeMap::from([("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64)))]);
+        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+
+        let root = report.tree();
+        assert_eq!(
+            root.identifier.as_ref().map(ToString::to_string),
+            Some("example.com/toolchain:1.0".to_string()),
+            "the root keeps the declared tag"
+        );
+        let mut text = Vec::new();
+        collect_node_text(&root, &mut text);
+        assert!(
+            text.iter().any(|entry| entry == "candidates"),
+            "the only section is the candidate listing: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|entry| entry.contains("iB") || entry.ends_with(" B")),
+            "no size annotation without a descriptor to read one from: {text:?}"
+        );
+    }
+
+    /// The `--resolve` sibling: where something WAS pinned, the tree roots at
+    /// the pinned identifier, so this test and the one above pin both sides of
+    /// `root_identifier`'s branch.
+    #[test]
+    fn resolved_plain_tree_roots_at_the_pinned_identifier() {
+        let root = pinned("toolchain", 'a');
+        let report = PackageInspect::new(
+            "toolchain".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, None),
+        );
+        assert_eq!(
+            report.tree().identifier.as_ref().map(ToString::to_string),
+            Some(format!("example.com/toolchain@sha256:{}", "a".repeat(64))),
+        );
     }
 
     // ── JSON projection ───────────────────────────────────────────────────
