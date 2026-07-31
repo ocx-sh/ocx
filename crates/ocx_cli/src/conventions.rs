@@ -236,6 +236,22 @@ pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
         .collect()
 }
 
+/// Exit code for an inspect run: 65 when the closure walk found a conflict.
+///
+/// Shared by both inspect commands. `DataError` is the code compose already
+/// returns for the identical condition (`DependencyError::Conflict`,
+/// `PackageErrorKind::EntrypointCollision`), so `ocx inspect --closure` exits
+/// exactly where `ocx run` over the same set would. The conflict detail stays
+/// in the payload — the exit code is the machine-readable half, not a
+/// replacement for it.
+pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectReport) -> std::process::ExitCode {
+    if report.has_conflicts() {
+        ocx_lib::cli::ExitCode::DataError.into()
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{export_ci, merge_tags_file, parse_tags_file, resolve_ci_arg, resolve_shell_arg};

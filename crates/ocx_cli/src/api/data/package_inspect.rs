@@ -982,6 +982,25 @@ impl InspectReport {
             env,
         }
     }
+
+    /// Every interface-projection conflict the closure walk detected, across
+    /// every entry.
+    ///
+    /// Empty means the selection is realizable. A non-empty result is what
+    /// drives the command's exit code — install/compose would hard-reject this
+    /// set, so inspect reports it AND exits non-zero rather than handing back a
+    /// green that hides an unusable surface.
+    pub fn has_conflicts(&self) -> bool {
+        self.packages.iter().any(|package| {
+            let closure = match &package.body {
+                Body::Candidates { .. } => None,
+                Body::Manifest { closure, .. } | Body::Resolved { closure, .. } => closure.as_ref(),
+            };
+            closure.is_some_and(|closure| {
+                !closure.conflicts.entrypoints.is_empty() || !closure.conflicts.repositories.is_empty()
+            })
+        })
+    }
 }
 
 impl Serialize for InspectReport {

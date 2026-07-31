@@ -438,3 +438,72 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     assert "LEAF_B_SECRET" not in insp_private_keys, insp_private_keys
     assert "LEAF_B_SECRET" not in env_self_keys, env_self_keys
 
+
+def test_inspect_closure_entrypoint_conflict_reports_payload_and_exits_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """An unrealizable surface is reported in full AND exits 65.
+
+    Two public deps claim the same entrypoint name, which
+    ``composer::check_entrypoints`` hard-rejects at install/compose time with
+    ``EntrypointCollision`` -> ``DataError``. ``inspect --closure`` sees the same
+    condition without installing, so it exits with the same code — while still
+    emitting the populated ``closure.conflicts.entrypoints`` a caller needs to
+    act on. Payload and exit code are asserted together on purpose: either one
+    alone would pass if the other regressed.
+    """
+    first = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_ep_a", tmp_path, entrypoints=["clash"], tag="1.0.0",
+    )
+    second = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_ep_b", tmp_path, entrypoints=["clash"], tag="1.0.0",
+    )
+    root = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        binaries=[],
+        dependencies=[
+            _dep_entry(ocx, first, visibility="public"),
+            _dep_entry(ocx, second, visibility="public"),
+        ],
+    )
+
+    import json as _json
+
+    result = ocx.run("package", "inspect", "--closure", root.short, check=False)
+
+    assert result.returncode == 65, (
+        f"an unrealizable surface must exit 65 (DataError), got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+
+    data = inspect_entry(_json.loads(result.stdout), root.short)
+    conflicts = data["closure"]["conflicts"]["entrypoints"]
+    assert conflicts, "the conflict must still be reported in the payload, not just via the exit code"
+    assert conflicts[0]["name"] == "clash"
+    assert len(conflicts[0]["packages"]) == 2, conflicts
+
+
+def test_inspect_closure_without_conflicts_exits_zero(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The green half of the exit-code contract: a realizable surface stays 0.
+
+    Pairs with the 65 case above so neither outcome is the only one ever
+    observed — a check that can only go one way is not a check.
+    """
+    dep = make_package_with_entrypoints(
+        ocx, f"{unique_repo}_ep_solo", tmp_path, entrypoints=["solo"], tag="1.0.0",
+    )
+    root = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        binaries=[],
+        dependencies=[_dep_entry(ocx, dep, visibility="public")],
+    )
+
+    import json as _json
+
+    result = ocx.run("package", "inspect", "--closure", root.short, check=False)
+
+    assert result.returncode == 0, f"a realizable surface must exit 0\nstderr: {result.stderr}"
+    data = inspect_entry(_json.loads(result.stdout), root.short)
+    assert data["closure"]["conflicts"] == {"entrypoints": [], "repositories": []}

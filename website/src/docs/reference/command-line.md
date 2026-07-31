@@ -2530,7 +2530,7 @@ JSON output is one envelope — `{ platform?, packages, env }` — whose `packag
 
 - `-p`, `--platform <PLATFORM>`: Platform to select. Applies with `--resolve` and `--closure`; ignored in default mode (the candidate list always shows every platform).
 - `--resolve`: Platform-select through the index and emit the resolution chain — the pinned identifier and the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size) — alongside the metadata and layers (the layers are shown for the selected manifest in both default and `--resolve` mode).
-- `--closure`: Compute the metadata-only dependency closure without installing. Adds one `closure` object to JSON output — `deps` (the transitive dependencies, in transitive-closure order) and `surface` (the `interface` and `private` projections) — and a matching `closure` branch to the plain-text tree. Combining `--closure` with `--resolve` on an image-index reference is redundant but harmless — the platform selection `--closure` already performs is the same one `--resolve` performs.
+- `--closure`: Compute the metadata-only dependency closure without installing. Adds one `closure` object to JSON output — `deps` (the transitive dependencies, in transitive-closure order) and `surface` (the `interface` and `private` projections) — and a matching `closure` branch to the plain-text tree. Combining `--closure` with `--resolve` on an image-index reference is redundant but harmless — the platform selection `--closure` already performs is the same one `--resolve` performs. A non-empty `closure.conflicts` exits 65 while still reporting the conflict.
 - `--env <KEY[:TYPE]=VALUE>`: Set an environment variable for this invocation, surfaced in the report's `env` array. Repeatable. Per-invocation only — this command still reads no `ocx.toml`; for a project's declared environment use [`ocx inspect`](#inspect).
 - `-h`, `--help`: Print help information.
 
@@ -2699,7 +2699,7 @@ Each surface carries three attributed arrays plus a completeness flag:
 
 `closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable.
 
-
+A non-empty `conflicts` exits **65** (`DataError`) while still reporting the condition in full — the payload is what a caller reads to act, the exit code is what a pipeline branches on. 65 is the same code install/compose already returns when it hard-rejects the identical condition, so `inspect --closure` exits exactly where the corresponding `ocx run` would.
 
 **Examples**
 

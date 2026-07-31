@@ -46,6 +46,10 @@ use crate::{conventions, options};
 /// `-p/--platform` applies with `--resolve` and `--closure`. Honors the global
 /// `--offline` / `--remote` / `--format` flags. JSON is the primary consumer
 /// surface (OCX is a backend tool).
+///
+/// Exits 65 when `--closure` finds a conflict that would make the surface
+/// unrealizable — the conflict is still reported in full, so a caller reads the
+/// detail from the payload and branches on the exit code.
 #[derive(Parser)]
 pub struct PackageInspect {
     #[clap(flatten)]
@@ -129,7 +133,7 @@ impl PackageInspect {
         let report = InspectReport::new(selected_platform, packages, conventions::env_entries(&env_overrides));
         context.api().report(&report)?;
 
-        Ok(ExitCode::SUCCESS)
+        Ok(conventions::inspect_exit_code(&report))
     }
 }
 
