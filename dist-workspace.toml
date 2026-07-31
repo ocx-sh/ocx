@@ -28,7 +28,7 @@ plan-jobs = ["./verify-version"]
 post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", "./docker-publish"]
 # Extra permissions for custom jobs. The override REPLACES the defaults, so
 # every scope the called workflow needs must be listed.
-github-custom-job-permissions = { docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" } }
+github-custom-job-permissions = { docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" }, post-release-oci-publish = { contents = "read", packages = "write" } }
 # No `include` for LICENSE-THIRD-PARTY.md: dist's auto-include glob is a
 # prefix match on `LICENSE*`, so it already lands in every archive. Listing
 # it explicitly puts it in twice (verified with `dist plan`).
