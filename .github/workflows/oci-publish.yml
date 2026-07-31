@@ -75,13 +75,13 @@ on:
           with. Absent (fork build, dev publish) means publish without announcing.
         required: false
 
-permissions:
-  contents: read
-  # GHCR push authenticates as GITHUB_TOKEN. A reusable workflow can only narrow
-  # the caller's grant, so this scope must be listed here AND granted by the
-  # caller — for release.yml that is `github-custom-job-permissions` in
-  # dist-workspace.toml, since the file itself is generated.
-  packages: write
+# No `permissions:` block on purpose. This workflow has two callers wanting
+# different scopes — the release path needs `packages: write` for the GHCR push,
+# the dev path pushes to dev.ocx.sh with its own registry credential and needs
+# nothing. A declaration here caps BOTH (a called workflow can only narrow its
+# caller's grant, never widen it), so a shared value would either strip the
+# release push's scope or hand the dev push one it has no use for. Each caller
+# declares what it needs instead.
 
 jobs:
   publish:
