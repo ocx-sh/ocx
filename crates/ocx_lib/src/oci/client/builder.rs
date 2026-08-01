@@ -27,6 +27,49 @@ pub(crate) const MAX_UPLOAD_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 /// progress granularity, this governs request size.
 pub(crate) const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024;
 
+/// Bound on every registry HTTP request, mapped to
+/// [`reqwest::ClientBuilder::read_timeout`].
+///
+/// # Two semantics, not one
+///
+/// The name `read_timeout` undersells it. reqwest creates the sleep at dispatch
+/// and resets it only per *response-body* frame, so one value governs two
+/// different things:
+///
+/// - **Per-frame idle bound** on the response body. An honest slow download is
+///   unaffected however long it runs, as long as frames keep arriving; a body
+///   that goes quiet for this long is treated as dead.
+/// - **Hard deadline** on everything before the first body frame: connect, TLS
+///   handshake, request-body upload, the whole redirect chain, and the
+///   registry's time-to-first-response-byte. None of these reset the sleep.
+///
+/// # Why 120 s
+///
+/// The goal is a bounded hang, not a tight SLA — the fork defaults this to
+/// `None`, which hangs forever, and nothing on the pull path retries
+/// (`pull_local.rs` propagates with `?`). So the value only has to be small
+/// enough to fail eventually and large enough that no honest transfer trips it.
+///
+/// The binding constraint is the *upload* half, where the deadline is hard: a
+/// [`PUSH_CHUNK_SIZE`] (3 MiB) `PATCH` must complete inside it, which at 120 s
+/// needs ~26 KiB/s of sustained uplink — below any link that could publish at
+/// all. At 30 s the same chunk demands ~105 KiB/s, which a domestic uplink or a
+/// throttled CI runner misses. The empty-body committing `PUT ?digest=` is the
+/// other case: the registry does its whole-blob commit server-side before
+/// answering, and that wait is time-to-first-byte, i.e. deadline, not idle.
+/// 120 s sits in the same neighbourhood as containerd's 5-minute default.
+///
+/// # Relation to the pull-path drain
+///
+/// Bounded-hang complement to the trailer drain in `Client::pull_layer`: a
+/// registry that stalls mid-body — including after the tar's end-of-archive
+/// marker but before the drain has pulled the codec trailer — now surfaces an
+/// error instead of blocking the pull forever. Mid-download it lands as
+/// [`ClientError::ShortBlobRead`](super::error::ClientError::ShortBlobRead) via
+/// the completeness discriminator: `TempFail` (75), retryable, which is the
+/// correct taxonomy for a transport that went quiet.
+pub(crate) const REGISTRY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
@@ -41,6 +84,7 @@ impl ClientBuilder {
             auth: auth::Auth::default(),
             config: oci::native::ClientConfig {
                 push_chunk_size: PUSH_CHUNK_SIZE,
+                read_timeout: Some(REGISTRY_READ_TIMEOUT),
                 // CA roots are seeded by the fork's `ClientConfig::default()`
                 // (self-contained on hosts with no system trust store), inherited
                 // here via `..Default::default()`. Single source of truth: the fork.
@@ -796,6 +840,145 @@ mod push_wire_tests {
         assert_eq!(
             puts[0].body_len, total,
             "the committing PUT must carry the whole blob — a resuming fallback would commit bytes the registry never stored"
+        );
+    }
+}
+
+/// Registry read timeout — a registry that goes quiet mid-body, or never answers
+/// at all, must not hang the pull.
+///
+/// The fork defaults `read_timeout` to `None`, so before this bound a stalled
+/// response body blocked forever. Nothing above the transport can recover from
+/// that: the drain in `Client::pull_layer` is itself a read, so a stall between
+/// the tar's end-of-archive marker and the codec trailer hangs *inside* the
+/// bounded-hang fix rather than around it.
+#[cfg(test)]
+mod read_timeout_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    /// A registry that answers the handshake, starts a blob body, then goes
+    /// silent without closing the connection.
+    ///
+    /// Silent-but-open is the case a timeout is needed for at all — a close
+    /// yields EOF, which every layer above already handles. The declared
+    /// `Content-Length` deliberately exceeds what is written, so the client has
+    /// every reason to keep waiting.
+    async fn start_stalling_registry() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = socket.into_split();
+                    let mut reader = tokio::io::BufReader::new(read_half);
+
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    // Drain headers up to the blank line.
+                    loop {
+                        let mut header = String::new();
+                        match reader.read_line(&mut header).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) if header.trim_end().is_empty() => break,
+                            Ok(_) => {}
+                        }
+                    }
+
+                    let target = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if !target.contains("/blobs/") {
+                        // Auth ping and anything else: answer normally so the
+                        // request under test is the blob body, not the handshake.
+                        let _ = write_half
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                        return;
+                    }
+
+                    // Promise far more than is delivered, hand over a few bytes,
+                    // then stall while holding the socket open.
+                    let _ = write_half
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\nstalled")
+                        .await;
+                    let _ = write_half.flush().await;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        address
+    }
+
+    /// Reads a blob body from `address` through the real `NativeTransport`,
+    /// with `read_timeout` overridden so the test does not wait out the shipped
+    /// 30 s. The override rides the same `.config` field access
+    /// `push_through_production_client` already uses — no new knob.
+    async fn read_stalled_blob_with_timeout(address: &str, read_timeout: Duration) -> std::io::Result<u64> {
+        let mut config = ClientBuilder::new()
+            .plain_http_registries(vec![address.to_string()])
+            .config;
+        config.read_timeout = Some(read_timeout);
+
+        let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
+        let image: oci::native::Reference = format!("{address}/test/blob:latest").parse().unwrap();
+        let digest = crate::oci::Digest::Sha256("a".repeat(64));
+
+        let mut stream = crate::oci::client::transport::OciTransport::pull_blob_streaming(&transport, &image, &digest)
+            .await
+            .expect("the stub answers the blob GET, so opening the stream must succeed");
+        tokio::io::copy(&mut stream, &mut tokio::io::sink()).await
+    }
+
+    /// The shipped client must carry a read timeout. `None` — the fork's default
+    /// — is an unbounded hang, and it is invisible until a registry stalls in
+    /// production, which is exactly when nobody is looking at this file.
+    #[test]
+    fn production_client_config_carries_the_registry_read_timeout() {
+        assert_eq!(
+            ClientBuilder::new().config.read_timeout,
+            Some(REGISTRY_READ_TIMEOUT),
+            "ClientBuilder::new() must set read_timeout — inheriting the fork's None means a stalled registry hangs the pull forever"
+        );
+    }
+
+    /// End-to-end proof that the bound actually fires: a stalled body read
+    /// returns an error rather than blocking.
+    ///
+    /// The injected 2 s is not only the idle bound — it is also the deadline the
+    /// stub's *response head* must beat (see the const's "two semantics"). A
+    /// value tight enough to be fast is therefore a value an oversubscribed
+    /// runner can trip before the test reaches its real assertion, surfacing as
+    /// a misdirecting failure on `pull_blob_streaming`. 2 s clears that with
+    /// room; the outer guard stays 5× it.
+    #[tokio::test]
+    async fn stalled_response_body_read_returns_instead_of_hanging() {
+        let address = start_stalling_registry().await;
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_stalled_blob_with_timeout(&address, Duration::from_secs(2)),
+        )
+        .await
+        .expect("a read timeout must end the stalled read — timing out here means the client hung");
+
+        let error = outcome.expect_err("a body that never completes must not read as a successful copy");
+        // reqwest wraps the timeout, so the outer `io::ErrorKind` is `Other`.
+        // Ask reqwest's own predicate rather than matching on the message.
+        let timed_out = std::iter::successors(std::error::Error::source(&error), |current| {
+            std::error::Error::source(*current)
+        })
+        .any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+        });
+        assert!(
+            timed_out,
+            "the stall must surface as a timeout somewhere in the source chain, got {error:?}"
         );
     }
 }

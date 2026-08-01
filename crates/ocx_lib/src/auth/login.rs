@@ -45,6 +45,10 @@ impl RegistryPing for OciClientPing {
         };
         let raw = RawClient::new(ClientConfig {
             protocol,
+            // Same per-read idle bound as the main client: a registry that
+            // accepts the connection and then goes quiet must not hang `ocx
+            // login` forever.
+            read_timeout: Some(oci::client::REGISTRY_READ_TIMEOUT),
             ..Default::default()
         });
         let auth = to_registry_auth(cred);

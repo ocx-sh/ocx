@@ -48,6 +48,9 @@ pub(crate) mod test_transport;
 mod transport;
 
 pub use builder::ClientBuilder;
+/// Re-exported so `auth::login`'s one-off ping client shares the single
+/// definition instead of picking its own idle bound.
+pub(crate) use builder::REGISTRY_READ_TIMEOUT;
 pub use mirror_map::MirrorMap;
 pub use transport::OciTransport;
 
