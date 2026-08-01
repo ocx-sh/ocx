@@ -821,8 +821,11 @@ fn classify_client_error(err: &crate::Error) -> ClientFailure {
 
 fn classify(client: &ClientError) -> ClientFailure {
     match client {
-        // Transient: registry-side failures and file I/O are both retryable.
-        ClientError::Registry(_) | ClientError::Io { .. } => ClientFailure::Transient,
+        // Transient: registry-side failures, file I/O, and an incomplete blob
+        // delivery are all retryable.
+        ClientError::Registry(_) | ClientError::Io { .. } | ClientError::ShortBlobRead { .. } => {
+            ClientFailure::Transient
+        }
         // Terminal auth failure — no retry.
         ClientError::Authentication(_) => ClientFailure::Auth,
         // 404-equivalent — no retry.
@@ -894,6 +897,16 @@ mod classify_tests {
         assert_transient(ClientError::Io {
             path: std::path::PathBuf::from("/tmp/test"),
             source: std::io::Error::other("disk"),
+        });
+    }
+
+    /// A blob that arrived short is a transfer fault, so the resolve loop must
+    /// retry it rather than treat it as terminal bad data.
+    #[test]
+    fn short_blob_read_is_transient() {
+        assert_transient(ClientError::ShortBlobRead {
+            expected: 1024,
+            actual: 512,
         });
     }
 

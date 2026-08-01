@@ -519,9 +519,13 @@ impl Client {
     ///   → tar::Archive::unpack()                // sync extraction (in spawn_blocking)
     /// ```
     ///
-    /// After the stream is fully consumed inside `spawn_blocking`, the
-    /// `HashingAsyncReader` digest is compared against the descriptor digest.
-    /// A mismatch returns [`ClientError::DigestMismatch`].
+    /// The tar extractor stops at the end-of-archive marker rather than at
+    /// stream end, so `spawn_blocking` drains the compressed remainder before
+    /// finalising — otherwise the digest would cover only the prefix tar asked
+    /// for. Two checks then run, in this order: fewer bytes than the descriptor
+    /// declares returns [`ClientError::ShortBlobRead`] (an incomplete delivery),
+    /// and a full-length blob whose hash differs returns
+    /// [`ClientError::DigestMismatch`] (the registry served wrong content).
     ///
     /// Callers are responsible for creating `output_dir` and writing the
     /// digest marker file.
@@ -682,6 +686,7 @@ impl Client {
         //   reader              → SyncIoBridge<Decoder<...>>
         //   .into_inner()       → Decoder<BufReader<ProgressReader<HashingAsyncReader<_>>>>
         //   .into_inner()       → BufReader<ProgressReader<HashingAsyncReader<_>>>
+        //   drain_compressed_remainder(..)   ← must run here, see its doc comment
         //   .into_inner()       → ProgressReader<HashingAsyncReader<_>>
         //   .into_inner()       → HashingAsyncReader<_>
         //   .finalize()         → (Digest, u64)
@@ -713,6 +718,47 @@ impl Client {
         // as a digest mismatch or internal tar error.
         let cap_with_probe = decompressed_cap.saturating_add(1);
 
+        /// Reads whatever compressed bytes the tar extractor left behind, so the
+        /// digest covers the whole blob instead of the prefix tar happened to want.
+        ///
+        /// `tar`'s entry iterator stops at the end-of-archive marker and hands the
+        /// reader back undrained, so the codec trailer (gzip's CRC+ISIZE footer,
+        /// xz's index + footer) and any post-terminator padding are usually still
+        /// unread. Those bytes never reach `HashingAsyncReader` unless they are
+        /// pulled deliberately — and whether they happened to ride the last buffer
+        /// fill depends on how the network segmented the response, which is what
+        /// made the resulting `DigestMismatch` non-deterministic.
+        ///
+        /// Drains the BUFFERED-COMPRESSED level, below the decoder: a decoder can
+        /// report decoded-EOF without having consumed its own trailing bytes, so
+        /// draining the decoded side would not reach them. Bounded by the outer
+        /// `take(blob_total_size)`, so a well-formed layer costs a few bytes and a
+        /// truncated one hits EOF immediately.
+        ///
+        /// Runs on the extraction-ERROR path too — that is load-bearing: wrong
+        /// bytes from a registry fail extraction with a format error, and the
+        /// digest is what attributes that to the registry (CWE-345) rather than
+        /// to a local archive problem. Skipped only on `cap_exceeded`, where the
+        /// caller returns `DecompressionCapExceeded` without ever consulting the
+        /// digest, so draining would just pull the rest of a known decompression
+        /// bomb's declared bytes into a sink.
+        ///
+        /// Swallows its own error on purpose: the caller decides the outcome from
+        /// `(bytes_read, digest)` — short delivery is `ShortBlobRead`, wrong
+        /// content is `DigestMismatch`. Propagating from here would let the fork's
+        /// `VerifyingStream` (which surfaces its digest error as an `io::Error` at
+        /// stream end, i.e. exactly during this drain) pre-empt the canonical check.
+        fn drain_compressed_remainder<R: tokio::io::AsyncRead + Unpin>(reader: R, cap_exceeded: bool) -> R {
+            if cap_exceeded {
+                return reader;
+            }
+            let mut bridge = SyncIoBridge::new(reader);
+            if let Err(error) = std::io::copy(&mut bridge, &mut std::io::sink()) {
+                log::debug!("draining the trailing compressed bytes failed: {error}");
+            }
+            bridge.into_inner()
+        }
+
         let (extract_result, digest_result, cap_exceeded): PipelineResult = match blob_compression {
             compression::CompressionAlgorithm::Lzma => {
                 let decoder = XzDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
@@ -730,7 +776,10 @@ impl Client {
                     //   bridge (Take<SyncIoBridge>) → into_inner() → SyncIoBridge
                     //     → into_inner() → Decoder → into_inner() → BufReader
                     //     → into_inner() → ProgressReader → into_inner() → HashingAsyncReader
-                    let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
+                    let buffered = bridge.into_inner().into_inner().into_inner();
+                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                        .into_inner()
+                        .into_inner();
                     (extract_result, hashing_reader.finalize(), cap_exceeded)
                 })
                 .await
@@ -743,7 +792,10 @@ impl Client {
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
                     let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
                     let cap_exceeded = bridge.limit() == 0;
-                    let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
+                    let buffered = bridge.into_inner().into_inner().into_inner();
+                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                        .into_inner()
+                        .into_inner();
                     (extract_result, hashing_reader.finalize(), cap_exceeded)
                 })
                 .await
@@ -758,7 +810,10 @@ impl Client {
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
                     let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
                     let cap_exceeded = bridge.limit() == 0;
-                    let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
+                    let buffered = bridge.into_inner().into_inner().into_inner();
+                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                        .into_inner()
+                        .into_inner();
                     (extract_result, hashing_reader.finalize(), cap_exceeded)
                 })
                 .await
@@ -783,6 +838,24 @@ impl Client {
             return Err(ClientError::DecompressionCapExceeded { cap: decompressed_cap });
         }
 
+        let (computed_digest, bytes_read) = digest_result;
+
+        // ── Delivery completeness ────────────────────────────────────
+        //
+        // Checked BEFORE the digest comparison, or the mismatch masks it: a
+        // prefix cannot hash to the whole, so an incomplete delivery is
+        // *guaranteed* to fail the digest check and would be reported as if the
+        // registry had served wrong content. `blob_total_size` is the
+        // manifest-verified declared size, and the drain above pulled every byte
+        // the transport was willing to hand over, so `bytes_read` short of it
+        // means the blob never arrived in full.
+        if bytes_read != blob_total_size {
+            return Err(ClientError::ShortBlobRead {
+                expected: blob_total_size,
+                actual: bytes_read,
+            });
+        }
+
         // ── Digest verification (canonical check) ────────────────────
         //
         // Perform the digest check BEFORE inspecting the extraction result.
@@ -794,10 +867,8 @@ impl Client {
         // the extraction error. Reporting DigestMismatch first correctly attributes
         // the failure to the registry serving wrong content.
         //
-        // The HashingAsyncReader accumulated bytes over everything read before
-        // extraction failed (or succeeded). Even a partial read produces a hash
-        // that does not match the expected digest, correctly triggering DigestMismatch.
-        let (computed_digest, _bytes_read) = digest_result;
+        // Reaching here means the whole declared blob was hashed, so a mismatch
+        // is about the bytes themselves — this variant means what its docs say.
         if computed_digest != layer_digest {
             return Err(ClientError::DigestMismatch {
                 expected: layer_digest.to_string(),
@@ -2511,21 +2582,21 @@ mod tests {
     // is a secondary check. Both produce ClientError::DigestMismatch.
 
     // (a) replaces verify_blob_digest_* coverage (a–e):
-    // Tampered stream via StubTransport/default path → ClientError::DigestMismatch
-    // (NOT ClientError::Io). The default pull_blob_streaming path uses
-    // HashingAsyncReader as sole verifier, so this exercises that path.
+    // Tampered stream via StubTransport → ClientError::DigestMismatch
+    // (NOT ClientError::Io). StubTransport does no verification of its own, so
+    // HashingAsyncReader is the sole verifier on this path.
     /// spec §D2 threat model: stream hash catches registry serving different bytes.
     /// This test verifies that `pull_layer` surfaces the canonical
-    /// `HashingAsyncReader` digest check on the default stub path.
+    /// `HashingAsyncReader` digest check on the stub path.
     #[tokio::test]
-    async fn streaming_tampered_blob_via_default_stub_path_yields_digest_mismatch() {
+    async fn streaming_tampered_blob_via_stub_path_yields_digest_mismatch() {
         // replaces verify_blob_digest_* coverage (a): tampered stream → DigestMismatch (NOT Io)
-        // on the Stub/default-impl path.
+        // on the Stub path.
         //
-        // The default pull_blob_streaming delegates to pull_blob_to_file then streams
-        // the file back. HashingAsyncReader in the assembled pipeline verifies the
-        // digest. A mismatch must surface as ClientError::DigestMismatch, not
-        // ClientError::Io or any other variant.
+        // StubTransport streams the blob map's bytes verbatim; HashingAsyncReader
+        // in the assembled pipeline is what verifies the digest. A mismatch must
+        // surface as ClientError::DigestMismatch, not ClientError::Io or any
+        // other variant.
         let claimed_digest = format!("sha256:{}", "a".repeat(64));
         let evil_bytes = b"bytes that definitely do not hash to all-a".to_vec();
         // The descriptor size must be the real served byte length so the
@@ -2653,7 +2724,7 @@ mod tests {
         // replaces T-A4 (pull_layer_rejects_tampered_blob_under_configured_mirror):
         // mirror-path invariant restated for streaming pipeline.
         //
-        // The StubTransport default pull_blob_streaming path funnels through
+        // The StubTransport pull_blob_streaming path funnels through
         // HashingAsyncReader in pull_layer. Adding a MirrorMap does NOT change
         // which verifier runs — the OCX-side verifier always fires, regardless
         // of what URL the transport uses internally.
@@ -2969,6 +3040,233 @@ mod tests {
         );
     }
 
+    // ── Undrained-stream regression (compressed-side digest) ─────────
+    //
+    // `tar`'s iterator stops at the end-of-archive marker, so the bytes after it
+    // — the codec trailer, plus any padding — are only hashed if the pipeline
+    // pulls them deliberately. Whether they happened to ride the last buffer
+    // fill is a property of network segmentation, which is why the production
+    // failure was a re-run lottery. `blob_stream_chunks` pins the boundary so
+    // the three outcomes are decidable.
+
+    /// A well-formed gzip layer whose 8-byte trailer arrives in a chunk the tar
+    /// extractor never demands must still pull successfully: the pipeline drains
+    /// the compressed remainder before finalising, so the digest covers the whole
+    /// blob rather than the prefix tar happened to read.
+    ///
+    /// Deterministic reproduction of the production `DigestMismatch` on
+    /// [ocx-contrib/mirror-bazelbuild run 30713887936].
+    #[tokio::test]
+    async fn pull_layer_succeeds_when_codec_trailer_arrives_in_final_chunk() {
+        let tar_gz_bytes = make_minimal_tar_gz(b"trailer split\n", "topdir/bin/tool");
+        let digest_str = Algorithm::Sha256.hash(&tar_gz_bytes).to_string();
+
+        // gzip's footer is the last 8 bytes (CRC32 + ISIZE). The deflate stream
+        // in chunk 1 already decodes to the complete tar, terminator included,
+        // so the extractor stops without ever asking for chunk 2.
+        let split = tar_gz_bytes.len() - 8;
+        let chunks = vec![tar_gz_bytes[..split].to_vec(), tar_gz_bytes[split..].to_vec()];
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_gz_bytes.clone());
+        data.write().blob_stream_chunks.insert(digest_str.clone(), chunks);
+        let client = stub(&data);
+
+        let id = test_pinned(digest_str.strip_prefix("sha256:").unwrap());
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: digest_str.clone(),
+            size: tar_gz_bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        client
+            .pull_layer(&id, &layer, dir.path())
+            .await
+            .expect("a trailer left in the final chunk must be drained, not reported as a digest mismatch");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("content/topdir/bin/tool")).unwrap(),
+            b"trailer split\n",
+            "the layer must still extract correctly"
+        );
+    }
+
+    /// Same property on the xz arm: an xz stream ends with an index plus a
+    /// 12-byte footer that the decoder needs only for verification, never to
+    /// produce output, so tar stops before they are read. Guards the Lzma arm's
+    /// drain call, which the gzip test cannot reach.
+    #[tokio::test]
+    async fn pull_layer_succeeds_when_xz_trailer_arrives_in_final_chunk() {
+        let tar_bytes = make_minimal_tar(b"xz trailer split\n", "topdir/bin/tool");
+        let tar_xz_bytes = compress_xz_bytes(&tar_bytes);
+        let digest_str = Algorithm::Sha256.hash(&tar_xz_bytes).to_string();
+
+        // The xz stream footer is 12 bytes; the index sits immediately before it.
+        // Holding both back proves the drain reaches them, since the LZMA2 block
+        // in chunk 1 already decodes to the whole tar.
+        const XZ_TRAILER: usize = 12;
+        let split = tar_xz_bytes.len() - XZ_TRAILER;
+        let chunks = vec![tar_xz_bytes[..split].to_vec(), tar_xz_bytes[split..].to_vec()];
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_xz_bytes.clone());
+        data.write().blob_stream_chunks.insert(digest_str.clone(), chunks);
+        let client = stub(&data);
+
+        let id = test_pinned(digest_str.strip_prefix("sha256:").unwrap());
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_XZ.to_string(),
+            digest: digest_str.clone(),
+            size: tar_xz_bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        client
+            .pull_layer(&id, &layer, dir.path())
+            .await
+            .expect("an xz footer left in the final chunk must be drained, not reported as a digest mismatch");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("content/topdir/bin/tool")).unwrap(),
+            b"xz trailer split\n",
+            "the layer must still extract correctly"
+        );
+    }
+
+    /// Same property on the zstd arm. A zstd frame's content checksum is the
+    /// last 4 bytes and is verification-only, so — like gzip's CRC footer — the
+    /// decoder produces the whole tar without it. Guards the Zstd arm's drain
+    /// call, which neither the gzip nor the xz test can reach.
+    #[tokio::test]
+    async fn pull_layer_succeeds_when_zstd_trailer_arrives_in_final_chunk() {
+        let tar_zst_bytes = compress_zstd_bytes(&make_minimal_tar(b"zstd trailer split\n", "topdir/bin/tool"));
+        let digest_str = Algorithm::Sha256.hash(&tar_zst_bytes).to_string();
+
+        // The frame's content checksum (enabled in the helper) is the trailing
+        // 4 bytes; the last block before it is already flagged final.
+        const ZSTD_CHECKSUM: usize = 4;
+        let split = tar_zst_bytes.len() - ZSTD_CHECKSUM;
+        let chunks = vec![tar_zst_bytes[..split].to_vec(), tar_zst_bytes[split..].to_vec()];
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_zst_bytes.clone());
+        data.write().blob_stream_chunks.insert(digest_str.clone(), chunks);
+        let client = stub(&data);
+
+        let id = test_pinned(digest_str.strip_prefix("sha256:").unwrap());
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_ZSTD.to_string(),
+            digest: digest_str.clone(),
+            size: tar_zst_bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        client
+            .pull_layer(&id, &layer, dir.path())
+            .await
+            .expect("a zstd checksum left in the final chunk must be drained, not reported as a digest mismatch");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("content/topdir/bin/tool")).unwrap(),
+            b"zstd trailer split\n",
+            "the layer must still extract correctly"
+        );
+    }
+
+    /// The trust anchor is not weakened by the drain: a full-length blob whose
+    /// content does not hash to the declared digest is still `DigestMismatch`
+    /// (CWE-345), never `ShortBlobRead`.
+    #[tokio::test]
+    async fn pull_layer_reports_digest_mismatch_for_wrong_full_length_content() {
+        // Valid gzip tar bytes, published under a digest they do not hash to —
+        // exactly what a registry serving substituted content looks like.
+        let tar_gz_bytes = make_minimal_tar_gz(b"substituted\n", "tool");
+        let wrong_digest = format!("sha256:{}", "a".repeat(64));
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(wrong_digest.clone(), tar_gz_bytes.clone());
+        let client = stub(&data);
+
+        let id = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: wrong_digest.clone(),
+            // Full declared length is served, so the short-read check must pass
+            // and leave the verdict to the digest comparison.
+            size: tar_gz_bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        match client.pull_layer(&id, &layer, dir.path()).await {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(expected, wrong_digest, "the declared digest must be reported");
+                assert_ne!(actual, wrong_digest, "the computed digest must differ");
+            }
+            Err(ClientError::ShortBlobRead { .. }) => {
+                panic!(
+                    "full-length wrong content must stay DigestMismatch — ShortBlobRead here would weaken the CWE-345 anchor"
+                )
+            }
+            other => panic!("expected DigestMismatch for wrong full-length content, got {other:?}"),
+        }
+    }
+
+    /// A stream that ends before the declared size is an incomplete delivery,
+    /// reported as `ShortBlobRead` — not as the registry having served wrong
+    /// content. Same fixture as the trailer test with the final chunk withheld,
+    /// so the two differ only in whether the remaining bytes exist at all.
+    #[tokio::test]
+    async fn pull_layer_reports_short_blob_read_for_truncated_stream() {
+        let tar_gz_bytes = make_minimal_tar_gz(b"truncated\n", "topdir/bin/tool");
+        let digest_str = Algorithm::Sha256.hash(&tar_gz_bytes).to_string();
+
+        let declared_size = tar_gz_bytes.len() as u64;
+        let split = tar_gz_bytes.len() - 8;
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_gz_bytes.clone());
+        // Only the prefix is ever delivered; the stream then ends.
+        data.write()
+            .blob_stream_chunks
+            .insert(digest_str.clone(), vec![tar_gz_bytes[..split].to_vec()]);
+        let client = stub(&data);
+
+        let id = test_pinned(digest_str.strip_prefix("sha256:").unwrap());
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: digest_str.clone(),
+            size: declared_size as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        match client.pull_layer(&id, &layer, dir.path()).await {
+            Err(ClientError::ShortBlobRead { expected, actual }) => {
+                assert_eq!(expected, declared_size, "expected must be the declared blob size");
+                assert_eq!(actual, split as u64, "actual must be the number of bytes delivered");
+            }
+            Err(ClientError::DigestMismatch { .. }) => {
+                panic!("a truncated delivery must not be attributed to the registry serving wrong content")
+            }
+            other => panic!("expected ShortBlobRead for a truncated stream, got {other:?}"),
+        }
+    }
+
     // ── Mid-stream interruption test (3.7) ─────────────────────────────
     //
     // spec §UX Scenario 1 error case: "If network is interrupted mid-stream,
@@ -3147,15 +3445,15 @@ mod tests {
     impl Unpin for InterruptingAsyncRead {}
 
     /// spec §UX Scenario 1 error case: mid-stream network interruption →
-    /// ClientError::Io (not DigestMismatch).
-    /// The streaming pipeline must propagate I/O errors as Io, not confuse them
-    /// with digest mismatches. The TempStore cleanup path handles temp dir cleanup.
+    /// `ClientError::ShortBlobRead` (not `DigestMismatch`).
+    /// The interruption is an incomplete delivery, and the byte count says so
+    /// exactly — it must not be attributed to the registry. The TempStore
+    /// cleanup path handles temp dir cleanup.
     #[tokio::test]
-    async fn mid_stream_network_interruption_yields_io_error_not_digest_mismatch() {
-        // spec §UX Scenario 1 error case: network interrupt → ClientError::Io.
-        // The InterruptingTransport writes partial bytes then returns ClientError::Io.
-        // The pull_layer pipeline must surface this as ClientError::Io (not DigestMismatch).
+    async fn mid_stream_network_interruption_yields_short_blob_read_not_digest_mismatch() {
+        // The InterruptingTransport yields partial bytes then errors mid-read.
         let partial_bytes = b"partial data before network cut".to_vec();
+        let partial_len = partial_bytes.len();
         let transport = InterruptingTransport {
             bytes_before_error: partial_bytes,
         };
@@ -3175,30 +3473,22 @@ mod tests {
 
         let result = client.pull_layer(&id, &layer, dir.path()).await;
 
-        // spec §UX Scenario 1 error case + spec §D1 digest-first ordering:
-        //
-        // With the streaming pipeline, mid-stream network interruption with
-        // non-matching bytes produces DigestMismatch (not Io) because the
-        // digest check runs before the extraction error check — and partial
-        // bytes produce a hash that doesn't match the declared digest. This is
-        // the correct CWE-345 behavior: wrong/partial bytes from the wire are
-        // treated as potential tampering, not as a network fault.
-        //
-        // A true "pure network interruption" (same bytes, just cut short)
-        // cannot be distinguished from CWE-345 tampering at the hash layer.
-        // DigestMismatch is the conservative (more secure) classification.
-        //
-        // We assert that pull_layer returns Err (never Ok) and that the error
-        // is either Io or DigestMismatch — not panic, not Ok.
+        // A cut stream and a lying registry are distinguishable after all: the
+        // declared size is manifest-verified, so `bytes_read` short of it is
+        // proof of an incomplete delivery, whereas the hash alone cannot tell
+        // the two apart (a prefix never matches either way). Asserting the exact
+        // variant — rather than tolerating a band of them — is what makes this a
+        // check on the discriminator instead of a check that something failed.
         match result {
-            Err(ClientError::Io { .. }) | Err(ClientError::DigestMismatch { .. }) => {
-                // Both are acceptable. DigestMismatch is the typical result
-                // because partial bytes don't match the declared digest.
-                // ClientError::Io is acceptable if the error propagates before
-                // the digest check (e.g. stream errors before any bytes read).
+            Err(ClientError::ShortBlobRead { expected, actual }) => {
+                assert_eq!(expected, 1024, "expected must be the declared descriptor size");
+                assert_eq!(
+                    actual, partial_len as u64,
+                    "actual must be the number of bytes that arrived before the cut"
+                );
             }
             Ok(()) => panic!("pull_layer must not succeed when stream errors mid-read"),
-            other => panic!("expected ClientError::Io or DigestMismatch for mid-stream interruption, got {other:?}"),
+            other => panic!("expected ClientError::ShortBlobRead for mid-stream interruption, got {other:?}"),
         }
 
         // spec §UX Scenario 1 cleanup contract:
@@ -3216,13 +3506,14 @@ mod tests {
     /// unlike Path A which errors before streaming begins via pull_blob_to_file.
     ///
     /// The InterruptingAsyncRead returns partial bytes then a ConnectionReset error.
-    /// The pipeline must return ClientError::Io (not DigestMismatch, not panic).
+    /// The pipeline must return `ClientError::ShortBlobRead` (not `DigestMismatch`,
+    /// not panic) — the bytes that did arrive fall short of the declared size.
     #[tokio::test]
-    async fn mid_stream_async_read_error_yields_io_not_digest_mismatch() {
+    async fn mid_stream_async_read_error_yields_short_blob_read_not_digest_mismatch() {
         // Path B (A8): pull_blob_streaming returns a stream that opens,
-        // yields partial bytes, then errors mid-read. The pipeline must
-        // propagate the I/O error as ClientError::Io.
+        // yields partial bytes, then errors mid-read.
         let partial_bytes = b"some partial gzip bytes".to_vec(); // not valid gzip — forces extraction error
+        let partial_len = partial_bytes.len();
         let transport = InterruptingTransport {
             bytes_before_error: partial_bytes,
         };
@@ -3242,27 +3533,21 @@ mod tests {
 
         let result = client.pull_layer(&id, &layer, dir.path()).await;
 
-        // After a mid-stream error with non-matching bytes, we expect either:
-        // - ClientError::Io (stream I/O error before digest could be verified), or
-        // - ClientError::DigestMismatch (bytes read before error don't match digest)
-        // What we must NOT get is Ok(()) with a successful extraction.
-        //
-        // The exact variant depends on the pipeline ordering: the
-        // digest check runs after extraction. With partial/invalid gzip bytes
-        // that don't match the declared digest, DigestMismatch is the
-        // expected result (partial-read hash ≠ expected digest). But if the
-        // AsyncRead error fires during decompression before finalize, the error
-        // propagates as ClientError::Io or is wrapped in an archive error that
-        // maps to ClientError::Io via the extraction error path. Both are
-        // acceptable — what matters is that Ok(()) is never returned.
+        // The gzip header is invalid, so extraction fails too — but the
+        // completeness check runs first and is the more precise answer: the
+        // stream ended short of the declared size. Attributing this to the
+        // registry (DigestMismatch) would send the operator hunting a
+        // supply-chain incident that never happened.
         match &result {
             Ok(()) => panic!("pull_layer must not succeed with a mid-stream error and invalid bytes"),
-            Err(ClientError::Io { .. })
-            | Err(ClientError::DigestMismatch { .. })
-            | Err(ClientError::Internal { .. }) => {
-                // expected — error was propagated (not swallowed)
+            Err(ClientError::ShortBlobRead { expected, actual }) => {
+                assert_eq!(*expected, 1024, "expected must be the declared descriptor size");
+                assert_eq!(
+                    *actual, partial_len as u64,
+                    "actual must be the number of bytes that arrived before the cut"
+                );
             }
-            Err(other) => panic!("unexpected error type for mid-stream AsyncRead error: {other:?}"),
+            Err(other) => panic!("expected ClientError::ShortBlobRead for mid-stream AsyncRead error, got {other:?}"),
         }
 
         // output_dir must still exist (TempStore owns cleanup).
@@ -3274,20 +3559,33 @@ mod tests {
 
     // ── Test helpers for (d) and (e) ─────────────────────────────────
 
+    /// Builds a minimal valid (uncompressed) tar archive containing one file.
+    fn make_minimal_tar(content: &[u8], filename: &str) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, filename, content).unwrap();
+        tar.into_inner().unwrap()
+    }
+
     /// Builds a minimal valid tar.gz archive containing one file.
     fn make_minimal_tar_gz(content: &[u8], filename: &str) -> Vec<u8> {
-        let mut buf = Vec::new();
-        {
-            let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let mut header = tar::Header::new_gnu();
-            header.set_size(content.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append_data(&mut header, filename, content).unwrap();
-            tar.into_inner().unwrap().finish().unwrap();
-        }
-        buf
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&make_minimal_tar(content, filename)).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Compresses `bytes` with zstd, content checksum ON so the frame ends in a
+    /// 4-byte verification-only trailer (the zstd analogue of gzip's CRC footer).
+    fn compress_zstd_bytes(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = zstd::Encoder::new(Vec::new(), 1).expect("zstd encoder");
+        encoder.include_checksum(true).expect("checksum flag");
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
     }
 
     /// Compresses `bytes` with XZ (single-threaded lzma2, preset 1) for test (e).

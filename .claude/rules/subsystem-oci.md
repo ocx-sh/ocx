@@ -400,10 +400,32 @@ transport.pull_blob_streaming → .take(layer.size) → HashingAsyncReader(algo)
   → ProgressReader → XzDecoder/GzDecoder → SyncIoBridge → tar::Archive::unpack()
 ```
 
-After stream end, `HashingAsyncReader::finalize()` compares the computed digest against
-the descriptor digest **before** returning any extraction error. Wrong bytes (CWE-345)
-cause a tar format error, but the digest mismatch is surfaced first (`DigestMismatch`,
-not `Internal`) — retrying usually heals transient corruption.
+**Drain before finalize.** `tar`'s iterator stops at the end-of-archive marker and hands the
+reader back undrained, so the codec trailer (gzip's 8-byte CRC+ISIZE footer, xz's index +
+footer) and any post-terminator padding are typically still unread. `pull_layer` drains the
+**buffered-compressed** level (below the decoder — a decoder can report decoded-EOF without
+consuming its own trailing bytes) into `io::sink` before unwinding to `finalize()`. Without
+it the digest covers only the prefix tar happened to demand, and whether the trailer rode the
+last buffer fill is decided by network segmentation — a non-deterministic `DigestMismatch`.
+The drain runs on the extraction-**error** path too — load-bearing, since the digest is what
+attributes a format error to the registry rather than to a local archive problem. It is skipped
+only when the decompressed cap was hit, where the caller returns `DecompressionCapExceeded`
+without ever consulting the digest and draining would just pull the rest of a known bomb's
+declared bytes into the sink. Bounded by `take(layer.size)`; swallows its own error, because the
+checks below judge the outcome.
+
+Post-drain checks, in order — cap → completeness → digest → extraction error:
+
+| Condition | Error | Meaning |
+|---|---|---|
+| `bytes_read != layer.size` | `ShortBlobRead` (exit 75, TempFail) | Incomplete delivery — transport truncation or an ocx-side short read. Retryable. |
+| digest ≠ descriptor digest | `DigestMismatch` (exit 65) | The registry served wrong content (CWE-345). |
+
+Completeness is checked **first, and must stay first**: a prefix cannot hash to the whole, so
+every incomplete delivery also fails the digest check and would otherwise be reported as a
+registry fault — making an ocx defect indistinguishable from a supply-chain attack in both
+directions. `DigestMismatch` is still surfaced before any extraction error: wrong bytes
+(CWE-345) cause a tar format error, but the mismatch is the security-relevant attribution.
 
 `NativeTransport::pull_blob_streaming` calls the fork's public `pull_blob_stream`, which
 wraps the response in `VerifyingStream` (mismatch → `io::Error(DigestError::VerificationError)`

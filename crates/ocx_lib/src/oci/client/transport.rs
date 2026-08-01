@@ -98,10 +98,13 @@ pub trait OciTransport: Send + Sync {
     /// # Default implementation
     ///
     /// The default implementation downloads the blob to a temporary file via
-    /// [`Self::pull_blob_to_file`] and then streams the file back. This keeps
-    /// [`StubTransport`](super::test_transport::StubTransport) in unit tests
-    /// compilable without any changes. The default path has no `VerifyingStream`
-    /// — `HashingAsyncReader` in `pull_layer` is the sole verifier there.
+    /// [`Self::pull_blob_to_file`] and then streams the file back, so an
+    /// implementor gets a working stream from `pull_blob_to_file` alone. It has
+    /// no `VerifyingStream` — `HashingAsyncReader` in `pull_layer` is the sole
+    /// verifier there. Overriding it is what gives an implementor control over
+    /// read boundaries (`NativeTransport` streams from the registry;
+    /// [`StubTransport`](super::test_transport::StubTransport) replays a
+    /// per-digest chunk plan).
     ///
     /// # Errors (from the returned reader)
     ///

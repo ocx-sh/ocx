@@ -285,7 +285,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
-| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |

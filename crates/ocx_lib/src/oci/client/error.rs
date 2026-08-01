@@ -18,6 +18,16 @@ pub enum ClientError {
     /// Fires for manifest digests and for verified blob digests.
     #[error("digest mismatch: expected '{expected}', got '{actual}'")]
     DigestMismatch { expected: String, actual: String },
+    /// The transport delivered fewer bytes than the manifest-declared blob size.
+    ///
+    /// Distinguishes an incomplete delivery (transport truncation, or an
+    /// ocx-side short read) from the registry serving wrong content
+    /// ([`ClientError::DigestMismatch`], CWE-345). Both produce a
+    /// non-matching hash — a prefix cannot hash to the whole — so without
+    /// this variant every incomplete transfer is reported as if the registry
+    /// had lied, in both directions.
+    #[error("short blob read: got {actual} of {expected} bytes")]
+    ShortBlobRead { expected: u64, actual: u64 },
     /// The decompressed output of a layer exceeded the decompression-bomb cap
     /// (CWE-400) before extraction completed. The compressed stream is rejected
     /// rather than allowed to exhaust disk. `cap` is the byte ceiling that was
@@ -188,6 +198,10 @@ impl ClassifyExitCode for ClientError {
             // 401/403 → AuthError, timeout → TempFail). For v1, treat every
             // registry operation failure as Unavailable.
             Self::Registry(_) => ExitCode::Unavailable,
+            // An incomplete delivery is a transfer fault, not malformed data:
+            // the same pull usually succeeds on retry, so it is TempFail rather
+            // than DataError.
+            Self::ShortBlobRead { .. } => ExitCode::TempFail,
             Self::DigestMismatch { .. }
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
@@ -201,5 +215,34 @@ impl ClassifyExitCode for ClientError {
             | Self::InvalidEncoding(_) => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An incomplete delivery exits 75 (retry), the registry serving wrong
+    /// content exits 65 (terminal). Asserting both pins the *distinction* —
+    /// folding `ShortBlobRead` into the `DataError` bucket would make a
+    /// transient truncation look like a supply-chain failure to `case $?`.
+    #[test]
+    fn short_blob_read_is_temp_fail_while_digest_mismatch_stays_data_error() {
+        assert_eq!(
+            ClientError::ShortBlobRead {
+                expected: 1024,
+                actual: 512,
+            }
+            .classify(),
+            Some(ExitCode::TempFail)
+        );
+        assert_eq!(
+            ClientError::DigestMismatch {
+                expected: "sha256:aaa".to_string(),
+                actual: "sha256:bbb".to_string(),
+            }
+            .classify(),
+            Some(ExitCode::DataError)
+        );
     }
 }

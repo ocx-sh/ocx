@@ -76,12 +76,22 @@ impl DigestState {
 ///
 /// # Ordering note (`pull_layer` governs)
 ///
-/// `pull_layer` calls `finalize()` even when extraction fails (e.g. invalid
-/// gzip header), then compares the partial-read digest against the expected
-/// one before propagating the extraction error. This is deliberate: wrong bytes
-/// from a misbehaving registry cause extraction to fail with a format error;
-/// reporting `DigestMismatch` first correctly attributes the failure to the
-/// registry (CWE-345), not a local archive problem.
+/// A running digest is only a whole-blob digest if the whole blob is read.
+/// `pull_layer` therefore **drains** the compressed stream to EOF after tar
+/// extraction — tar stops at the end-of-archive marker and leaves the codec
+/// trailer unread — and only then calls `finalize()`, even when extraction
+/// failed (e.g. invalid gzip header).
+///
+/// It then discriminates in this order:
+///
+/// 1. `bytes_read` short of the manifest-declared size → `ShortBlobRead`. The
+///    blob never arrived in full, so its digest was never in question; checking
+///    the hash first would mask every incomplete delivery as a registry fault.
+/// 2. Digest mismatch → `DigestMismatch`, ahead of any extraction error. Wrong
+///    bytes from a misbehaving registry cause extraction to fail with a format
+///    error; reporting the mismatch first correctly attributes the failure to
+///    the registry (CWE-345), not to a local archive problem.
+/// 3. Extraction error.
 ///
 /// # Example
 ///

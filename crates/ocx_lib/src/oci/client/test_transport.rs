@@ -31,6 +31,14 @@ pub(crate) struct StubTransportInner {
     pub manifest_delays: HashMap<String, std::time::Duration>,
     /// Digest string → blob bytes (written to file by `pull_blob_to_file`).
     pub blobs: HashMap<String, Vec<u8>>,
+    /// Digest string → read-boundary plan for `pull_blob_streaming`.
+    ///
+    /// When a plan exists for a digest, the stub yields exactly those chunks in
+    /// order, one per read, instead of the whole blob. Exists so a test can put
+    /// a layer's codec trailer in a chunk the tar extractor never demands —
+    /// the shape a real network produces by chance, and the one that decides
+    /// whether the compressed-side digest covers the whole blob or a prefix.
+    pub blob_stream_chunks: HashMap<String, Vec<Vec<u8>>>,
     /// Digest returned by `fetch_manifest_digest`.
     pub digest: Option<String>,
     /// Successive results for push operations (consumed FIFO).
@@ -246,6 +254,34 @@ impl OciTransport for StubTransport {
             })?;
         }
         Ok(())
+    }
+
+    async fn pull_blob_streaming(
+        &self,
+        _image: &oci::native::Reference,
+        digest: &oci::Digest,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>> {
+        let digest_key = digest.to_string();
+        self.record(&format!("pull_blob_streaming:{digest_key}"));
+        // Overriding the trait default (temp file round-trip) is what makes read
+        // boundaries controllable. Without a plan the whole blob is one chunk,
+        // which is what the default delivers on its first fill anyway.
+        let chunks = {
+            let inner = self.data.read();
+            inner
+                .blob_stream_chunks
+                .get(&digest_key)
+                .cloned()
+                .unwrap_or_else(|| vec![inner.blobs.get(&digest_key).cloned().unwrap_or_default()])
+        };
+        // `StreamReader` hands out at most one stream item per `poll_read`, so
+        // each planned chunk is exactly one read at the pipeline's bottom.
+        let stream = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(chunk))),
+        );
+        Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
     }
 
     async fn push_manifest(&self, _image: &oci::native::Reference, _manifest: &oci::Manifest) -> Result<String> {
