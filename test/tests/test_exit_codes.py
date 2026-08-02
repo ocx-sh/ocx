@@ -18,14 +18,12 @@ removed automatically the moment the product catches up:
   successfully parses and the install fails later as `NotFound` (79). Triggering
   `IdentifierError` at parse time requires either a stricter parser or a test
   fixture that can inject a pre-parsed `IdentifierError` through the CLI.
-- 69 (Unavailable): `ocx index update` logs errors per-package and exits 0;
-  `ocx install` against an unroutable host surfaces as `AuthError` (80) because
-  the transport interprets the connection failure as an auth failure. Neither
-  reliably produces `ClientError::Registry → Unavailable` via the CLI.
+- 69 (Unavailable): a registry that *answers*, just not usefully, is hard to
+  provoke from the CLI. An unroutable host never answers at all, so it is 75
+  (see below), not 69.
 
 Deferred codes (no reliable acceptance-test trigger available):
 - 74 (IoError): disk-full or read-failure not injectable from user tests.
-- 75 (TempFail): rate-limit or transient-network failure not reliably injectable.
 - 77 (PermissionDenied): filesystem EPERM not reliably injectable without root.
 """
 from __future__ import annotations
@@ -80,10 +78,16 @@ class TestExitCodes:
             f"got {result.returncode}\nstderr: {result.stderr.strip()}"
         )
 
-    def test_exit_code_69_unavailable_on_unroutable_registry(
+    def test_exit_code_75_tempfail_on_unroutable_registry(
         self, ocx: OcxRunner
     ) -> None:
-        """Unroutable registry → ClientError::Registry → exit 69 (EX_UNAVAILABLE)."""
+        """Unroutable registry → ClientError::RegistryTransient → exit 75.
+
+        The connect never completed, so nothing about the request was answered
+        and the same command may succeed once the host is reachable. That is
+        exactly what 75 (EX_TEMPFAIL) promises a retrying wrapper, and what 69
+        would deny it.
+        """
         # Port 1 is reserved and unroutable on standard systems.
         env = {**ocx.env, "OCX_DEFAULT_REGISTRY": "127.0.0.1:1"}
         result = subprocess.run(
@@ -92,7 +96,7 @@ class TestExitCodes:
             text=True,
             env=env,
         )
-        assert result.returncode == 69, (
-            f"expected exit 69 (Unavailable) for unroutable registry, "
+        assert result.returncode == 75, (
+            f"expected exit 75 (TempFail) for unroutable registry, "
             f"got {result.returncode}\nstderr: {result.stderr.strip()}"
         )

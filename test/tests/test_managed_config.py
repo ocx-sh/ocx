@@ -384,10 +384,11 @@ def test_config_update_registry_down_leaves_snapshot_untouched(
     result = _run(ocx, "config", "update")
     # A hard connection-refused against `127.0.0.1:1` fails inside the OCI
     # client's `GET /v2/` auth ping at the transport (connect) layer -- the
-    # registry never answered, so it classifies as Unavailable (69), not a
-    # credentials failure (80).
-    assert result.returncode == 69, (
-        f"a connection-refused update classifies as Unavailable (69), got {result.returncode}: {result.stderr}"
+    # registry never answered, so it classifies as a transient fault (75), not
+    # a credentials failure (80). 75 rather than 69 because rerunning the same
+    # command once the host is reachable can succeed.
+    assert result.returncode == 75, (
+        f"a connection-refused update classifies as TempFail (75), got {result.returncode}: {result.stderr}"
     )
     assert snapshot_path.read_text() == before, (
         "a failed update must never partially overwrite the existing snapshot"

@@ -855,6 +855,7 @@ mod push_wire_tests {
 #[cfg(test)]
 mod read_timeout_tests {
     use super::*;
+    use crate::oci::client::error::ClientError;
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
@@ -979,6 +980,38 @@ mod read_timeout_tests {
         assert!(
             timed_out,
             "the stall must surface as a timeout somewhere in the source chain, got {error:?}"
+        );
+    }
+
+    /// The timeout must not only fire, it must land in the retryable bucket:
+    /// a registry that went quiet exits 75, not 69.
+    ///
+    /// This is the only way to exercise `registry_error`'s `is_timeout()` arm —
+    /// `reqwest::Error` has no public constructor, so a real stalled socket is
+    /// the sole source of one. `pull_blob` is the seam because it buffers the
+    /// body through the fork, which converts the stalled read into
+    /// `OciDistributionError::RequestError` before ocx maps it.
+    #[tokio::test]
+    async fn stalled_registry_read_timeout_classifies_as_transient() {
+        let address = start_stalling_registry().await;
+
+        let mut config = ClientBuilder::new().plain_http_registries(vec![address.clone()]).config;
+        config.read_timeout = Some(Duration::from_secs(2));
+        let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
+        let image: oci::native::Reference = format!("{address}/test/blob:latest").parse().unwrap();
+        let digest = crate::oci::Digest::Sha256("a".repeat(64));
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::oci::client::transport::OciTransport::pull_blob(&transport, &image, &digest),
+        )
+        .await
+        .expect("a read timeout must end the stalled pull — timing out here means the client hung");
+
+        let error = outcome.expect_err("a body that never completes must not read as a successful pull");
+        assert!(
+            matches!(error, ClientError::RegistryTransient(_)),
+            "a stalled registry must classify as RegistryTransient (TempFail/75), got {error:?}"
         );
     }
 }

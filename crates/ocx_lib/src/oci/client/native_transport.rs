@@ -53,65 +53,104 @@ impl NativeTransport {
         self.client
             .auth(image, &auth, operation)
             .await
-            .map_err(auth_or_availability_error)?;
+            .map_err(registry_error)?;
         Ok(())
     }
 }
 
-/// Classifies a failed auth ping. Only a registry that actually answered with a
-/// 401/403 (surfaced by `oci_client` as `AuthenticationFailure` /
-/// `UnauthorizedError`) is a genuine credentials failure
-/// ([`ClientError::Authentication`] → exit 80). Everything else is an
-/// availability problem ([`ClientError::Registry`] → exit 69):
-/// - connect / timeout (`RequestError`) — never reached the registry;
-/// - token-endpoint 5xx / 429 (`ServerError`, tagged in the patched
-///   `oci_client` `authenticate`) — the registry is unhealthy or rate-limiting;
-/// - an unparseable token body (`RegistryTokenDecodeError`).
-fn auth_or_availability_error(e: oci_client::errors::OciDistributionError) -> ClientError {
-    use oci_client::errors::OciDistributionError::{RegistryTokenDecodeError, RequestError, ServerError};
-    match &e {
-        RequestError(request) if request.is_connect() || request.is_timeout() => ClientError::Registry(Box::new(e)),
-        ServerError { .. } | RegistryTokenDecodeError(_) => ClientError::Registry(Box::new(e)),
-        _ => ClientError::Authentication(Box::new(e)),
-    }
-}
-
-fn registry_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ClientError {
-    ClientError::Registry(e.into())
-}
-
-/// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
-/// registry indicates the manifest does not exist (404 / MANIFEST_UNKNOWN),
-/// and falls back to [`ClientError::Registry`] for everything else.
-fn manifest_not_found_or_registry_error(
-    e: oci_client::errors::OciDistributionError,
-    image: &oci::native::Reference,
-) -> ClientError {
-    use oci_client::errors::OciDistributionError::*;
+/// Classifies any failed registry operation onto the [`ClientError`] taxonomy.
+///
+/// Three buckets, and the split that matters is the last two:
+/// [`ClientError::RegistryTransient`] (exit 75) promises the same command may
+/// succeed if it is run again, [`ClientError::Registry`] (exit 69) promises it
+/// will not, and [`ClientError::Authentication`] (exit 80) says the credentials
+/// are the problem. A connect that never completed and a request that timed out
+/// belong in the first: nothing about the request was ever answered, least of
+/// all the credentials.
+///
+/// # Two shapes carry the same status code
+///
+/// A 429 or a 403 reaches this function as *either* an enveloped
+/// `RegistryError` or a bare `ServerError`, depending on which fork code path
+/// produced it. `validate_registry_response` parses the OCI error envelope out
+/// of any 4xx body, but the push path's `extract_location_header` turns every
+/// non-`202` answer into a `ServerError` without ever looking at the body — so
+/// a 401 rejecting a chunk `PATCH` arrives as `ServerError { code: 401 }`.
+/// Both shapes must be classified or half the wire surface falls to the
+/// catch-all.
+///
+/// # Why auth is checked before rate limiting on an envelope
+///
+/// An envelope may carry several codes. Auth wins because the costs are
+/// asymmetric under retry: retrying a denial spends the budget and can trip an
+/// account lockout, while reading a rate limit as an auth failure only misnames
+/// a wait the caller was going to take anyway.
+///
+/// # Why only 429 / 502 / 503 / 504 are transient
+///
+/// The set is deliberately issue-scoped, not "every 5xx". A 500 is a server
+/// bug — a rerun hits the same bug, so it stays 69. A 408 is rare from a
+/// registry, and the case it would cover is already transient by another
+/// route: reqwest surfaces a client-side timeout as `RequestError`, matched
+/// above.
+fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
+    use oci_client::errors::OciDistributionError::{
+        AuthenticationFailure, RegistryError, RequestError, ServerError, UnauthorizedError,
+    };
     use oci_client::errors::OciErrorCode;
     match &e {
-        ImageManifestNotFoundError(_) => ClientError::ManifestNotFound(image.to_string()),
+        RequestError(request) if request.is_timeout() || request.is_connect() => {
+            ClientError::RegistryTransient(Box::new(e))
+        }
+        AuthenticationFailure(_) | UnauthorizedError { .. } => ClientError::Authentication(Box::new(e)),
+        ServerError { code: 401 | 403, .. } => ClientError::Authentication(Box::new(e)),
+        ServerError {
+            code: 429 | 502 | 503 | 504,
+            ..
+        } => ClientError::RegistryTransient(Box::new(e)),
         RegistryError { envelope, .. } => {
-            let is_not_found = envelope.errors.iter().any(|err| {
-                matches!(
-                    err.code,
-                    OciErrorCode::ManifestUnknown | OciErrorCode::NotFound | OciErrorCode::NameUnknown
-                )
-            });
-            if is_not_found {
-                ClientError::ManifestNotFound(image.to_string())
+            let has = |wanted: OciErrorCode| envelope.errors.iter().any(|err| err.code == wanted);
+            if has(OciErrorCode::Unauthorized) || has(OciErrorCode::Denied) {
+                ClientError::Authentication(Box::new(e))
+            } else if has(OciErrorCode::Toomanyrequests) {
+                ClientError::RegistryTransient(Box::new(e))
             } else {
                 ClientError::Registry(Box::new(e))
             }
         }
-        ServerError { code: 404, .. } => ClientError::ManifestNotFound(image.to_string()),
         _ => ClientError::Registry(Box::new(e)),
+    }
+}
+
+/// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
+/// registry indicates the manifest does not exist (404 / MANIFEST_UNKNOWN),
+/// and defers to [`registry_error`] for everything else.
+fn manifest_not_found_or_registry_error(
+    e: oci_client::errors::OciDistributionError,
+    image: &oci::native::Reference,
+) -> ClientError {
+    use oci_client::errors::OciDistributionError::{ImageManifestNotFoundError, RegistryError, ServerError};
+    use oci_client::errors::OciErrorCode;
+    let is_not_found = match &e {
+        ImageManifestNotFoundError(_) | ServerError { code: 404, .. } => true,
+        RegistryError { envelope, .. } => envelope.errors.iter().any(|err| {
+            matches!(
+                err.code,
+                OciErrorCode::ManifestUnknown | OciErrorCode::NotFound | OciErrorCode::NameUnknown
+            )
+        }),
+        _ => false,
+    };
+    if is_not_found {
+        ClientError::ManifestNotFound(image.to_string())
+    } else {
+        registry_error(e)
     }
 }
 
 /// Maps OCI distribution errors to [`ClientError::RepositoryNotFound`] when the
 /// registry indicates the repository does not exist (404 / NAME_UNKNOWN),
-/// and falls back to [`ClientError::Registry`] for everything else.
+/// and defers to [`registry_error`] for everything else.
 ///
 /// Used by `list_tags` so callers can distinguish an authoritative
 /// "repository absent" (legitimately empty, e.g. before the first publish)
@@ -121,23 +160,20 @@ fn repository_not_found_or_registry_error(
     e: oci_client::errors::OciDistributionError,
     image: &oci::native::Reference,
 ) -> ClientError {
-    use oci_client::errors::OciDistributionError::*;
+    use oci_client::errors::OciDistributionError::{RegistryError, ServerError};
     use oci_client::errors::OciErrorCode;
-    let repository = format!("{}/{}", image.registry(), image.repository());
-    match &e {
-        RegistryError { envelope, .. } => {
-            let is_not_found = envelope
-                .errors
-                .iter()
-                .any(|err| matches!(err.code, OciErrorCode::NotFound | OciErrorCode::NameUnknown));
-            if is_not_found {
-                ClientError::RepositoryNotFound(repository)
-            } else {
-                ClientError::Registry(Box::new(e))
-            }
-        }
-        ServerError { code: 404, .. } => ClientError::RepositoryNotFound(repository),
-        _ => ClientError::Registry(Box::new(e)),
+    let is_not_found = match &e {
+        ServerError { code: 404, .. } => true,
+        RegistryError { envelope, .. } => envelope
+            .errors
+            .iter()
+            .any(|err| matches!(err.code, OciErrorCode::NotFound | OciErrorCode::NameUnknown)),
+        _ => false,
+    };
+    if is_not_found {
+        ClientError::RepositoryNotFound(format!("{}/{}", image.registry(), image.repository()))
+    } else {
+        registry_error(e)
     }
 }
 
@@ -503,29 +539,38 @@ mod tests {
     use futures::StreamExt;
     use std::sync::Mutex;
 
+    use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
+
+    fn reference() -> oci::native::Reference {
+        oci::native::Reference::try_from("registry.test/mirror/cmake:4.3.3").expect("valid reference")
+    }
+
+    fn envelope_error(code: OciErrorCode) -> OciDistributionError {
+        OciDistributionError::RegistryError {
+            envelope: OciEnvelope {
+                errors: vec![OciError {
+                    code,
+                    message: String::new(),
+                    detail: serde_json::Value::Null,
+                }],
+            },
+            url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
+        }
+    }
+
+    fn server_error(code: u16) -> OciDistributionError {
+        OciDistributionError::ServerError {
+            code,
+            url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
+            message: String::new(),
+        }
+    }
+
     /// Regression tests for issue #157 — `list_tags` errors must distinguish
     /// an authoritative "repository absent" from a transient registry failure
     /// so discover callers can stay fail-safe.
     mod repository_not_found_mapping {
         use super::*;
-        use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
-
-        fn reference() -> oci::native::Reference {
-            oci::native::Reference::try_from("registry.test/mirror/cmake:4.3.3").expect("valid reference")
-        }
-
-        fn envelope_error(code: OciErrorCode) -> OciDistributionError {
-            OciDistributionError::RegistryError {
-                envelope: OciEnvelope {
-                    errors: vec![OciError {
-                        code,
-                        message: String::new(),
-                        detail: serde_json::Value::Null,
-                    }],
-                },
-                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
-            }
-        }
 
         #[test]
         fn name_unknown_maps_to_repository_not_found() {
@@ -545,31 +590,21 @@ mod tests {
 
         #[test]
         fn server_404_maps_to_repository_not_found() {
-            let error = OciDistributionError::ServerError {
-                code: 404,
-                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
-                message: "not found".to_string(),
-            };
-            let mapped = repository_not_found_or_registry_error(error, &reference());
+            let mapped = repository_not_found_or_registry_error(server_error(404), &reference());
             assert!(matches!(mapped, ClientError::RepositoryNotFound(_)), "got {mapped:?}");
         }
 
         #[test]
-        fn server_5xx_stays_registry_error() {
-            let error = OciDistributionError::ServerError {
-                code: 503,
-                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
-                message: "service unavailable".to_string(),
-            };
-            let mapped = repository_not_found_or_registry_error(error, &reference());
-            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        fn server_5xx_is_transient_registry_failure() {
+            let mapped = repository_not_found_or_registry_error(server_error(503), &reference());
+            assert!(matches!(mapped, ClientError::RegistryTransient(_)), "got {mapped:?}");
         }
 
         #[test]
-        fn rate_limit_envelope_stays_registry_error() {
+        fn rate_limit_envelope_is_transient_registry_failure() {
             let mapped =
                 repository_not_found_or_registry_error(envelope_error(OciErrorCode::Toomanyrequests), &reference());
-            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+            assert!(matches!(mapped, ClientError::RegistryTransient(_)), "got {mapped:?}");
         }
     }
 
@@ -578,51 +613,80 @@ mod tests {
     /// credentials failure — stays `Authentication` (exit 80).
     #[test]
     fn genuine_auth_rejection_stays_authentication() {
-        use oci_client::errors::OciDistributionError;
         let failure = OciDistributionError::AuthenticationFailure("bad token".to_string());
         assert!(
-            matches!(auth_or_availability_error(failure), ClientError::Authentication(_)),
+            matches!(registry_error(failure), ClientError::Authentication(_)),
             "AuthenticationFailure must classify as Authentication"
         );
         let unauthorized = OciDistributionError::UnauthorizedError {
             url: "https://registry.test/v2/".to_string(),
         };
         assert!(
-            matches!(auth_or_availability_error(unauthorized), ClientError::Authentication(_)),
+            matches!(registry_error(unauthorized), ClientError::Authentication(_)),
             "UnauthorizedError must classify as Authentication"
         );
     }
 
-    /// Bug 15: a token-endpoint 5xx / 429 (tagged `ServerError` in the patched
-    /// `authenticate`) or an unparseable token body is an availability failure —
-    /// `Registry` (69), not `Authentication` (80).
+    /// The push path never sees an enveloped 401/403: `extract_location_header`
+    /// turns every non-`202` into a bare `ServerError`, so a chunk `PATCH`
+    /// rejected for credentials arrives as `ServerError { code: 401 }`. Reading
+    /// only the envelope shape would classify it as a plain registry failure
+    /// and hand a 69 to a caller whose credentials are the actual problem.
     #[test]
-    fn token_service_unavailable_is_registry_not_authentication() {
-        use oci_client::errors::OciDistributionError;
-        for code in [503u16, 429] {
-            let server = OciDistributionError::ServerError {
-                code,
-                url: "https://registry.test/token".to_string(),
-                message: "down".to_string(),
-            };
+    fn server_401_and_403_are_authentication() {
+        for code in [401u16, 403] {
+            let mapped = registry_error(server_error(code));
             assert!(
-                matches!(auth_or_availability_error(server), ClientError::Registry(_)),
-                "token-service {code} must classify as Registry"
+                matches!(mapped, ClientError::Authentication(_)),
+                "a {code} answer must classify as Authentication, got {mapped:?}"
+            );
+        }
+    }
+
+    /// `DENIED` is the enveloped form of "your credentials do not cover this",
+    /// and the envelope check runs before the rate-limit one: under retry the
+    /// costs are asymmetric — retrying a denial burns the budget and can trip
+    /// an account lockout, while surfacing a rate limit as an auth failure only
+    /// misnames a wait.
+    #[test]
+    fn denied_envelope_is_authentication() {
+        let mapped = registry_error(envelope_error(OciErrorCode::Denied));
+        assert!(
+            matches!(mapped, ClientError::Authentication(_)),
+            "a DENIED envelope must classify as Authentication, got {mapped:?}"
+        );
+    }
+
+    /// Bug 15: a token-endpoint 5xx / 429 (tagged `ServerError` in the patched
+    /// `authenticate`) is never a credentials failure — it is transient
+    /// (`RegistryTransient` → 75). An unparseable token body is neither: it
+    /// falls to the catch-all `Registry` (69), which is what proves the
+    /// catch-all still exists after the classification table grew.
+    #[test]
+    fn token_service_faults_are_never_authentication() {
+        for code in [503u16, 429] {
+            let mapped = registry_error(server_error(code));
+            assert!(
+                matches!(mapped, ClientError::RegistryTransient(_)),
+                "token-service {code} must classify as RegistryTransient, got {mapped:?}"
             );
         }
         let decode = OciDistributionError::RegistryTokenDecodeError("bad json".to_string());
+        let mapped = registry_error(decode);
         assert!(
-            matches!(auth_or_availability_error(decode), ClientError::Registry(_)),
-            "an unparseable token body must classify as Registry"
+            matches!(mapped, ClientError::Registry(_)),
+            "an unparseable token body must fall through to Registry, got {mapped:?}"
         );
     }
 
     /// Bug 12 root cause: a connection-refused auth ping (the registry never
-    /// answered) must classify `Registry` (→ Unavailable, exit 69), NOT
-    /// `Authentication` (80). Port 1 on loopback is closed, so the connect fails
-    /// immediately and deterministically.
+    /// answered) must NOT classify as `Authentication` (80). It is transient
+    /// (`RegistryTransient` → 75): nothing about the credentials was ever
+    /// tested, and the same command may succeed once the host is reachable.
+    /// Port 1 on loopback is closed, so the connect fails immediately and
+    /// deterministically.
     #[tokio::test]
-    async fn connect_refused_auth_ping_is_registry_not_authentication() {
+    async fn connect_refused_auth_ping_is_transient_not_authentication() {
         let transport = NativeTransport::new(
             oci::native::Client::new(oci::native::ClientConfig::default()),
             crate::auth::Auth::new(),
@@ -630,8 +694,8 @@ mod tests {
         let reference = oci::native::Reference::try_from("127.0.0.1:1/ocx/probe:latest").expect("valid reference");
         let result = transport.authenticate(&reference, oci::RegistryOperation::Pull).await;
         assert!(
-            matches!(result, Err(ClientError::Registry(_))),
-            "a refused connection must be Registry (Unavailable/69), got {result:?}"
+            matches!(result, Err(ClientError::RegistryTransient(_))),
+            "a refused connection must be RegistryTransient (TempFail/75), got {result:?}"
         );
     }
 

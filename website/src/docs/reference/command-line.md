@@ -283,14 +283,16 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
-| 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
+| 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a local resource that cannot be reached | Inspect stderr; fix the registry or the URL before retrying |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
-| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
-| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
+| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: filesystem EPERM | Adjust filesystem permissions |
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
-| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
+| 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
+
+**75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
 
 Scripts can `case $?` on these stable values:
 
@@ -299,8 +301,8 @@ ocx package install cmake:3.28
 case $? in
     0)  echo "installed" ;;
     64) echo "usage error; check flags" ;;
-    69) echo "registry unreachable; retry with backoff" ;;
-    75) echo "temporary failure; retry later" ;;
+    69) echo "registry answered badly; a rerun will not help" ;;
+    75) echo "transient failure; retry with backoff" ;;
     78) echo "bad config; inspect the config file" ;;
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;

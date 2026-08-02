@@ -823,9 +823,10 @@ fn classify(client: &ClientError) -> ClientFailure {
     match client {
         // Transient: registry-side failures, file I/O, and an incomplete blob
         // delivery are all retryable.
-        ClientError::Registry(_) | ClientError::Io { .. } | ClientError::ShortBlobRead { .. } => {
-            ClientFailure::Transient
-        }
+        ClientError::Registry(_)
+        | ClientError::RegistryTransient(_)
+        | ClientError::Io { .. }
+        | ClientError::ShortBlobRead { .. } => ClientFailure::Transient,
         // Terminal auth failure — no retry.
         ClientError::Authentication(_) => ClientFailure::Auth,
         // 404-equivalent — no retry.
@@ -890,6 +891,15 @@ mod classify_tests {
     #[test]
     fn registry_is_transient() {
         assert_transient(ClientError::Registry(Box::new(std::io::Error::other("net"))));
+    }
+
+    /// A connect failure, timeout, or 429/5xx is retryable by construction —
+    /// it is the variant that exists to say so.
+    #[test]
+    fn registry_transient_is_transient() {
+        assert_transient(ClientError::RegistryTransient(Box::new(std::io::Error::other(
+            "connect timed out",
+        ))));
     }
 
     #[test]

@@ -30,14 +30,21 @@ pub enum ExitCode {
     DataError = 65,
     /// Required resource unavailable: network down, registry unreachable.
     /// Mirrors `EX_UNAVAILABLE` (69).
+    ///
+    /// Rerunning the same command will not change the outcome — that is what
+    /// separates this from [`ExitCode::TempFail`].
     Unavailable = 69,
     /// I/O error: filesystem permission denied, disk full, read/write failure.
     /// Mirrors `EX_IOERR` (74).
     IoError = 74,
-    /// Temporary failure that may succeed on retry: rate limit, transient network.
+    /// Temporary failure that may succeed on retry: rate limit, transient
+    /// network, registry connect failure or timeout.
     /// Mirrors `EX_TEMPFAIL` (75).
+    ///
+    /// The same command may succeed if it is run again — which is what makes
+    /// automated retry safe on 75 and unsafe on [`ExitCode::Unavailable`].
     TempFail = 75,
-    /// Insufficient permissions: registry 403, filesystem `EPERM`.
+    /// Insufficient permissions: filesystem `EPERM`.
     /// Mirrors `EX_NOPERM` (77).
     PermissionDenied = 77,
     /// Configuration error: bad `config.toml`, missing required field, parse failure.
@@ -46,7 +53,7 @@ pub enum ExitCode {
     /// Resource not found: package 404, explicit config path absent.
     /// OCX-specific; first slot above `EX_CONFIG`.
     NotFound = 79,
-    /// Authentication failure: registry 401, missing credentials.
+    /// Authentication failure: registry 401 or 403, missing credentials.
     /// OCX-specific.
     AuthError = 80,
     /// A deliberate local policy (offline, frozen, ...) refused a

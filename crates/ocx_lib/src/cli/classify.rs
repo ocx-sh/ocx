@@ -335,6 +335,16 @@ mod tests {
         assert_eq!(classify(err), ExitCode::Unavailable);
     }
 
+    /// The 75-vs-69 split: a transient registry fault exits 75, which is what
+    /// tells a wrapper the same command may succeed if it is run again. The
+    /// sibling test above keeps the 69 fall-through honest — both must hold, or
+    /// the distinction is decorative.
+    #[test]
+    fn client_registry_transient_maps_to_temp_fail() {
+        let err = ClientError::RegistryTransient(Box::new(std::io::Error::other("connect timed out")));
+        assert_eq!(classify(err), ExitCode::TempFail);
+    }
+
     #[test]
     fn client_io_maps_to_io_error() {
         // Plan taxonomy: ClientError::Io → IoError (74)

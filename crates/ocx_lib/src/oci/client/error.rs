@@ -86,6 +86,16 @@ pub enum ClientError {
     /// A registry operation failed.
     #[error("registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// A registry operation failed for a reason that may not repeat: the
+    /// connect never completed, a request timed out, or the registry answered
+    /// 429 / 502 / 503 / 504.
+    ///
+    /// Split from [`ClientError::Registry`] because the two demand opposite
+    /// reactions from a caller: this one says "run the same command again",
+    /// [`ClientError::Registry`] says "the registry answered, and it will
+    /// answer the same way next time".
+    #[error("transient registry failure: {0}")]
+    RegistryTransient(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// File I/O error with path context.
     #[error("I/O error for '{}': {source}", path.display())]
     Io {
@@ -194,10 +204,12 @@ impl ClassifyExitCode for ClientError {
             Self::Authentication(_) => ExitCode::AuthError,
             Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
             Self::Io { .. } => ExitCode::IoError,
-            // TODO: inspect inner source to refine (HTTP 429/503 → TempFail,
-            // 401/403 → AuthError, timeout → TempFail). For v1, treat every
-            // registry operation failure as Unavailable.
+            // The 75-vs-69 contract: 75 means the same command may succeed if
+            // it is run again, 69 means it will not. `Registry` is the second
+            // case — the registry answered, just not usefully — so a wrapper
+            // that retries on 75 leaves it alone.
             Self::Registry(_) => ExitCode::Unavailable,
+            Self::RegistryTransient(_) => ExitCode::TempFail,
             // An incomplete delivery is a transfer fault, not malformed data:
             // the same pull usually succeeds on retry, so it is TempFail rather
             // than DataError.
