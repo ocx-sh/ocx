@@ -11,6 +11,7 @@ mod api;
 mod app;
 mod command;
 mod conventions;
+mod error_envelope;
 mod options;
 
 #[tokio::main]

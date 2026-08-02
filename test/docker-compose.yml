@@ -1,14 +1,40 @@
 services:
+  # Primary registry — zot (CNCF project-zot), an OCI Distribution 1.1 registry
+  # with a NATIVE Referrers API: GET /v2/<name>/referrers/<digest> plus the
+  # OCI-Subject response header on a manifest push that carries a `subject`.
+  #
+  # Why zot and not registry:2 / registry:3?  distribution (BOTH v2 and v3) does
+  # NOT implement the Referrers API — it relies on the referrers TAG-schema
+  # fallback.  OCX is referrers-only (no tag fallback by design, #106), so the
+  # supply-chain sign/verify path (#194) and the referrers smoke test require a
+  # registry that serves the real endpoint.  Verified empirically for #195:
+  # registry:3 (distribution 3.1.1) returns Go's "404 page not found" on
+  # /referrers/ and omits OCI-Subject on push; zot returns OCI-Subject and a
+  # populated referrers index.  Pinned to a multi-arch tag (linux/amd64 +
+  # linux/arm64).  Config is mounted read-only from ./zot-config.json.
   registry:
-    image: registry:2
+    image: ghcr.io/project-zot/zot:v2.1.18
     ports:
-      - "5000:5000"
+      # ponytail: host port overridable (default unchanged) so a squatted
+      # 5000 on the runner's machine doesn't block bring-up; set
+      # OCX_ZOT_PORT + REGISTRY=localhost:<port> together.
+      - "${OCX_ZOT_PORT:-5000}:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro
 
-  # Mirror registry — a second registry:2 instance used by test_mirror.py to
-  # simulate a corporate artifact-manager remote/proxy repository.  Session-
-  # scoped via the `mirror_registry` fixture in test/conftest.py.  Gated
-  # behind the same OCX_TESTS_NO_REGISTRY skip flag so a single-registry
-  # or Windows runner that never starts docker-compose is not broken.
+  # Legacy registry — registry:2 (distribution v2).  The SINGLE registry:2
+  # instance in this file; it serves two roles:
+  #   1. Mirror-test target (test_oci_registry_mirror.py, `mirror_registry`
+  #      fixture) — a second writable registry that simulates a corporate
+  #      artifact-manager remote/proxy repository.
+  #   2. Permanent referrers-NEGATIVE fixture (test_referrers_capability.py,
+  #      #106, `legacy_registry` fixture) — a real registry WITHOUT the
+  #      Referrers API, so the ReferrersUnsupported path (exit 84) is exercised
+  #      against a genuine v2 registry rather than a mock.
+  # Session-scoped via the `mirror_registry` / `legacy_registry` fixtures in
+  # test/conftest.py.  Gated behind the same OCX_TESTS_NO_REGISTRY skip flag as
+  # the primary so a single-registry or Windows runner that never starts
+  # docker-compose is not broken.
   mirror-registry:
     image: registry:2
     ports:

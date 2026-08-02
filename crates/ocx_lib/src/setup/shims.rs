@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::setup::error::Error;
-use crate::utility::fs::persist_temp_file;
+use crate::utility::fs::write_bytes_atomic;
 
 /// `$OCX_HOME/env.sh` — POSIX (sh/bash/zsh) shim.
 ///
@@ -299,8 +299,9 @@ pub fn fish_conf_body() -> &'static str {
 /// Write all five `env.*` shims into `ocx_home`, atomically and diff-gated.
 ///
 /// Creates `ocx_home` (`mkdir -p`) if absent, then writes each shim through the
-/// Windows-retry-aware atomic-publish primitive
-/// [`persist_temp_file`](crate::utility::fs::persist_temp_file). A file whose
+/// private-file atomic-write helper
+/// [`write_bytes_atomic`](crate::utility::fs::write_bytes_atomic) (temp-in-parent
+/// then Windows-retry-aware publish). A file whose
 /// on-disk bytes already equal the canonical body is skipped (diff-gate), so a
 /// re-run is a no-op. Returns the paths actually (re)written, in shim order.
 ///
@@ -326,7 +327,10 @@ pub fn write_shims(ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error
             continue;
         }
         if !dry_run {
-            write_atomic(ocx_home, &target, body)?;
+            write_bytes_atomic(&target, body.as_bytes()).map_err(|source| Error::Io {
+                path: target.to_path_buf(),
+                source,
+            })?;
         }
         written.push(target);
     }
@@ -360,25 +364,6 @@ fn needs_write(target: &Path, body: &str) -> Result<bool, Error> {
             source,
         }),
     }
-}
-
-/// Write `body` to `target` atomically: a `NamedTempFile` in `dir` is filled
-/// then published through [`persist_temp_file`].
-fn write_atomic(dir: &Path, target: &Path, body: &str) -> Result<(), Error> {
-    use std::io::Write as _;
-
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|source| Error::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    tmp.write_all(body.as_bytes()).map_err(|source| Error::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    persist_temp_file(tmp, target).map_err(|source| Error::Io {
-        path: target.to_path_buf(),
-        source,
-    })
 }
 
 #[cfg(test)]

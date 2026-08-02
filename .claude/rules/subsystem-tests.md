@@ -27,13 +27,23 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 
 | Fixture | Scope | Purpose |
 |---------|-------|---------|
-| `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose) |
+| `registry` | session | localhost:5000 **zot** (referrers-capable primary; auto-started via docker-compose) |
+| `mirror_registry` | session | localhost:5001 registry:2 (mirror-test target; skips if absent) |
+| `legacy_registry` | session | localhost:5001 registry:2 — referrers-**negative** fixture (no Referrers API) for `test_referrers_capability.py` (#106); same service as `mirror_registry` |
 | `ocx_binary` | session | Path to compiled `ocx` binary |
 | `ocx_home` | function | Isolated temp dir for `OCX_HOME` |
 | `ocx` | function | `OcxRunner` instance with test isolation |
 | `unique_repo` | function | UUID-prefixed repo name (e.g., `t_a1b2c3d4_test`) |
 | `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
 | `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
+
+**Registry topology (#195):** the primary `registry` (5000) is **zot** because it
+serves the OCI 1.1 Referrers API natively — distribution's `registry:2`/`registry:3`
+do NOT (they omit `OCI-Subject` on push and 404 the `/v2/<name>/referrers/<digest>`
+route), and OCX is referrers-only with no tag-schema fallback (#106). The single
+`registry:2` instance (`mirror-registry`, 5001) doubles as the mirror-test target and
+the permanent referrers-unsupported negative fixture. `test_referrers_smoke.py` proves
+the round-trip. Referrers push/list helpers live in `src/registry.py`.
 
 ## OcxRunner API
 

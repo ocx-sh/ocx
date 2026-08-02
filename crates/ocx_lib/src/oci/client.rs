@@ -102,6 +102,17 @@ impl Client {
         self.lock_timeout
     }
 
+    /// Returns a reference to the inner transport.
+    ///
+    /// Crate-internal: the sign/verify pipelines take a `&Client` and derive
+    /// the transport through here for their transport-level calls (capability
+    /// probes, referrer manifest reads). The public API never exposes
+    /// `&dyn OciTransport` — pipelines are driven through the `PackageManager`
+    /// facade (`sign_one` / `verify_one`), not by handing callers a transport.
+    pub(crate) fn transport(&self) -> &dyn OciTransport {
+        &*self.transport
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {
@@ -3408,6 +3419,25 @@ mod tests {
             }))
         }
 
+        async fn push_referrer_manifest(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _manifest_bytes: &[u8],
+            _media_type: &str,
+        ) -> super::transport::Result<oci::Descriptor> {
+            unimplemented!("not needed for the streaming-interruption test")
+        }
+
+        async fn list_referrers(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _artifact_type: Option<&str>,
+        ) -> super::transport::Result<Vec<oci::Descriptor>> {
+            unimplemented!("not needed for the streaming-interruption test")
+        }
+
         fn box_clone(&self) -> Box<dyn super::OciTransport> {
             Box::new(InterruptingTransport {
                 bytes_before_error: self.bytes_before_error.clone(),
@@ -5527,6 +5557,34 @@ mod tests {
             async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> TransportResult<String> {
                 self.data.record("fetch_manifest_digest", image);
                 Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            async fn push_referrer_manifest(
+                &self,
+                image: &oci::native::Reference,
+                _subject_digest: &oci::Digest,
+                manifest_bytes: &[u8],
+                media_type: &str,
+            ) -> TransportResult<oci::Descriptor> {
+                self.data.record("push_referrer_manifest", image);
+                Ok(oci::Descriptor {
+                    media_type: media_type.to_owned(),
+                    digest: format!("sha256:{}", "a".repeat(64)),
+                    size: manifest_bytes.len() as i64,
+                    urls: None,
+                    annotations: None,
+                    artifact_type: None,
+                })
+            }
+
+            async fn list_referrers(
+                &self,
+                image: &oci::native::Reference,
+                _subject_digest: &oci::Digest,
+                _artifact_type: Option<&str>,
+            ) -> TransportResult<Vec<oci::Descriptor>> {
+                self.data.record("list_referrers", image);
+                Ok(vec![])
             }
 
             async fn pull_manifest_raw(

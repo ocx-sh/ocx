@@ -25,4 +25,4 @@ pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
 pub use platform::PlatformOption;
 pub use pull::Pull;
-pub use verify::Verify;
+pub use verify::{SignatureVerify, Verify};
