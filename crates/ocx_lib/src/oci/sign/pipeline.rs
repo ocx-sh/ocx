@@ -121,19 +121,22 @@ impl SignPipeline {
             .await
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?
             .unwrap_or_else(|| resolved.clone());
-        let registry = physical.registry().to_string();
-        let repo = physical.repository().to_string();
-        let image = native::Reference::with_tag(registry.clone(), repo.clone(), "latest".to_string());
+        // The mirror map applies on top: `transport_reference` is the read seam
+        // every registry-facing reference must come from (T-arch-G1), so a
+        // `[mirrors]` entry for the physical host redirects this traffic too.
+        let image = client.transport_reference(&physical);
 
         // Fetch the target manifest bytes for the subject descriptor's size.
-        let subject_ref = native::Reference::with_digest(registry.clone(), repo.clone(), subject_digest.to_string());
+        // `clone_with_digest` drops the tag, so this stays digest-only — a
+        // `repo:tag@digest` reference keys a different registry path and 404s.
+        let subject_ref = image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, _) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
 
         // 2. Referrers-API capability (cache-first).
-        Self::ensure_referrers_supported(transport, &ctx, &registry, &repo, &subject_digest).await?;
+        Self::ensure_referrers_supported(transport, &ctx, &image, &subject_digest).await?;
 
         // 3. Acquire the OIDC token.
         let token = ctx.token_provider.acquire("sigstore").await?;
@@ -209,14 +212,15 @@ impl SignPipeline {
     async fn ensure_referrers_supported(
         transport: &dyn OciTransport,
         ctx: &SignContext<'_>,
-        registry: &str,
-        repo: &str,
+        image: &native::Reference,
         subject_digest: &Digest,
     ) -> Result<(), SignErrorKind> {
+        // Cache key = the host actually probed (`probe` records the same one),
+        // so a mirrored registry caches under the mirror, not the upstream.
         let cached = if ctx.no_cache {
             None
         } else {
-            ReferrersApiCapability::from_cache(registry, ctx.state)
+            ReferrersApiCapability::from_cache(image.resolve_registry(), ctx.state)
                 .await
                 .ok()
                 .flatten()
@@ -225,7 +229,7 @@ impl SignPipeline {
         let capability = match cached {
             Some(hit) => hit,
             None => {
-                let probed = ReferrersApiCapability::probe(transport, registry, repo, subject_digest)
+                let probed = ReferrersApiCapability::probe(transport, image, subject_digest)
                     .await
                     .map_err(map_client_error)?;
                 // Best-effort cache write; a failure here must not fail the sign.

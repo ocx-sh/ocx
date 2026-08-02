@@ -63,9 +63,12 @@ impl ReferrersApiCapability {
     /// - [`ClientError::ReferrersUnsupported`] → [`ReferrersSupport::Unsupported`]
     /// - Any other error → propagated to the caller
     ///
-    /// The `registry`, `repo`, and `digest` parameters identify the endpoint
-    /// to probe. A zero-value or otherwise known digest is acceptable — the
-    /// response body is ignored; only the HTTP status matters.
+    /// `image` is the caller's already-mirror-resolved transport reference
+    /// (built via `Client::transport_reference`, T-arch-G1) — the endpoint's
+    /// host and repository come from it, and its `resolve_registry()` becomes
+    /// the per-registry cache key so a read-back keys off the host that was
+    /// actually probed. A zero-value or otherwise known digest is acceptable —
+    /// the response body is ignored; only the HTTP status matters.
     ///
     /// # Probe digest caveat
     ///
@@ -77,23 +80,17 @@ impl ReferrersApiCapability {
     /// manifest's real digest when available.
     pub async fn probe(
         transport: &dyn OciTransport,
-        registry: &str,
-        repo: &str,
+        image: &native::Reference,
         digest: &Digest,
     ) -> Result<Self, ClientError> {
-        // Build a reference pointing at the registry + repo. The tag is
-        // irrelevant for a referrers probe (the endpoint uses the digest
-        // directly), but the transport requires a well-formed reference.
-        let image = native::Reference::with_tag(registry.to_string(), repo.to_string(), "latest".to_string());
-
-        let supported = match transport.list_referrers(&image, digest, None).await {
+        let supported = match transport.list_referrers(image, digest, None).await {
             Ok(_) => ReferrersSupport::Supported,
             Err(ClientError::ReferrersUnsupported { .. }) => ReferrersSupport::Unsupported,
             Err(other) => return Err(other),
         };
 
         Ok(Self {
-            registry: registry.to_string(),
+            registry: image.resolve_registry().to_string(),
             supported,
             probed_at: SystemTime::now(),
             ttl_seconds: TTL_SECS,
@@ -354,12 +351,20 @@ mod tests {
         Digest::Sha256("0".repeat(64))
     }
 
+    /// Probe target for the fixtures. Parsed rather than direct-constructed —
+    /// T-arch-G1 reserves the direct constructors for the mirror seams in
+    /// `oci/client.rs`, and it scans source text, so even naming one here
+    /// would trip it.
+    fn probe_image(registry: &str) -> oci::native::Reference {
+        format!("{registry}/myrepo:latest").parse().expect("probe reference")
+    }
+
     // ── probe tests ──────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn probe_404_returns_unsupported() {
         let transport = ProbeStub::unsupported();
-        let cap = ReferrersApiCapability::probe(&transport, "test.example", "myrepo", &zero_digest())
+        let cap = ReferrersApiCapability::probe(&transport, &probe_image("test.example"), &zero_digest())
             .await
             .expect("probe must not error on 404");
         assert_eq!(cap.supported, ReferrersSupport::Unsupported);
@@ -370,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn probe_200_returns_supported() {
         let transport = ProbeStub::supported();
-        let cap = ReferrersApiCapability::probe(&transport, "test.example", "myrepo", &zero_digest())
+        let cap = ReferrersApiCapability::probe(&transport, &probe_image("test.example"), &zero_digest())
             .await
             .expect("probe must not error on 200");
         assert_eq!(cap.supported, ReferrersSupport::Supported);
@@ -380,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn probe_500_propagates_error() {
         let transport = ProbeStub::error("internal server error");
-        let result = ReferrersApiCapability::probe(&transport, "test.example", "myrepo", &zero_digest()).await;
+        let result = ReferrersApiCapability::probe(&transport, &probe_image("test.example"), &zero_digest()).await;
         assert!(result.is_err(), "non-404 error must propagate");
     }
 
@@ -416,7 +421,7 @@ mod tests {
             .filter(ReferrersApiCapability::is_fresh);
         let capability = match cached {
             Some(hit) => hit,
-            None => ReferrersApiCapability::probe(&would_error_if_probed, "ghcr.io", "myrepo", &zero_digest())
+            None => ReferrersApiCapability::probe(&would_error_if_probed, &probe_image("ghcr.io"), &zero_digest())
                 .await
                 .expect("probe should not be reached with a fresh cache"),
         };

@@ -155,9 +155,10 @@ impl VerifyPipeline {
             .await
             .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?
             .unwrap_or_else(|| resolved.clone());
-        let registry = physical.registry().to_string();
-        let repo = physical.repository().to_string();
-        let image = native::Reference::with_tag(registry.clone(), repo.clone(), "latest".to_string());
+        // The mirror map applies on top: `transport_reference` is the read seam
+        // every registry-facing reference must come from (T-arch-G1), so a
+        // `[mirrors]` entry for the physical host redirects this traffic too.
+        let image = client.transport_reference(&physical);
 
         // 2. List signature referrers (capability cache short-circuits a known
         //    Unsupported registry without re-listing), then re-filter client-side
@@ -172,8 +173,7 @@ impl VerifyPipeline {
         //    it would drop a genuine server-matched referrer (regression class:
         //    a registry that matched server-side but omits the per-descriptor
         //    artifactType echo).
-        let referrers =
-            Self::list_signature_referrers(transport, &ctx, &image, &registry, &repo, &subject_digest).await?;
+        let referrers = Self::list_signature_referrers(transport, &ctx, &image, &subject_digest).await?;
         let mut candidates: Vec<crate::oci::Descriptor> = referrers
             .into_iter()
             .filter(|descriptor| match descriptor.artifact_type.as_deref() {
@@ -214,8 +214,9 @@ impl VerifyPipeline {
                 break;
             }
             examined += 1;
-            let referrer_ref =
-                native::Reference::with_digest(registry.clone(), repo.clone(), descriptor.digest.clone());
+            // `clone_with_digest` drops the tag, so this stays digest-only — a
+            // `repo:tag@digest` reference keys a different registry path and 404s.
+            let referrer_ref = image.clone_with_digest(descriptor.digest.clone());
             let referrer_bytes = match pull_referrer_manifest_capped(transport, &referrer_ref).await {
                 Ok(bytes) => bytes,
                 Err(kind) => {
@@ -337,16 +338,16 @@ impl VerifyPipeline {
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
         image: &native::Reference,
-        registry: &str,
-        repo: &str,
         subject_digest: &Digest,
     ) -> Result<Vec<crate::oci::Descriptor>, VerifyErrorKind> {
         // Capability: a fresh cache entry avoids a re-probe; otherwise probe
         // and persist. `Unsupported` fails hard (no fallback-tag reads, S1-F).
+        // Cache key = the host actually probed (`probe` records the same one),
+        // so a mirrored registry caches under the mirror, not the upstream.
         let cached = if ctx.no_cache {
             None
         } else {
-            ReferrersApiCapability::from_cache(registry, ctx.state)
+            ReferrersApiCapability::from_cache(image.resolve_registry(), ctx.state)
                 .await
                 .ok()
                 .flatten()
@@ -355,7 +356,7 @@ impl VerifyPipeline {
         let capability = match cached {
             Some(hit) => hit,
             None => {
-                let probed = ReferrersApiCapability::probe(transport, registry, repo, subject_digest)
+                let probed = ReferrersApiCapability::probe(transport, image, subject_digest)
                     .await
                     .map_err(map_client_error)?;
                 let _ = probed.write_cache(ctx.state).await;
@@ -1097,8 +1098,11 @@ mod tests {
             inner.blobs.insert(oversize_digest.to_string(), oversize);
         }
         let transport = StubTransport::new(data);
-        let image =
-            native::Reference::with_tag("registry.example".to_string(), "repo".to_string(), "latest".to_string());
+        // Parsed, not direct-constructed: this fixture only needs a well-formed
+        // reference to key the stub, and T-arch-G1 reserves the direct
+        // constructors for `oci/client.rs` (it scans source text, so even
+        // naming one in a comment would trip it).
+        let image: native::Reference = "registry.example/repo:latest".parse().expect("stub reference");
 
         let streamed = pull_bundle_blob_capped(&transport, &image, &honest_digest)
             .await
@@ -1124,16 +1128,13 @@ mod tests {
 
         let honest = br#"{"schemaVersion":2,"layers":[]}"#.to_vec();
         let oversize = vec![b'x'; MAX_REFERRER_MANIFEST_BYTES as usize + 1];
-        let honest_ref = native::Reference::with_digest(
-            "registry.example".to_string(),
-            "repo".to_string(),
-            format!("sha256:{}", "a".repeat(64)),
-        );
-        let oversize_ref = native::Reference::with_digest(
-            "registry.example".to_string(),
-            "repo".to_string(),
-            format!("sha256:{}", "b".repeat(64)),
-        );
+        // Parsed for the same reason as above (T-arch-G1 seam gate).
+        let honest_ref: native::Reference = format!("registry.example/repo@sha256:{}", "a".repeat(64))
+            .parse()
+            .expect("stub reference");
+        let oversize_ref: native::Reference = format!("registry.example/repo@sha256:{}", "b".repeat(64))
+            .parse()
+            .expect("stub reference");
 
         let data = StubTransportData::new();
         {
@@ -1189,6 +1190,20 @@ mod tests {
             matches!(failure, VerifyErrorKind::NoSignaturesFound),
             "got: {failure:?}"
         );
+    }
+
+    #[test]
+    fn digest_addressed_refs_derived_from_the_seam_carry_no_tag() {
+        // `Client::transport_reference` returns a reference carrying the
+        // resolved tag, but a `repo:tag@digest` reference keys a DIFFERENT
+        // registry path and 404s — the pre-seam code built these digest-only.
+        // Pins oci-spec's `clone_with_digest` tag-clearing so an upstream bump
+        // that starts preserving tags fails here instead of at pull time.
+        let image: native::Reference = "ghcr.io/acme/tool:1.0".parse().expect("tagged reference");
+        let derived = image.clone_with_digest(format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(derived.tag(), None, "digest-addressed ref must carry no tag");
+        assert_eq!(derived.registry(), "ghcr.io", "host must survive");
+        assert_eq!(derived.repository(), "acme/tool", "repository must survive");
     }
 
     // ── Index indirection: transport traffic follows the PHYSICAL registry ──

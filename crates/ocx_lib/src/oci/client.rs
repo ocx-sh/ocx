@@ -146,7 +146,7 @@ impl Client {
     /// [`Identifier::canonical_reference`] (which stays callable in-crate) — that
     /// discipline is enforced by the structural test plus the behavioural
     /// backstop, not by the compiler.
-    fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
+    pub(in crate::oci) fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
         let Some((host, repository)) = self
             .mirrors
             .rewrite_repository(identifier.registry(), identifier.repository())
@@ -174,7 +174,7 @@ impl Client {
     /// Sibling of [`transport_reference`](Self::transport_reference) for the
     /// case where there is no full identifier — only a registry string and a
     /// placeholder repository.
-    fn transport_registry(&self, registry: &str) -> native::Reference {
+    pub(in crate::oci) fn transport_registry(&self, registry: &str) -> native::Reference {
         // The catalog **URL** is built from `registry()` alone (`/v2/_catalog`),
         // so the repository never reaches the path. The catalog **auth scope**,
         // however, is `repository:<repository>:pull` (oci-client `_auth`), so the
