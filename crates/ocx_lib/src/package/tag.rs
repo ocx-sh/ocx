@@ -108,12 +108,40 @@ fn parse_canonical(value: &str) -> Option<(Algorithm, &str)> {
     })
 }
 
+/// Matches the OCI Referrers tag-schema fallback shape `<algorithm>-<hex>`
+/// and its legacy `cosign` artifact suffixes `<algorithm>-<hex>.sig` /
+/// `<algorithm>-<hex>.att` — the dash-separated digest tags a registry
+/// without native Referrers-API support (or an older `cosign`) parks
+/// signature/attestation manifests under. OCX never writes these
+/// (`ocx package sign` fails closed with `ExitCode::ReferrersUnsupported`
+/// instead of falling back), but a third-party repo signed elsewhere still
+/// carries them, and they name a signature or attestation manifest, never a
+/// package version — same rule as the dot-form [`parse_canonical`] alias,
+/// spelled with a dash because that is the tag-schema convention.
+fn is_referrer_fallback_tag(value: &str) -> bool {
+    let base = value
+        .strip_suffix(".sig")
+        .or_else(|| value.strip_suffix(".att"))
+        .unwrap_or(value);
+    Algorithm::ALL.iter().any(|algorithm| {
+        base.strip_prefix(algorithm.prefix())
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|hex| hex.len() == algorithm.hex_len() && hex.chars().all(|c| c.is_ascii_hexdigit()))
+    })
+}
+
 impl Tag {
     /// Returns `true` if this tag is not a version pointer: the OCX-internal
-    /// namespace, or a digest-alias tag naming a platform manifest by its own
-    /// digest. Neither may appear as a version in the index.
+    /// namespace, a digest-alias tag naming a platform manifest by its own
+    /// digest, or an OCI Referrers fallback / `cosign` signature-artifact tag
+    /// ([`is_referrer_fallback_tag`]). None of these may appear as a version
+    /// in the index.
     pub fn is_reserved(&self) -> bool {
-        matches!(self, Tag::Internal(_) | Tag::Canonical { .. })
+        match self {
+            Tag::Internal(_) | Tag::Canonical { .. } => true,
+            Tag::Other(value) => is_referrer_fallback_tag(value),
+            _ => false,
+        }
     }
 
     /// `&str` convenience wrapper over [`Tag::is_reserved`] for listing filters.
@@ -275,6 +303,46 @@ mod tests {
         }
     }
 
+    // ── Referrer fallback tag verdict ─────────────────────────────
+
+    /// The dash-form `<algorithm>-<hex>` is the OCI Referrers tag-schema
+    /// fallback shape. It stays classified `Tag::Other` (unlike the dot-form
+    /// alias, it is not `Tag::Canonical`) but must still be reserved.
+    #[test]
+    fn tag_classifies_sha256_dash_form_as_reserved_other() {
+        let tag = Tag::from(format!("sha256-{}", hex(64)));
+        assert!(matches!(tag, Tag::Other(_)), "got {tag:?}");
+        assert!(tag.is_reserved());
+    }
+
+    #[test]
+    fn tag_classifies_dash_form_sig_suffix_as_reserved() {
+        let raw = format!("sha256-{}.sig", hex(64));
+        let tag = Tag::from(raw.clone());
+        assert!(matches!(tag, Tag::Other(_)), "got {tag:?}");
+        assert!(tag.is_reserved(), "'{raw}' should be reserved");
+    }
+
+    #[test]
+    fn tag_classifies_dash_form_att_suffix_as_reserved() {
+        let raw = format!("sha256-{}.att", hex(64));
+        let tag = Tag::from(raw.clone());
+        assert!(matches!(tag, Tag::Other(_)), "got {tag:?}");
+        assert!(tag.is_reserved(), "'{raw}' should be reserved");
+    }
+
+    #[test]
+    fn tag_does_not_reserve_dash_form_boundary_cases() {
+        for raw in [
+            format!("sha256-{}", hex(63)),        // wrong hex length
+            format!("sha256-{}.sbom", hex(64)),   // unrecognized suffix
+            "v1.2.3".to_string(),                 // no dash-digest shape at all
+        ] {
+            let tag = Tag::from(raw.clone());
+            assert!(!tag.is_reserved(), "'{raw}' should not be reserved, got {tag:?}");
+        }
+    }
+
     /// `:` is illegal in an OCI tag, so the colon form is not a tag OCX ever
     /// writes and is not classified.
     #[test]
@@ -349,6 +417,11 @@ mod tests {
             (format!("sha256.{}", hex(64)), true),
             (format!("sha384.{}", hex(96)), true),
             (format!("sha512.{}", hex(128)), true),
+            (format!("sha256-{}", hex(64)), true),
+            (format!("sha256-{}.sig", hex(64)), true),
+            (format!("sha256-{}.att", hex(64)), true),
+            (format!("sha256-{}", hex(63)), false),
+            (format!("sha256-{}.sbom", hex(64)), false),
             (format!("sha256:{}", hex(64)), false),
             (format!("sha256.{}", hex(63)), false),
             (format!("sha384.{}", hex(64)), false),
