@@ -8,9 +8,12 @@
 //! Rekor SET, verifies the signature over the subject digest, and checks
 //! `--certificate-identity` / `--certificate-oidc-issuer` against the cert.
 //!
-//! Phase 1 scaffolding — bodies use `unimplemented!()` until Phase 5. See
-//! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! for the full verify state machine.
+//! Wired end to end by [`pipeline::VerifyPipeline`]. Read-only throughout —
+//! every registry call routes through the mirror-aware read seam. The
+//! embedded TUF trust root is still stubbed, so `--trust-root` /
+//! `OCX_SIGSTORE_TRUST_ROOT` is required; see `signing.md` "Current
+//! Limitations". Design record:
+//! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 
 // `error` is `pub` — `VerifyError`/`VerifyErrorKind` are bound by the CLI layer.
 pub mod error;

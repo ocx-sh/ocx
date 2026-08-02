@@ -134,10 +134,23 @@ impl SignPipeline {
         // `clone_with_digest` drops the tag, so this stays digest-only — a
         // `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
-        let (subject_bytes, _) = transport
+        let (subject_bytes, served_digest) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
+        // `subject_bytes.len()` becomes the subject descriptor's `size` pushed
+        // to the CANONICAL host, but the bytes came from the READ host, which
+        // under a `[mirrors]` entry is a different machine. Bind them to the
+        // digest already resolved before trusting their length — a wrong size
+        // yields a signature strict verifiers reject. Fail closed, reusing the
+        // transport's own wrong-content error so the exit code matches a
+        // registry-served mismatch anywhere else.
+        if Digest::try_from(served_digest.as_str()).ok().as_ref() != Some(&subject_digest) {
+            return Err(map_client_error(ClientError::DigestMismatch {
+                expected: subject_digest.to_string(),
+                actual: served_digest,
+            }));
+        }
 
         // 2. Referrers-API capability (cache-first) of the host we will PUSH
         //    to. A mirror's referrers support says nothing about the upstream's,
@@ -402,6 +415,9 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingTransport {
         calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// When set, `pull_manifest_raw` claims this digest instead of the
+        /// resolved subject digest — a mirror serving the wrong manifest.
+        served_subject_digest: Option<String>,
     }
 
     impl RecordingTransport {
@@ -456,7 +472,11 @@ mod tests {
             _: &[&str],
         ) -> std::result::Result<(Vec<u8>, String), ClientError> {
             self.record("pull_manifest_raw", image);
-            Ok((b"{}".to_vec(), indirection_subject_digest().to_string()))
+            let digest = self
+                .served_subject_digest
+                .clone()
+                .unwrap_or_else(|| indirection_subject_digest().to_string());
+            Ok((b"{}".to_vec(), digest))
         }
 
         async fn pull_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<Vec<u8>, ClientError> {
@@ -575,10 +595,22 @@ mod tests {
     /// state dir, so a caller can read back the persisted capability record.
     /// Panics if the run does not complete.
     async fn run_recorded_sign(mirrors: crate::oci::client::MirrorMap) -> (Vec<String>, tempfile::TempDir) {
+        let (result, calls, temp) = drive_sign(mirrors, RecordingTransport::default()).await;
+        if let Err(error) = result {
+            panic!("sign must complete against the recording transport: {error}");
+        }
+        (calls, temp)
+    }
+
+    /// The run itself, with the transport injectable and the outcome returned
+    /// rather than asserted — so a test can drive a failing sign.
+    async fn drive_sign(
+        mirrors: crate::oci::client::MirrorMap,
+        transport: RecordingTransport,
+    ) -> (Result<SignResult, SignError>, Vec<String>, tempfile::TempDir) {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
 
-        let transport = RecordingTransport::default();
         let mut client = Client::with_transport(Box::new(transport.clone()));
         client.mirrors = mirrors;
         let index = Index::from_impl(IndirectingIndex { physical });
@@ -590,7 +622,7 @@ mod tests {
         let signer = FixedSigner;
         let token_provider = FixedTokenProvider;
 
-        if let Err(error) = SignPipeline::run(
+        let result = SignPipeline::run(
             &client,
             SignContext {
                 identifier: &logical,
@@ -604,11 +636,8 @@ mod tests {
                 state: &state,
             },
         )
-        .await
-        {
-            panic!("sign must complete against the recording transport: {error}");
-        }
-        (transport.calls(), temp)
+        .await;
+        (result, transport.calls(), temp)
     }
 
     #[tokio::test]
@@ -689,6 +718,38 @@ mod tests {
                 .expect("cache read")
                 .is_none(),
             "sign must not cache the canonical verdict under the mirror",
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_refuses_a_subject_manifest_the_read_host_served_under_a_different_digest() {
+        // The subject bytes come from the READ host (a different machine under
+        // a `[mirrors]` entry) but their length becomes the descriptor `size`
+        // pushed to the canonical host. A poisoned length yields a signature
+        // strict verifiers reject, so the read must be bound to the resolved
+        // digest and fail closed BEFORE anything is written.
+        let transport = RecordingTransport {
+            served_subject_digest: Some(crate::oci::Algorithm::Sha256.hash(b"a different manifest").to_string()),
+            ..RecordingTransport::default()
+        };
+        let (result, calls, _state_dir) = drive_sign(crate::oci::client::MirrorMap::default(), transport).await;
+
+        let Err(error) = result else {
+            panic!("sign must refuse a subject manifest served under the wrong digest");
+        };
+        // The kind's own Display is deliberately generic ("internal signing
+        // error"); the cause rides the `source()` chain, so walk it.
+        let chain = std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(
+            chain.contains("digest mismatch"),
+            "the refusal must carry the mismatch in its source chain, got: {chain}",
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("push_")),
+            "nothing may be pushed after a subject-digest mismatch, got: {calls:?}",
         );
     }
 }
