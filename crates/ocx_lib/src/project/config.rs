@@ -1560,6 +1560,52 @@ bad = "ocx.sh/CMAKE:3.28"
         assert_kind!(err, ProjectErrorKind::FileTooLarge { .. });
     }
 
+    /// A checked-in `ocx.toml` cannot declare the trust-sensitive `OCX_*`
+    /// variables — not in `[env]`, not in a group's — because both sit in the
+    /// namespace `crate::env::is_reserved_ocx_key` reserves.
+    ///
+    /// `OCX_NO_VERIFY` turns off the policy-gated auto-verify on install/pull
+    /// and is forwarded to every child ocx; `OCX_IDENTITY_TOKEN` is a bearer
+    /// credential. Either one declarable from a project file would let a
+    /// repository silently disable signature verification for everyone who runs
+    /// a tool out of it.
+    ///
+    /// Built from the `keys::` constants rather than string literals: the gate
+    /// matches on the `OCX_` prefix, so respelling either variable outside that
+    /// prefix moves it out of the gate's reach without touching the gate. That
+    /// is the failure this test exists to catch, alongside the gate itself
+    /// being weakened.
+    #[test]
+    fn project_env_cannot_declare_trust_sensitive_ocx_keys() {
+        for key in [crate::env::keys::OCX_NO_VERIFY, crate::env::keys::OCX_IDENTITY_TOKEN] {
+            for scope in ["env", "group.ci.env"] {
+                let toml_str = format!("[{scope}]\n{key} = \"1\"\n");
+                let Err(err) = ProjectConfig::from_toml_str(&toml_str) else {
+                    panic!("[{scope}] must reject the reserved key {key}");
+                };
+                assert_eq!(
+                    <crate::project::Error as crate::cli::ClassifyExitCode>::classify(&err),
+                    Some(crate::cli::ExitCode::ConfigError),
+                    "a reserved-key declaration is a config fault (exit 78)"
+                );
+
+                #[allow(irrefutable_let_patterns)]
+                let crate::project::Error::Project(project_error) = err else {
+                    panic!("expected Error::Project");
+                };
+                let ProjectErrorKind::EnvReservedKey {
+                    scope: reported_scope,
+                    key: reported_key,
+                } = &project_error.kind
+                else {
+                    panic!("expected EnvReservedKey, got {:?}", project_error.kind);
+                };
+                assert_eq!(reported_scope, scope, "the error must name the table to edit");
+                assert_eq!(reported_key, key);
+            }
+        }
+    }
+
     // ── resolve() contract tests ─────────────────────────────────────────────
     //
     // Each test acquires `crate::test::env::lock()` and clears the three env
