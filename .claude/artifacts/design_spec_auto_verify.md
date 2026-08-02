@@ -30,6 +30,10 @@ pub async fn verify_one(&self, package: &oci::Identifier, platform: &oci::Platfo
                         opts: VerifyOptions<'_>) -> Result<VerifyReport, PackageError>
 ```
 
+**As shipped:** `transport: &'a dyn OciTransport` is a concrete `client: &'a oci::Client` (no
+trait object), and `cache_root: &'a Path` is a `state: &'a StateStore` — state caches route
+through `StateStore`, not a raw path (see `crates/ocx_lib/src/package_manager/tasks/verify.rs`).
+
 Body: build `VerifyContext { identifier: package, platform, policies, no_cache,
 transport: opts.transport, index: self.index(), trust_root, rekor_url, cache_root,
 offline }` → `VerifyPipeline::run` → wrap `VerifyResult` in `VerifyReport`; map

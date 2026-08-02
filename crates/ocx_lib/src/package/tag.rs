@@ -140,7 +140,7 @@ impl Tag {
         match self {
             Tag::Internal(_) | Tag::Canonical { .. } => true,
             Tag::Other(value) => is_referrer_fallback_tag(value),
-            _ => false,
+            Tag::Latest | Tag::Version(_) => false,
         }
     }
 

@@ -225,10 +225,10 @@ impl App {
 }
 
 /// Map a parsed `Command` to the canonical space-separated string consumers
-/// match on (e.g., `"package sign"`, `"verify"`, `"index update"`).
+/// match on (e.g., `"package sign"`, `"package verify"`, `"index update"`).
 ///
-/// Frozen per ADR C-S1-1 §"`command` field". Any change to an existing mapping
-/// is a v1 → v2 schema bump.
+/// Frozen per ADR C-S1-1, "JSON error envelope" section (the `command` field is
+/// part of the frozen v1 envelope shape). Any change to an existing mapping is a v1 → v2 schema bump.
 fn canonical_command_name(command: &command::Command) -> &'static str {
     use command::Command;
     use command::config::ConfigGroup as ConfigCmd;

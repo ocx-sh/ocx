@@ -540,9 +540,12 @@ peers, though — see [Tier precedence](#keys-trust-merge) below.
 | `oidc_issuer` | string | yes | Exact expected OIDC issuer URL (byte-equal). No regex form in this release — issuer URLs are stable. |
 
 Exactly one of `identity` / `identity_regexp` must be set — both present, or both absent, is a
-configuration error. Each entry uses `deny_unknown_fields`: a typo'd key (e.g. `scop`) is a
-parse error, not a silent no-op, the same protection [`[registries.<name>]`](#keys-registries)
-and [`[mirrors."<host>"]`](#keys-mirrors) give.
+configuration error. Unknown keys are ignored, like everywhere else in `config.toml`: a file
+written for a newer ocx must still load on an older one, so a typo'd key (e.g. `scop`) is
+silently dropped rather than rejected. What still fails the entry is a missing **required**
+field — a policy without `scope` or `oidc_issuer` is a parse error, and one that ends up with
+neither `identity` nor `identity_regexp` is rejected when the policy compiles, never silently
+treated as "trust anything".
 
 #### Scope matching {#keys-trust-scope}
 

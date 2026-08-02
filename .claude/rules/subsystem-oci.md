@@ -36,6 +36,7 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/referrer/capability.rs` | `ReferrersApiCapability` probe + per-registry capability cache (`$OCX_HOME/state/referrers/<registry>.json`) |
 | `oci/referrer/manifest.rs` | `ReferrerManifest` — OCI referrer manifest builder and descriptor helpers |
 | `oci/referrer/media_types.rs` | Media-type constants for Sigstore bundle and other referrer artifact types |
+| `oci/endpoint.rs` | Sigstore endpoint SSRF/scheme validation — `validate_sigstore_url` (the boundary for `--rekor-url`/`--fulcio-url`), the default public Rekor endpoint constant (`DEFAULT_REKOR_URL`), and the shared timeouted `sigstore_http_client()` reused by all four Sigstore call sites (Fulcio CSR, Rekor upload, ambient OIDC token exchange, verify pipeline). A peer of `oci/sign` and `oci/verify`, not owned by either |
 | `oci/sign.rs` | Root module; re-exports signing public types |
 | `oci/sign/bundle.rs` | Sigstore bundle v0.3 (`application/vnd.dev.sigstore.bundle.v0.3+json`) serialisation |
 | `oci/sign/error.rs` | `SignError` + `SignErrorKind` — three-layer error with exit-code classification |

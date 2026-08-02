@@ -19,11 +19,14 @@
 ## As-Shipped Notes (naming/shape deviations from the sketches below)
 
 The illustrative code blocks in this ADR predate the implementation. The shipped
-API differs in three cosmetic ways — the semantics are unchanged:
+API differs in four ways from the sketches below — the first three are cosmetic
+naming/shape changes with unchanged semantics; the fourth is a deliberate
+validation-tolerance deviation, recorded separately below:
 
 - **Error type** `TrustError` → **`crate::trust::TrustPolicyError`** (variants `IdentityConflict` / `IdentityUnset` / `InvalidRegex`, all `{ scope }`).
 - **No `TrustPolicySet` newtype.** The ANY-of set is a plain `&[crate::trust::CompiledPolicy]` slice (YAGNI — the set needs no behaviour of its own). Resolution is the free functions `trust::resolve` / `trust::resolve_compiled`; evaluation is `oci::verify::identity::verify_policies(cert_der, &[CompiledPolicy])`. `CompiledPolicy::exact(identity, issuer)` builds the flag-override single-element set.
 - **`VerifyErrorKind` variant** `NoTrustPolicyMatch` → **`NoIdentityProvided`** (`kind_detail = "no_identity_provided"`, exit **64**). Same condition and rationale; the name reads better for the common "flags omitted" case.
+- **No `#[serde(deny_unknown_fields)]` on `TrustPolicy`.** D2's sketch below shows the entry carrying `deny_unknown_fields`; the shipped `crate::trust::TrustPolicy` carries none. Deliberately removed: `arch-principles.md`'s "Fleet forward-compat on fleet-read config" convention forbids `deny_unknown_fields` anywhere reachable from `Config`, because the `[managed]` tier deserializes a fleet-distributed `config.toml` as `Config` — a `[[trust.policy]]` payload written by a newer ocx must degrade to its known fields on an older binary, not fail the whole file (regression test: `trust_config_tolerates_unknown_fields_from_newer_ocx`, `crates/ocx_lib/src/trust.rs`). The XOR identity invariant this ADR requires still holds at resolution time regardless: `TrustPolicy::compile()` rejects an entry that sets neither `identity` nor `identity_regexp` (`TrustPolicyError::IdentityUnset`) — unknown-field tolerance widens what parses, never what a resolved policy is allowed to mean.
 
 `VerifyContext` therefore carries `policies: &'a [crate::trust::CompiledPolicy]` (not `identity_policy: &TrustPolicySet`), and `Context` gains `config_trust: TrustConfig` + `config_trust_policies()` (the narrow-projection seam this ADR recommends).
 

@@ -141,10 +141,11 @@ impl PackageVerify {
         // every mode. `--offline` scopes to the Sigstore trust services (the
         // Rekor-key fetch and TUF), not the registry — so, unlike sign, offline
         // verify does not exit 81; it requires cached/supplied trust material
-        // instead. See `verify_context`. The index the pipeline uses comes from
+        // instead. See `verify_client`. The index the pipeline uses comes from
         // the manager facade, so only the registry client + offline flag are
         // taken here.
-        let (_, client, offline) = context.verify_context();
+        let client = context.verify_client();
+        let offline = context.is_offline();
 
         // The trust-root cache is keyed by the Rekor instance; compute the key
         // here (where `rekor_url`'s type is in scope) so the resolver takes a

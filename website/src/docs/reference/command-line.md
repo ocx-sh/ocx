@@ -3269,7 +3269,7 @@ Supplying exactly one of the two flags is a usage error (exit 64) rejected by th
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
 | 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
-| 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
+| 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed |
 | 77 | Certificate identity or OIDC issuer mismatch |
 | 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--tuf-root` and no fresh trust-root cache entry); the message names the remedy |
 | 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
@@ -3336,11 +3336,13 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 |----------------|------|---------|
 | `no_signatures_found` | 79 | No referrers found for the target manifest; publisher has not signed this platform |
 | `no_usable_bundle` | 79 | Referrers found but none has a recognized Sigstore bundle artifact type |
+| `candidate_limit_exhausted` | 65 | The signature candidate examination cap was reached with unexamined referrers remaining and none of the examined candidates passed; the operator must reduce the referrer count or raise the cap |
 | `identity_mismatch` | 77 | Certificate SAN does not satisfy the expected identity, whether supplied via `--certificate-identity` or resolved from a [`[[trust.policy]]`][config-trust] entry |
 | `issuer_mismatch` | 77 | Certificate OIDC issuer does not match the expected issuer, whether supplied via `--certificate-oidc-issuer` or resolved from a [`[[trust.policy]]`][config-trust] entry |
 | `cert_chain_invalid` | 65 | Certificate chain does not verify against the supplied trust root |
 | `signature_invalid` | 65 | Signature does not verify over the subject manifest digest |
 | `rekor_set_invalid` | 65 | Rekor SET does not verify (bundle tampered) |
+| `transparency_body_mismatch` | 65 | Rekor transparency-log entry body does not bind to the bundle — a previously-valid SET/body spliced onto a different subject |
 | `rekor_set_absent_tsa_present` | 83 | Rekor SET absent but RFC 3161 TSA timestamp present (Rekor v2 transition) |
 | `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
 | `rekor_unavailable` | 83 | Rekor transparency log unavailable during verify |

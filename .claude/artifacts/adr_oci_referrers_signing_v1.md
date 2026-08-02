@@ -891,7 +891,7 @@ All `--format json` errors in signing / verify commands produce exactly this sha
 ```json
 {
   "schema_version": 1,
-  "command": "verify",
+  "command": "package verify",
   "exit_code": 0,
   "data": {
     "subject": "ocx.sh/cmake:3.28",
