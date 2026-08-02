@@ -70,6 +70,22 @@ pub(crate) const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024
 /// correct taxonomy for a transport that went quiet.
 pub(crate) const REGISTRY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Bound on the connect phase of every registry request, mapped to
+/// [`reqwest::ClientBuilder::connect_timeout`].
+///
+/// The fork defaults this to `None`, which is unbounded: a host that accepts
+/// nothing and refuses nothing — a black-holing firewall, a load balancer with
+/// no backend — leaves the socket in SYN_SENT until the OS gives up, which on
+/// Linux is over two minutes and on some tunings far longer.
+/// [`REGISTRY_READ_TIMEOUT`] does not cover this, because a connect that never
+/// completes never dispatches a request for reqwest to time.
+///
+/// 30 s matches `INDEX_CONNECT_TIMEOUT` in `oci/index/ocx_index.rs`, the
+/// sibling bound on the index-document fetch: both are the connect phase
+/// against a registry-class endpoint, and one number is easier to reason about
+/// than two.
+pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
@@ -85,6 +101,7 @@ impl ClientBuilder {
             config: oci::native::ClientConfig {
                 push_chunk_size: PUSH_CHUNK_SIZE,
                 read_timeout: Some(REGISTRY_READ_TIMEOUT),
+                connect_timeout: Some(REGISTRY_CONNECT_TIMEOUT),
                 // CA roots are seeded by the fork's `ClientConfig::default()`
                 // (self-contained on hosts with no system trust store), inherited
                 // here via `..Default::default()`. Single source of truth: the fork.
@@ -943,6 +960,18 @@ mod read_timeout_tests {
             ClientBuilder::new().config.read_timeout,
             Some(REGISTRY_READ_TIMEOUT),
             "ClientBuilder::new() must set read_timeout — inheriting the fork's None means a stalled registry hangs the pull forever"
+        );
+    }
+
+    /// The connect phase needs its own bound: a host that neither accepts nor
+    /// refuses the SYN never dispatches a request, so the read timeout — which
+    /// reqwest arms at dispatch — never gets a chance to fire.
+    #[test]
+    fn production_client_config_carries_the_registry_connect_timeout() {
+        assert_eq!(
+            ClientBuilder::new().config.connect_timeout,
+            Some(REGISTRY_CONNECT_TIMEOUT),
+            "ClientBuilder::new() must set connect_timeout — inheriting the fork's None means a black-holed connect hangs until the OS gives up"
         );
     }
 
