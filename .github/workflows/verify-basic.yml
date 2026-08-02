@@ -39,7 +39,7 @@ jobs:
       - name: Setup OCX
         uses: ./.github/actions/setup-ocx
         with:
-          version: '0.3.7'
+          version: '0.5.2'
       - name: Lint workflows
         # `ocx run` composes the project toolchain (actionlint + shellcheck +
         # go-task) from ocx.lock and runs the task hermetically — same gate as
