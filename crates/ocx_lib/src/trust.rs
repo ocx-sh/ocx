@@ -30,7 +30,6 @@ use serde::{Deserialize, Serialize};
 
 /// Container for the `[trust]` config section (`[[trust.policy]]` entries).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TrustConfig {
     /// The declared policies. Empty when `[trust]` is present but lists none.
     #[serde(default)]
@@ -43,7 +42,6 @@ pub struct TrustConfig {
 /// is a configuration error surfaced by [`TrustPolicy::compile`] (cosign's
 /// `--certificate-identity` / `--certificate-identity-regexp` precedent).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TrustPolicy {
     /// Package prefix this policy applies to, e.g. `ghcr.io/acme/*`.
     ///
@@ -490,5 +488,36 @@ oidc_issuer = "https://example.com"
         assert_eq!(root.trust.policy.len(), 2);
         assert_eq!(root.trust.policy[0].scope, "ghcr.io/acme/*");
         assert!(root.trust.policy[1].identity_regexp.is_some());
+    }
+
+    #[test]
+    fn trust_config_tolerates_unknown_fields_from_newer_ocx() {
+        // Fleet forward-compat: the `[managed]` tier deserializes a
+        // fleet-distributed config.toml as `Config`, which reaches
+        // `TrustConfig`/`TrustPolicy`. A payload written by a newer ocx must
+        // degrade to its known fields on an older binary, not fail the whole
+        // file (see arch-principles.md "Fleet forward-compat on fleet-read
+        // config"). With `#[serde(deny_unknown_fields)]` restored on either
+        // struct, this parse fails — that is the regression this test guards.
+        let toml = r#"
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+future_field = "added by a newer ocx"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("unknown field is tolerated, not rejected");
+        assert_eq!(root.trust.policy.len(), 1);
+        let policy = &root.trust.policy[0];
+        assert_eq!(policy.scope, "ghcr.io/acme/*");
+        assert_eq!(
+            policy.identity.as_deref(),
+            Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3")
+        );
+        assert_eq!(policy.oidc_issuer, "https://token.actions.githubusercontent.com");
     }
 }
