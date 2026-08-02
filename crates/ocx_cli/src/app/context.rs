@@ -30,14 +30,24 @@ pub struct Context {
     /// `oci_index` and reused for catalog sync (`ocx index update`); empty
     /// under `--offline` or when no namespace is configured as index-kind.
     index_sources: Vec<oci::index::OcxIndex>,
-    /// Registry client available in every mode (including `--offline`).
+    /// Registry client available in every mode (including `--offline`), built
+    /// lazily on first read via [`Self::verify_client`].
     ///
-    /// Built unconditionally so `ocx package verify` can read the artifact + its
-    /// signature referrer from the registry even offline — verify's offline
-    /// semantics scope to Sigstore trust services, not the artifact registry
-    /// (see `verify_context`). `remote_client` stays offline-gated for every
-    /// other command.
-    registry_client: oci::Client,
+    /// Exists so `ocx package verify` can read the artifact + its signature
+    /// referrer from the registry even offline — verify's offline semantics
+    /// scope to Sigstore trust services, not the artifact registry (see
+    /// `verify_client`). `remote_client` stays offline-gated for every other
+    /// command. Deferred rather than built unconditionally in `try_init`
+    /// because most `--offline` invocations never call `verify_client` and the
+    /// TLS trust-store construction it costs (~7ms) is pure waste for them;
+    /// `try_init` still forces it eagerly whenever a network client is needed
+    /// anyway (online) or an operator trust policy demands auto-verify.
+    /// `Arc` makes the cell cloneable alongside the rest of `Context`.
+    registry_client_cell: std::sync::Arc<std::sync::OnceLock<oci::Client>>,
+    /// Registry mirror map threaded into [`Self::registry_client_cell`]'s
+    /// on-demand build — kept so `verify_client()` can construct the client
+    /// without re-deriving it from `Config`.
+    mirror_map: oci::MirrorMap,
     local_index: oci::index::LocalIndex,
     /// Separately-consumable local-index refresh seam (`adr_index_indirection.md`
     /// Decision H) — wraps `local_index`'s per-package refresh and per-source
@@ -192,24 +202,23 @@ impl Context {
         // what gets contacted) — composition with the existing plain-HTTP set,
         // no implicit scheme-driven opt-out (ADR F2).
         //
-        // Built unconditionally: `verify` reads the artifact + signature from the
-        // registry in every mode (its `--offline` scopes to Sigstore trust
-        // services, not the registry). Offline still yields `remote_client:
-        // None`, so the manager and `remote_client()` keep their offline
-        // behavior — only `verify_context()` reads this client.
-        let registry_client = oci::ClientBuilder::new()
-            .plain_http_registries(env::insecure_registries())
-            .mirrors(mirror_map.clone())
-            .progress(progress.clone())
-            .build();
+        // `verify` reads the artifact + signature from the registry in every
+        // mode (its `--offline` scopes to Sigstore trust services, not the
+        // registry) — see `registry_client_cell`'s field doc. Offline yields
+        // `remote_client: None` (the cell stays unbuilt), so the manager and
+        // `remote_client()` keep their offline behavior; online forces the
+        // cell here since a network client is needed regardless.
+        let registry_client_cell: std::sync::Arc<std::sync::OnceLock<oci::Client>> =
+            std::sync::Arc::new(std::sync::OnceLock::new());
         let (remote_client, oci_index) = if options.offline {
             (None, None)
         } else {
+            let client = registry_client_cell
+                .get_or_init(|| build_registry_client(&mirror_map, &progress))
+                .clone();
             (
-                Some(registry_client.clone()),
-                Some(index::OciIndex::new(index::OciIndexConfig {
-                    client: registry_client.clone(),
-                })),
+                Some(client.clone()),
+                Some(index::OciIndex::new(index::OciIndexConfig { client })),
             )
         };
         let file_structure = file_structure::FileStructure::new();
@@ -234,7 +243,14 @@ impl Context {
         let local_index = index::LocalIndex::new(index::LocalConfig {
             index_store: index_store.clone(),
         })
-        .with_allow_yanked(allow_yanked);
+        .with_allow_yanked(allow_yanked)
+        // The SSRF exemption for physical pointers this local copy mints
+        // (ocx#218). Threaded here, not at each chain construction, so every
+        // chain built from this local index — default, lock-scoped `ocx update`,
+        // `ocx patch test`'s scratch chain, `PackageManager::offline_view` —
+        // reads the same operator config. `--offline` builds no sources at all,
+        // so without this the floor would have no exemption to read there.
+        .with_trusted_hosts(trusted_hosts_by_namespace(&config));
         let index_sync = index::IndexSync::new(local_index.clone());
 
         // Single `Index::from_chained` entry point; see
@@ -429,19 +445,30 @@ impl Context {
         // `run`, patch discovery). `None` when no operator `[[trust.policy]]` is
         // configured. install/pull refine the opt-out from their
         // `--verify`/`--no-verify` flag via `conventions::manager_with_verify_flag`.
-        let operator_policies = config.trust.as_ref().map(|t| t.policy.clone()).unwrap_or_default();
+        let operator_policies = config.trust_policies().to_vec();
         // Resolve the `OCX_NO_VERIFY` opt-out ONCE here; both the auto-verify
         // config below and the forwarding `config_view` further down read this
         // single value (the per-command `--verify`/`--no-verify` flag refines it
         // in `conventions::manager_with_verify_flag`).
         let no_verify_env = env::flag(env::keys::OCX_NO_VERIFY, false);
-        let manager = manager.with_auto_verify(build_auto_verify(
-            operator_policies,
-            &registry_client,
-            options.offline,
-            file_structure.state.clone(),
-            no_verify_env,
-        ));
+        // Only force the lazy registry client when a policy actually needs it —
+        // an empty `operator_policies` must not pay the ~7ms TLS-store build cost
+        // `build_auto_verify` would otherwise trigger by taking `&oci::Client`.
+        let auto_verify = if operator_policies.is_empty() {
+            None
+        } else {
+            let client = registry_client_cell
+                .get_or_init(|| build_registry_client(&mirror_map, &progress))
+                .clone();
+            build_auto_verify(
+                operator_policies,
+                &client,
+                options.offline,
+                file_structure.state.clone(),
+                no_verify_env,
+            )
+        };
+        let manager = manager.with_auto_verify(auto_verify);
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -486,7 +513,8 @@ impl Context {
             remote_client,
             oci_index,
             index_sources,
-            registry_client,
+            registry_client_cell,
+            mirror_map,
             offline: options.offline,
             project_path,
             file_structure,
@@ -864,19 +892,66 @@ impl Context {
         self.managed_config_snapshot.as_ref()
     }
 
-    /// Returns the default [`Index`] paired with a registry [`oci::Client`] for
-    /// `ocx package verify`, in every mode — including `--offline`.
+    /// Returns the registry [`oci::Client`] `ocx package verify` reads through,
+    /// in every mode — including `--offline`. Built on first call and cached
+    /// (see [`Self::registry_client_cell`] doc) — never gated on
+    /// `[[trust.policy]]` configuration, so an unconfigured trust set with
+    /// explicit `--certificate-identity`/`--certificate-oidc-issuer` flags
+    /// still gets a client under `--offline`.
     ///
     /// Unlike the offline-gated [`Self::remote_client`], this never fails on
     /// `--offline`: verify inherently reads the artifact and its signature
     /// referrer from the registry where they live (a local mirror in air-gapped
     /// deployments), so its `--offline` semantics scope to the Sigstore trust
-    /// services (the Rekor key fetch and TUF), not the artifact registry. The
-    /// returned `bool` is the offline flag, which the verify pipeline uses to
-    /// forbid trust-services network and require cached/supplied trust material.
-    pub fn verify_context(&self) -> (&oci::index::Index, &oci::Client, bool) {
-        (&self.default_index, &self.registry_client, self.offline)
+    /// services (the Rekor key fetch and TUF), not the artifact registry. Pair
+    /// it with [`Self::is_offline`], which the verify pipeline uses to forbid
+    /// trust-services network and require cached/supplied trust material.
+    pub fn verify_client(&self) -> &oci::Client {
+        self.registry_client_cell
+            .get_or_init(|| build_registry_client(&self.mirror_map, &self.progress))
     }
+}
+
+/// Every namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption
+/// (ocx#218), keyed by namespace and skipping namespaces that declare none.
+///
+/// Config is the single source of truth for the exemption:
+/// [`Context::build_index_sources`] reads the same field into each `OcxIndex`
+/// and each per-namespace `ssrf_guard`, and this map is that same value read
+/// once more for the chained index. It deliberately covers EVERY namespace, not
+/// only the index-bearing ones `build_index_sources` builds a source for — an
+/// operator who declared where a namespace's traffic may go has answered the
+/// question for that namespace, whether or not it also declares an `index`, and
+/// a namespace with no source has no other place to carry the exemption.
+fn trusted_hosts_by_namespace(config: &ocx_lib::Config) -> std::collections::HashMap<String, Vec<String>> {
+    let Some(registries) = config.registries.as_ref() else {
+        return std::collections::HashMap::new();
+    };
+    registries
+        .iter()
+        .filter_map(|(namespace, entry)| {
+            let hosts = entry.trusted_hosts.clone()?;
+            (!hosts.is_empty()).then(|| (namespace.clone(), hosts))
+        })
+        .collect()
+}
+
+/// Builds the registry client backing [`Context::registry_client_cell`].
+///
+/// Extracted so the lazy on-demand build ([`Context::verify_client`]) and the
+/// two eager call sites in [`Context::try_init`] that already need a network
+/// client (the online `remote_client`/`oci_index` pair, and policy-gated
+/// auto-verify) share one construction — no drift between "built lazily" and
+/// "built eagerly" client shapes.
+fn build_registry_client(
+    mirror_map: &oci::MirrorMap,
+    progress: &ocx_lib::cli::progress::ProgressManager,
+) -> oci::Client {
+    oci::ClientBuilder::new()
+        .plain_http_registries(env::insecure_registries())
+        .mirrors(mirror_map.clone())
+        .progress(progress.clone())
+        .build()
 }
 
 /// Build the shared policy-gated auto-verify config, or `None` when no operator
@@ -1255,6 +1330,58 @@ mod tests {
             ns_b.trusted_hosts(),
             ["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()].as_slice(),
             "ns-b's trusted_hosts must never be the union with ns-a's"
+        );
+    }
+
+    #[test]
+    fn trusted_hosts_map_covers_every_declaring_namespace_including_plain_oci_ones() {
+        // The map the local index carries so the SSRF floor can judge a
+        // LOCALLY-minted physical target (ocx#218). It is keyed per namespace
+        // and — unlike `build_index_sources` — is NOT restricted to
+        // index-bearing namespaces: an operator who declared where a
+        // namespace's traffic may go has answered the question for it whether
+        // or not it also declares an `index`, and such a namespace has no
+        // source to carry the exemption for it.
+        let mut registries = std::collections::HashMap::new();
+        registries.insert(
+            "indexed.example".to_string(),
+            ocx_lib::RegistryConfig {
+                index: Some("https://index.indexed.example".to_string()),
+                trusted_hosts: Some(vec!["10.0.0.0/8".to_string()]),
+                ..Default::default()
+            },
+        );
+        registries.insert(
+            "plain.example".to_string(),
+            ocx_lib::RegistryConfig {
+                trusted_hosts: Some(vec!["192.168.0.0/16".to_string()]),
+                ..Default::default()
+            },
+        );
+        registries.insert("silent.example".to_string(), ocx_lib::RegistryConfig::default());
+        let config = ocx_lib::Config {
+            registries: Some(registries),
+            ..Default::default()
+        };
+
+        let map = trusted_hosts_by_namespace(&config);
+
+        assert_eq!(
+            map.get("indexed.example").map(Vec::as_slice),
+            Some(["10.0.0.0/8".to_string()].as_slice())
+        );
+        assert_eq!(
+            map.get("plain.example").map(Vec::as_slice),
+            Some(["192.168.0.0/16".to_string()].as_slice()),
+            "a namespace with no `index` still gets its declared exemption"
+        );
+        assert!(
+            !map.contains_key("silent.example"),
+            "a namespace declaring no trusted_hosts must get no entry, so the floor guards it"
+        );
+        assert!(
+            trusted_hosts_by_namespace(&ocx_lib::Config::default()).is_empty(),
+            "no [registries] table means no exemptions anywhere"
         );
     }
 
