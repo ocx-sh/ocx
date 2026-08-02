@@ -197,9 +197,16 @@ impl App {
         // `api().report(...)` call, which already honors `--format json`.
         let format = cli.context.format;
         let command_name = canonical_command_name(command);
+        // Report-then-fail commands (e.g. `package push --announce-file` with an
+        // unwritable path) already printed their stdout document; appending the
+        // envelope would leave two concatenated JSON documents on stdout. The
+        // envelope is the stdout document only for failures that reported nothing.
+        let reported = context.api().reported_handle();
         match command.execute(context).await {
             Ok(code) => Ok(code),
-            Err(err) if matches!(format, Some(Format::Json)) => {
+            Err(err)
+                if matches!(format, Some(Format::Json)) && !reported.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
                 match render_error_envelope(command_name, &err) {
                     Ok(rendered) => println!("{rendered}"),
                     Err(render_err) => {

@@ -166,7 +166,9 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
 }
 
 /// Render an `anyhow::Error` as a JSON error envelope (emitted on stdout by
-/// `main.rs` when `--format json` is active).
+/// `app.rs` when `--format json` is active and the failing command printed no
+/// report of its own — a report-then-fail command keeps its report as the one
+/// stdout document, and the failure detail stays on stderr).
 ///
 /// Classifies the exit code via [`ocx_lib::cli::classify_error`] (walks the
 /// error chain via `source()`), maps that to an [`ErrorCategory`], collects
