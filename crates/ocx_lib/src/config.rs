@@ -173,9 +173,15 @@ impl Config {
                 None => self.managed = Some(other_managed),
             }
         }
-        // Trust policies APPEND across tiers (union), never replace: a
-        // higher tier adds a more-specific scope or widens the ANY-of set
-        // (rotation), it never masks a lower tier's pin.
+        // Trust policies APPEND across tiers at storage level (union): this
+        // extends the vec, it never drops or replaces an earlier tier's
+        // entry outright. But `trust::resolve` then keeps only the
+        // longest-literal-prefix (most-specific-scope) matches from the
+        // appended set, so a later tier's MORE SPECIFIC scope CAN displace an
+        // earlier tier's broader pin at resolution time — e.g. a system-tier
+        // `ghcr.io/acme/*` pin is masked, for `ghcr.io/acme/tool` targets, by
+        // a user-tier `ghcr.io/acme/tool` entry naming a different identity.
+        // Only entries at *equal* specificity combine as ANY-of (rotation).
         if let Some(other_trust) = other.trust {
             match self.trust.as_mut() {
                 Some(self_trust) => self_trust.policy.extend(other_trust.policy),
