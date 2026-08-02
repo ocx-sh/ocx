@@ -397,7 +397,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
-| 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
+| 75 | Another `ocx` process holds the project lock on `ocx.toml`, or a transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries. Retry with backoff. |
 | 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
@@ -1400,6 +1400,7 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | 65 | `--check` reported drift. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
+| 75 | Transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries — rerunning may succeed. |
 | 78 | Existing `ocx.lock` is malformed (parse error) or uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
@@ -1608,6 +1609,7 @@ The composer prepends env entries in iteration order, so the **last group listed
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
+| 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
 | 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
 | 79 | Package not found in registry during auto-install. |
 | 80 | Authentication failure during auto-install. |

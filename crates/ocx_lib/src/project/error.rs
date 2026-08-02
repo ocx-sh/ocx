@@ -343,6 +343,10 @@ pub enum ProjectErrorKind {
 
     /// Resolution for a single tool exceeded the per-tool timeout. The
     /// underlying cause is absent (we only know the deadline fired).
+    ///
+    /// Classifies as [`ExitCode::TempFail`] (75): a deadline on a registry
+    /// interaction leaves the request unanswered rather than answered badly,
+    /// so a rerun can genuinely succeed.
     #[error("resolve timed out for '{identifier}'")]
     ResolveTimeout { identifier: Box<Identifier> },
 
@@ -496,9 +500,26 @@ impl ClassifyExitCode for Error {
                 ProjectErrorKind::Locked => ExitCode::TempFail,
                 ProjectErrorKind::TagNotFound { .. } => ExitCode::NotFound,
                 ProjectErrorKind::AuthFailure { .. } => ExitCode::AuthError,
-                ProjectErrorKind::RegistryUnreachable { .. } | ProjectErrorKind::ResolveTimeout { .. } => {
-                    ExitCode::Unavailable
-                }
+                // Exactly one cause may override the default, and it is the
+                // transient one: the announced contract for this variant is
+                // "75 when the resolver gives up on a transient fault".
+                // `project_err_from_client` boxes the `ClientError` verbatim
+                // for that downcast. Every other cause keeps 69 — deferring to
+                // a typed non-transient cause would let it re-code the
+                // lock-resolve interface (a `DigestMismatch` exhaustion
+                // reaching a caller as 65), and a cause that is not a
+                // `ClientError` at all has no classification to defer to.
+                ProjectErrorKind::RegistryUnreachable { source, .. } => source
+                    .downcast_ref::<crate::oci::client::error::ClientError>()
+                    .filter(|client| {
+                        matches!(client, crate::oci::client::error::ClientError::RegistryTransient(_))
+                    })
+                    .and_then(ClassifyExitCode::classify)
+                    .unwrap_or(ExitCode::Unavailable),
+                // A per-tool deadline on a registry interaction: nothing was
+                // answered, so a rerun can genuinely succeed. Same rule the
+                // transport applies to a request timeout one layer down.
+                ProjectErrorKind::ResolveTimeout { .. } => ExitCode::TempFail,
                 ProjectErrorKind::LockMissing => ExitCode::ConfigError,
                 // The lock was written by an unsupported version — the user
                 // must regenerate it, same remedy shape as a config mismatch.

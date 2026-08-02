@@ -664,9 +664,11 @@ pub fn lookup_host_leaf<'a>(
     select_best(host, &candidates)
 }
 
-/// Run the retry chain: up to `retry_attempts` retries on
-/// [`ClientError::Registry`]; `Authentication`, `Ok(None)`, and any
-/// other terminal classification returns immediately.
+/// Run the retry chain: up to `retry_attempts` retries on any fault
+/// [`classify`] calls [`ClientFailure::Transient`] — [`ClientError::Registry`],
+/// [`ClientError::RegistryTransient`], [`ClientError::Io`] and
+/// [`ClientError::ShortBlobRead`]. `Authentication`, `Ok(None)`, and any other
+/// terminal classification returns immediately.
 async fn retry_fetch(
     index: &Index,
     identifier: Identifier,
@@ -740,9 +742,10 @@ async fn retry_fetch(
                     ClientFailure::Other => {
                         // No structured `ClientError` classification applied —
                         // treat as a registry-tier failure so the classification
-                        // table remains total. Exit code falls into Unavailable
-                        // (69), which is the safest default for "registry said
-                        // no, but we don't know why."
+                        // table remains total. The fault's own classification
+                        // decides only the transient case (75); everything else
+                        // defaults to Unavailable (69), the safest answer for
+                        // "registry said no, but we don't know why."
                         return Err(project_err_from_client(err, identifier, |id, src| {
                             ProjectErrorKind::RegistryUnreachable {
                                 identifier: Box::new(id),
@@ -1563,6 +1566,76 @@ mod tests {
         );
     }
 
+    /// Giving up on a *transient* fault after the retry budget is spent still
+    /// exits 75, not 69: the resolver ran out of patience, the registry did not
+    /// run out of the ability to answer. Paired with the sibling test above —
+    /// that one wraps `ClientError::Registry` and must stay at 69, so together
+    /// they prove `RegistryUnreachable` reads its own cause rather than
+    /// flattening every exhaustion to one code.
+    #[tokio::test]
+    async fn resolve_lock_retry_exhausted_on_transient_fault_classifies_as_temp_fail() {
+        let config = single_tool_config();
+        let script = (0..3)
+            .map(|_| Err(ClientError::RegistryTransient(Box::new(std::io::Error::other("connect timed out"))).into()))
+            .collect();
+        let mock = MockIndex::with_script(script);
+        let (index, counter) = index_from_mock(&mock);
+
+        let err = resolve_lock(&config, &index, &[], fast_options())
+            .await
+            .expect_err("retry exhaustion must surface as an error");
+
+        assert_eq!(
+            *counter.lock().unwrap(),
+            3,
+            "a transient fault must consume the same retry budget as any other; got {}",
+            *counter.lock().unwrap()
+        );
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::TempFail),
+            "retry-exhausted transient fault must classify as TempFail (exit 75); got {code:?}"
+        );
+    }
+
+    /// The transient carve-out is exactly a carve-out: a typed but NOT
+    /// transient cause under `RegistryUnreachable` keeps 69.
+    ///
+    /// `RegistryUnreachable` is the lock-resolve interface's "the registry
+    /// would not answer" outcome, and 75 is announced for one case only — the
+    /// resolver giving up on a transient fault. Reading the exit code off the
+    /// innermost cause unconditionally would let a malformed manifest re-code
+    /// that outcome to 65, which no `case $?` around a resolve expects.
+    #[tokio::test]
+    async fn resolve_lock_non_transient_client_fault_stays_unavailable() {
+        let config = single_tool_config();
+        let script = vec![Err(
+            ClientError::InvalidManifest("no manifests array".to_string()).into()
+        )];
+        let mock = MockIndex::with_script(script);
+        let (index, counter) = index_from_mock(&mock);
+
+        let err = resolve_lock(&config, &index, &[], fast_options())
+            .await
+            .expect_err("a malformed manifest must surface as an error");
+
+        assert_eq!(
+            *counter.lock().unwrap(),
+            1,
+            "a data fault is not retryable; expected exactly 1 call, got {}",
+            *counter.lock().unwrap()
+        );
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::Unavailable),
+            "a non-transient cause must keep Unavailable (exit 69), not adopt its own 65; got {code:?}"
+        );
+    }
+
     // ── 4. Auth failure — no retry ──────────────────────────────────────────
 
     /// Plan line 631: "auth failure: mock returns `Authentication` →
@@ -1635,16 +1708,18 @@ mod tests {
         );
     }
 
-    // ── 6. Timeout classifies as Unavailable ────────────────────────────────
+    // ── 6. Timeout classifies as TempFail ───────────────────────────────────
 
-    /// Plan line 633: "timeout: mock hangs past `per_tool_timeout` →
-    /// returns `Unavailable`-classified error."
+    /// A per-tool deadline firing on a registry interaction is the retryable
+    /// case: nothing was answered, so the same command may well succeed on a
+    /// rerun. Same rule the transport applies to a request timeout (75), one
+    /// layer up.
     ///
     /// Timeout path: per-call delay exceeds `per_tool_timeout`. The
     /// `tokio::time::timeout` wrapper around the retry chain must fire
-    /// and map to Unavailable classification (exit 69).
+    /// and map to TempFail classification (exit 75).
     #[tokio::test]
-    async fn resolve_lock_timeout_classifies_as_unavailable() {
+    async fn resolve_lock_timeout_classifies_as_temp_fail() {
         let config = single_tool_config();
         // Mock hangs 500ms per call; timeout is 50ms, so the first
         // attempt can never complete.
@@ -1676,8 +1751,8 @@ mod tests {
         let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
         assert_eq!(
             code,
-            Some(crate::cli::ExitCode::Unavailable),
-            "timeout must classify as Unavailable (exit 69); got {:?}",
+            Some(crate::cli::ExitCode::TempFail),
+            "timeout must classify as TempFail (exit 75); got {:?}",
             code
         );
     }
