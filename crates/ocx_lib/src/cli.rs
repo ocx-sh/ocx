@@ -23,7 +23,7 @@ mod styles;
 mod theme;
 mod user_interface;
 
-pub use classify::{ClassifyExitCode, classify_error};
+pub use classify::{ClassifyErrorKind, ClassifyExitCode, classify_error};
 pub use data_interface::{Annotation, Cell, Column, DataInterface, TreeItem};
 pub use error::{MetadataResolutionError, UsageError};
 pub use exit_code::ExitCode;

@@ -1,6 +1,6 @@
 ---
 name: meta-maintain-config
-description: Use when creating or editing skills, rules, agents, or hooks under `.claude/`. Also when AI knowledge has drifted from project patterns, a new Claude Code feature lands, or syncing artifacts to current state. Modes: `create`, `audit`, `refresh`, `review`, `research <topic>`.
+description: Use when creating or editing skills, rules, agents, or hooks under `.claude/`. Also when AI knowledge has drifted from project patterns, a new Claude Code feature lands, or syncing artifacts to current state.
 user-invocable: true
 argument-hint: "create | audit | refresh | review | research topic"
 disable-model-invocation: true

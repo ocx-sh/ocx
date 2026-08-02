@@ -27,6 +27,8 @@ GC-walked stores below. `LocalIndex` (the `oci::index` consumer) reads through i
 (`context.rs`), bypassing `FileStructure` for that one override — home resolution stays
 `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index`. ADR: `adr_index_indirection.md` Decision A, B1, H.
 
+Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL-bound, per-subsystem/per-registry, not GC-walked). Distinct from the three CAS tiers because it carries no digest, has no `refs/` linkage, and may be deleted at any time without integrity loss. See `adr_oci_referrers_signing_v1.md` Amendment 3 for the definitional contract and the originating decision.
+
 ## Module Map
 
 | File | Purpose | Key Types |
@@ -37,6 +39,7 @@ GC-walked stores below. `LocalIndex` (the `oci::index` consumer) reads through i
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
 | `symlink_store.rs` | Install symlinks (candidate/current) | `SymlinkStore`, `SymlinkKind` |
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
+| `state_store.rs` | Persistent + ephemeral runtime state per subsystem (update-check throttle, managed-config, OCI Referrers capability cache, offline-verify trust-root cache) — named per-subsystem accessors, no generic `StateKey` | `StateStore` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
 | `index_store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
 | `reference_manager.rs` | Forward symlinks + back-references for GC | `ReferenceManager` |
@@ -60,7 +63,7 @@ pub struct FileStructure {
     pub packages: PackageStore,
     pub index: IndexStore,
     pub symlinks: SymlinkStore,
-    pub state: StateStore,
+    pub state: StateStore,   // persistent + ephemeral runtime state; see adr_oci_referrers_signing_v1.md Amendment 3
     pub temp: TempStore,
     pub locks: PathBuf,
 }
@@ -164,10 +167,23 @@ Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identif
 
 ### StateStore — Persistent runtime state
 
-Layout: `{root}/state/` — see "Root-level state files under `$OCX_HOME`" above for the full
-path table (`state/update-check/<slug>` etc.).
+Layout: `{root}/state/` — see "Root-level state files under `$OCX_HOME`" above for the fixed
+root-level entries (`state/update-check/<slug>` etc.); per-subsystem caches follow the general
+shape `state/{subsystem}/{key}.json` (e.g. `state/referrers/<registry-slug>.json`,
+`state/trust_root/<rekor-authority-slug>.json`).
 
-Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (metadata JSON) + `managed_config_toml_file()` (readable `config.toml` payload sibling) — the snapshot persists as **two** files (payload written first, metadata last, each its own atomic temp+rename; metadata absent ⟹ whole snapshot reads absent), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` and `managed_config_toml_path_for_snapshot(snapshot_path)` (sibling derivation) shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic.
+Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; signing/trust caches: `referrers_capability_file(registry)` (`state/referrers/<registry-slug>.json`) and `trust_root_file(rekor_authority)` (`state/trust_root/<rekor-authority-slug>.json`) — both slug via `to_relaxed_slug` (dots preserved) and are the layout owners for the OCI referrer capability + offline-verify trust-root caches; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (metadata JSON) + `managed_config_toml_file()` (readable `config.toml` payload sibling) — the snapshot persists as **two** files (payload written first, metadata last, each its own atomic temp+rename; metadata absent ⟹ whole snapshot reads absent), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` and `managed_config_toml_path_for_snapshot(snapshot_path)` (sibling derivation) shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic.
+
+**Definitional contract** (applies to every `state/{subsystem}/...` entry — e.g. the OCI
+Referrers capability cache and the offline-verify trust-root cache, both introduced by
+`adr_oci_referrers_signing_v1.md` Amendment 3):
+
+- **Purpose:** ephemeral, non-content-addressed, registry-scoped or subsystem-scoped runtime state. NOT for content (use `blobs/`), extracted files (`layers/`), assembled packages (`packages/`), persistent metadata mirror (`tags/`), or install pointers (`symlinks/`).
+- **Lifetime:** TTL-bound per subsystem (the Referrers capability cache uses a flat 6h TTL, ADR Amendment 6). Stale entries are safe to delete at any time without integrity loss.
+- **GC:** **not walked** by `ocx clean`. The garbage collector traverses `refs/{symlinks,deps,layers,blobs}/` for reachability; `state/` has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate.
+- **Atomicity:** writes via `tempfile::NamedTempFile` + `std::fs::rename` (Windows-safe across existing targets). The `tempfile::persist` shortcut does **not** replace-existing on Windows.
+- **Concurrency:** advisory file lock optional per subsystem. Capability cache reads tolerate fail-open ("file missing → unknown, reprobe").
+- **Schema:** each subsystem owns its JSON schema. No registry-wide invariants beyond filename layout.
 
 ### TempStore — Download staging
 

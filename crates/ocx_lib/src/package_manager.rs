@@ -270,6 +270,7 @@ mod install_info_identifier_tests {
 // Re-export types needed by other modules and CLI commands.
 pub use concurrency::Concurrency;
 pub use error::DependencyError;
+pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
@@ -283,7 +284,9 @@ pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{
     AdmittedBinaries, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, ResolvedChain, SitePatchRoots,
 };
+pub use tasks::sign::{SignOptions, SignReport};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
+pub use tasks::verify::{VerifyOptions, VerifyReport};
 
 use crate::{config::patch::ResolvedPatchConfig, file_structure, oci, patch::PatchSnapshot};
 
@@ -338,6 +341,16 @@ pub struct PackageManager {
     /// falls back to `file_structure.index` — correct for tests and for any
     /// invocation without a redirect. Set by `Context::try_init`.
     index_store: Option<file_structure::IndexStore>,
+    /// Policy-gated auto-verify configuration.
+    ///
+    /// `None` = no trust policy configured; the auto-verify hook in the pull
+    /// pipeline is a no-op. When `Some`, [`maybe_auto_verify`](Self::maybe_auto_verify)
+    /// runs after each package's manifest resolves and before download. Attached
+    /// once on the shared manager in `Context::try_init` via
+    /// [`with_auto_verify`](Self::with_auto_verify), so every install surface
+    /// (install, pull, exec, env, run, patch discovery) inherits it, not just
+    /// install/pull.
+    auto_verify: Option<AutoVerify>,
 }
 
 impl PackageManager {
@@ -363,6 +376,7 @@ impl PackageManager {
             patch_snapshot: None,
             managed_config_client: None,
             index_store: None,
+            auto_verify: None,
         }
     }
 
@@ -389,6 +403,25 @@ impl PackageManager {
     pub fn with_managed_config_client(mut self, client: Option<oci::Client>) -> Self {
         self.managed_config_client = client;
         self
+    }
+
+    /// Inject the policy-gated auto-verify configuration.
+    ///
+    /// Called once from `Context::try_init` with `Some(..)` only when at
+    /// least one operator trust policy is configured; `None` disables the hook
+    /// (no-op). install/pull refine the opt-out from their `--verify`/
+    /// `--no-verify` flag via `conventions::manager_with_verify_flag` — every
+    /// other surface relies on `OCX_NO_VERIFY` alone. Returns `self` for
+    /// builder-style chaining.
+    #[must_use]
+    pub fn with_auto_verify(mut self, auto_verify: Option<AutoVerify>) -> Self {
+        self.auto_verify = auto_verify;
+        self
+    }
+
+    /// The injected auto-verify configuration, if any.
+    pub fn auto_verify(&self) -> Option<&AutoVerify> {
+        self.auto_verify.as_ref()
     }
 
     /// Inject the resolved patch configuration into this manager.
@@ -625,6 +658,10 @@ impl PackageManager {
             // Carry the effective index-store redirect so an offline view's
             // guaranteed-local lookups read the same home as the parent.
             index_store: self.index_store.clone(),
+            // `offline_view` is a hook-command primitive (env export, global
+            // toolchain) that never installs, so the auto-verify hook is never
+            // reached; carry the config through unchanged for parity.
+            auto_verify: self.auto_verify.clone(),
         }
     }
 

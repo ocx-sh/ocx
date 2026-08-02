@@ -126,16 +126,28 @@ jobs:
     name: Acceptance Tests
     needs: smoke
     runs-on: ubuntu-latest
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: true
+      - name: Start acceptance registry
+        shell: bash
+        run: |
+          # zot (OCI 1.1 Referrers API) is the primary acceptance registry —
+          # distribution's registry:2/registry:3 do NOT serve
+          # /v2/<name>/referrers/<digest> (#195). Started from the compose file
+          # (single source of truth, no image drift). Both services run so the
+          # registry:2 negative fixture (legacy_registry, #106) is CI-provable
+          # and the mirror tests run in CI too (deliberate scope expansion).
+          docker compose -f test/docker-compose.yml up -d registry mirror-registry
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:5000/v2/ > /dev/null 2>&1; then
+              echo "Registry is ready"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::Registry did not become reachable"; exit 1
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

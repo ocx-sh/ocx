@@ -669,26 +669,17 @@ async fn write_profile(path: &Path, content: &str) -> Result<(), error::Error> {
         })?
 }
 
-/// Blocking body of [`write_profile`]: create the parent dir, fill a temp file
-/// in it, and publish atomically via [`crate::utility::fs::persist_temp_file`].
+/// Blocking body of [`write_profile`]: create the parent dir, then write the
+/// content atomically via [`crate::utility::fs::write_bytes_atomic`] (private
+/// temp file in the parent, published over `path`).
 fn write_profile_blocking(path: &Path, content: &str) -> Result<(), error::Error> {
-    use std::io::Write as _;
-
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| error::Error::Io {
         path: parent.to_path_buf(),
         source,
     })?;
 
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| error::Error::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    tmp.write_all(content.as_bytes()).map_err(|source| error::Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    crate::utility::fs::persist_temp_file(tmp, path).map_err(|source| error::Error::Io {
+    crate::utility::fs::write_bytes_atomic(path, content.as_bytes()).map_err(|source| error::Error::Io {
         path: path.to_path_buf(),
         source,
     })

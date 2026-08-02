@@ -79,6 +79,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
 | 10 | Automatic libc/ABI resolution | glibc vs musl selected per-host from one OCI index; no `-musl` tag suffixes, no separate repos |
 | 11 | Centrally managed corporate config as ordinary OCX package | `[managed]` config tier syncs mirrors/patches-pointer/default-registry settings from one operator-published `config.toml` package per fleet (`ocx config push` — versioned tags, cascades, per-host pins/rollbacks/pause reuse the package machinery); identity-gated local snapshot means config resolution stays network-free on every ordinary command, refresh never blocks, required-but-absent snapshot fails closed. Deliberately pull-based and console-free: fleet visibility is `ocx config update --check --format json` in existing inventory tooling. Rolls out a fleet-wide config change without re-provisioning every host — a gap mise/asdf/ORAS do not close either. Reinforces Principle #7 (Private-first). |
+| 12 | Keyless Sigstore signing (v1 scope) | Sign + verify via OCI Referrers, identity-pinned `[[trust.policy]]`, offline/auto-verify — wired against operator-supplied trust material (and the in-repo fake Sigstore stack for tests); production Sigstore fidelity (embedded TUF root, standard Rekor SET, cosign interop) deferred — see signing.md § Deferred to Future Work |
 
 ## Competitive Positioning
 
@@ -122,6 +123,10 @@ ocx exec cmake:3.28 -- cmake --version   # Run with clean environment
 ocx env cmake:3.28                  # Print resolved environment variables
 ocx select cmake:3.28               # Set "current" to this version
 ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish
+ocx package sign -p linux/amd64 my/cmake:3.28            # Keyless Sigstore sign via OCI Referrers
+ocx package verify -p linux/amd64 my/cmake:3.28 \        # Keyless verify (needs --trust-root/--tuf-root; embedded root stubbed)
+  --certificate-identity you@example.com \
+  --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects
 ocx index catalog                   # List known repositories
 ```
@@ -146,7 +151,7 @@ Global flags: `--offline`, `--remote`, `--format json`.
 - **Workspace**: `crates/ocx_lib` (core) + `crates/ocx_cli` (CLI); the mirror tool lives in its own repo ([ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror))
 - **Default registry**: `ocx.sh` (configurable via `OCX_DEFAULT_REGISTRY`)
 - **Platform support**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
-- **Testing**: pytest acceptance tests against real OCI registry (registry:2 via docker-compose)
+- **Testing**: pytest acceptance tests against real OCI registries via docker-compose — zot (OCI 1.1 Referrers API primary) + registry:2 (mirror / referrers-negative fixture)
 
 ## Update Protocol
 

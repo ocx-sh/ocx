@@ -821,13 +821,17 @@ fn classify_client_error(err: &crate::Error) -> ClientFailure {
 
 fn classify(client: &ClientError) -> ClientFailure {
     match client {
-        // Transient: registry-side failures, file I/O, and an incomplete blob
-        // delivery are all retryable.
-        ClientError::Registry(_) | ClientError::Io { .. } | ClientError::ShortBlobRead { .. } => {
-            ClientFailure::Transient
+        // Transient: registry-side failures, file I/O, an incomplete blob
+        // delivery, rate limits, and 5xx are all retryable.
+        ClientError::Registry(_)
+        | ClientError::Io { .. }
+        | ClientError::ShortBlobRead { .. }
+        | ClientError::RateLimited { .. }
+        | ClientError::ServiceUnavailable { .. } => ClientFailure::Transient,
+        // Terminal auth/permission failures — no retry.
+        ClientError::Authentication(_) | ClientError::Unauthorized { .. } | ClientError::Forbidden { .. } => {
+            ClientFailure::Auth
         }
-        // Terminal auth failure — no retry.
-        ClientError::Authentication(_) => ClientFailure::Auth,
         // 404-equivalent — no retry.
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound(_) | ClientError::RepositoryNotFound(_) => {
             ClientFailure::NotFound
@@ -844,6 +848,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::LayerSizeExceeded { .. }
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
+        | ClientError::ReferrersUnsupported { .. }
         | ClientError::Internal(_) => ClientFailure::Other,
     }
 }

@@ -131,6 +131,31 @@ impl StateStore {
         self.managed_config_dir().join("pause.json")
     }
 
+    /// Returns the OCI Referrers-API capability-cache file for `registry`.
+    ///
+    /// Path: `{root}/referrers/{registry_slug}.json` where `{registry_slug}` is
+    /// the relaxed slug of `registry` (dots preserved, `/`/`:` neutralised) so a
+    /// hostile registry string cannot escape the store root. Owned by
+    /// [`crate::oci::referrer::capability::ReferrersApiCapability`].
+    pub fn referrers_capability_file(&self, registry: &str) -> PathBuf {
+        self.root
+            .join("referrers")
+            .join(format!("{}.json", registry.to_relaxed_slug()))
+    }
+
+    /// Returns the offline-verify trust-root-cache file for `rekor_authority`.
+    ///
+    /// Path: `{root}/trust_root/{rekor_authority_slug}.json` where the slug is
+    /// the relaxed slug of the Rekor URL authority (`host[:port]`), so public and
+    /// private Sigstore instances never collide and a hostile authority string
+    /// cannot escape the store root. Owned by
+    /// [`crate::oci::verify::trust_cache::TrustRootCache`].
+    pub fn trust_root_file(&self, rekor_authority: &str) -> PathBuf {
+        self.root
+            .join("trust_root")
+            .join(format!("{}.json", rekor_authority.to_relaxed_slug()))
+    }
+
     /// Pure associated fn deriving the managed-config snapshot path from
     /// `ocx_home` (the `$OCX_HOME` root, NOT this store's `state/` root)
     /// without constructing a [`StateStore`].
@@ -309,6 +334,49 @@ mod tests {
             !file_name.contains('/'),
             "slug must not contain slashes; got: {file_name}"
         );
+    }
+
+    // ── referrers_capability_file / trust_root_file ──────────────────────────
+
+    /// The referrers capability cache for `ghcr.io` lands under `referrers/`
+    /// with the relaxed slug (dots preserved) plus a `.json` suffix.
+    #[test]
+    fn referrers_capability_file_produces_correct_path() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(
+            store.referrers_capability_file("ghcr.io"),
+            PathBuf::from("/ocx/state/referrers/ghcr.io.json")
+        );
+    }
+
+    /// The trust-root cache is keyed by Rekor authority under `trust_root/`;
+    /// the `:` in `host:port` is neutralised to `_` by the relaxed slug.
+    #[test]
+    fn trust_root_file_produces_correct_path() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(
+            store.trust_root_file("rekor.example:443"),
+            PathBuf::from("/ocx/state/trust_root/rekor.example_443.json")
+        );
+    }
+
+    /// A hostile registry / authority string must never escape the store root:
+    /// the relaxed slug replaces `/` and `..`-forming dots so every produced
+    /// path stays a direct child of the subsystem directory. (Moved here from
+    /// `capability.rs` when the layout moved onto these accessors.)
+    #[test]
+    fn cache_files_reject_hostile_slug() {
+        let store = StateStore::new("/ocx/state");
+        for hostile in ["../evil", "/etc/passwd", "..", "../../etc/shadow", "foo/../bar"] {
+            for file in [store.referrers_capability_file(hostile), store.trust_root_file(hostile)] {
+                let name = file.file_name().unwrap().to_str().unwrap();
+                assert!(!name.contains('/'), "slug must not contain slashes; got: {name}");
+                // The only path components below the store root are the subsystem
+                // dir and the single slugged filename — no `..` traversal.
+                let tail: Vec<_> = file.strip_prefix("/ocx/state").unwrap().components().collect();
+                assert_eq!(tail.len(), 2, "expected {{subsystem}}/{{slug}}.json, got {file:?}");
+            }
+        }
     }
 
     // ── is_throttled decision table ──────────────────────────────────────────

@@ -102,6 +102,17 @@ impl Client {
         self.lock_timeout
     }
 
+    /// Returns a reference to the inner transport.
+    ///
+    /// Crate-internal: the sign/verify pipelines take a `&Client` and derive
+    /// the transport through here for their transport-level calls (capability
+    /// probes, referrer manifest reads). The public API never exposes
+    /// `&dyn OciTransport` — pipelines are driven through the `PackageManager`
+    /// facade (`sign_one` / `verify_one`), not by handing callers a transport.
+    pub(crate) fn transport(&self) -> &dyn OciTransport {
+        &*self.transport
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {
@@ -135,7 +146,7 @@ impl Client {
     /// [`Identifier::canonical_reference`] (which stays callable in-crate) — that
     /// discipline is enforced by the structural test plus the behavioural
     /// backstop, not by the compiler.
-    fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
+    pub(in crate::oci) fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
         let Some((host, repository)) = self
             .mirrors
             .rewrite_repository(identifier.registry(), identifier.repository())
@@ -163,7 +174,7 @@ impl Client {
     /// Sibling of [`transport_reference`](Self::transport_reference) for the
     /// case where there is no full identifier — only a registry string and a
     /// placeholder repository.
-    fn transport_registry(&self, registry: &str) -> native::Reference {
+    pub(in crate::oci) fn transport_registry(&self, registry: &str) -> native::Reference {
         // The catalog **URL** is built from `registry()` alone (`/v2/_catalog`),
         // so the repository never reaches the path. The catalog **auth scope**,
         // however, is `repository:<repository>:pull` (oci-client `_auth`), so the
@@ -178,6 +189,26 @@ impl Client {
             .rewrite_repository(registry, "")
             .unwrap_or_else(|| (registry.to_string(), String::new()));
         native::Reference::with_tag(host, repository, "latest".into())
+    }
+
+    /// Builds the transport reference for a **write-path** operation — always
+    /// the canonical host, never a mirror.
+    ///
+    /// Write counterpart to [`transport_reference`](Self::transport_reference).
+    /// Remote/proxy mirrors are read-only (ADR Q5): a push routed through the
+    /// read seam is rejected outright, or — against a writable mirror — lands
+    /// the artifact somewhere the canonical verifier never looks, which for a
+    /// signature is silent non-coverage rather than a visible failure.
+    /// [`ensure_auth`](Self::ensure_auth) already splits `Push` off this way;
+    /// this exposes the same decision to the referrer write paths
+    /// (`oci/sign/pipeline.rs`), which build their own references.
+    ///
+    /// Lives here rather than at the call sites because
+    /// [`Identifier::canonical_reference`] is allow-listed to this file
+    /// (`canonical_reference_only_used_in_allowed_files`) and direct
+    /// construction is gated by T-arch-G1.
+    pub(in crate::oci) fn transport_write_reference(&self, identifier: &Identifier) -> native::Reference {
+        identifier.canonical_reference()
     }
 
     // ── Authentication ─────────────────────────────────────────────
@@ -3408,6 +3439,25 @@ mod tests {
             }))
         }
 
+        async fn push_referrer_manifest(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _manifest_bytes: &[u8],
+            _media_type: &str,
+        ) -> super::transport::Result<oci::Descriptor> {
+            unimplemented!("not needed for the streaming-interruption test")
+        }
+
+        async fn list_referrers(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _artifact_type: Option<&str>,
+        ) -> super::transport::Result<Vec<oci::Descriptor>> {
+            unimplemented!("not needed for the streaming-interruption test")
+        }
+
         fn box_clone(&self) -> Box<dyn super::OciTransport> {
             Box::new(InterruptingTransport {
                 bytes_before_error: self.bytes_before_error.clone(),
@@ -5527,6 +5577,34 @@ mod tests {
             async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> TransportResult<String> {
                 self.data.record("fetch_manifest_digest", image);
                 Ok(format!("sha256:{}", "a".repeat(64)))
+            }
+
+            async fn push_referrer_manifest(
+                &self,
+                image: &oci::native::Reference,
+                _subject_digest: &oci::Digest,
+                manifest_bytes: &[u8],
+                media_type: &str,
+            ) -> TransportResult<oci::Descriptor> {
+                self.data.record("push_referrer_manifest", image);
+                Ok(oci::Descriptor {
+                    media_type: media_type.to_owned(),
+                    digest: format!("sha256:{}", "a".repeat(64)),
+                    size: manifest_bytes.len() as i64,
+                    urls: None,
+                    annotations: None,
+                    artifact_type: None,
+                })
+            }
+
+            async fn list_referrers(
+                &self,
+                image: &oci::native::Reference,
+                _subject_digest: &oci::Digest,
+                _artifact_type: Option<&str>,
+            ) -> TransportResult<Vec<oci::Descriptor>> {
+                self.data.record("list_referrers", image);
+                Ok(vec![])
             }
 
             async fn pull_manifest_raw(

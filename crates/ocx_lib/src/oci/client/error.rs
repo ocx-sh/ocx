@@ -102,6 +102,52 @@ pub enum ClientError {
     /// An internal library error (e.g. codesign, archive processing).
     #[error("{0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The registry rejected the request with HTTP 401.
+    ///
+    /// Distinct from [`Self::Authentication`] (credential resolution failure);
+    /// this is the registry actively refusing after credentials were sent.
+    #[error("registry {registry} returned 401 unauthorized")]
+    Unauthorized {
+        registry: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// The registry rejected the request with HTTP 403.
+    #[error("registry {registry} returned 403 forbidden")]
+    Forbidden {
+        registry: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// The registry rate-limited the request with HTTP 429.
+    ///
+    /// `retry_after` carries the parsed `Retry-After` header value in seconds
+    /// when the registry supplied one. Absent when the header was missing or
+    /// unparseable — callers default to a local backoff policy.
+    #[error("registry {registry} rate-limited the request")]
+    RateLimited {
+        registry: String,
+        retry_after: Option<u64>,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// The registry is unavailable (HTTP 5xx, network failures, timeouts).
+    #[error("registry {registry} is unavailable")]
+    ServiceUnavailable {
+        registry: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// The registry does not implement the OCI Referrers API and has no
+    /// fallback-tag referrers index. Distinct from [`Self::ServiceUnavailable`]:
+    /// the registry is reachable but the endpoint is not served.
+    #[error("registry {registry} does not support the OCI Referrers API")]
+    ReferrersUnsupported { registry: String },
 }
 
 impl ClientError {
@@ -191,7 +237,7 @@ impl ArtifactFetchError {
 impl ClassifyExitCode for ClientError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            Self::Authentication(_) => ExitCode::AuthError,
+            Self::Authentication(_) | Self::Unauthorized { .. } => ExitCode::AuthError,
             Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
             Self::Io { .. } => ExitCode::IoError,
             // TODO: inspect inner source to refine (HTTP 429/503 → TempFail,
@@ -202,6 +248,10 @@ impl ClassifyExitCode for ClientError {
             // the same pull usually succeeds on retry, so it is TempFail rather
             // than DataError.
             Self::ShortBlobRead { .. } => ExitCode::TempFail,
+            Self::Forbidden { .. } => ExitCode::PermissionDenied,
+            Self::RateLimited { .. } => ExitCode::TempFail,
+            Self::ServiceUnavailable { .. } => ExitCode::Unavailable,
+            Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
             Self::DigestMismatch { .. }
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType

@@ -9,6 +9,19 @@ import pytest
 from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
+# Re-export Sigstore fake-service fixtures so `test_sign.py` / `test_verify.py`
+# can consume them by name without importing directly.
+from tests.fixtures.fake_sigstore import (  # noqa: F401
+    FakeFulcio,
+    FakeRekor,
+    FakeOidcIssuer,
+    FakeSigstoreStack,
+    fake_sigstore_stack,
+    fake_fulcio,
+    fake_rekor,
+    fake_oidc_token,
+)
+
 
 @pytest.fixture()
 def unique_repo(request: pytest.FixtureRequest) -> str:
