@@ -140,8 +140,23 @@ impl VerifyPipeline {
             }
         };
         let subject_digest = resolved.digest().ok_or(VerifyErrorKind::NoSignaturesFound)?;
-        let registry = resolved.registry().to_string();
-        let repo = resolved.repository().to_string();
+        // Index indirection: a logical name (`ocx.sh/<ns>/<pkg>`) may point at a
+        // different physical registry, so every transport-facing call below —
+        // capability probe, referrer listing, referrer manifest + bundle blob
+        // pulls — targets the physical address. `Ok(None)` = no rewrite, same
+        // contract the pull path's `resolve_transport_pinned` reads. Trust
+        // policy scope matching stays on the LOGICAL identifier (`ctx.policies`
+        // are resolved from it by the caller): only registry traffic moves. The
+        // SSRF floor on the returned host is enforced upstream in the shared
+        // index choke point (`ChainedIndex::guard_local_physical`).
+        let physical = ctx
+            .index
+            .physical_reference(&resolved)
+            .await
+            .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?
+            .unwrap_or_else(|| resolved.clone());
+        let registry = physical.registry().to_string();
+        let repo = physical.repository().to_string();
         let image = native::Reference::with_tag(registry.clone(), repo.clone(), "latest".to_string());
 
         // 2. List signature referrers (capability cache short-circuits a known
@@ -733,6 +748,10 @@ fn map_client_error(error: ClientError) -> VerifyErrorKind {
     match error {
         ClientError::ReferrersUnsupported { .. } => VerifyErrorKind::ReferrersUnsupported,
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound { .. } => VerifyErrorKind::NoSignaturesFound,
+        // A registry that serves a spec-violating image index where a signature
+        // artifact was expected is malformed signature data, not an ocx defect:
+        // exit 65, not the catch-all's exit 1.
+        ClientError::InvalidImageIndex(_) => VerifyErrorKind::BundleParseFailed,
         other => VerifyErrorKind::Internal(Box::new(other)),
     }
 }
@@ -1169,6 +1188,249 @@ mod tests {
         assert!(
             matches!(failure, VerifyErrorKind::NoSignaturesFound),
             "got: {failure:?}"
+        );
+    }
+
+    // ── Index indirection: transport traffic follows the PHYSICAL registry ──
+
+    /// SHA-256 the indirecting test index reports as the subject digest.
+    fn indirection_subject_digest() -> Digest {
+        crate::oci::Algorithm::Sha256.hash(b"indirected subject manifest")
+    }
+
+    /// A test index whose logical name resolves to a DIFFERENT physical
+    /// registry — the `index.ocx.sh` shape (`ocx.sh/<ns>/<pkg>` pointing at
+    /// `oci://ghcr.io/<org>/<repo>`) reduced to what the pipeline consumes.
+    #[derive(Clone)]
+    struct IndirectingIndex {
+        physical: Identifier,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::oci::index::IndexImpl for IndirectingIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+
+        async fn fetch_manifest(
+            &self,
+            _: &Identifier,
+            _: IndexOperation,
+        ) -> crate::Result<Option<(Digest, crate::oci::Manifest)>> {
+            Ok(Some((
+                indirection_subject_digest(),
+                crate::oci::Manifest::Image(crate::oci::ImageManifest::default()),
+            )))
+        }
+
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(indirection_subject_digest()))
+        }
+
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn physical_reference(&self, _: &Identifier) -> crate::Result<Option<Identifier>> {
+            Ok(Some(self.physical.clone()))
+        }
+
+        fn box_clone(&self) -> Box<dyn crate::oci::index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Transport double that records `"<method>:<registry>"` for every call, so
+    /// a test can assert which host the pipeline actually talked to. Only the
+    /// methods this pipeline reaches do any work.
+    #[derive(Clone, Default)]
+    struct RecordingTransport {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingTransport {
+        fn record(&self, method: &str, image: &native::Reference) {
+            self.calls
+                .lock()
+                .expect("recorder lock")
+                .push(format!("{method}:{}", image.resolve_registry()));
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("recorder lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciTransport for RecordingTransport {
+        async fn ensure_auth(
+            &self,
+            image: &native::Reference,
+            _: crate::oci::RegistryOperation,
+        ) -> std::result::Result<(), ClientError> {
+            self.record("ensure_auth", image);
+            Ok(())
+        }
+
+        async fn list_tags(
+            &self,
+            _: &native::Reference,
+            _: usize,
+            _: Option<String>,
+        ) -> std::result::Result<Vec<String>, ClientError> {
+            unimplemented!("verify never lists tags")
+        }
+
+        async fn catalog(
+            &self,
+            _: &native::Reference,
+            _: usize,
+            _: Option<String>,
+        ) -> std::result::Result<Vec<String>, ClientError> {
+            unimplemented!("verify never reads the catalog")
+        }
+
+        async fn fetch_manifest_digest(&self, _: &native::Reference) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify resolves digests through the index")
+        }
+
+        async fn pull_manifest_raw(
+            &self,
+            image: &native::Reference,
+            _: &[&str],
+        ) -> std::result::Result<(Vec<u8>, String), ClientError> {
+            self.record("pull_manifest_raw", image);
+            Ok((b"{}".to_vec(), indirection_subject_digest().to_string()))
+        }
+
+        async fn pull_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<Vec<u8>, ClientError> {
+            unimplemented!("verify streams blobs")
+        }
+
+        async fn pull_blob_to_file(
+            &self,
+            _: &native::Reference,
+            _: &Digest,
+            _: &std::path::Path,
+        ) -> std::result::Result<(), ClientError> {
+            unimplemented!("verify never writes blobs to disk")
+        }
+
+        async fn head_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<u64, ClientError> {
+            unimplemented!("verify never HEADs blobs")
+        }
+
+        async fn push_manifest(
+            &self,
+            _: &native::Reference,
+            _: &crate::oci::Manifest,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify never pushes")
+        }
+
+        async fn push_manifest_raw(
+            &self,
+            _: &native::Reference,
+            _: Vec<u8>,
+            _: &str,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify never pushes")
+        }
+
+        async fn push_blob(
+            &self,
+            _: &native::Reference,
+            _: Vec<u8>,
+            _: &Digest,
+            _: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify never pushes")
+        }
+
+        async fn push_referrer_manifest(
+            &self,
+            _: &native::Reference,
+            _: &Digest,
+            _: &[u8],
+            _: &str,
+        ) -> std::result::Result<crate::oci::Descriptor, ClientError> {
+            unimplemented!("verify never pushes")
+        }
+
+        async fn list_referrers(
+            &self,
+            image: &native::Reference,
+            _: &Digest,
+            _: Option<&str>,
+        ) -> std::result::Result<Vec<crate::oci::Descriptor>, ClientError> {
+            self.record("list_referrers", image);
+            Ok(Vec::new())
+        }
+
+        fn box_clone(&self) -> Box<dyn OciTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_reads_referrers_from_the_physical_registry_not_the_logical_one() {
+        // Index indirection (`adr_index_indirection.md` C2): the logical
+        // `ocx.sh/...` name is a pointer; the artifact and its signature
+        // referrers live on the physical registry the index root names. A
+        // pipeline that builds its transport reference from the LOGICAL
+        // identifier asks the wrong host for the signature — which for an
+        // indirected package reads as "not signed" (exit 79) no matter how the
+        // publisher signed it.
+        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
+
+        let transport = RecordingTransport::default();
+        let client = Client::with_transport(Box::new(transport.clone()));
+        let index = Index::from_impl(IndirectingIndex {
+            physical: physical.clone(),
+        });
+        let temp = tempfile::TempDir::new().expect("state dir");
+        let state = StateStore::new(temp.path());
+        let (_key, cert) = self_signed_cert();
+        let trust_root = trust_root_of(&[&cert]);
+        let rekor_url = Url::parse("https://rekor.example").expect("rekor url");
+        let platform = crate::oci::Platform::any();
+
+        let outcome = VerifyPipeline::run(
+            &client,
+            VerifyContext {
+                identifier: &logical,
+                platform: &platform,
+                policies: &[],
+                no_cache: true,
+                index: &index,
+                trust_root: &trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline: true,
+            },
+        )
+        .await;
+        let Err(error) = outcome else {
+            panic!("the recording transport lists no referrers, so verify must fail");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::NoSignaturesFound),
+            "expected the empty-referrer outcome, got: {error}",
+        );
+
+        let calls = transport.calls();
+        assert!(
+            calls.iter().any(|call| call == "list_referrers:ghcr.io"),
+            "the referrer listing must target the physical registry, got: {calls:?}",
+        );
+        assert!(
+            calls.iter().all(|call| call.ends_with(":ghcr.io")),
+            "no transport call may target the logical index host, got: {calls:?}",
         );
     }
 

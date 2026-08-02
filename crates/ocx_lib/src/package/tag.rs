@@ -334,9 +334,9 @@ mod tests {
     #[test]
     fn tag_does_not_reserve_dash_form_boundary_cases() {
         for raw in [
-            format!("sha256-{}", hex(63)),        // wrong hex length
-            format!("sha256-{}.sbom", hex(64)),   // unrecognized suffix
-            "v1.2.3".to_string(),                 // no dash-digest shape at all
+            format!("sha256-{}", hex(63)),      // wrong hex length
+            format!("sha256-{}.sbom", hex(64)), // unrecognized suffix
+            "v1.2.3".to_string(),               // no dash-digest shape at all
         ] {
             let tag = Tag::from(raw.clone());
             assert!(!tag.is_reserved(), "'{raw}' should not be reserved, got {tag:?}");
