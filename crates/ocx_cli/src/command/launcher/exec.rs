@@ -209,7 +209,11 @@ impl LauncherExec {
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim resolved via the default Windows PATHEXT.
 
-        let resolved = process_env.resolve_command(command);
+        // The shadow rule has to hold at this hop too: a package that declares
+        // entrypoints resolves THROUGH its generated launcher, so a plain
+        // `resolve_command` here would let a host copy win in the fresh
+        // `ocx launcher exec` process and defeat the check the parent made.
+        let resolved = process_env.resolve_test_command(command)?;
 
         let err = child_process::exec(&resolved, args, process_env);
         Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))

@@ -2627,6 +2627,18 @@ Malformed layout syntax at publish (`strip` not a `u8`, an unknown key, a duplic
 
 Materializes a package locally without a registry round-trip and runs a command or script in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. Either a trailing `-- CMD [ARGS...]` or a `--script PATH` is required; the two forms are mutually exclusive.
 
+::: warning Commands resolve against the package first
+A bare command name is looked up in the package's own directories before the host `PATH`, and the package's copy of a name is never skipped:
+
+- **The package ships an executable of that name** — it runs. This is the ordinary case.
+- **The package ships the name but the file is not executable** — the command fails with exit code 65, naming the path and its permission bits. It does *not* fall back to a same-named binary on the host, because that would test something the package does not contain and report a pass.
+- **The package does not ship the name at all** — it resolves on the host `PATH` as usual (`sh`, `grep`, and friends keep working), with a warning naming the directories that were searched.
+
+A name carrying a path separator (`./tool`, an absolute path) addresses a file directly and is unaffected.
+
+Catch a missing executable bit at publish time instead with [`ocx package create --bin-scan`][cmd-package-create].
+:::
+
 **Usage**
 
 ```shell
@@ -2684,6 +2696,10 @@ ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.1 \
 ::: tip Tempdir lifecycle
 Without `--keep` or `--output`, the temp directory is deleted on any exit — success or failure. Use `--keep` to opt in to preservation on failure. Re-run with `--keep` to inspect.
 :::
+
+**Exit codes — trailing-command branch**
+
+The child's own exit code propagates verbatim, so any value can appear. Two codes are produced by `ocx` itself before the child starts: 64 for a usage error, and 65 when the package ships the named command but the file is not executable (see the warning above).
 
 **Exit codes — `--script` branch**
 

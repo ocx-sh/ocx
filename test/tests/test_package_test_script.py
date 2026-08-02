@@ -1079,3 +1079,71 @@ def test_os_arch_cross_type_wall(
         f"cross-type wall: expected exit 0, got {result.returncode}\n"
         f"stderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shadow rule (#268) — ocx.run() never falls through to a host copy
+# ---------------------------------------------------------------------------
+
+
+def test_nonexecutable_package_binary_fails_script(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx.run("shtool")` fails when the package ships shtool non-executable.
+
+    The literal #268 repro: with a same-named executable on the host PATH the
+    script used to run THAT and pass, so a package that lost its executable bit
+    shipped green. Script outcome is a failure → exit 1 (the existing contract;
+    the resolution error surfaces in the failure message, not as exit 65).
+    """
+    tag = "1.0.0"
+    decoy_dir = tmp_path / "host-bin"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "shtool"
+    decoy.write_text(_SHTOOL_SCRIPT)
+    decoy.chmod(0o755)
+
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        tag,
+        tmp_path,
+        bins=["shtool"],
+        bin_scripts={"shtool": _SHTOOL_SCRIPT},
+        bin_exec={"shtool": False},
+        cascade=False,
+    )
+    bundle = tmp_path / f"bundle-{unique_repo}-{tag}.tar.xz"
+    metadata_path = resolved_metadata_path(bundle)
+
+    script = _write_script(
+        tmp_path,
+        "shadow.star",
+        'r = ocx.run("shtool", "--version")\nexpect.ok(r)\n',
+    )
+
+    env = {**ocx.env, "PATH": f"{decoy_dir}:{ocx.env['PATH']}"}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "test",
+            "-p", _PLATFORM,
+            "-m", str(metadata_path),
+            "-i", pkg.short,
+            str(bundle),
+            "--script", str(script),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120.0,
+    )
+
+    assert result.returncode == 1, (
+        f"a non-executable package binary must fail the script (exit 1), got "
+        f"{result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "not executable" in combined, (
+        f"the failure must say the shipped file is not executable, got:\n{combined}"
+    )

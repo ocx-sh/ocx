@@ -242,7 +242,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         .await
     } else if !args.command.is_empty() {
         let (command, command_args) = args.command.split_first().expect("non-empty command checked above");
-        let resolved = process_env.resolve_command(command);
+        let resolved = process_env.resolve_test_command(command)?;
         let status = child_process::spawn_and_wait(&resolved, command_args, process_env)
             .await
             .map_err(|e| anyhow::Error::from(e).context(format!("failed to run '{}'", resolved.display())))?;

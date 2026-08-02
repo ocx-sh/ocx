@@ -42,6 +42,8 @@ Every function below is a method (always written with parens). Returned values a
 
 The first positional argument is the program; the rest are argv. Splat a list with `ocx.run(*cmd)`. Calling with zero positional args fails the script.
 
+A bare program name resolves against the composed package directories before the host `PATH`, and never silently falls through to the host when the package under test ships a copy it cannot execute — that case fails the script instead. A name the package does not ship resolves on the host as usual.
+
 The keyword-only parameters:
 
 - `env` — dict overlaid on top of the composed env for this call only. Reserved keys (`PATH`, `OCX_HOME`, the `OCX_*` loader vars, and the `OCX_AUTH_*` credential family) are rejected.

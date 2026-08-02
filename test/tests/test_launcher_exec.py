@@ -16,8 +16,12 @@ Scenarios covered:
 
 from __future__ import annotations
 
+import os
+import stat
+import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -152,4 +156,70 @@ def test_launcher_exec_missing_metadata_json_exits_64(ocx: OcxRunner) -> None:
     )
     assert "metadata.json" in result.stderr, (
         f"error must mention 'metadata.json'; stderr={result.stderr.strip()!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shadow rule at the launcher hop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX executable bit has no Windows analogue")
+def test_launcher_hop_refuses_a_non_executable_dispatch_target(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A package's own non-executable target must not be passed over here either.
+
+    A generated entrypoint re-enters `ocx launcher exec` as a *fresh* process,
+    so this hop makes its own resolution decision. Resolving it the way the OS
+    would means a package shipping a 0644 dispatch target silently runs the
+    host's same-named binary — #268, one process later, and invisible to the
+    `ocx package test` coverage because a different code path decides it.
+
+    The decoy is what makes this discriminating: it prints a marker no package
+    binary ever prints, so a green run that executed it is visible.
+    """
+    decoy_dir = tmp_path / "host-bin"
+    decoy_dir.mkdir()
+    decoy_marker = f"decoy-{uuid4().hex[:12]}"
+    decoy = decoy_dir / "hello"
+    decoy.write_text(f"#!/bin/sh\necho {decoy_marker}\n")
+    decoy.chmod(decoy.stat().st_mode | stat.S_IEXEC)
+
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints=["hello"],
+        bins=["hello"],
+        bin_exec={"hello": False},
+    )
+    ocx.plain("package", "install", "--select", pkg.short)
+
+    launcher = _get_package_root(ocx, pkg.short) / "entrypoints" / "hello"
+    assert launcher.exists(), f"the generated launcher must exist: {launcher}"
+
+    launcher_env = dict(ocx.env)
+    # The decoy leads PATH; the ocx dir follows so the launcher can re-enter.
+    launcher_env["PATH"] = os.pathsep.join(
+        [str(decoy_dir), str(ocx.binary.parent), launcher_env.get("PATH", "")]
+    )
+    completed = subprocess.run(
+        [str(launcher)],
+        capture_output=True,
+        text=True,
+        env=launcher_env,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 65, (
+        f"a non-executable dispatch target must exit 65 (DataError), got "
+        f"{completed.returncode}\nstdout: {completed.stdout}\nstderr: {completed.stderr}"
+    )
+    assert decoy_marker not in completed.stdout, (
+        f"the host decoy must never run; stdout:\n{completed.stdout}"
+    )
+    assert f"bin{os.sep}hello" in completed.stderr, (
+        f"stderr must name the package path of the offending file, got:\n{completed.stderr}"
     )

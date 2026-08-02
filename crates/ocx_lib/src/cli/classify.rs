@@ -82,7 +82,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
     use crate::config::managed::ManagedConfigError;
-    use crate::env::ForwardedEnvError;
+    use crate::env::{CommandResolutionError, ForwardedEnvError};
     use crate::file_structure::error::Error as FileStructureError;
     use crate::forge::ForgeError;
     use crate::managed_config::{
@@ -128,6 +128,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(crate::Error);
     try_downcast!(ConfigError);
     try_downcast!(ForwardedEnvError);
+    try_downcast!(CommandResolutionError);
     try_downcast!(ClientError);
     try_downcast!(OciIndexError);
     try_downcast!(DigestError);
@@ -371,6 +372,19 @@ mod tests {
             "bad-input",
             crate::oci::identifier::error::IdentifierErrorKind::InvalidFormat,
         );
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn command_resolution_error_maps_to_data_error() {
+        // A package shipping a non-executable binary is malformed content →
+        // DataError (65), parity with BinScanError::DeclaredNotExecutable.
+        // Without the ladder rung this silently degrades to Failure (1).
+        let err = crate::env::CommandResolutionError::NotExecutable {
+            command: "shtool".into(),
+            path: PathBuf::from("/pkg/bin/shtool"),
+            mode: 0o644,
+        };
         assert_eq!(classify(err), ExitCode::DataError);
     }
 

@@ -442,6 +442,7 @@ def make_package_with_entrypoints(
     dependencies: list[dict] | None = None,
     env: list[dict] | None = None,
     extra_files: dict[str, str] | None = None,
+    bin_exec: dict[str, bool] | None = None,
 ) -> PackageInfo:
     """Publish a test package whose metadata declares ``entrypoints``.
 
@@ -473,6 +474,11 @@ def make_package_with_entrypoints(
         package's installed ``content/`` tree and reachable via
         ``${installPath}/<rel_path>`` at runtime.  Parent directories are
         created automatically.  Defaults to ``None`` (no extra files).
+    bin_exec:
+        Maps a binary name to whether it gets the executable bit (default:
+        every name in ``bins`` does).  A ``False`` entry builds the shadow-rule
+        fixture at the launcher hop: an entrypoint whose dispatch target the
+        package ships but cannot run.  POSIX only — Windows has no exec bit.
     """
     if isinstance(entrypoints, list):
         for n in entrypoints:
@@ -506,7 +512,8 @@ def make_package_with_entrypoints(
             script.write_text(f"@echo entry-point-{name} {marker} %*\n")
         else:
             script.write_text(f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n')
-            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+            if (bin_exec or {}).get(name, True):
+                script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     if extra_files:
         for rel_path, content in extra_files.items():

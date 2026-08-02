@@ -336,16 +336,21 @@ fn program_is_path(program: &str) -> bool {
 /// `cwd` — NOT the process CWD — because the child runs with `current_dir(cwd)`
 /// applied; resolving it against the outer CWD would bind (and refuse-check)
 /// the wrong binary.
-fn resolve_program(base_env: &crate::env::Env, program: &str, cwd: &Path) -> std::path::PathBuf {
+///
+/// A bare name goes through
+/// [`Env::resolve_test_command`](crate::env::Env::resolve_test_command), so a
+/// name the package under test ships but cannot execute fails the script
+/// instead of silently running the host's copy.
+fn resolve_program(base_env: &crate::env::Env, program: &str, cwd: &Path) -> Result<std::path::PathBuf, String> {
     if program_is_path(program) {
         let raw = Path::new(program);
-        return if raw.is_absolute() {
+        return Ok(if raw.is_absolute() {
             raw.to_path_buf()
         } else {
             cwd.join(raw)
-        };
+        });
     }
-    base_env.resolve_command(program)
+    base_env.resolve_test_command(program).map_err(|e| e.to_string())
 }
 
 /// Returns true if `resolved` is (or resolves to) an `ocx` binary — refused in
@@ -456,6 +461,7 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
         });
 
         let cwd_path = cwd_path.map_err(fail)?;
+        let resolved = resolved.map_err(fail)?;
 
         // Refuse re-entrant ocx (Fix#6).
         let reentrant = host::with(|s| is_ocx_binary(&s.env, &resolved));
@@ -751,12 +757,12 @@ mod tests {
         let env = crate::env::Env::clean();
         let cwd = Path::new("/sandbox/subdir");
         assert_eq!(
-            resolve_program(&env, "./tool", cwd),
+            resolve_program(&env, "./tool", cwd).unwrap(),
             cwd.join("tool"),
             "`./tool` must bind to <cwd>/tool"
         );
         assert_eq!(
-            resolve_program(&env, "bin/tool", cwd),
+            resolve_program(&env, "bin/tool", cwd).unwrap(),
             cwd.join("bin/tool"),
             "`bin/tool` must bind under the validated cwd"
         );
@@ -768,7 +774,7 @@ mod tests {
         let cwd = Path::new("/sandbox/subdir");
         let abs = if cfg!(windows) { r"C:\bin\tool" } else { "/usr/bin/tool" };
         assert_eq!(
-            resolve_program(&env, abs, cwd),
+            resolve_program(&env, abs, cwd).unwrap(),
             Path::new(abs),
             "an absolute program path must not be re-anchored on the cwd"
         );
@@ -783,7 +789,7 @@ mod tests {
         #[cfg(windows)]
         env.set("PATHEXT", ".EXE");
         let cwd = Path::new("/sandbox/subdir");
-        let resolved = resolve_program(&env, "definitely_missing_bin_xyz", cwd);
+        let resolved = resolve_program(&env, "definitely_missing_bin_xyz", cwd).unwrap();
         assert!(
             !resolved.starts_with(cwd),
             "a bare PATH name must not be anchored on the cwd, got {resolved:?}"

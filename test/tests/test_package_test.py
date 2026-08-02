@@ -55,6 +55,7 @@ def _make_test_package(
     env: list[dict] | None = None,
     dependencies: list[dict] | None = None,
     entrypoints: dict[str, dict] | None = None,
+    bin_exec: dict[str, bool] | None = None,
 ) -> tuple[Path, Path, PackageInfo]:
     """Create a local package layout (content dir + metadata file + bundle) for
     use with ``ocx package test``.
@@ -63,6 +64,10 @@ def _make_test_package(
     ``package_info`` is the pushed package record (needed for digest refs and
     dep descriptors). The bundle is also pushed to the registry so digest-layer
     tests can resolve layer blobs.
+
+    ``bin_exec`` maps a binary name to whether it gets the executable bit
+    (default: every name in ``bins`` does). A ``False`` entry builds the
+    shadow-rule fixture: a package that ships a name it cannot run.
     """
     plat = _PLATFORM
     marker = f"marker-{uuid4().hex[:12]}"
@@ -79,7 +84,8 @@ def _make_test_package(
             script.write_text(f"@echo {marker}\n")
         else:
             script.write_text(f"#!/bin/sh\necho {marker}\n")
-            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+            if (bin_exec or {}).get(name, True):
+                script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     home_key = unique_repo.upper().replace("-", "_") + "_HOME"
     metadata_env = env or [
@@ -1270,4 +1276,101 @@ def test_env_flag_survives_generated_entrypoint_launcher(
         f"the override must survive the launcher re-entry — without forwarding "
         f"the launcher re-applies the package's own 'package-value' on top; "
         f"stdout:\n{result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shadow rule (#268) — a package's own copy of a name is never skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no POSIX executable bit on Windows")
+def test_nonexecutable_package_binary_fails_instead_of_using_host_copy(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A package shipping a non-executable binary fails; the host copy never runs.
+
+    The bug (#268): command resolution walked the composed package PATH dirs
+    straight on into the ambient PATH, and skipped a non-executable file
+    without a word. A package whose `bin/shtool` lost its executable bit was
+    therefore tested against whatever `shtool` the host happened to have — and
+    reported a pass.
+
+    The decoy on PATH is what makes this discriminating: it prints a marker no
+    package binary ever prints, so a green run that executed it is visible.
+    """
+    decoy_dir = tmp_path / "host-bin"
+    decoy_dir.mkdir()
+    decoy_marker = f"decoy-{uuid4().hex[:12]}"
+    decoy = decoy_dir / "shtool"
+    decoy.write_text(f"#!/bin/sh\necho {decoy_marker}\n")
+    decoy.chmod(decoy.stat().st_mode | stat.S_IEXEC)
+
+    bundle, metadata_path, pkg_info = _make_test_package(
+        ocx,
+        unique_repo,
+        tmp_path,
+        bins=["shtool"],
+        bin_exec={"shtool": False},
+    )
+
+    result = ocx.plain(
+        "package", "test",
+        "-p", _PLATFORM,
+        "-m", str(metadata_path),
+        "-i", pkg_info.short,
+        str(bundle),
+        "--",
+        "shtool",
+        check=False,
+        env_overrides={"PATH": f"{decoy_dir}{os.pathsep}{ocx.env['PATH']}"},
+    )
+
+    assert result.returncode == 65, (
+        f"a non-executable package binary must exit 65 (DataError), got "
+        f"{result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert decoy_marker not in result.stdout, (
+        f"the host decoy must never run; stdout:\n{result.stdout}"
+    )
+    assert "not executable" in result.stderr, (
+        f"stderr must say the file is not executable, got:\n{result.stderr}"
+    )
+    # A path fragment, not the bare name: the command name alone appears in
+    # every one of these messages, so `"shtool" in stderr` would pass even if
+    # the error stopped naming the offending file at all.
+    assert f"bin{os.sep}shtool" in result.stderr, (
+        f"stderr must name the package path of the offending file, got:\n{result.stderr}"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the POSIX `sh` host tool")
+def test_host_tool_not_shipped_by_package_resolves_with_warning(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A name the package does not ship still resolves on the host, with a warning.
+
+    The shadow rule only governs names the package under test actually ships.
+    `sh`, `grep` and friends must keep working — loudly, so a typo'd tool name
+    silently testing a host binary is visible in the log.
+    """
+    bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
+
+    result = ocx.plain(
+        "package", "test",
+        "-p", _PLATFORM,
+        "-m", str(metadata_path),
+        "-i", pkg_info.short,
+        str(bundle),
+        "--",
+        "sh", "-c", "true",
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"an unshipped host tool must still run, got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert "not shipped by the composed packages" in result.stderr, (
+        f"resolving off the host PATH must warn, got:\n{result.stderr}"
     )

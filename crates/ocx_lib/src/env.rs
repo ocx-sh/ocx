@@ -279,6 +279,16 @@ fn wide_to_upper(c: u16) -> u16 {
 #[derive(Clone)]
 pub struct Env {
     vars: HashMap<EnvKey, OsString>,
+    /// The `PATH` directories contributed by composed package entries, in the
+    /// same order they occupy in `PATH` — never the ambient inherited ones.
+    ///
+    /// This is what makes [`Env::resolve_test_command`] able to answer "does
+    /// the package under test ship this name?" separately from "is this name
+    /// on PATH at all". Populated only by [`Env::apply_entries`], and
+    /// deliberately never emitted by [`Env::iter`] / `IntoIterator`: it is
+    /// resolution bookkeeping, not an environment variable, and must not reach
+    /// a child process.
+    package_path: OsString,
 }
 
 impl Default for Env {
@@ -291,11 +301,15 @@ impl Env {
     pub fn new() -> Self {
         Self {
             vars: std::env::vars_os().map(|(k, v)| (EnvKey::new(k), v)).collect(),
+            package_path: OsString::new(),
         }
     }
 
     pub fn clean() -> Self {
-        Self { vars: HashMap::new() }
+        Self {
+            vars: HashMap::new(),
+            package_path: OsString::new(),
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&OsStr> {
@@ -475,11 +489,29 @@ impl Env {
     ///
     /// This is the bridge from [`entry::Entry`](crate::package::metadata::env::entry::Entry)
     /// (the canonical resolved env var) to the process environment used by `exec`.
+    ///
+    /// Every `PATH` directory a composed entry contributes is additionally
+    /// recorded in the private `package_path`, so [`Self::resolve_test_command`]
+    /// can tell a directory the package under test shipped from one the host
+    /// happened to have. Folding it in with the same
+    /// [`move_to_front`](crate::utility::path::move_to_front) used for the real
+    /// `PATH` keeps the two orders identical by construction.
     pub fn apply_entries(&mut self, entries: &[crate::package::metadata::env::entry::Entry]) {
         use crate::package::metadata::env::modifier::ModifierKind;
+        let path_key = EnvKey::new("PATH");
         for entry in entries {
             match entry.kind {
-                ModifierKind::Path => self.add_path(&entry.key, &entry.value),
+                ModifierKind::Path => {
+                    self.add_path(&entry.key, &entry.value);
+                    // Key equality under `EnvKey` (case-insensitive on Windows)
+                    // is what excludes the other path-shaped variables —
+                    // LD_LIBRARY_PATH, PKG_CONFIG_PATH, MANPATH — which
+                    // contribute no executables.
+                    if EnvKey::new(entry.key.as_str()) == path_key {
+                        self.package_path =
+                            utility::path::move_to_front(&self.package_path, OsStr::new(entry.value.as_str()));
+                    }
+                }
                 ModifierKind::Constant => self.set(&entry.key, &entry.value),
             }
         }
@@ -536,38 +568,13 @@ impl Env {
     /// method vs. delegating to `which_in` which reads `std::env::var_os`.
     #[cfg(windows)]
     fn resolve_command_windows(&self, command: &OsStr, cwd: &std::path::Path) -> Option<PathBuf> {
-        // Parse PATHEXT from our child env. Fall back to a sensible Windows
-        // default when absent so bare `foo` can still resolve `foo.exe`.
-        let pathext_str = self
-            .get("PATHEXT")
-            .and_then(|v| v.to_str())
-            .unwrap_or(".COM;.EXE;.BAT;.CMD")
-            .to_string();
-
-        let mut extensions: Vec<&str> = pathext_str
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // The OCX launcher shim is always `<name>.exe` post-`.cmd` cutover
-        // (adr_windows_exe_shim.md). A hardened or customized child PATHEXT may
-        // omit `.EXE` entirely (e.g. `PATHEXT=.BAT;.CMD`); the cutover removed
-        // the PATHEXT inject/warn safety net on the premise that `.EXE` is
-        // unconditionally resolvable, so guarantee it is probed here regardless
-        // of the child PATHEXT. Probe order still respects the user's listed
-        // extensions; `.exe` is appended only when absent (case-insensitive).
-        if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
-            extensions.push(".EXE");
-        }
-
         // For each extension, ask `which_in` if `command + ext` is found.
         // `which_in` on a name-with-extension will not try to append further
         // extensions — it just probes the PATH directories for that exact name.
         let path = self.get("PATH");
-        for ext in &extensions {
+        for ext in self.pathext() {
             let mut candidate = command.to_os_string();
-            candidate.push(ext);
+            candidate.push(&ext);
             if let Ok(found) = which::which_in(&candidate, path, cwd) {
                 return Some(found);
             }
@@ -577,6 +584,213 @@ impl Env {
         // that already carry an extension like `foo.exe`).
         which::which_in(command, path, cwd).ok()
     }
+
+    /// Windows-only: the executable extensions to probe, in order.
+    ///
+    /// Read from *this* env's PATHEXT, falling back to the Windows default when
+    /// absent so a bare `foo` can still resolve `foo.exe`.
+    ///
+    /// The OCX launcher shim is always `<name>.exe` post-`.cmd` cutover
+    /// (adr_windows_exe_shim.md). A hardened or customized child PATHEXT may
+    /// omit `.EXE` entirely (e.g. `PATHEXT=.BAT;.CMD`); the cutover removed the
+    /// PATHEXT inject/warn safety net on the premise that `.EXE` is
+    /// unconditionally resolvable, so it is guaranteed to be probed regardless
+    /// of the child PATHEXT. Probe order still respects the user's listed
+    /// extensions; `.EXE` is appended only when absent (case-insensitive).
+    #[cfg(windows)]
+    fn pathext(&self) -> Vec<String> {
+        let pathext_str = self
+            .get("PATHEXT")
+            .and_then(|v| v.to_str())
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .to_string();
+
+        let mut extensions: Vec<String> = pathext_str
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
+            extensions.push(".EXE".to_string());
+        }
+        extensions
+    }
+
+    /// Resolve a command for `ocx * test` / launcher re-entry: never silently
+    /// skip a same-named file the package under test ships.
+    ///
+    /// [`Self::resolve_command`] answers "what would the OS run", which walks
+    /// the composed package directories straight on into the ambient PATH and
+    /// skips a non-executable file without a word. For a test command that is
+    /// the wrong question: a package shipping `tool` with the executable bit
+    /// missing would silently be tested against the *host's* `tool`, and pass.
+    ///
+    /// So the package's own copy is decided first, and only a name the package
+    /// does not ship at all is looked up on the host PATH:
+    ///
+    /// 1. Scan the package-contributed PATH directories, in PATH order; the
+    ///    first executable match wins.
+    /// 2. A match that is present but not executable is a hard error — never a
+    ///    fall-through to a host copy.
+    /// 3. A name the package does not ship resolves through
+    ///    [`Self::resolve_command`], with a warning naming the directories that
+    ///    were searched — unless the host lookup came up empty too, where
+    ///    [`Self::resolve_command`] has already warned about the same name.
+    ///
+    /// A path-bearing `command` (`./tool`, an absolute path, a Windows
+    /// drive-relative `C:tool`) names a file directly, so there is no
+    /// package-versus-host question to answer and it delegates unchanged.
+    ///
+    /// On Windows a candidate is reached only by matching a PATHEXT extension,
+    /// which *is* the platform's definition of executable — there is no exec
+    /// bit to fail, so [`CommandResolutionError::NotExecutable`] cannot occur.
+    ///
+    /// Synchronous, like [`Self::resolve_command`] (whose `which_in` stats the
+    /// same directories): a handful of local `stat` calls, once per invocation,
+    /// immediately before the process execs a child and stops doing anything
+    /// else. Not worth an async seam the sibling resolver does not have.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandResolutionError::NotExecutable`] when the package under test
+    /// ships the name but the file cannot be executed.
+    pub fn resolve_test_command(&self, command: impl AsRef<OsStr>) -> Result<PathBuf, CommandResolutionError> {
+        let command = command.as_ref();
+        if command_is_path(command) {
+            return Ok(self.resolve_command(command));
+        }
+
+        // The bare name comes last, and only for a command that already
+        // carries a PATHEXT extension (`-- tool.exe`): without it the package
+        // scan misses a file the package plainly ships. An extensionless bare
+        // name is deliberately NOT a candidate — Windows cannot exec it, and
+        // `resolve_command_windows` would never return one either, so matching
+        // it here would trade a working host fallback for a doomed exec.
+        #[cfg(windows)]
+        let candidates: Vec<OsString> = {
+            let pathext = self.pathext();
+            let command_has_pathext_extension = std::path::Path::new(command)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|extension| {
+                    pathext
+                        .iter()
+                        .any(|known| known.trim_start_matches('.').eq_ignore_ascii_case(extension))
+                });
+            pathext
+                .iter()
+                .map(|ext| {
+                    let mut candidate = command.to_os_string();
+                    candidate.push(ext);
+                    candidate
+                })
+                .chain(command_has_pathext_extension.then(|| command.to_os_string()))
+                .collect()
+        };
+        #[cfg(not(windows))]
+        let candidates: Vec<OsString> = vec![command.to_os_string()];
+
+        // The first present-but-not-executable hit, remembered across the whole
+        // scan so an executable match in a later directory still wins.
+        let mut blocked: Option<(PathBuf, u32)> = None;
+
+        for dir in std::env::split_paths(&self.package_path) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            for name in &candidates {
+                let path = dir.join(name);
+                // `metadata` follows symlinks: a relative link inside the
+                // package to a real binary resolves, a dangling one is simply
+                // not a candidate.
+                let Ok(metadata) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                match executable_verdict(&metadata) {
+                    Ok(()) => return Ok(path),
+                    Err(mode) => blocked.get_or_insert((path, mode)),
+                };
+            }
+        }
+
+        if let Some((path, mode)) = blocked {
+            return Err(CommandResolutionError::NotExecutable {
+                command: command.to_string_lossy().into_owned(),
+                path,
+                mode,
+            });
+        }
+
+        // ponytail: warn, not error — strict upgrade = swap this arm for
+        // Err(OutsidePackage) when the owner flips decision #1 on #268.
+        let found = self.resolve_command(command);
+        // Only when the host lookup actually found something. `resolve_command`
+        // already warned on its way to returning the bare name unchanged, and a
+        // second line there would claim a resolution that did not happen.
+        // Directories go through `{:?}`, which quotes and escapes them: a value
+        // reaching here can carry a newline, and a raw one forges log lines
+        // (CWE-117).
+        if found.as_path() != std::path::Path::new(command) {
+            // `split_paths("")` yields one empty PathBuf; the scan skips those,
+            // so the message must too or a PATH-less package prints `[""]`.
+            let searched: Vec<PathBuf> = std::env::split_paths(&self.package_path)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .collect();
+            log::warn!(
+                "'{}' is not shipped by the composed packages; resolved to '{}' on the host PATH — expected it under one of: {:?}",
+                command.to_string_lossy(),
+                found.display(),
+                searched
+            );
+        }
+        Ok(found)
+    }
+}
+
+/// True when `command` names a file directly rather than a bare name to look
+/// up on PATH.
+///
+/// A bare name is *exactly one* [`Component::Normal`](std::path::Component) —
+/// anything else is path-bearing. The scan joins the name onto each package
+/// directory, and `Path::join` with a value carrying its own root or prefix
+/// discards the base, so a looser test lets the join stat outside every
+/// package directory and report the result as a copy the package ships. A
+/// separator test misses the Windows drive-relative form (`C:tool` has no
+/// separator, yet `join` keeps only the drive).
+fn command_is_path(command: &OsStr) -> bool {
+    let mut components = std::path::Path::new(command).components();
+    !matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+/// `Ok(())` when the candidate can be executed, `Err(mode)` carrying its
+/// permission bits when it cannot.
+///
+/// Mirrors the three-bit POSIX test in
+/// [`crate::package::bin_scan`]'s `unix_is_executable`.
+// ponytail: duplicated 3-line POSIX bit test; sharing would invert env→package layering
+#[cfg(unix)]
+fn executable_verdict(metadata: &std::fs::Metadata) -> Result<(), u32> {
+    use std::os::unix::fs::PermissionsExt;
+    // The caller already filtered to `is_file()`, so this checks the bit only —
+    // a directory's `x` (traversable) can never reach here.
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 != 0 { Ok(()) } else { Err(mode & 0o7777) }
+}
+
+/// Non-Unix hosts have no exec bit: a candidate is reached only by matching a
+/// PATHEXT extension, which is the platform's own executability rule, so every
+/// candidate that exists is executable.
+#[cfg(not(unix))]
+fn executable_verdict(_metadata: &std::fs::Metadata) -> Result<(), u32> {
+    Ok(())
 }
 
 impl IntoIterator for Env {
@@ -698,6 +912,39 @@ pub fn is_valid_env_key(key: &str) -> bool {
 pub fn is_reserved_ocx_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
     upper.starts_with("OCX_") || upper.starts_with("__OCX_")
+}
+
+/// Failure modes of [`Env::resolve_test_command`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CommandResolutionError {
+    /// The package under test ships this name, but the file cannot be exec'd.
+    ///
+    /// Deliberately terminal: falling through to a same-named host binary
+    /// would run the test against something the package does not contain and
+    /// report a pass.
+    #[error(
+        "'{command}' is present in the package under test at '{}' but is not executable (mode {mode:04o}); \
+         re-create the package with the executable bit set - ocx does not fall through to a host copy on PATH",
+        path.display()
+    )]
+    NotExecutable {
+        /// The bare command name as invoked.
+        command: String,
+        /// Absolute path of the non-executable file inside the package.
+        path: PathBuf,
+        /// POSIX permission bits, masked to `0o7777`.
+        mode: u32,
+    },
+}
+
+impl crate::cli::ClassifyExitCode for CommandResolutionError {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        // Parity with `BinScanError::DeclaredNotExecutable`: the package's own
+        // content contradicts what it claims to ship — malformed input data,
+        // not a usage error and not a config fault.
+        Some(crate::cli::ExitCode::DataError)
+    }
 }
 
 /// Failure modes of decoding the forwarded [`keys::OCX_ENV`] payload.
@@ -2138,6 +2385,306 @@ mod tests {
             env.get(keys::OCX_PATCH_SNAPSHOT).is_none(),
             "patch_snapshot=None must remove any stale OCX_PATCH_SNAPSHOT from the child env"
         );
+    }
+
+    // ── `resolve_test_command` — the #268 shadow rule ──────────────────────
+
+    /// Builds a `PATH`-kind entry for `dir`, as the composer would.
+    fn path_entry(key: &str, dir: &std::path::Path) -> crate::package::metadata::env::entry::Entry {
+        crate::package::metadata::env::entry::Entry {
+            key: key.to_string(),
+            value: dir.to_str().unwrap().to_string(),
+            kind: crate::package::metadata::env::modifier::ModifierKind::Path,
+        }
+    }
+
+    /// Writes `name` into `dir` with the given mode, returning its path.
+    #[cfg(unix)]
+    fn write_binary(dir: &std::path::Path, name: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    /// macOS puts `TempDir` under the `/tmp` -> `/private/tmp` symlink, so a
+    /// raw tempdir path never equals a resolved one. Compare canonical forms.
+    fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+        match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+            (Ok(l), Ok(r)) => l == r,
+            _ => left == right,
+        }
+    }
+
+    /// The #268 regression: a package that ships `tool` without the executable
+    /// bit must fail loudly, never fall through to the host's copy.
+    ///
+    /// The composition mirrors the real one — the package entry prepends onto
+    /// an inherited PATH — so `resolve_command`'s answer here is exactly what
+    /// `ocx package test` used to execute.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_errors_when_package_copy_not_executable() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let ambient_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(package_dir.path(), "tool", 0o644);
+        let decoy = write_binary(ambient_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", ambient_dir.path());
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        // Anchor: the old resolver silently picked the host copy. If this ever
+        // stops holding, the test below no longer discriminates.
+        assert!(
+            same_file(&env.resolve_command("tool"), &decoy),
+            "precondition: resolve_command must still return the host decoy"
+        );
+
+        let error = env
+            .resolve_test_command("tool")
+            .expect_err("a non-executable package copy must not fall through to the host");
+        let message = error.to_string();
+        assert!(
+            message.contains(shipped.to_str().unwrap()),
+            "error must name the package path, got: {message}"
+        );
+        assert!(message.contains("0644"), "error must name the mode, got: {message}");
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError)
+        );
+    }
+
+    /// Happy path is unchanged: an executable the package ships wins, and the
+    /// answer is the one `resolve_command` already gave.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_prefers_package_dir_over_ambient() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let ambient_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(package_dir.path(), "tool", 0o755);
+        write_binary(ambient_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", ambient_dir.path());
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let resolved = env.resolve_test_command("tool").unwrap();
+        assert!(
+            same_file(&resolved, &shipped),
+            "package copy must win; got {}",
+            resolved.display()
+        );
+        assert!(same_file(&resolved, &env.resolve_command("tool")));
+    }
+
+    /// A name the package does not ship still resolves on the host PATH — the
+    /// `sh` / `grep` case every test script relies on.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_falls_back_when_package_ships_nothing() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let ambient_dir = tempfile::tempdir().unwrap();
+        write_binary(package_dir.path(), "other", 0o755);
+        let host_tool = write_binary(ambient_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", ambient_dir.path());
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let resolved = env.resolve_test_command("tool").unwrap();
+        assert!(
+            same_file(&resolved, &host_tool),
+            "an unshipped name must resolve on the host PATH; got {}",
+            resolved.display()
+        );
+    }
+
+    /// A dependency's `bin/` is a package directory too — the scan covers every
+    /// composed PATH entry, not just the root package's.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_searches_dependency_dirs() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let dependency_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(dependency_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.apply_entries(&[
+            path_entry("PATH", dependency_dir.path()),
+            path_entry("PATH", root_dir.path()),
+        ]);
+
+        let resolved = env.resolve_test_command("tool").unwrap();
+        assert!(
+            same_file(&resolved, &shipped),
+            "a dependency's bin dir must be searched; got {}",
+            resolved.display()
+        );
+    }
+
+    /// A blocked hit does not veto an executable copy a *later* package
+    /// directory ships. The scan remembers the block and keeps going; the
+    /// error is only reported when the whole scan turned up nothing runnable.
+    ///
+    /// This is the case that makes `blocked` a remembered `Option` rather than
+    /// an early return — a dependency shipping a stray 0644 `tool` must not
+    /// fail a package that ships a working one.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_later_executable_beats_an_earlier_blocked_copy() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        write_binary(first_dir.path(), "tool", 0o644);
+        let executable = write_binary(second_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        // `apply_entries` prepends each PATH value, so applying second then
+        // first leaves `first_dir` ahead of `second_dir` in the scan order.
+        env.apply_entries(&[
+            path_entry("PATH", second_dir.path()),
+            path_entry("PATH", first_dir.path()),
+        ]);
+
+        let resolved = env
+            .resolve_test_command("tool")
+            .expect("an executable copy in a later dir must win over an earlier blocked one");
+        assert!(
+            same_file(&resolved, &executable),
+            "expected the executable copy in the second dir; got {}",
+            resolved.display()
+        );
+    }
+
+    /// Two executable copies: scan order decides, and scan order is PATH
+    /// order — the same answer `resolve_command` gives.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_first_executable_in_path_order_wins() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = write_binary(first_dir.path(), "tool", 0o755);
+        write_binary(second_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.apply_entries(&[
+            path_entry("PATH", second_dir.path()),
+            path_entry("PATH", first_dir.path()),
+        ]);
+
+        let resolved = env.resolve_test_command("tool").unwrap();
+        assert!(
+            same_file(&resolved, &first),
+            "the first package dir in PATH order must win; got {}",
+            resolved.display()
+        );
+        assert!(
+            same_file(&resolved, &env.resolve_command("tool")),
+            "package-scan order must agree with what the OS would run"
+        );
+    }
+
+    /// Only `PATH` contributes executables. A `LD_LIBRARY_PATH` entry pointing
+    /// at a directory that happens to hold a same-named non-executable file
+    /// must not turn a legitimate host lookup into an error.
+    #[cfg(unix)]
+    #[test]
+    fn apply_entries_records_only_path_dirs() {
+        let library_dir = tempfile::tempdir().unwrap();
+        let ambient_dir = tempfile::tempdir().unwrap();
+        write_binary(library_dir.path(), "tool", 0o644);
+        let host_tool = write_binary(ambient_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", ambient_dir.path());
+        env.apply_entries(&[path_entry("LD_LIBRARY_PATH", library_dir.path())]);
+
+        let resolved = env
+            .resolve_test_command("tool")
+            .expect("a LD_LIBRARY_PATH dir contributes no executables");
+        assert!(same_file(&resolved, &host_tool));
+    }
+
+    /// A path-bearing name addresses a file directly — no package-versus-host
+    /// question — so it must behave exactly as `resolve_command` does.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_delegates_path_bearing_names() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(package_dir.path(), "tool", 0o644);
+
+        let mut env = Env::clean();
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        for name in [shipped.to_str().unwrap(), "./tool", "..", "a/b"] {
+            assert_eq!(
+                env.resolve_test_command(name).unwrap(),
+                env.resolve_command(name),
+                "path-bearing '{name}' must delegate unchanged"
+            );
+        }
+    }
+
+    /// Only a lone bare name may be joined onto a package directory.
+    ///
+    /// The package scan does `dir.join(command)`, and `join` with anything
+    /// carrying its own root or prefix *replaces* the base — so a name that is
+    /// not exactly one normal component would stat outside every package
+    /// directory and be reported as a copy the package ships (CWE-22 class).
+    /// `C:tool` is the Windows form that a separator test cannot see: it has
+    /// no separator at all, yet `join` keeps only the drive.
+    #[test]
+    fn command_is_path_admits_only_a_single_normal_component() {
+        for bare in ["tool", "tool.exe", "tool-1.2"] {
+            assert!(
+                !command_is_path(OsStr::new(bare)),
+                "'{bare}' is a lone bare name and must be package-scanned"
+            );
+        }
+        for bearing in ["..", "a/b", "./tool", "/abs/tool", ""] {
+            assert!(
+                command_is_path(OsStr::new(bearing)),
+                "'{bearing}' must delegate to resolve_command, never be joined onto a package dir"
+            );
+        }
+        #[cfg(windows)]
+        for bearing in ["C:tool", "C:\\tool", "\\\\server\\share\\tool"] {
+            assert!(
+                command_is_path(OsStr::new(bearing)),
+                "'{bearing}' carries a drive/prefix that would replace the package dir on join"
+            );
+        }
+    }
+
+    /// On Windows a package-shipped `<name>.exe` is found through the child
+    /// env's PATHEXT, and a name that already carries the extension resolves
+    /// through the bare-name candidate appended after them.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_test_command_finds_package_exe_via_pathext() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let shipped = package_dir.path().join("tool.exe");
+        std::fs::write(&shipped, b"MZ").unwrap();
+
+        let mut env = Env::clean();
+        env.set("PATHEXT", ".EXE;.CMD");
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        // `tool` matches via the `.EXE` candidate; `tool.exe` only matches
+        // because the bare name is probed too — without it a `-- tool.exe`
+        // invocation would miss the package scan entirely and fall to the host.
+        for invoked in ["tool", "tool.exe"] {
+            let resolved = env
+                .resolve_test_command(invoked)
+                .unwrap_or_else(|e| panic!("'{invoked}' must resolve inside the package: {e}"));
+            assert_eq!(
+                resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
+                "tool.exe",
+                "'{invoked}' must resolve to the package's tool.exe"
+            );
+        }
     }
 
     /// `resolve_command` must find a well-known binary that exists on PATH.

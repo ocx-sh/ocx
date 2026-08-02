@@ -362,7 +362,7 @@ impl PackageTest {
             .split_first()
             .expect("clap required_unless_present=script guarantees a command in the non-script branch");
 
-        let resolved = process_env.resolve_command(command);
+        let resolved = process_env.resolve_test_command(command)?;
 
         // Print keep message before the child runs — last output ocx produces.
         if let Some(msg) = &keep_msg {

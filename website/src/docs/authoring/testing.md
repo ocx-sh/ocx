@@ -34,6 +34,16 @@ OCX will:
 
 The child's exit code is forwarded unchanged. A failing test command (`exit 7`) gives you exit code 7.
 
+### What the command name resolves to {#basic-resolution}
+
+A bare command name is resolved against the package's own directories before the host `PATH`, and the package's copy of a name is never quietly passed over. The point of `package test` is to test what you are about to publish, so a name your package ships has to be the thing that runs.
+
+That matters most when the file is there but cannot be executed. A binary that lost its executable bit — a common casualty of `zip`, of a `COPY` in a build image, or of a checkout on a filesystem that drops the bit — fails with exit code 65, naming the path and its mode. It is not passed over in favour of a same-named host binary: doing so would test something the package does not contain, and report a pass for a package nobody can run.
+
+Names your package does not ship are unaffected: `sh`, `grep`, `curl` and the rest still resolve on the host `PATH`, with a warning on stderr naming the package directories that were searched. So a typo'd tool name is visible in the log rather than silently testing a host binary. A name carrying a path separator (`./tool`, an absolute path) addresses a file directly and skips this entirely.
+
+To catch a missing executable bit before you even get here, pass `--bin-scan` to [`ocx package create`][cmd-package-create]: it verifies the `binaries` claim against the content tree at authoring time.
+
 ## Identifier constraints {#identifier}
 
 The identifier must be in tag form — `repo:tag` or `registry/repo:tag`. An explicit `@digest` suffix is rejected with a usage error (exit 64), because the digest is computed locally from the layers you supply and would conflict with any pre-committed value.
@@ -231,6 +241,8 @@ The sandbox applies to the `ocx.*` host API only — file reads, writes, and pat
 
 Re-entrant `ocx` invocations are refused in v1. `ocx.run("ocx", ...)` exits with code 1 and a message explaining the limitation.
 
+`ocx.run` resolves a bare program name the same way the trailing-command form does — [against the package first][basic-resolution]. A name your package ships but cannot execute fails the script rather than running the host's copy of that tool, so a package with a 644 binary no longer passes its own smoke test. Names the package does not ship still resolve on the host `PATH`.
+
 ### Output format {#scripted-tests-output}
 
 Pass `--format json` to get a structured envelope alongside the exit code:
@@ -295,8 +307,12 @@ For `.star` syntax highlighting in VS Code, add the [vscode-bazel][vscode-bazel]
 <!-- commands -->
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-test]: ../reference/command-line.md#package-test
+[cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-env]: ../reference/command-line.md#package-env
+
+<!-- internal -->
+[basic-resolution]: #basic-resolution
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md

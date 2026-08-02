@@ -260,6 +260,9 @@ fn windows_claim_name(file_name: &str) -> Option<&str> {
     Some(&file_name[..file_name.len() - ext.len()])
 }
 
+// Deliberately duplicated by `env.rs`'s `executable_verdict` (which returns the
+// mode on failure so the resolver can name it) — sharing would invert the
+// env-on-package layering. Change the bit test here, change it there.
 #[cfg(unix)]
 fn unix_is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
