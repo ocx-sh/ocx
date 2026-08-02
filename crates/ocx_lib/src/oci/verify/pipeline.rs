@@ -1213,6 +1213,35 @@ mod tests {
         crate::oci::Algorithm::Sha256.hash(b"indirected subject manifest")
     }
 
+    /// Stand-in bundle blob — not a real Sigstore bundle, so verification
+    /// fail-closes at `BundleParseFailed` once it has been fetched.
+    const STUB_BUNDLE_BLOB: &[u8] = b"not a sigstore bundle";
+
+    /// A structurally valid signature referrer manifest whose single layer
+    /// points at [`STUB_BUNDLE_BLOB`]. Built through the production builder so
+    /// the fixture cannot drift from the shape the pipeline parses.
+    ///
+    /// Exists so the indirection tests reach the referrer-manifest pull AND the
+    /// bundle-blob pull; an empty referrer listing short-circuits at
+    /// `NoSignaturesFound` and leaves those two later reads unobserved.
+    fn stub_referrer_manifest() -> Vec<u8> {
+        let payload = crate::oci::Descriptor {
+            media_type: crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
+            digest: crate::oci::Algorithm::Sha256.hash(STUB_BUNDLE_BLOB).to_string(),
+            size: STUB_BUNDLE_BLOB.len() as i64,
+            ..crate::oci::Descriptor::default()
+        };
+        let subject = crate::oci::Descriptor {
+            media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+            digest: indirection_subject_digest().to_string(),
+            size: 2,
+            ..crate::oci::Descriptor::default()
+        };
+        crate::oci::referrer::ReferrerManifest::build(subject, SIGSTORE_BUNDLE_V03, payload)
+            .to_canonical_json()
+            .expect("referrer manifest json")
+    }
+
     /// A test index whose logical name resolves to a DIFFERENT physical
     /// registry — the `index.ocx.sh` shape (`ocx.sh/<ns>/<pkg>` pointing at
     /// `oci://ghcr.io/<org>/<repo>`) reduced to what the pipeline consumes.
@@ -1319,11 +1348,23 @@ mod tests {
             _: &[&str],
         ) -> std::result::Result<(Vec<u8>, String), ClientError> {
             self.record("pull_manifest_raw", image);
-            Ok((b"{}".to_vec(), indirection_subject_digest().to_string()))
+            let bytes = stub_referrer_manifest();
+            Ok((bytes, indirection_subject_digest().to_string()))
         }
 
         async fn pull_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<Vec<u8>, ClientError> {
             unimplemented!("verify streams blobs")
+        }
+
+        async fn pull_blob_streaming(
+            &self,
+            image: &native::Reference,
+            _: &Digest,
+        ) -> std::result::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>, ClientError> {
+            // Junk, on purpose: the run only has to REACH this read on the right
+            // host. `parse_bundle` then fail-closes into `BundleParseFailed`.
+            self.record("pull_blob_streaming", image);
+            Ok(Box::new(std::io::Cursor::new(STUB_BUNDLE_BLOB.to_vec())))
         }
 
         async fn pull_blob_to_file(
@@ -1383,7 +1424,14 @@ mod tests {
             _: Option<&str>,
         ) -> std::result::Result<Vec<crate::oci::Descriptor>, ClientError> {
             self.record("list_referrers", image);
-            Ok(Vec::new())
+            let bytes = stub_referrer_manifest();
+            Ok(vec![crate::oci::Descriptor {
+                media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                digest: crate::oci::Algorithm::Sha256.hash(&bytes).to_string(),
+                size: bytes.len() as i64,
+                artifact_type: Some(SIGSTORE_BUNDLE_V03.to_string()),
+                ..crate::oci::Descriptor::default()
+            }])
         }
 
         fn box_clone(&self) -> Box<dyn OciTransport> {
@@ -1392,10 +1440,13 @@ mod tests {
     }
 
     /// Drive a verify run against the recording transport for the logical name
-    /// `ocx.sh/acme/tool:1.0`, indirected to the physical `ghcr.io/acme/tool:1.0`,
-    /// and return the `"<method>:<registry>"` log. The transport lists no
-    /// referrers, so the run must end in `NoSignaturesFound`.
-    async fn run_recorded_verify(mirrors: crate::oci::client::MirrorMap) -> Vec<String> {
+    /// `ocx.sh/acme/tool:1.0`, indirected to the physical `ghcr.io/acme/tool:1.0`.
+    /// Returns the `"<method>:<registry>"` log plus the state dir, so a caller
+    /// can read back the persisted capability record. The transport serves one
+    /// referrer whose bundle blob is junk, so the run walks the full read chain
+    /// (probe → list → referrer manifest → bundle blob) and ends in
+    /// `BundleParseFailed`.
+    async fn run_recorded_verify(mirrors: crate::oci::client::MirrorMap) -> (Vec<String>, tempfile::TempDir) {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
 
@@ -1426,13 +1477,13 @@ mod tests {
         )
         .await;
         let Err(error) = outcome else {
-            panic!("the recording transport lists no referrers, so verify must fail");
+            panic!("the recording transport serves a junk bundle, so verify must fail");
         };
         assert!(
-            matches!(error.kind, VerifyErrorKind::NoSignaturesFound),
-            "expected the empty-referrer outcome, got: {error}",
+            matches!(error.kind, VerifyErrorKind::BundleParseFailed),
+            "expected the junk-bundle outcome, got: {error}",
         );
-        transport.calls()
+        (transport.calls(), temp)
     }
 
     #[tokio::test]
@@ -1444,11 +1495,20 @@ mod tests {
         // identifier asks the wrong host for the signature — which for an
         // indirected package reads as "not signed" (exit 79) no matter how the
         // publisher signed it.
-        let calls = run_recorded_verify(crate::oci::client::MirrorMap::default()).await;
-        assert!(
-            calls.iter().any(|call| call == "list_referrers:ghcr.io"),
-            "the referrer listing must target the physical registry, got: {calls:?}",
-        );
+        let (calls, _state_dir) = run_recorded_verify(crate::oci::client::MirrorMap::default()).await;
+        // Name every stage explicitly: the `all()` below passes vacuously if the
+        // run short-circuits before the later reads, so the later reads have to
+        // be asserted present, not just consistent.
+        for stage in [
+            "list_referrers:ghcr.io",
+            "pull_manifest_raw:ghcr.io",
+            "pull_blob_streaming:ghcr.io",
+        ] {
+            assert!(
+                calls.iter().any(|call| call == stage),
+                "`{stage}` must target the physical registry, got: {calls:?}",
+            );
+        }
         assert!(
             calls.iter().all(|call| call.ends_with(":ghcr.io")),
             "no transport call may target the logical index host, got: {calls:?}",
@@ -1469,12 +1529,18 @@ mod tests {
                 path_prefix: "proxy".to_string(),
             },
         )]);
-        let calls = run_recorded_verify(mirrors).await;
+        let (calls, state_dir) = run_recorded_verify(mirrors).await;
 
-        assert!(
-            calls.iter().any(|call| call == "list_referrers:mirror.example"),
-            "referrer reads must follow the mirror, got: {calls:?}",
-        );
+        for stage in [
+            "list_referrers:mirror.example",
+            "pull_manifest_raw:mirror.example",
+            "pull_blob_streaming:mirror.example",
+        ] {
+            assert!(
+                calls.iter().any(|call| call == stage),
+                "`{stage}` must follow the mirror, got: {calls:?}",
+            );
+        }
         assert!(
             calls.iter().all(|call| call.ends_with(":mirror.example")),
             "every verify call is a read and must follow the mirror, got: {calls:?}",
@@ -1482,6 +1548,25 @@ mod tests {
         assert!(
             !calls.iter().any(|call| call.starts_with("push_")),
             "verify must never write, got: {calls:?}",
+        );
+
+        // The capability record must be keyed on the host actually probed.
+        // `from_cache` returns None when the stored `registry` disagrees with
+        // the lookup key, so these two assertions pin the key exactly.
+        let state = StateStore::new(state_dir.path());
+        assert!(
+            ReferrersApiCapability::from_cache("mirror.example", &state)
+                .await
+                .expect("cache read")
+                .is_some(),
+            "verify must cache the capability under the mirror it probed",
+        );
+        assert!(
+            ReferrersApiCapability::from_cache("ghcr.io", &state)
+                .await
+                .expect("cache read")
+                .is_none(),
+            "verify must not cache a mirror's verdict under the canonical host",
         );
     }
 

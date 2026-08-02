@@ -571,9 +571,10 @@ mod tests {
 
     /// Drive a full sign run against the recording transport for the logical
     /// name `ocx.sh/acme/tool:1.0`, indirected to the physical
-    /// `ghcr.io/acme/tool:1.0`, and return the `"<method>:<registry>"` log.
+    /// `ghcr.io/acme/tool:1.0`. Returns the `"<method>:<registry>"` log plus the
+    /// state dir, so a caller can read back the persisted capability record.
     /// Panics if the run does not complete.
-    async fn run_recorded_sign(mirrors: crate::oci::client::MirrorMap) -> Vec<String> {
+    async fn run_recorded_sign(mirrors: crate::oci::client::MirrorMap) -> (Vec<String>, tempfile::TempDir) {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
 
@@ -607,7 +608,7 @@ mod tests {
         {
             panic!("sign must complete against the recording transport: {error}");
         }
-        transport.calls()
+        (transport.calls(), temp)
     }
 
     #[tokio::test]
@@ -618,7 +619,7 @@ mod tests {
         // reference from the LOGICAL identifier attaches the signature to a
         // host that does not hold the subject manifest — the signature is
         // written where no verifier will ever look for it.
-        let calls = run_recorded_sign(crate::oci::client::MirrorMap::default()).await;
+        let (calls, _state_dir) = run_recorded_sign(crate::oci::client::MirrorMap::default()).await;
         assert!(
             calls.iter().any(|call| call == "push_referrer_manifest:ghcr.io"),
             "the referrer manifest must be pushed to the physical registry, got: {calls:?}",
@@ -648,7 +649,7 @@ mod tests {
                 path_prefix: "proxy".to_string(),
             },
         )]);
-        let calls = run_recorded_sign(mirrors).await;
+        let (calls, state_dir) = run_recorded_sign(mirrors).await;
 
         assert!(
             calls.iter().any(|call| call == "pull_manifest_raw:mirror.example"),
@@ -669,6 +670,25 @@ mod tests {
                 .iter()
                 .any(|call| call.starts_with("push_") && call.ends_with(":mirror.example")),
             "no write may reach the read-only mirror, got: {calls:?}",
+        );
+
+        // The capability record must be keyed on the host actually probed — the
+        // canonical one for sign. `from_cache` returns None when the stored
+        // `registry` disagrees with the lookup key, so these two pin the key.
+        let state = StateStore::new(state_dir.path());
+        assert!(
+            ReferrersApiCapability::from_cache("ghcr.io", &state)
+                .await
+                .expect("cache read")
+                .is_some(),
+            "sign must cache the capability under the canonical host it probed",
+        );
+        assert!(
+            ReferrersApiCapability::from_cache("mirror.example", &state)
+                .await
+                .expect("cache read")
+                .is_none(),
+            "sign must not cache the canonical verdict under the mirror",
         );
     }
 }
