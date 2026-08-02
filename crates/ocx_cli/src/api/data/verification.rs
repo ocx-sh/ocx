@@ -17,7 +17,11 @@ use crate::api::Printable;
 
 /// Summary of a successful Sigstore verification.
 ///
-/// Plain format: single "Field | Value" table.
+/// Plain format: single "Field | Value" table listing the subject digest,
+/// referrer digest, cert identity, cert OIDC issuer, and signed-at timestamp.
+/// `subject_digest` is the answer (what was verified) and renders full;
+/// `referrer_digest` shortens to 12 hex — a full `sha256:<64hex>` earns its
+/// row only once per view. Both stay full in JSON.
 ///
 /// JSON format: `{ subject_digest, referrer_digest, certificate_identity,
 /// certificate_oidc_issuer, signed_at }`.
@@ -56,9 +60,13 @@ impl VerificationReport {
 
 impl Printable for VerificationReport {
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+        // `subject_digest` is the answer (what was verified) and stays full;
+        // `referrer_digest` shortens to 12 hex so only one full
+        // sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
+        // Column Budget"). Both remain full in JSON.
         let fields = [
             ("Subject digest", self.subject_digest.to_string()),
-            ("Referrer digest", self.referrer_digest.to_string()),
+            ("Referrer digest", self.referrer_digest.to_short_string()),
             ("Certificate identity", self.certificate_identity.clone()),
             ("Certificate OIDC issuer", self.certificate_oidc_issuer.clone()),
             ("Signed at", self.signed_at.clone()),
@@ -120,5 +128,15 @@ mod tests {
         assert_eq!(data["certificate_identity"], "test-signer@example.com");
         assert_eq!(data["certificate_oidc_issuer"], "https://fake-oidc.test");
         assert!(parsed.get("error").is_none(), "success branch must not carry error");
+    }
+
+    /// `print_plain` shortens `referrer_digest` to 12 hex (only `subject_digest`
+    /// earns a full `sha256:<64hex>` row) — smoke-checks the table renders
+    /// without panic.
+    #[test]
+    fn print_plain_smoke() {
+        let report = sample_report();
+        let data = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        report.print_plain(&data);
     }
 }

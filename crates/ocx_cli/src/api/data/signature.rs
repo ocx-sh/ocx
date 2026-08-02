@@ -18,9 +18,14 @@ use crate::api::Printable;
 
 /// Summary of a successful keyless signing operation.
 ///
-/// Plain format: single "Field | Value" table listing the subject digest,
-/// bundle digest, referrer digest, platform, signer, cert identity, and cert
+/// Plain format: single "Field | Value" table listing the identifier, subject
+/// digest, bundle digest, referrer digest, platform, cert identity, and cert
 /// OIDC issuer (one row per field — `Printable` single-table rule honored).
+/// `subject_digest` is the answer (what was signed) and renders full;
+/// `bundle_digest` and `referrer_digest` shorten to 12 hex — a full
+/// `sha256:<64hex>` earns its row only once per view. `signer` has no row:
+/// for Slice 1 it is always the constant `"keyless-fulcio"`. Both stay full
+/// (and `signer` stays present) in JSON.
 ///
 /// JSON format: `{ identifier, subject_digest, bundle_digest, referrer_digest,
 /// platform, signer, certificate_identity, certificate_oidc_issuer }`.
@@ -78,13 +83,17 @@ impl SignatureReport {
 
 impl Printable for SignatureReport {
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+        // `subject_digest` is the answer (what was signed) and stays full;
+        // `bundle_digest`/`referrer_digest` shorten to 12 hex so only one
+        // full sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
+        // Column Budget"). `signer` has no row — it is the constant
+        // "keyless-fulcio" for Slice 1. Both remain full/present in JSON.
         let fields = [
             ("Identifier", self.identifier.clone()),
             ("Subject digest", self.subject_digest.to_string()),
-            ("Bundle digest", self.bundle_digest.to_string()),
-            ("Referrer digest", self.referrer_digest.to_string()),
+            ("Bundle digest", self.bundle_digest.to_short_string()),
+            ("Referrer digest", self.referrer_digest.to_short_string()),
             ("Platform", self.platform.clone()),
-            ("Signer", self.signer.clone()),
             ("Certificate identity", self.certificate_identity.clone()),
             ("Certificate OIDC issuer", self.certificate_oidc_issuer.clone()),
         ];
@@ -151,5 +160,15 @@ mod tests {
         // C-S1-1 contract: platform must serialize as a plain string (e.g. "linux/amd64").
         assert_eq!(data["platform"], "linux/amd64", "data[platform] must be a plain string");
         assert_eq!(data["signer"], "keyless-fulcio");
+    }
+
+    /// `print_plain` shortens `bundle_digest`/`referrer_digest` to 12 hex (only
+    /// `subject_digest` earns a full `sha256:<64hex>` row) and drops `signer`
+    /// (constant for Slice 1) — smoke-checks the table renders without panic.
+    #[test]
+    fn print_plain_smoke() {
+        let report = sample_report();
+        let data = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        report.print_plain(&data);
     }
 }
