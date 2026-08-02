@@ -416,6 +416,27 @@ pub(super) fn map_fork_io_error_to_client_error(error: std::io::Error) -> super:
     })
 }
 
+/// Whole-blob push restarts allowed after a transient registry fault — three
+/// total attempts.
+///
+/// Each *request* is bounded by
+/// [`REGISTRY_READ_TIMEOUT`](super::builder::REGISTRY_READ_TIMEOUT) (120 s),
+/// not each attempt: a restart re-uploads the whole blob, so an attempt is as
+/// many bounded requests as the blob has chunks. The worst case before a push
+/// finally gives up is therefore three attempts, each of which may re-upload
+/// the whole blob and then stall for the full 120 s read deadline, plus the
+/// 1 s + 2 s backoff. That is the ceiling being bought; anything larger stops
+/// looking like resilience and starts looking like a hang.
+const PUSH_RETRY_ATTEMPTS: u8 = 2;
+
+/// Wait before the first restart, doubled per attempt (the house pattern from
+/// `project::resolve::retry_fetch`).
+///
+/// No jitter: two retries across at most four concurrent layers is not a
+/// thundering herd, and the spread jitter buys would be invisible against the
+/// per-request timeout.
+const PUSH_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl NativeTransport {
     /// Checks blob existence, then uploads the blob via a streamed chunked push
     /// with fluent progress.
@@ -434,6 +455,29 @@ impl NativeTransport {
     /// cap the chunking exists to respect: falling back there would trade a
     /// diagnosable spec violation for the `416` this chunking was written to avoid.
     /// Above the cap the violation is propagated instead.
+    ///
+    /// # Restart on a transient fault
+    ///
+    /// A [`ClientError::RegistryTransient`] mid-upload restarts the whole blob,
+    /// up to [`PUSH_RETRY_ATTEMPTS`] times. Each attempt begins with a fresh
+    /// `POST`, which abandons whatever the failed session stored — a registry
+    /// discards an unreferenced upload session, so the restart needs no range
+    /// reconciliation to be safe. Progress rewinds with it, harmlessly: the bar
+    /// is driven by absolute `set_position`, so a restart moves it backwards
+    /// rather than double-counting.
+    ///
+    /// A `SpecViolationError` is *not* transient and keeps its existing
+    /// behaviour exactly — one monolithic fallback, itself never retried. The
+    /// registry disagreed with the client about what it stored; sending the
+    /// same bytes again does not resolve a disagreement.
+    ///
+    /// Deliberately skipped: re-checking `blob_exists` between attempts. It
+    /// would only pay off in the narrow case where the committing `PUT`
+    /// succeeded server-side and the response timed out. Add it when a log
+    /// shows that happening.
+    // ponytail: whole-blob restart. Per-chunk retry needs a fork change
+    // (buffer the chunk into Bytes for a replayable body) — do it when a
+    // re-sent layer measurably costs more than the fork PR.
     async fn do_push_blob(
         &self,
         image: &oci::native::Reference,
@@ -462,44 +506,56 @@ impl NativeTransport {
         }
 
         let total = data.len() as u64;
+        // `Bytes` clones are refcounted, so each attempt's fresh body — and the
+        // fallback's — costs a pointer, not a copy of the blob.
         let data = Bytes::from(data);
 
-        // Clone the blob for the fallback path (Bytes clone is cheap — refcounted).
-        let fallback_data = data.clone();
-
-        match self
-            .client
-            .push_blob_stream(
-                image,
-                progress_body_stream(data, Arc::clone(&on_progress)),
-                digest_str.as_str(),
-                Some(total as usize),
-            )
-            .await
-        {
-            Ok(url) => {
-                // The final frame already reported `total`; repeat so callers still
-                // see completion for a zero-length blob (which yields no frames).
-                on_progress(total);
-                Ok(url)
-            }
-            Err(error @ oci_client::errors::OciDistributionError::SpecViolationError(_)) => {
-                log::warn!("Registry spec violation during streamed chunked push: {}", error);
-                if total > MAX_UPLOAD_REQUEST_BYTES as u64 {
-                    log::warn!(
-                        "Not falling back to buffered push: it ends in a single {total}-byte request, \
-                         over the {MAX_UPLOAD_REQUEST_BYTES}-byte per-request cap, so the registry would \
-                         reject it too"
-                    );
-                    return Err(registry_error(error));
+        let mut attempt: u8 = 0;
+        let mut backoff = PUSH_RETRY_INITIAL_BACKOFF;
+        loop {
+            let body = progress_body_stream(data.clone(), Arc::clone(&on_progress));
+            match self
+                .client
+                .push_blob_stream(image, body, digest_str.as_str(), Some(total as usize))
+                .await
+            {
+                Ok(url) => {
+                    // The final frame already reported `total`; repeat so callers still
+                    // see completion for a zero-length blob (which yields no frames).
+                    on_progress(total);
+                    return Ok(url);
                 }
-                log::warn!("Falling back to buffered push (chunked-then-monolithic retry, no progress)");
-                self.client
-                    .push_blob(image, fallback_data, digest_str.as_str())
-                    .await
-                    .map_err(registry_error)
+                Err(error @ oci_client::errors::OciDistributionError::SpecViolationError(_)) => {
+                    log::warn!("Registry spec violation during streamed chunked push: {}", error);
+                    if total > MAX_UPLOAD_REQUEST_BYTES as u64 {
+                        log::warn!(
+                            "Not falling back to buffered push: it ends in a single {total}-byte request, \
+                             over the {MAX_UPLOAD_REQUEST_BYTES}-byte per-request cap, so the registry would \
+                             reject it too"
+                        );
+                        return Err(registry_error(error));
+                    }
+                    log::warn!("Falling back to buffered push (chunked-then-monolithic retry, no progress)");
+                    return self
+                        .client
+                        .push_blob(image, data.clone(), digest_str.as_str())
+                        .await
+                        .map_err(registry_error);
+                }
+                Err(e) => {
+                    let mapped = registry_error(e);
+                    if !matches!(mapped, ClientError::RegistryTransient(_)) || attempt >= PUSH_RETRY_ATTEMPTS {
+                        return Err(mapped);
+                    }
+                    attempt += 1;
+                    log::warn!(
+                        "Transient registry failure uploading blob {digest_str} ({mapped}); \
+                         restarting the upload in {backoff:?} (attempt {attempt} of {PUSH_RETRY_ATTEMPTS})"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
             }
-            Err(e) => Err(registry_error(e)),
         }
     }
 }

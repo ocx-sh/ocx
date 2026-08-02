@@ -505,6 +505,7 @@ mod push_wire_tests {
     use super::*;
     use crate::oci::client::error::ClientError;
     use crate::oci::client::transport::{OciTransport as _, no_progress};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -514,6 +515,42 @@ mod push_wire_tests {
         target: String,
         content_range: Option<String>,
         body_len: usize,
+    }
+
+    /// Injected chunk-`PATCH` failures: answer the next `remaining` of them
+    /// with `status` instead of `202`.
+    ///
+    /// The budget is shared across **connections**, not per-connection. A
+    /// restarted upload opens a fresh session and may well arrive on a fresh
+    /// socket, so a per-connection counter would fault every attempt equally —
+    /// the test could then never distinguish "retried and recovered" from
+    /// "never retried", which is the whole thing it exists to show.
+    #[derive(Clone)]
+    struct PatchFaults {
+        status: u16,
+        remaining: Arc<AtomicUsize>,
+    }
+
+    impl PatchFaults {
+        fn none() -> Self {
+            Self::new(0, 0)
+        }
+
+        fn new(status: u16, count: usize) -> Self {
+            Self {
+                status,
+                remaining: Arc::new(AtomicUsize::new(count)),
+            }
+        }
+
+        /// Spends one unit of budget, returning the status to answer with;
+        /// `None` once the budget is exhausted.
+        fn take(&self) -> Option<u16> {
+            self.remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+                .ok()
+                .map(|_| self.status)
+        }
     }
 
     /// Minimal HTTP/1.1 stub of an OCI blob-upload session.
@@ -532,6 +569,10 @@ mod push_wire_tests {
         /// `accepted_first_chunk` overrides the byte count reported for the first
         /// `PATCH`, simulating a registry that stored less than it was sent.
         async fn start(accepted_first_chunk: Option<usize>) -> Self {
+            Self::start_with(accepted_first_chunk, PatchFaults::none()).await
+        }
+
+        async fn start_with(accepted_first_chunk: Option<usize>, faults: PatchFaults) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap().to_string();
             let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -540,8 +581,9 @@ mod push_wire_tests {
             tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let log = Arc::clone(&log);
+                    let faults = faults.clone();
                     tokio::spawn(async move {
-                        serve_connection(socket, log, accepted_first_chunk).await;
+                        serve_connection(socket, log, accepted_first_chunk, faults).await;
                     });
                 }
             });
@@ -553,12 +595,20 @@ mod push_wire_tests {
             self.recorded.lock().unwrap().clone()
         }
 
+        fn method(&self, method: &str) -> Vec<RecordedRequest> {
+            self.recorded().into_iter().filter(|r| r.method == method).collect()
+        }
+
+        fn posts(&self) -> Vec<RecordedRequest> {
+            self.method("POST")
+        }
+
         fn patches(&self) -> Vec<RecordedRequest> {
-            self.recorded().into_iter().filter(|r| r.method == "PATCH").collect()
+            self.method("PATCH")
         }
 
         fn puts(&self) -> Vec<RecordedRequest> {
-            self.recorded().into_iter().filter(|r| r.method == "PUT").collect()
+            self.method("PUT")
         }
     }
 
@@ -566,6 +616,7 @@ mod push_wire_tests {
         socket: tokio::net::TcpStream,
         recorded: Arc<Mutex<Vec<RecordedRequest>>>,
         accepted_first_chunk: Option<usize>,
+        faults: PatchFaults,
     ) {
         let (read_half, mut write_half) = socket.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
@@ -635,18 +686,23 @@ mod push_wire_tests {
                     "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nContent-Length: 0\r\n\r\n"
                         .to_string()
                 }
-                "PATCH" => {
-                    stored += body_len;
-                    patch_count += 1;
-                    let reported = match accepted_first_chunk {
-                        Some(accepted) if patch_count == 1 => accepted,
-                        _ => stored,
-                    };
-                    format!(
-                        "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nRange: 0-{}\r\nContent-Length: 0\r\n\r\n",
-                        reported.saturating_sub(1)
-                    )
-                }
+                // A faulted PATCH answers before the accounting: the bytes it
+                // carried were never stored, so `stored` must not advance.
+                "PATCH" => match faults.take() {
+                    Some(status) => format!("HTTP/1.1 {status} Injected Fault\r\nContent-Length: 0\r\n\r\n"),
+                    None => {
+                        stored += body_len;
+                        patch_count += 1;
+                        let reported = match accepted_first_chunk {
+                            Some(accepted) if patch_count == 1 => accepted,
+                            _ => stored,
+                        };
+                        format!(
+                            "HTTP/1.1 202 Accepted\r\nLocation: /v2/test/blob/blobs/uploads/stub\r\nRange: 0-{}\r\nContent-Length: 0\r\n\r\n",
+                            reported.saturating_sub(1)
+                        )
+                    }
+                },
                 "PUT" => format!("HTTP/1.1 201 Created\r\nLocation: {target}\r\nContent-Length: 0\r\n\r\n"),
                 // HEAD (blob_exists) and anything else: not present.
                 _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
@@ -857,6 +913,116 @@ mod push_wire_tests {
         assert_eq!(
             puts[0].body_len, total,
             "the committing PUT must carry the whole blob — a resuming fallback would commit bytes the registry never stored"
+        );
+    }
+
+    /// A 503 on a chunk `PATCH` must not lose the layer: the push restarts from
+    /// a fresh session and still commits the blob exactly once.
+    ///
+    /// The restart is whole-blob by design — a fresh `POST` abandons whatever
+    /// the failed session stored, which is why the recovery is safe without any
+    /// range reconciliation. The assertions pin that shape rather than just the
+    /// `Ok`: two `POST`s (a *new* session, not a resume on the old one), the two
+    /// surviving `PATCH`es tiling the blob exactly once, and one `PUT`.
+    #[tokio::test]
+    async fn transient_patch_failure_restarts_the_upload_and_commits_once() {
+        let stub = StubRegistry::start_with(None, PatchFaults::new(503, 1)).await;
+        let data: Vec<u8> = (0..PUSH_CHUNK_SIZE + 1024).map(|i| (i % 251) as u8).collect();
+        let total = data.len();
+
+        push_through_production_client(&stub, data)
+            .await
+            .expect("a 503 on one chunk must be retried, not surfaced as a failed push");
+
+        assert_eq!(
+            stub.posts().len(),
+            2,
+            "the retry must open a FRESH upload session, not resume the failed one; saw {:?}",
+            stub.posts()
+        );
+
+        let patches = stub.patches();
+        assert_eq!(
+            patches.len(),
+            3,
+            "one faulted PATCH plus the two of the successful attempt; saw {patches:?}"
+        );
+
+        let mut next_start = 0usize;
+        for patch in &patches[1..] {
+            let range = patch
+                .content_range
+                .as_deref()
+                .expect("every chunk PATCH must carry Content-Range");
+            let (start, end) = range.split_once('-').expect("Content-Range must be `start-end`");
+            let (start, end) = (start.parse::<usize>().unwrap(), end.parse::<usize>().unwrap());
+            assert_eq!(
+                start, next_start,
+                "the retried attempt's chunks must be contiguous, got {range} after {next_start}"
+            );
+            next_start = end + 1;
+        }
+        assert_eq!(
+            next_start, total,
+            "the retried attempt must cover the whole blob exactly once"
+        );
+
+        let puts = stub.puts();
+        assert_eq!(puts.len(), 1, "the blob must be committed exactly once, saw {puts:?}");
+    }
+
+    /// A registry that faults *every* chunk spends the whole budget and then
+    /// surfaces the fault as transient — the exit-75 contract, not a 69.
+    ///
+    /// Two things are pinned that the recovering sibling above cannot show:
+    /// the budget is bounded (exactly three `POST`s — one initial attempt plus
+    /// `PUSH_RETRY_ATTEMPTS` restarts, so a raised constant reds this), and
+    /// exhausting it does not downgrade the error. A caller that reruns on 75
+    /// is exactly right here: the registry never answered usefully.
+    #[tokio::test]
+    async fn exhausted_transient_retries_surface_as_transient() {
+        let stub = StubRegistry::start_with(None, PatchFaults::new(503, usize::MAX)).await;
+        let data: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+
+        let error = push_through_production_client(&stub, data)
+            .await
+            .expect_err("a registry that faults every chunk must not yield a successful push");
+
+        assert_eq!(
+            stub.posts().len(),
+            3,
+            "the budget is one initial attempt plus PUSH_RETRY_ATTEMPTS restarts; saw {:?}",
+            stub.posts()
+        );
+        assert!(
+            matches!(error, ClientError::RegistryTransient(_)),
+            "an exhausted transient retry must stay transient (exit 75), got {error:?}"
+        );
+    }
+
+    /// A 401 is not transient, so it must be surfaced on the first attempt.
+    ///
+    /// One `POST` is the discriminator: a retry-everything loop would open
+    /// three sessions before giving up, spending two extra round trips and two
+    /// backoff waits on an answer that will not change.
+    #[tokio::test]
+    async fn permanent_patch_failure_is_not_retried() {
+        let stub = StubRegistry::start_with(None, PatchFaults::new(401, usize::MAX)).await;
+        let data: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+
+        let error = push_through_production_client(&stub, data)
+            .await
+            .expect_err("a registry that rejects every chunk must not yield a successful push");
+
+        assert_eq!(
+            stub.posts().len(),
+            1,
+            "a credentials rejection must not be retried; saw {:?}",
+            stub.posts()
+        );
+        assert!(
+            matches!(error, ClientError::Authentication(_)),
+            "a 401 on a chunk PATCH must surface as Authentication (80), got {error:?}"
         );
     }
 }
