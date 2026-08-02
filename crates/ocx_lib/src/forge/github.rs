@@ -8,9 +8,10 @@
 //! register S5). Enforces the X5 invariants: a single no-redirect client per
 //! run, bearer via header only, fork parent verified against the upstream,
 //! endpoints rebuilt only from a response-body identity, a bounded readiness
-//! poll, and one 3s retry of the whole commit sequence for GitHub's "fork
-//! metadata ready before git objects" write race. Commits are multi-file atomic
-//! via the git data API (design register C15).
+//! poll, and a bounded replay of the whole commit sequence for GitHub's "fork
+//! metadata ready before git objects" write race and for transient forge
+//! faults. Commits are multi-file atomic via the git data API (design register
+//! C15).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -38,8 +39,13 @@ const ACCEPT_RAW: &str = "application/vnd.github.raw+json";
 const USER_AGENT_VALUE: &str = concat!("ocx/", env!("CARGO_PKG_VERSION"));
 /// Total per-request timeout for ordinary forge calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Fixed delay before the single fresh-fork write retry (design register X5).
-const FRESH_FORK_RETRY_DELAY: Duration = Duration::from_secs(3);
+/// Backoff delays before each replay of the git-data commit sequence.
+///
+/// Three replays, ~39s of waiting at worst: long enough to ride out a fresh
+/// fork's object provisioning (design register X5) and a short forge fault,
+/// short enough not to stretch a push job that has already published to the
+/// registry and only owes the index its announce.
+const GIT_DATA_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)];
 
 /// How a branch stands relative to a base ref, as GitHub's compare API reports it.
 ///
@@ -617,6 +623,31 @@ impl GitHubForge {
         Ok(identity)
     }
 
+    /// Fast-forward `fork`'s `branch` onto its upstream — GitHub's "Sync fork".
+    ///
+    /// An announce commit is written to the fork but parents off a SHA read
+    /// from the **upstream** repository, so that object reaches the fork only
+    /// through the shared fork network. A fork whose own branches never advance
+    /// leans on that sharing for every write it ever makes, and GitHub answers
+    /// those writes with a 5xx — or a 422 carrying no validation reason — once
+    /// the fork has fallen far enough behind: on 2026-08-02 the shared announce
+    /// fork stood 33 commits behind and every mirror in the fleet failed its
+    /// announce against `POST /git/commits`. Syncing first puts the base commit
+    /// in the fork's own history, so the git-data sequence stops depending on
+    /// cross-repository object reach.
+    ///
+    /// Best-effort by construction: this only moves *where* the base object
+    /// lives, so it is never a precondition of the commit that follows. A fork
+    /// that has diverged from upstream answers 409, one with nothing to pull
+    /// answers non-success too, and in both cases the commit sequence is
+    /// unaffected — so a failure is logged and the announce proceeds.
+    pub async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
+        let url = self.url(&format!("/repos/{}/{}/merge-upstream", fork.owner, fork.repo));
+        if let Err(error) = self.post_json(&url, &json!({ "branch": branch })).await {
+            tracing::debug!(%error, fork = %fork.full_name(), "fork sync skipped");
+        }
+    }
+
     /// Verify the credential may push a branch to `repo`, before anything is
     /// written there.
     ///
@@ -683,17 +714,21 @@ impl GitHubForge {
         files: &BTreeMap<String, Vec<u8>>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
-        match self
+        let mut outcome = self
             .commit_files_once(repo, branch, base_sha, message, files, update)
-            .await
-        {
-            Err(error) if is_fresh_fork_race(&error) => {
-                tokio::time::sleep(FRESH_FORK_RETRY_DELAY).await;
-                self.commit_files_once(repo, branch, base_sha, message, files, update)
-                    .await
+            .await;
+        for delay in GIT_DATA_RETRY_DELAYS {
+            let Err(error) = &outcome else { break };
+            if !is_retryable(error) {
+                break;
             }
-            result => result,
+            tracing::debug!(%error, "replaying the git-data commit sequence");
+            tokio::time::sleep(delay).await;
+            outcome = self
+                .commit_files_once(repo, branch, base_sha, message, files, update)
+                .await;
         }
+        outcome
     }
 
     /// One attempt at the [`Self::commit_files`] sequence: base tree -> blobs ->
@@ -817,11 +852,30 @@ fn parse_compare_status(url: &str, status: &str) -> Result<BranchComparison, For
     }
 }
 
-/// Whether an error is a 404 from the git data API — GitHub's "fork metadata
-/// ready before git objects" provisioning window (design register X5), the one
-/// failure [`GitHubForge::commit_files`] retries.
-fn is_fresh_fork_race(error: &ForgeError) -> bool {
-    matches!(error, ForgeError::Status { status, .. } if *status == StatusCode::NOT_FOUND.as_u16())
+/// Whether a failed git-data attempt is worth replaying.
+///
+/// A 404 is GitHub's "fork metadata ready before git objects" provisioning
+/// window (design register X5). A 429 or a 5xx is throttling or a server-side
+/// fault: on 2026-08-02 the shared announce fork answered `POST /git/commits`
+/// with 500 for every mirror in the fleet, and each run had already published
+/// to the registry by then, so giving up left the registry ahead of the index.
+/// Replaying the whole sequence is safe — blobs and trees are content-addressed
+/// so a repeat write returns the same SHA, and the ref update stays a
+/// compare-and-swap.
+///
+/// A 422 is deliberately NOT replayed. GitHub spends it on both "the endpoint
+/// has been spammed" and genuine validation failure, and nothing outside the
+/// response body tells them apart; replaying the latter only defers the same
+/// error. A rejected fast-forward needs the caller's regeneration against the
+/// winning head, never a blind replay of the same commit.
+fn is_retryable(error: &ForgeError) -> bool {
+    matches!(
+        error,
+        ForgeError::Status { status, .. }
+            if *status == StatusCode::NOT_FOUND.as_u16()
+                || *status == StatusCode::TOO_MANY_REQUESTS.as_u16()
+                || (500..600).contains(status)
+    )
 }
 
 /// Whether a 422 from pull-request create means "one already exists".
@@ -1012,6 +1066,7 @@ mod tests {
     const UPDATE_PATH: &str = "/repos/forkuser/index/git/refs/heads/indexbot-announce-acme-widget";
     const PROBE_PATH: &str = "/repos/forkuser/index/git/ref/heads/indexbot-announce-acme-widget";
     const CREATE_PATH: &str = "/repos/forkuser/index/git/refs";
+    const MERGE_UPSTREAM_PATH: &str = "/repos/forkuser/index/merge-upstream";
     /// GitHub's real answer to a PATCH of a ref that does not exist — a 422,
     /// not the 404 the endpoint shape suggests.
     const REFERENCE_DOES_NOT_EXIST: &str = r#"{"message":"Reference does not exist"}"#;
@@ -1196,24 +1251,62 @@ mod tests {
     }
 
     #[test]
-    fn only_a_404_counts_as_the_fresh_fork_race() {
-        let not_found = ForgeError::Status {
-            url: "https://api/git/commits/abc".to_string(),
-            status: 404,
-        };
-        assert!(is_fresh_fork_race(&not_found));
-        for other in [401, 422, 500] {
+    fn provisioning_and_transient_statuses_replay_but_validation_failures_do_not() {
+        // 404 = the fresh fork's objects are not there yet; 429/5xx = the forge
+        // itself is throttling or broken. Both answer differently on a replay.
+        for transient in [404, 429, 500, 502, 503] {
+            let error = ForgeError::Status {
+                url: "https://api/git/commits".to_string(),
+                status: transient,
+            };
+            assert!(is_retryable(&error), "{transient} must replay");
+        }
+        // 401/403 will answer the same forever. 422 is GitHub's one code for
+        // both "spammed" and "your request is wrong" — replaying the second
+        // only defers it, and nothing but the body separates them.
+        for terminal in [401, 403, 422] {
             let error = ForgeError::Status {
                 url: "https://api/git/trees".to_string(),
-                status: other,
+                status: terminal,
             };
-            assert!(!is_fresh_fork_race(&error), "{other} must not trigger the retry");
+            assert!(!is_retryable(&error), "{terminal} must not replay");
         }
         // A rejected fast-forward-only update needs the caller's regeneration,
         // never a blind replay of the same commit.
-        assert!(!is_fresh_fork_race(&ForgeError::NonFastForward {
+        assert!(!is_retryable(&ForgeError::NonFastForward {
             branch: "indexbot-announce-acme-widget".to_string(),
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_fork_fast_forwards_the_named_branch_onto_upstream() {
+        // Without this the announce commit's parent lives only in the upstream
+        // repository, and every git-data write leans on fork-network sharing.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("POST", MERGE_UPSTREAM_PATH) => (200, r#"{"merge_type":"fast-forward"}"#.to_string()),
+            _ => (599, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        fake.forge().sync_fork(&test_repo(), "main").await;
+
+        assert_eq!(fake.routes(), [format!("POST {MERGE_UPSTREAM_PATH}")]);
+        let body: Value = serde_json::from_str(&fake.recorded()[0].body).expect("the sync body is the JSON we sent");
+        assert_eq!(body, json!({ "branch": "main" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_fork_tolerates_a_fork_that_cannot_fast_forward() {
+        // 409 = diverged. The sync only decides where the base object lives, so
+        // a refusal must not abort an announce that would otherwise commit.
+        let fake = FakeForge::start(|_method, _path| (409, r#"{"message":"There are merge conflicts"}"#.to_string()))
+            .await
+            .expect("fake forge starts");
+
+        fake.forge().sync_fork(&test_repo(), "main").await;
+
+        assert_eq!(fake.routes(), [format!("POST {MERGE_UPSTREAM_PATH}")]);
     }
 
     #[test]

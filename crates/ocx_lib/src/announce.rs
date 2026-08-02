@@ -234,7 +234,13 @@ pub async fn announce(
                         Some(fork) => fork,
                         None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
                     };
-                    (fork.coordinate(), Some(fork))
+                    let coordinate = fork.coordinate();
+                    // The commit below parents off a SHA read from the upstream
+                    // repository but is written to the fork, so the base object
+                    // reaches it only through the shared fork network. Land that
+                    // object in the fork's own history first (see `sync_fork`).
+                    forge.sync_fork(&coordinate, INDEX_BASE_REF).await;
+                    (coordinate, Some(fork))
                 }
                 None => {
                     forge.ensure_push_access(&request.index_repo).await?;
