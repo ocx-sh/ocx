@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
+from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 from tests.fixtures.fake_sigstore import (
     FAKE_ISSUER_URL,
@@ -464,4 +466,71 @@ def test_single_flag_without_pair_exits_64(
     assert verify.returncode == 64, (
         f"expected exit 64 (clap requires both-or-neither), got {verify.returncode}\n"
         f"stderr: {verify.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ocx.toml preservation — the in-place editor must not touch [[trust.policy]]
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_add_then_remove_preserves_trust_policy_section(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    tmp_path: Path,
+) -> None:
+    """`ocx add` / `ocx remove` preserve a hand-written `[[trust.policy]]`
+    section byte-for-byte, comment included.
+
+    `render_preserving` (commit eff2205a) rewrote `ocx.toml` mutation from a
+    whole-struct re-serialize to an in-place edit of only the mutated table;
+    this is the sibling regression net to
+    ``test_project_toml_preservation.py`` for the one table that test module
+    never touches.
+    """
+    scope = f"{ocx.registry}/{published_package.repo}"
+    trust_section = (
+        "[[trust.policy]]\n"
+        f'scope = "{scope}"\n'
+        "# pinned deliberately, do not relax\n"
+        f'identity = "{FAKE_SUBJECT}"\n'
+        f'oidc_issuer = "{FAKE_ISSUER_URL}"\n'
+    )
+    body = f"[tools]\n\n{trust_section}"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir(exist_ok=True)
+    (project_dir / "ocx.toml").write_text(body)
+
+    added = make_package(
+        ocx, f"t_{uuid4().hex[:8]}_trustadd", "1.0.0", tmp_path, new=True, cascade=False
+    )
+
+    add_result = subprocess.run(
+        [str(ocx.binary), "add", added.fq],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert add_result.returncode == 0, (
+        f"ocx add failed: rc={add_result.returncode}, stderr={add_result.stderr!r}"
+    )
+    after_add = (project_dir / "ocx.toml").read_text()
+    assert trust_section in after_add, (
+        f"[[trust.policy]] must survive ocx add byte-for-byte; got:\n{after_add}"
+    )
+
+    remove_result = subprocess.run(
+        [str(ocx.binary), "remove", added.repo],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert remove_result.returncode == 0, (
+        f"ocx remove failed: rc={remove_result.returncode}, stderr={remove_result.stderr!r}"
+    )
+    after_remove = (project_dir / "ocx.toml").read_text()
+    assert trust_section in after_remove, (
+        f"[[trust.policy]] must survive ocx remove byte-for-byte; got:\n{after_remove}"
     )
