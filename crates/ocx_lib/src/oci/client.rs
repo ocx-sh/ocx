@@ -191,6 +191,26 @@ impl Client {
         native::Reference::with_tag(host, repository, "latest".into())
     }
 
+    /// Builds the transport reference for a **write-path** operation — always
+    /// the canonical host, never a mirror.
+    ///
+    /// Write counterpart to [`transport_reference`](Self::transport_reference).
+    /// Remote/proxy mirrors are read-only (ADR Q5): a push routed through the
+    /// read seam is rejected outright, or — against a writable mirror — lands
+    /// the artifact somewhere the canonical verifier never looks, which for a
+    /// signature is silent non-coverage rather than a visible failure.
+    /// [`ensure_auth`](Self::ensure_auth) already splits `Push` off this way;
+    /// this exposes the same decision to the referrer write paths
+    /// (`oci/sign/pipeline.rs`), which build their own references.
+    ///
+    /// Lives here rather than at the call sites because
+    /// [`Identifier::canonical_reference`] is allow-listed to this file
+    /// (`canonical_reference_only_used_in_allowed_files`) and direct
+    /// construction is gated by T-arch-G1.
+    pub(in crate::oci) fn transport_write_reference(&self, identifier: &Identifier) -> native::Reference {
+        identifier.canonical_reference()
+    }
+
     // ── Authentication ─────────────────────────────────────────────
 
     /// Pre-authenticate against the registry for `identifier` with the

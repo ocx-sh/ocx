@@ -121,22 +121,28 @@ impl SignPipeline {
             .await
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?
             .unwrap_or_else(|| resolved.clone());
-        // The mirror map applies on top: `transport_reference` is the read seam
-        // every registry-facing reference must come from (T-arch-G1), so a
-        // `[mirrors]` entry for the physical host redirects this traffic too.
-        let image = client.transport_reference(&physical);
+        // Two seams, because signing both reads and writes. The subject fetch is
+        // a read and may be served by a `[mirrors]` entry; the referrer push is
+        // a write and must reach the canonical host — remote/proxy mirrors are
+        // read-only (ADR Q5), so a signature pushed at a mirror is rejected, or
+        // against a writable mirror lands where the canonical verifier never
+        // looks. Same Pull/Push split `Client::ensure_auth` makes.
+        let read_image = client.transport_reference(&physical);
+        let write_image = client.transport_write_reference(&physical);
 
         // Fetch the target manifest bytes for the subject descriptor's size.
         // `clone_with_digest` drops the tag, so this stays digest-only — a
         // `repo:tag@digest` reference keys a different registry path and 404s.
-        let subject_ref = image.clone_with_digest(subject_digest.to_string());
+        let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, _) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
 
-        // 2. Referrers-API capability (cache-first).
-        Self::ensure_referrers_supported(transport, &ctx, &image, &subject_digest).await?;
+        // 2. Referrers-API capability (cache-first) of the host we will PUSH
+        //    to. A mirror's referrers support says nothing about the upstream's,
+        //    and the upstream is where the referrer manifest has to land.
+        Self::ensure_referrers_supported(transport, &ctx, &write_image, &subject_digest).await?;
 
         // 3. Acquire the OIDC token.
         let token = ctx.token_provider.acquire("sigstore").await?;
@@ -162,7 +168,7 @@ impl SignPipeline {
             Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         transport
             .push_blob(
-                &image,
+                &write_image,
                 EMPTY_CONFIG_PAYLOAD.to_vec(),
                 &empty_config_digest,
                 no_progress.clone(),
@@ -170,7 +176,7 @@ impl SignPipeline {
             .await
             .map_err(map_client_error)?;
         transport
-            .push_blob(&image, bundle.bytes.clone(), &bundle.digest, no_progress)
+            .push_blob(&write_image, bundle.bytes.clone(), &bundle.digest, no_progress)
             .await
             .map_err(map_client_error)?;
 
@@ -190,7 +196,7 @@ impl SignPipeline {
         let manifest = ReferrerManifest::build(subject_descriptor, SIGSTORE_BUNDLE_V03, bundle_descriptor);
         let manifest_bytes = manifest.to_canonical_json()?;
         let referrer_descriptor = transport
-            .push_referrer_manifest(&image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
+            .push_referrer_manifest(&write_image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
             .await
             .map_err(map_client_error)?;
         let referrer_digest =
@@ -563,22 +569,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn sign_pushes_the_referrer_to_the_physical_registry_not_the_logical_one() {
-        // Index indirection (`adr_index_indirection.md` C2): the logical
-        // `ocx.sh/...` name is a pointer; the artifact lives on the physical
-        // registry the index root names. A pipeline that builds its transport
-        // reference from the LOGICAL identifier attaches the signature to a
-        // host that does not hold the subject manifest — the signature is
-        // written where no verifier will ever look for it.
+    /// Drive a full sign run against the recording transport for the logical
+    /// name `ocx.sh/acme/tool:1.0`, indirected to the physical
+    /// `ghcr.io/acme/tool:1.0`, and return the `"<method>:<registry>"` log.
+    /// Panics if the run does not complete.
+    async fn run_recorded_sign(mirrors: crate::oci::client::MirrorMap) -> Vec<String> {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
 
         let transport = RecordingTransport::default();
-        let client = Client::with_transport(Box::new(transport.clone()));
-        let index = Index::from_impl(IndirectingIndex {
-            physical: physical.clone(),
-        });
+        let mut client = Client::with_transport(Box::new(transport.clone()));
+        client.mirrors = mirrors;
+        let index = Index::from_impl(IndirectingIndex { physical });
         let temp = tempfile::TempDir::new().expect("state dir");
         let state = StateStore::new(temp.path());
         let fulcio_url = Url::parse("https://fulcio.example").expect("fulcio url");
@@ -587,7 +589,7 @@ mod tests {
         let signer = FixedSigner;
         let token_provider = FixedTokenProvider;
 
-        let result = SignPipeline::run(
+        if let Err(error) = SignPipeline::run(
             &client,
             SignContext {
                 identifier: &logical,
@@ -601,12 +603,22 @@ mod tests {
                 state: &state,
             },
         )
-        .await;
-        if let Err(error) = &result {
+        .await
+        {
             panic!("sign must complete against the recording transport: {error}");
         }
+        transport.calls()
+    }
 
-        let calls = transport.calls();
+    #[tokio::test]
+    async fn sign_pushes_the_referrer_to_the_physical_registry_not_the_logical_one() {
+        // Index indirection (`adr_index_indirection.md` C2): the logical
+        // `ocx.sh/...` name is a pointer; the artifact lives on the physical
+        // registry the index root names. A pipeline that builds its transport
+        // reference from the LOGICAL identifier attaches the signature to a
+        // host that does not hold the subject manifest — the signature is
+        // written where no verifier will ever look for it.
+        let calls = run_recorded_sign(crate::oci::client::MirrorMap::default()).await;
         assert!(
             calls.iter().any(|call| call == "push_referrer_manifest:ghcr.io"),
             "the referrer manifest must be pushed to the physical registry, got: {calls:?}",
@@ -618,6 +630,45 @@ mod tests {
         assert!(
             calls.iter().all(|call| call.ends_with(":ghcr.io")),
             "no transport call may target the logical index host, got: {calls:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_reads_from_the_mirror_but_writes_to_the_canonical_host() {
+        // ADR Q5: remote/proxy mirrors are read-only. The subject fetch is a
+        // read and may come from the mirror; the capability probe and every
+        // push must reach the canonical host, or signing breaks outright in a
+        // mirrored deployment — and against a writable mirror it "succeeds"
+        // while depositing the signature where no canonical verifier looks.
+        let mirrors = crate::oci::client::MirrorMap::new([(
+            "ghcr.io".to_string(),
+            crate::config::mirror::ParsedMirror {
+                protocol: "https".to_string(),
+                host: "mirror.example".to_string(),
+                path_prefix: "proxy".to_string(),
+            },
+        )]);
+        let calls = run_recorded_sign(mirrors).await;
+
+        assert!(
+            calls.iter().any(|call| call == "pull_manifest_raw:mirror.example"),
+            "the subject-manifest read must go to the mirror, got: {calls:?}",
+        );
+        for write in ["push_blob:ghcr.io", "push_referrer_manifest:ghcr.io"] {
+            assert!(
+                calls.iter().any(|call| call == write),
+                "`{write}` must target the canonical host, got: {calls:?}",
+            );
+        }
+        assert!(
+            calls.iter().any(|call| call == "list_referrers:ghcr.io"),
+            "the capability probe must ask the host we push to, got: {calls:?}",
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("push_") && call.ends_with(":mirror.example")),
+            "no write may reach the read-only mirror, got: {calls:?}",
         );
     }
 }

@@ -63,12 +63,18 @@ impl ReferrersApiCapability {
     /// - [`ClientError::ReferrersUnsupported`] → [`ReferrersSupport::Unsupported`]
     /// - Any other error → propagated to the caller
     ///
-    /// `image` is the caller's already-mirror-resolved transport reference
-    /// (built via `Client::transport_reference`, T-arch-G1) — the endpoint's
-    /// host and repository come from it, and its `resolve_registry()` becomes
-    /// the per-registry cache key so a read-back keys off the host that was
-    /// actually probed. A zero-value or otherwise known digest is acceptable —
-    /// the response body is ignored; only the HTTP status matters.
+    /// `image` names the host whose support is in question, and the caller
+    /// chooses which one that is: verify probes the host it READS signatures
+    /// from (`Client::transport_reference` — the mirror, when configured),
+    /// sign probes the host it WRITES the referrer manifest to
+    /// (`Client::transport_write_reference` — always canonical, ADR Q5). A
+    /// mirror's referrers support says nothing about the upstream's, so the
+    /// two must not share an answer. `resolve_registry()` of this reference
+    /// becomes the cache key, which keeps the two verdicts in separate
+    /// entries by construction.
+    ///
+    /// A zero-value or otherwise known digest is acceptable — the response
+    /// body is ignored; only the HTTP status matters.
     ///
     /// # Probe digest caveat
     ///

@@ -1391,23 +1391,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn verify_reads_referrers_from_the_physical_registry_not_the_logical_one() {
-        // Index indirection (`adr_index_indirection.md` C2): the logical
-        // `ocx.sh/...` name is a pointer; the artifact and its signature
-        // referrers live on the physical registry the index root names. A
-        // pipeline that builds its transport reference from the LOGICAL
-        // identifier asks the wrong host for the signature — which for an
-        // indirected package reads as "not signed" (exit 79) no matter how the
-        // publisher signed it.
+    /// Drive a verify run against the recording transport for the logical name
+    /// `ocx.sh/acme/tool:1.0`, indirected to the physical `ghcr.io/acme/tool:1.0`,
+    /// and return the `"<method>:<registry>"` log. The transport lists no
+    /// referrers, so the run must end in `NoSignaturesFound`.
+    async fn run_recorded_verify(mirrors: crate::oci::client::MirrorMap) -> Vec<String> {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = Identifier::parse("ghcr.io/acme/tool:1.0").expect("physical identifier");
 
         let transport = RecordingTransport::default();
-        let client = Client::with_transport(Box::new(transport.clone()));
-        let index = Index::from_impl(IndirectingIndex {
-            physical: physical.clone(),
-        });
+        let mut client = Client::with_transport(Box::new(transport.clone()));
+        client.mirrors = mirrors;
+        let index = Index::from_impl(IndirectingIndex { physical });
         let temp = tempfile::TempDir::new().expect("state dir");
         let state = StateStore::new(temp.path());
         let (_key, cert) = self_signed_cert();
@@ -1437,8 +1432,19 @@ mod tests {
             matches!(error.kind, VerifyErrorKind::NoSignaturesFound),
             "expected the empty-referrer outcome, got: {error}",
         );
+        transport.calls()
+    }
 
-        let calls = transport.calls();
+    #[tokio::test]
+    async fn verify_reads_referrers_from_the_physical_registry_not_the_logical_one() {
+        // Index indirection (`adr_index_indirection.md` C2): the logical
+        // `ocx.sh/...` name is a pointer; the artifact and its signature
+        // referrers live on the physical registry the index root names. A
+        // pipeline that builds its transport reference from the LOGICAL
+        // identifier asks the wrong host for the signature — which for an
+        // indirected package reads as "not signed" (exit 79) no matter how the
+        // publisher signed it.
+        let calls = run_recorded_verify(crate::oci::client::MirrorMap::default()).await;
         assert!(
             calls.iter().any(|call| call == "list_referrers:ghcr.io"),
             "the referrer listing must target the physical registry, got: {calls:?}",
@@ -1446,6 +1452,36 @@ mod tests {
         assert!(
             calls.iter().all(|call| call.ends_with(":ghcr.io")),
             "no transport call may target the logical index host, got: {calls:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_stays_on_the_mirror_and_never_writes() {
+        // Verify is read-only, so unlike sign it has no canonical-host half:
+        // both the capability probe and the referrer listing follow the mirror.
+        // The write assertion is the standing guard — a push added here would
+        // hit a read-only mirror (ADR Q5).
+        let mirrors = crate::oci::client::MirrorMap::new([(
+            "ghcr.io".to_string(),
+            crate::config::mirror::ParsedMirror {
+                protocol: "https".to_string(),
+                host: "mirror.example".to_string(),
+                path_prefix: "proxy".to_string(),
+            },
+        )]);
+        let calls = run_recorded_verify(mirrors).await;
+
+        assert!(
+            calls.iter().any(|call| call == "list_referrers:mirror.example"),
+            "referrer reads must follow the mirror, got: {calls:?}",
+        );
+        assert!(
+            calls.iter().all(|call| call.ends_with(":mirror.example")),
+            "every verify call is a read and must follow the mirror, got: {calls:?}",
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("push_")),
+            "verify must never write, got: {calls:?}",
         );
     }
 
