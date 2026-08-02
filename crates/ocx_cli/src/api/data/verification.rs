@@ -58,21 +58,33 @@ impl VerificationReport {
     }
 }
 
+impl VerificationReport {
+    /// The (label, value) pairs `print_plain` renders, in display order.
+    ///
+    /// Extracted from `print_plain` so the digest-shortening contract can be
+    /// pinned by a unit test: `Printer` writes directly to the real process
+    /// stdout with no injectable writer (see `data_interface.rs`), so
+    /// `print_plain`'s rendered bytes cannot be captured in-process. This pure
+    /// helper carries the same field list with no `Printer` dependency.
+    fn plain_fields(&self) -> [(&'static str, String); 5] {
+        [
+            ("Subject digest", self.subject_digest.to_string()),
+            ("Referrer digest", self.referrer_digest.to_short_string()),
+            ("Certificate identity", self.certificate_identity.clone()),
+            ("Certificate OIDC issuer", self.certificate_oidc_issuer.clone()),
+            ("Signed at", self.signed_at.clone()),
+        ]
+    }
+}
+
 impl Printable for VerificationReport {
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
         // `subject_digest` is the answer (what was verified) and stays full;
         // `referrer_digest` shortens to 12 hex so only one full
         // sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
         // Column Budget"). Both remain full in JSON.
-        let fields = [
-            ("Subject digest", self.subject_digest.to_string()),
-            ("Referrer digest", self.referrer_digest.to_short_string()),
-            ("Certificate identity", self.certificate_identity.clone()),
-            ("Certificate OIDC issuer", self.certificate_oidc_issuer.clone()),
-            ("Signed at", self.signed_at.clone()),
-        ];
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
-        for (label, value) in fields {
+        for (label, value) in self.plain_fields() {
             rows[0].push(Cell::from(label.to_string()));
             rows[1].push(Cell::from(value));
         }
@@ -115,16 +127,13 @@ mod tests {
         assert_eq!(parsed["command"], "package verify");
         assert_eq!(parsed["exit_code"], 0);
         let data = &parsed["data"];
-        assert!(
-            data["subject_digest"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("sha256:"))
-        );
-        assert!(
-            data["referrer_digest"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("sha256:"))
-        );
+        // JSON keeps every digest full, unlike plain mode — a shortened 12-hex
+        // form also satisfies `starts_with("sha256:")`, so exact equality is
+        // required to pin that JSON never shortens (see
+        // `print_plain_shortens_referrer_digest_but_not_subject` for the
+        // plain-mode counterpart).
+        assert_eq!(data["subject_digest"], format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(data["referrer_digest"], format!("sha256:{}", "b".repeat(64)));
         assert_eq!(data["certificate_identity"], "test-signer@example.com");
         assert_eq!(data["certificate_oidc_issuer"], "https://fake-oidc.test");
         assert!(parsed.get("error").is_none(), "success branch must not carry error");
@@ -138,5 +147,41 @@ mod tests {
         let report = sample_report();
         let data = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
         report.print_plain(&data);
+    }
+
+    /// Pins the plain-mode digest-shortening contract on the actual
+    /// `(label, value)` pairs `print_plain` renders: `subject_digest` stays
+    /// full (it is the answer) and `referrer_digest` shortens to 12 hex.
+    #[test]
+    fn print_plain_shortens_referrer_digest_but_not_subject() {
+        let report = sample_report();
+        let fields = report.plain_fields();
+
+        let value_for = |label: &str| -> String {
+            fields
+                .iter()
+                .find(|(field_label, _)| *field_label == label)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("missing field {label:?} in plain_fields()"))
+        };
+
+        let full_subject = format!("sha256:{}", "a".repeat(64));
+        let full_referrer = format!("sha256:{}", "b".repeat(64));
+
+        assert_eq!(
+            value_for("Subject digest"),
+            full_subject,
+            "subject digest must stay full"
+        );
+        assert_eq!(
+            value_for("Referrer digest"),
+            report.referrer_digest.to_short_string(),
+            "referrer digest must shorten to 12 hex"
+        );
+        assert_ne!(
+            value_for("Referrer digest"),
+            full_referrer,
+            "referrer digest must not render the full 64-hex form"
+        );
     }
 }

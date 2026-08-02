@@ -12,6 +12,7 @@ Fulcio/Rekor + OIDC issuer, per ADR D9).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 
@@ -24,6 +25,13 @@ from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor, FakeSigstoreStac
 # Sigstore bundle v0.3 artifact type — mirrors the Rust constant
 # `oci::referrer::media_types::SIGSTORE_BUNDLE_V03`.
 SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+# A full, un-shortened digest: `sha256:` + 64 hex chars. `.startswith("sha256:")`
+# alone is also satisfied by the 12-hex short form the CLI's plain-mode output
+# uses (`api/data/signature.rs::plain_fields`), so it cannot tell "JSON was
+# shortened" from "JSON stayed full" — a regression that shortened the JSON
+# digest would still pass a bare `startswith` check.
+FULL_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -205,7 +213,11 @@ def test_sign_reads_env_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+    bundle_digest = envelope["data"]["bundle_digest"]
+    assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
+        f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
+        f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
+    )
 
 
 def test_sign_reads_stdin_token(
@@ -235,7 +247,11 @@ def test_sign_reads_stdin_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+    bundle_digest = envelope["data"]["bundle_digest"]
+    assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
+        f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
+        f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

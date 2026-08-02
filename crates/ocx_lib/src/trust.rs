@@ -520,4 +520,32 @@ future_field = "added by a newer ocx"
         );
         assert_eq!(policy.oidc_issuer, "https://token.actions.githubusercontent.com");
     }
+
+    #[test]
+    fn trust_config_tolerates_unknown_top_level_field_from_newer_ocx() {
+        // Same fleet forward-compat concern as
+        // `trust_config_tolerates_unknown_fields_from_newer_ocx`, but the unknown
+        // key sits directly under `[trust]` — a sibling of `policy` — so this
+        // exercises `TrustConfig` itself, not `TrustPolicy`. Restoring
+        // `#[serde(deny_unknown_fields)]` on `TrustConfig` alone (leaving
+        // `TrustPolicy` untouched) fails this parse; that is the regression this
+        // test guards, and it is the gap the sibling test above cannot catch
+        // because its unknown field lives inside `[[trust.policy]]`.
+        let toml = r#"
+[trust]
+future_field = "added by a newer ocx"
+
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("unknown top-level field is tolerated, not rejected");
+        assert_eq!(root.trust.policy.len(), 1);
+        assert_eq!(root.trust.policy[0].scope, "ghcr.io/acme/*");
+    }
 }

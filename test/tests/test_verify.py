@@ -245,7 +245,11 @@ def test_verify_error_envelope_golden_shape(
         env=env,
     )
     assert result.returncode != 0, "unsigned package must fail verify"
-    envelope = json.loads(result.stdout or result.stderr)
+    # No `or result.stderr` fallback: the envelope must land on stdout. A
+    # fallback here would let a regression that moved the envelope to stderr
+    # pass silently — see test_verify_json_format_emits_single_envelope_on_stdout
+    # for the dedicated single-stream contract test.
+    envelope = json.loads(result.stdout)
     assert envelope["schema_version"] == 1
     assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 79
@@ -254,6 +258,43 @@ def test_verify_error_envelope_golden_shape(
     assert error["kind"] == "not_found"
     assert isinstance(error["message"], str) and error["message"]
     assert isinstance(error["context"], dict)
+
+
+def test_verify_json_format_emits_single_envelope_on_stdout(
+    ocx: OcxRunner, published_package: PackageInfo, fake_fulcio: FakeFulcio
+) -> None:
+    """Under ``--format json``, a failing verify emits exactly one JSON
+    document on stdout — never a second document, never stray diagnostic text,
+    never the envelope on stderr instead.
+
+    For a command that reported nothing before failing (an unsigned package),
+    that one document IS the error envelope. ``json.loads`` on the raw
+    ``result.stdout`` string parses strictly: it only succeeds when the whole
+    stream is exactly one JSON value, so a stray extra document or leaked text
+    fails this test with a JSON decode error rather than silently passing.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_SIGSTORE_TRUST_ROOT": str(fake_fulcio.root_pem)}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "verify",
+            "--certificate-identity", "anyone@example.com",
+            "--certificate-oidc-issuer", "https://anywhere.example",
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, "unsigned package must fail verify"
+    envelope = json.loads(result.stdout)
+    assert envelope["schema_version"] == 1
+    assert envelope["command"] == "package verify"
+    assert "error" in envelope
+    assert "data" not in envelope, "error branch must not carry data"
 
 
 def test_verify_success_envelope_golden_shape(
