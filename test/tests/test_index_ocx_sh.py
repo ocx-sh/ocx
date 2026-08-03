@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import subprocess
 import tomllib
 import urllib.error
@@ -1880,6 +1881,195 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     assert_symlink_exists(candidate)
     mirror_slug = registry_dir(mirror_registry)
     assert_not_exists(symlinks_root / mirror_slug)
+
+
+# ---------------------------------------------------------------------------
+# G8 — a registry-role mirror keyed on an UNREACHABLE physical host carries the
+#      index-indirected fetch: the rewrite happens before the physical host is
+#      ever dialed. Committed as a PAIR (with / without the mirror line) so the
+#      rewrite stays load-bearing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def dead_endpoint() -> Iterator[str]:
+    """A `127.0.0.1:<port>` authority that resolves but refuses connections.
+
+    The socket stays BOUND (never listening) for the whole test: a bound
+    socket both answers `ECONNREFUSED` and reserves the port, so no sibling
+    xdist worker's fixture server can claim it mid-test and turn the refusal
+    into an accept. Releasing it first — as an earlier revision did — left
+    exactly that window, and a green install would then no longer prove the
+    rewrite happened.
+
+    A loopback IP literal rather than the `no-such-*.invalid` names used
+    elsewhere in this file: `OcxIndex::physical_identifier`
+    (`crates/ocx_lib/src/oci/index/ocx_index.rs`) runs
+    `oci::ssrf::resolve_and_validate` on the physical host BEFORE the mirror
+    seam in `Client::transport_reference`, so a `.invalid` name would die in
+    DNS (`SsrfError::Resolution` -> exit 69) and never reach the seam under
+    test. `127.0.0.1` resolves with no DNS at all and is admitted by an
+    explicit `trusted_hosts` entry, which leaves the TCP connection as the
+    only thing that can still stop the physical fetch.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        # Observed, never assumed: the address must actually refuse.
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=1)
+        yield f"127.0.0.1:{port}"
+
+
+def _arrange_dead_physical_host(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+    dead_host: str,
+    *,
+    with_registry_mirror: bool,
+) -> tuple[static_index.PackageEntry, Path, Path]:
+    """Publishes onto the live registry, serves an index root whose
+    `repository` pointer names a dead loopback endpoint, and writes the config.
+
+    `with_registry_mirror` is the ONLY difference between the two tests below:
+    the single `[mirrors."<dead-host>"] registry` line. Everything else —
+    package bytes, dispatch-object digests, `trusted_hosts`, insecure-host
+    allowance, index home — is byte-identical, so the pair isolates the
+    rewrite and nothing else.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{dead_host}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+
+    registry_host = ocx.registry.split(":", 1)[0]
+    # `trusted_hosts` carries BOTH the canonical registry's bare host (the
+    # substitute the mirror points at) and `127.0.0.1` (the dead physical host
+    # the SSRF pre-flight validates) — the guard runs on the pointer as
+    # written, before any rewrite, so an untrusted loopback pointer would be
+    # refused with exit 78 rather than reaching the mirror map.
+    config = (
+        f'[registries."ocx.sh"]\n'
+        f'index = "{index_server.base_url}"\n'
+        f'trusted_hosts = ["{registry_host}", "127.0.0.1"]\n'
+    )
+    if with_registry_mirror:
+        config += f'\n[mirrors."{dead_host}"]\nregistry = "http://{ocx.registry}"\n'
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(config)
+    # The dead host is deliberately NOT listed: the plain-HTTP gate only ever
+    # inspects a mirror's TARGET host, and the dead endpoint is never dialed
+    # on the mirrored path.
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    candidate = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir("ocx.sh")
+        / repository
+        / "candidates"
+        / "1.0.0"
+    )
+    return entry, index_dir, candidate
+
+
+def test_registry_role_mirror_rewrites_an_unreachable_physical_host(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+    dead_endpoint: str,
+) -> None:
+    """G8 positive half: `ocx package install` of an index-indirected logical
+    identifier succeeds even though the root's `repository` pointer names a
+    host that refuses every connection — because a `[mirrors."<dead-host>"]`
+    registry-role entry rewrites it to the live registry first.
+
+    G7 above already composes both mirror roles in one install; what it does
+    not pin is that the physical host is never dialed at all. Here the pointer
+    address is *unreachable* (`dead_endpoint` proves it refuses), so the
+    rewrite in `Client::transport_reference` (`crates/ocx_lib/src/oci/client.rs`)
+    must happen before the connect — a reachable-but-empty registry, G7's
+    arrangement, cannot distinguish the two orders.
+    """
+    repository = f"{unique_repo}/pkg"
+    entry, index_dir, candidate = _arrange_dead_physical_host(
+        ocx,
+        unique_repo,
+        tmp_path,
+        index_server,
+        dead_endpoint,
+        with_registry_mirror=True,
+    )
+
+    ocx.plain("--index", str(index_dir), "package", "install", entry.logical_id)
+
+    # The install really went through the index indirection (not a plain OCI
+    # resolve): the fixture served the config probe and the root document.
+    requested_paths = [record.path for record in index_server.requests]
+    assert requested_paths, "the fixture must have received the two-hop traffic"
+    assert any(path.endswith("/config.json") for path in requested_paths)
+    assert any(path.endswith(f"/p/{repository}.json") for path in requested_paths)
+
+    # The physical bytes arrived — via the mirror, since the pointer's own host
+    # is dead — and the candidate lands under the LOGICAL namespace slug.
+    assert_symlink_exists(candidate)
+
+
+def test_index_indirected_install_fails_without_the_registry_role_mirror(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+    dead_endpoint: str,
+) -> None:
+    """G8 negative twin: the identical arrangement minus the one
+    `[mirrors."<dead-host>"] registry` line fails, and fails *at the dead
+    physical endpoint*.
+
+    This is what makes the positive half above falsifiable: without it, a
+    green install could equally be explained by the package bytes already
+    sitting in the local stores from the `make_package` push. The pair only
+    passes together if the mirror rewrite is the thing carrying the fetch.
+    """
+    entry, index_dir, candidate = _arrange_dead_physical_host(
+        ocx,
+        unique_repo,
+        tmp_path,
+        index_server,
+        dead_endpoint,
+        with_registry_mirror=False,
+    )
+
+    result = ocx.plain(
+        "--index", str(index_dir), "package", "install", entry.logical_id, check=False
+    )
+
+    # 75 = EX_TEMPFAIL: a refused connection is classified as a transient
+    # registry fault, the same lane as any other physical-registry outage.
+    assert result.returncode == 75, (
+        f"expected EX_TEMPFAIL (75) from the unreachable physical registry, "
+        f"got rc={result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+    assert dead_endpoint in result.stderr, (
+        "the failure must name the dead physical endpoint — otherwise it proves "
+        f"only that something went wrong\nstderr: {result.stderr.strip()}"
+    )
+    assert_not_exists(candidate)
 
 
 # ===========================================================================
