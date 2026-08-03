@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-08-03
+
+### Added
+
+- Retry a blob upload that failed on a transient registry fault *(oci)*
+
+### Fixed
+
+- Exit 75, not 69, when a registry times out or rate-limits *(oci)* **BREAKING**
+- Exit 75 when a lock resolve gives up on a transient registry fault *(project)* **BREAKING**
+- Bound the registry connect phase at 30 seconds *(oci)*
+- Resolve commands against the package before the host PATH *(cli)* **BREAKING**
+
 ## [0.5.2] - 2026-08-02
 
 ### Fixed
@@ -777,6 +790,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.5.3]: https://github.com/ocx-sh/ocx/compare/v0.5.2..v0.5.3
 [0.5.2]: https://github.com/ocx-sh/ocx/compare/v0.5.1..v0.5.2
 [0.5.1]: https://github.com/ocx-sh/ocx/compare/v0.5.0..v0.5.1
 [0.5.0]: https://github.com/ocx-sh/ocx/compare/v0.4.3..v0.5.0
