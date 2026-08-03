@@ -128,8 +128,11 @@ def get_package_info(
             remote=remote,
         )
         result = json.loads(output)
-        # Returns null when no description is published
-        return result if result else None
+        # Keyed by the request identifier (`{"<id>": {...}|null}`, even for a
+        # single package — see PackageDescriptions in package_description.rs).
+        # Exactly one entry per single-identifier request; unwrap it. Value is
+        # null when no description is published for that package.
+        return next(iter(result.values()), None)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         print(f"  Warning: failed to get info for {repo}: {e}", file=sys.stderr)
         return None
@@ -308,6 +311,11 @@ def main() -> None:
     if args.packages and catalog_path.exists() and not args.force:
         existing_catalog = json.loads(catalog_path.read_text())
 
+    # Anything that is not a selective refresh rebuilds the whole catalog —
+    # including `--package X --force` and `--package X` without an existing
+    # catalog.json — and must pass the all-empty-descriptions gate below.
+    full_run = not (args.packages and existing_catalog)
+
     # Get repos and tags from registry
     if args.packages and existing_catalog:
         print(f"Selective refresh for: {', '.join(args.packages)}")
@@ -366,6 +374,20 @@ def main() -> None:
 
     # Sort by name
     summaries.sort(key=lambda s: s["name"].lower())
+
+    # Sanity gate: if `ocx package info` JSON output shape drifts (e.g. the
+    # keyed-by-identifier wrapper added in a81229b8), every description
+    # silently falls back to "" and nothing else here notices. A full run
+    # producing zero non-empty descriptions is that signal.
+    if full_run and summaries and all(not s["description"] for s in summaries):
+        print(
+            f"ERROR: full catalog run produced 0/{len(summaries)} non-empty "
+            "descriptions -- either `ocx package info` output shape drifted "
+            "(check get_package_info() in scripts/catalog-generate.py) or no "
+            "package in this registry publishes a description",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Write catalog.json
     catalog = {
