@@ -254,6 +254,27 @@ def fetch_manifest_raw(registry: str, repo: str, ref: str) -> tuple[bytes, str]:
     raise RuntimeError(f"could not fetch manifest {registry}/{repo}:{ref}")
 
 
+def put_manifest(registry: str, repo: str, ref: str, body: bytes, content_type: str) -> str:
+    """PUTs ``body`` verbatim as the manifest at ``ref`` (a tag or digest),
+    returning the digest the registry serves it under
+    (``Docker-Content-Digest``).
+
+    A direct HTTP PUT, bypassing ``ocx`` entirely, for tests that need to
+    hand-corrupt a registry alias into a shape ``ocx`` itself would never
+    produce (e.g. a cascade alias missing a platform it should carry).
+    """
+    import requests
+
+    response = requests.put(
+        f"http://{registry}/v2/{repo}/manifests/{ref}",
+        data=body,
+        headers={"Content-Type": content_type},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.headers.get("Docker-Content-Digest") or _sha256_digest(body)
+
+
 def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) -> None:
     """Copies a manifest chain (image index -> child manifest -> config +
     layer blobs) from ``from_repo`` to ``to_repo`` verbatim, so the
@@ -283,15 +304,6 @@ def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) 
         )
         return body, media_type
 
-    def put_manifest(ref_: str, body: bytes, content_type: str) -> None:
-        response = requests.put(
-            f"http://{registry}/v2/{to_repo}/manifests/{ref_}",
-            data=body,
-            headers={"Content-Type": content_type},
-            timeout=10,
-        )
-        response.raise_for_status()
-
     def copy_blob(digest: str) -> None:
         head = requests.head(f"http://{registry}/v2/{to_repo}/blobs/{digest}", timeout=10)
         if head.status_code == 200:
@@ -310,8 +322,8 @@ def clone_manifest_chain(registry: str, from_repo: str, to_repo: str, ref: str) 
         copy_blob(child_doc["config"]["digest"])
         for layer in child_doc.get("layers", []):
             copy_blob(layer["digest"])
-        put_manifest(child_digest, child_body, child_content_type)
-    put_manifest(ref, index_body, index_content_type)
+        put_manifest(registry, to_repo, child_digest, child_body, child_content_type)
+    put_manifest(registry, to_repo, ref, index_body, index_content_type)
 
 
 # ---------------------------------------------------------------------------

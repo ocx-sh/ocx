@@ -13,6 +13,8 @@ pub mod env;
 pub mod install;
 pub mod lock;
 pub mod login;
+pub mod package_cascade_check;
+pub mod package_cascade_repair;
 pub mod package_description;
 pub mod package_inspect;
 pub mod patch_freeze;

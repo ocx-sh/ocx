@@ -131,6 +131,22 @@ pub(crate) struct SingleLayerArtifact {
     pub layer_digest: Digest,
 }
 
+/// Which host a read addresses.
+///
+/// Reads are mirror-aware by default — that is the whole point of the mirror
+/// map. A read that *backs a write* is the exception: writes go to the
+/// canonical registry (mirrors are read-only, ADR Q5), so a decision taken from
+/// a mirror's answer and then applied to the canonical host is a decision about
+/// a repository nobody read (CWE-345/367). Such a read names
+/// [`Canonical`](Self::Canonical) and the whole transaction stays on one host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadAddressing {
+    /// The default: a configured mirror serves the read.
+    Mirrored,
+    /// The canonical registry, mirrors bypassed.
+    Canonical,
+}
+
 pub struct Client {
     transport: Box<dyn OciTransport>,
     pub(super) lock_timeout: std::time::Duration,
@@ -173,6 +189,24 @@ impl Client {
             progress: crate::cli::progress::ProgressManager::disabled(),
             mirrors: MirrorMap::default(),
         }
+    }
+
+    /// Points reads at `host` for everything published under `upstream`.
+    ///
+    /// The `mirrors` field is module-private, so a caller outside `oci` cannot
+    /// build a mirrored client — which is exactly what a test asserting that
+    /// some subsystem's reads are *not* mirrored needs.
+    #[cfg(test)]
+    pub(crate) fn with_test_mirror(mut self, upstream: &str, host: &str, path_prefix: &str) -> Self {
+        self.mirrors = MirrorMap::new([(
+            upstream.to_string(),
+            crate::config::mirror::ParsedMirror {
+                protocol: "https".to_string(),
+                host: host.to_string(),
+                path_prefix: path_prefix.to_string(),
+            },
+        )]);
+        self
     }
 
     // ── Mirror transform (single read-path rewrite seam) ───────────
@@ -241,6 +275,20 @@ impl Client {
         native::Reference::with_tag(host, repository, "latest".into())
     }
 
+    /// Builds the reference for a read that has been told which host to
+    /// address.
+    ///
+    /// The mirrored arm is [`transport_reference`](Self::transport_reference)
+    /// verbatim — this is a routing switch, not a second seam.
+    fn read_reference(&self, identifier: &Identifier, addressing: ReadAddressing) -> native::Reference {
+        match addressing {
+            ReadAddressing::Mirrored => self.transport_reference(identifier),
+            // Push stays canonical (remote/proxy mirrors are read-only), so a
+            // read that decides a write has to name the same host.
+            ReadAddressing::Canonical => identifier.canonical_reference(),
+        }
+    }
+
     // ── Authentication ─────────────────────────────────────────────
 
     /// Pre-authenticate against the registry for `identifier` with the
@@ -277,7 +325,19 @@ impl Client {
     /// Lists the tags for the given image reference.
     /// There is no validation that the tags correspond to valid package versions.
     pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
-        let image = self.transport_reference(&identifier);
+        self.list_tags_addressed(identifier, ReadAddressing::Mirrored).await
+    }
+
+    /// [`list_tags`](Self::list_tags) against a caller-chosen host.
+    ///
+    /// `ReadAddressing::Canonical` is for a listing a write is planned from —
+    /// see [`ReadAddressing`].
+    pub(crate) async fn list_tags_addressed(
+        &self,
+        identifier: Identifier,
+        addressing: ReadAddressing,
+    ) -> Result<Vec<String>> {
+        let image = self.read_reference(&identifier, addressing);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let chunk_size = self.tag_chunk_size;
         let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
@@ -429,6 +489,36 @@ impl Client {
         log::debug!("Successfully merged platform entry into index for {}", ref_);
 
         Ok((index_digest, index))
+    }
+
+    /// Pushes `index` whole at `identifier`, returning the digest of the bytes
+    /// that were written.
+    ///
+    /// The write primitive `ocx package cascade repair` needs: it recomputes an
+    /// alias index in full and replaces it, where
+    /// [`merge_platform_into_index`](Self::merge_platform_into_index) reads what
+    /// the registry currently serves and edits one platform entry into it. The
+    /// returned digest is computed from the bytes this call put on the wire, so
+    /// a caller reading the tag back afterwards is comparing against what it
+    /// wrote rather than against whatever the registry chose to echo.
+    ///
+    /// # Errors
+    ///
+    /// Push authentication failure, index serialization failure, or a registry
+    /// that rejects the manifest.
+    pub(crate) async fn push_index(&self, identifier: &Identifier, index: &oci::ImageIndex) -> Result<Digest> {
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let ref_ = identifier.canonical_reference();
+        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Push).await?;
+
+        let index_data = serde_json::to_vec(index).map_err(ClientError::Serialization)?;
+        let index_digest = Algorithm::Sha256.hash(&index_data);
+        self.transport
+            .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
+            .await?;
+        log::debug!("Pushed index for {} as {}", ref_, index_digest);
+
+        Ok(index_digest)
     }
 
     // ── Canonical tag (registry-side deletion safety net) ─────────────
@@ -1735,7 +1825,21 @@ impl Client {
         &self,
         identifier: &Identifier,
     ) -> std::result::Result<Option<Digest>, ClientError> {
-        let image = self.transport_reference(identifier);
+        self.probe_manifest_digest_addressed(identifier, ReadAddressing::Mirrored)
+            .await
+    }
+
+    /// [`probe_manifest_digest`](Self::probe_manifest_digest) against a
+    /// caller-chosen host.
+    ///
+    /// `ReadAddressing::Canonical` is for a probe that gates or verifies a
+    /// write — see [`ReadAddressing`].
+    pub(crate) async fn probe_manifest_digest_addressed(
+        &self,
+        identifier: &Identifier,
+        addressing: ReadAddressing,
+    ) -> std::result::Result<Option<Digest>, ClientError> {
+        let image = self.read_reference(identifier, addressing);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         match self.transport.fetch_manifest_digest(&image).await {
             Ok(digest_str) => Ok(Some(Digest::try_from(digest_str.as_str()).map_err(|e| {
@@ -1783,7 +1887,21 @@ impl Client {
         &self,
         identifier: &Identifier,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
-        self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES)
+        self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES, ReadAddressing::Mirrored)
+            .await
+    }
+
+    /// [`fetch_manifest_raw_bytes`](Self::fetch_manifest_raw_bytes) against a
+    /// caller-chosen host.
+    ///
+    /// `ReadAddressing::Canonical` is for a body a write is planned from — see
+    /// [`ReadAddressing`].
+    pub(crate) async fn fetch_manifest_raw_bytes_addressed(
+        &self,
+        identifier: &Identifier,
+        addressing: ReadAddressing,
+    ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
+        self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES, addressing)
             .await
     }
 
@@ -1794,8 +1912,9 @@ impl Client {
         &self,
         identifier: &Identifier,
         max_bytes: usize,
+        addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
-        let image = self.transport_reference(identifier);
+        let image = self.read_reference(identifier, addressing);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let (raw_bytes, digest_str) = match self
@@ -2181,7 +2300,10 @@ mod tests {
         let length = stub_manifest_of_known_length(&id, &data);
         let client = stub(&data);
 
-        match client.fetch_manifest_raw_bytes_capped(&id, length - 1).await {
+        match client
+            .fetch_manifest_raw_bytes_capped(&id, length - 1, ReadAddressing::Mirrored)
+            .await
+        {
             Err(ClientError::InvalidManifest(message)) => {
                 assert!(
                     message.contains(&length.to_string()),
@@ -2207,7 +2329,7 @@ mod tests {
         let client = stub(&data);
 
         let (raw_bytes, _digest, _parsed) = client
-            .fetch_manifest_raw_bytes_capped(&id, length)
+            .fetch_manifest_raw_bytes_capped(&id, length, ReadAddressing::Mirrored)
             .await
             .expect("a body of exactly the cap must be accepted")
             .expect("tag is present in the stub");
@@ -6266,6 +6388,73 @@ mod tests {
             assert_eq!(repository, mirrored_repository());
         }
 
+        // ── The canonical-addressed reads: the mirror is bypassed ────────────
+        //
+        // Paired with the mirrored tests above, which are the positive control:
+        // the same client, the same identifier, and the addressing argument is
+        // the only thing that differs. These are the reads `ocx package cascade
+        // check|repair` uses — an audit that plans a canonical-host write must
+        // not decide from a mirror's answer.
+
+        #[tokio::test]
+        async fn list_tags_canonical_bypasses_the_mirror() {
+            let (client, data) = mirrored_client();
+            let _ = client
+                .list_tags_addressed(identifier_with_tag("1.0"), ReadAddressing::Canonical)
+                .await;
+            assert_eq!(
+                data.call("list_tags"),
+                (UPSTREAM_REGISTRY.to_string(), REPOSITORY.to_string()),
+                "a canonical listing must reach the upstream host with the repository unrewritten"
+            );
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_raw_bytes_canonical_bypasses_the_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client
+                .fetch_manifest_raw_bytes_addressed(&id, ReadAddressing::Canonical)
+                .await;
+            assert_eq!(
+                data.call("pull_manifest_raw"),
+                (UPSTREAM_REGISTRY.to_string(), REPOSITORY.to_string()),
+                "a canonical manifest read must reach the upstream host with the repository unrewritten"
+            );
+        }
+
+        #[tokio::test]
+        async fn probe_manifest_digest_canonical_bypasses_the_mirror() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client
+                .probe_manifest_digest_addressed(&id, ReadAddressing::Canonical)
+                .await;
+            assert_eq!(
+                data.call("fetch_manifest_digest"),
+                (UPSTREAM_REGISTRY.to_string(), REPOSITORY.to_string()),
+                "a canonical digest probe must reach the upstream host with the repository unrewritten"
+            );
+        }
+
+        /// A canonical read authenticates against the canonical host too —
+        /// one transaction, one host, one credential scope. Authenticating
+        /// against the mirror and then reading upstream would fail closed at
+        /// best and read as an anonymous request at worst.
+        #[tokio::test]
+        async fn a_canonical_read_authenticates_against_the_canonical_host() {
+            let (client, data) = mirrored_client();
+            let id = identifier_with_tag("1.0");
+            let _ = client
+                .fetch_manifest_raw_bytes_addressed(&id, ReadAddressing::Canonical)
+                .await;
+            assert_eq!(
+                data.call("ensure_auth").0,
+                UPSTREAM_REGISTRY.to_string(),
+                "the pull scope must be requested for the host the read addresses"
+            );
+        }
+
         #[tokio::test]
         async fn fetch_layer_blob_capped_routes_through_mirror() {
             let (client, data) = mirrored_client();
@@ -6303,6 +6492,12 @@ mod tests {
     //                          + test helpers in the `transport_reference` module.
     // - `package/cascade.rs` — push-path cascade test spies keying a manifest
     //                          map by canonical reference (test-only).
+    // - `package/cascade/{gather,apply,equivalence}.rs`
+    //                        — cascade audit test spies, same shape and same
+    //                          test-only scope as `package/cascade.rs` above.
+    //                          The audit's production code names no reference at
+    //                          all: it asks for `ReadAddressing::Canonical` and
+    //                          the seam in this file builds the reference.
     #[test]
     fn canonical_reference_only_used_in_allowed_files() {
         use std::fs;
@@ -6310,7 +6505,14 @@ mod tests {
 
         // Allow-list: file paths (relative to the ocx_lib src root) that are
         // permitted to reference `canonical_reference`.
-        const ALLOWED_SUFFIXES: &[&str] = &["oci/identifier.rs", "oci/client.rs", "package/cascade.rs"];
+        const ALLOWED_SUFFIXES: &[&str] = &[
+            "oci/identifier.rs",
+            "oci/client.rs",
+            "package/cascade.rs",
+            "package/cascade/gather.rs",
+            "package/cascade/apply.rs",
+            "package/cascade/equivalence.rs",
+        ];
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let src_root = Path::new(manifest_dir).join("src");

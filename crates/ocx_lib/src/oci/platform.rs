@@ -814,6 +814,39 @@ impl TryFrom<Option<native::Platform>> for Platform {
     }
 }
 
+/// Renders a raw fork wire-type [`native::Platform`] using OCX's canonical
+/// `os/arch[/variant][+feature[,feature...]]` grammar (the same grammar
+/// [`Platform`]'s [`Display`](std::fmt::Display) impl produces).
+///
+/// Display-only, not a codec: unlike [`TryFrom<native::Platform> for
+/// Platform`], this is **total** over every `os`/`architecture` value the
+/// fork can hold, including a platform OCX's closed [`OperatingSystem`] /
+/// [`Architecture`] enums do not support (e.g. `freebsd/amd64`) — callers
+/// that must keep such real-but-unsupported platforms around (the cascade
+/// fold's registry-graph diff) still get a human-readable cell instead of
+/// the fork's verbose `Debug`-style [`Display`](std::fmt::Display). The
+/// result carries no round-trip guarantee back to a `native::Platform` and
+/// ignores the deprecated `features` field and `os_version`, neither of
+/// which the canonical grammar has a slot for.
+pub fn render_native_platform(platform: &native::Platform) -> String {
+    let mut rendered = format!("{}/{}", platform.os, platform.architecture);
+    if let Some(variant) = platform.variant.as_deref().filter(|value| !value.is_empty()) {
+        rendered.push('/');
+        rendered.push_str(&escape_platform_component(variant));
+    }
+    let os_features = normalize_os_features(platform.os_features.as_deref().unwrap_or_default());
+    if !os_features.is_empty() {
+        rendered.push('+');
+        for (index, feature) in os_features.iter().enumerate() {
+            if index > 0 {
+                rendered.push(',');
+            }
+            rendered.push_str(&escape_platform_component(feature));
+        }
+    }
+    rendered
+}
+
 // --- Serde via native::Platform ---
 //
 // Serialization converts to native::Platform first, ensuring OCI-compatible
@@ -1428,6 +1461,118 @@ mod tests {
         // +features suffix. Filesystem paths use segments()/ascii_segments().
         let platform: Platform = "linux/amd64+libc.glibc".parse().unwrap();
         assert_eq!(platform.to_string(), "linux/amd64+libc.glibc");
+    }
+
+    // --- render_native_platform: canonical grammar for the raw fork type ---
+
+    #[test]
+    fn render_native_platform_appends_a_single_os_feature() {
+        let platform = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::Amd64,
+            os_version: None,
+            os_features: Some(vec!["libc.glibc".to_string()]),
+            variant: None,
+            features: None,
+        };
+        assert_eq!(render_native_platform(&platform), "linux/amd64+libc.glibc");
+    }
+
+    #[test]
+    fn render_native_platform_renders_a_platform_ocx_cannot_construct() {
+        // freebsd/amd64 is real but unsupported by OCX's closed `Platform`
+        // enum — `TryFrom<native::Platform>` refuses it — yet the cascade
+        // fold deliberately keeps such platforms around rather than reading
+        // "we failed to parse it" as "it has no platform"
+        // (`cascade::graph::platform_slot`'s doc comment), so the plain
+        // table must still render one.
+        let platform = native::Platform {
+            os: native::Os::FreeBSD,
+            architecture: native::Arch::Amd64,
+            os_version: None,
+            os_features: None,
+            variant: None,
+            features: None,
+        };
+        assert_eq!(render_native_platform(&platform), "freebsd/amd64");
+        assert!(
+            Platform::try_from(platform).is_err(),
+            "freebsd is unsupported by the typed Platform"
+        );
+    }
+
+    #[test]
+    fn render_native_platform_includes_a_non_empty_variant() {
+        let platform = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::ARM64,
+            os_version: None,
+            os_features: None,
+            variant: Some("v8".to_string()),
+            features: None,
+        };
+        assert_eq!(render_native_platform(&platform), "linux/arm64/v8");
+    }
+
+    #[test]
+    fn render_native_platform_skips_an_empty_variant() {
+        let platform = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::Amd64,
+            os_version: None,
+            os_features: None,
+            variant: Some(String::new()),
+            features: None,
+        };
+        assert_eq!(
+            render_native_platform(&platform),
+            "linux/amd64",
+            "an empty variant must not render a trailing slash with nothing after it"
+        );
+    }
+
+    #[test]
+    fn render_native_platform_normalizes_unsorted_duplicate_features() {
+        let platform = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::Amd64,
+            os_version: None,
+            os_features: Some(vec!["b.y".to_string(), "a.x".to_string(), "a.x".to_string()]),
+            variant: None,
+            features: None,
+        };
+        assert_eq!(render_native_platform(&platform), "linux/amd64+a.x,b.y");
+    }
+
+    #[test]
+    fn render_native_platform_has_no_suffix_for_empty_features() {
+        let platform = native::Platform {
+            os: native::Os::Windows,
+            architecture: native::Arch::Amd64,
+            os_version: None,
+            os_features: Some(Vec::new()),
+            variant: None,
+            features: None,
+        };
+        assert_eq!(render_native_platform(&platform), "windows/amd64");
+    }
+
+    #[test]
+    fn render_native_platform_agrees_with_the_typed_display_for_a_supported_platform() {
+        let platform = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::ARM64,
+            os_version: None,
+            os_features: Some(vec!["libc.musl".to_string()]),
+            variant: Some("v8".to_string()),
+            features: None,
+        };
+        let typed = Platform::try_from(platform.clone()).expect("linux/arm64/v8 is supported");
+        assert_eq!(
+            render_native_platform(&platform),
+            typed.to_string(),
+            "the two grammars must not drift apart for a platform both can represent"
+        );
     }
 
     #[test]

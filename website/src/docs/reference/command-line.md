@@ -2347,6 +2347,225 @@ ocx package announce --package acme/widget --tags-from-file tags.txt --fork myus
 ```
 :::
 
+#### `cascade check` {#package-cascade-check}
+
+Diffs a package's cascade tag graph — the rolling aliases (`latest`, `3`, `3.28`, …) [`ocx package push --cascade`][cmd-package-push] maintains — against the state a fold over every published concrete version says it should be. Nothing re-checks the cascade graph at publish time if a cascade push is interrupted partway through (see [Cascades][in-depth-versioning-cascades]); `check` is how that drift gets found again after the fact, without republishing anything. It never writes to the registry or to any local index.
+
+`check` accepts both **logical** and **physical** identifiers. A logical identifier (a namespace with an [`index`][config-registries-index] configured, e.g. `ocx.sh/kitware/cmake:3.28`) resolves to its physical registry location the same way [`ocx package install`][cmd-package-install] does, and additionally fetches that namespace's live [index][in-depth-indices] root — a **third finding layer**, index staleness, on top of the registry-graph findings every identifier gets, comparing each observed alias digest against the digest actually committed in the index. A physical identifier (a bare registry path, e.g. `ghcr.io/ocx-contrib/cmake:3.28`) skips that layer: there is no logical name to look an index root up under. A digest-pinned identifier (`pkg@sha256:…`) is a usage error — a digest names one immutable artifact, not a tag with alias ancestors to diff.
+
+Each identifier's own tag selects how much of the graph a run covers:
+
+| Identifier form | Scope |
+|---|---|
+| Tagless (`acme/cmake`) | Every alias tag in every variant track — `latest`, `3`, `3.28`, and any `debug`/other variant's aliases too |
+| `:latest` (or any bare default-variant alias) | The default variant's track only — never `debug` or another variant's |
+| A rolling tag (`:3.28`, `:debug-3`) | That tag's subtree plus the path from it up to its own root (`3.28` → `3` → `latest`) |
+| A fully build-tagged leaf (`:3.28.1_20260216120000`) | The path up to root only — the leaf itself is the published source of truth and is never a write target |
+| A bare variant name (`:debug`) | Usage error (exit 64) — whether `debug` names a track root depends on the package's other tags, which this call has not read; scope a tag under it instead (`:debug-3`) |
+| A digest reference (`@sha256:…`) | Usage error (exit 64) — a digest has no tag graph to diff |
+
+Multiple identifiers naming the same package union their scopes into a single report; different packages each get their own. `check` authenticates for **pull only** — it never probes push credentials.
+
+**Usage**
+
+```shell
+ocx package cascade check <IDENTIFIER>...
+```
+
+**Arguments**
+
+- `<IDENTIFIER>...`: One or more package identifiers, logical or physical, each optionally carrying a tag that narrows scope (see the table above). Required.
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| Every alias in scope matches the fold-expected state — nothing to report | 0 |
+| At least one finding: a stale or missing alias entry, a duplicate entry shadowing another for the same platform, an orphaned tag, or (logical identifiers only) an index root behind the registry | 65 |
+| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved or canonical `sha256.<hex>` tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
+
+**JSON report**
+
+```json
+{
+  "reports": [
+    {
+      "identifier": "acme/cmake",
+      "logical": "ocx.sh/acme/cmake",
+      "aliases": {
+        "latest": { "state": "present" },
+        "3": { "state": "present" },
+        "3.28": { "state": "present" }
+      },
+      "rows": [
+        {
+          "tag": "3.28",
+          "platform": { "architecture": "arm64", "os": "linux" },
+          "status": "stale",
+          "observed": "sha256:aaaa…",
+          "expected": "sha256:bbbb…",
+          "source": "3.28.1_20260216120000",
+          "observed_source": null
+        },
+        {
+          "tag": "3.28",
+          "platform": { "architecture": "amd64", "os": "linux" },
+          "status": "duplicate",
+          "observed": "sha256:dddd…",
+          "expected": "sha256:bbbb…",
+          "source": "3.28.1_20260216120000",
+          "observed_source": "3.28.0_20260101000000"
+        }
+      ],
+      "index_findings": [
+        { "finding": "stale", "tag": "3.28", "committed": "sha256:cccc…", "live": "sha256:bbbb…" }
+      ],
+      "ignored_tags": ["sha256.aaaa1111"],
+      "unrepairable": []
+    }
+  ]
+}
+```
+
+Every report is nested under one top-level `reports` array — the whole JSON contract is that one wrapper key. Each row's `status` is one of `ok`, `missing`, `stale`, `orphan`, or `duplicate`; `source`/`observed_source` name the published version a digest was folded from or recognized as belonging to, `null` when there is none. `duplicate` marks a platform for which the alias's index carries two descriptors: only the last one resolves, so the earlier entry is published but invisible to every consumer — `repair` collapses the pair back to one entry the same way it rebuilds any other stale slot. `index_findings` carries two shapes: a committed tag whose registry digest has moved past what the index still records (`stale`, shown above), and an alias tag observed live on the registry that the index has never committed at all (`{ "finding": "not-committed", "tag": "…" }`). `unrepairable` names aliases that need new content published before anything can fix them — `{ "reason": "child-manifest-missing", "tag": "…", "digest": "…" }` (a referenced manifest is gone), `{ "reason": "child-digest-unaddressable", "tag": "…", "digest": "…" }` (a digest algorithm this build cannot check), or `{ "reason": "would-empty-index", "tag": "…" }` (repairing it would leave the alias with no entries at all). Field names above are representative of the shipped report's shape, not a frozen wire contract — what a script branches on is `rows[].status` and the finding classes, not a specific key spelling.
+
+#### `cascade repair` {#package-cascade-repair}
+
+Recomputes and writes the whole alias index for every tag [`cascade check`](#package-cascade-check) would report as broken. `repair` writes by default — the same convention as every other `--dry-run` flag in this reference: `check` is already the read-only preview, so `repair` needs no separate opt-out to be safe to run. Pass `--dry-run` to compute and report the same plan without touching the registry.
+
+Identifier forms and scope selection are identical to [`cascade check`](#package-cascade-check) — see the table there. An index-staleness finding on a logical identifier is never something `repair` writes: fixing the registry graph and re-publishing the index are different hops (see below), and `repair` only ever authenticates for registry push.
+
+For each broken alias, `repair` rebuilds the whole platform index entry from the same fold `check` diffs against, preserving every observed entry the fold does not itself supersede — an [OCI annotation][oci-annotations] already on the index, a non-platform entry like an attestation, or an orphaned alias tag whose child manifest still exists on the registry. An orphan is preserved while its child is resolvable and dropped only once it provably is not: before writing, every referenced platform manifest is checked to still exist, and a missing one is dropped **only if every entry naming that digest is an orphan slot**. If the same digest also backs a slot the fold expects (a manifest shared across two platforms, a Rosetta-style alias) or an entry with no platform at all (an annotation or attestation), the **whole alias** is refused instead (reported, not silently skipped) rather than quietly losing content, while every other alias in the run still writes. Writes are batched — nothing reaches the registry until the whole run's plan is built — and proceed concurrently per tag. After each write, `repair` re-reads the tag it just wrote and warns (does not fail) if the digest disagrees with what was pushed, which is evidence of a concurrent publisher racing the same tag rather than something `repair` can safely resolve — the write itself still landed, so the outcome is reported `raced` only when nothing was written at all (the tag moved between this run's read and its write), never when the write landed but a read-back disagreed. There is no [conditional-request][mdn-if-match] guard on the write itself — avoid running `repair` against a repository with a publish in flight.
+
+`repair` only ever touches the **registry** side of the tag graph — reaching the public [index][in-depth-indices] with the fix is a second, separate hop through [`ocx package announce`][cmd-package-announce]. `--announce-tags <PATH>` writes one bare alias-tag name per line, in the same comma/newline format [`--tags-from-file`][cmd-package-announce] reads, so a pipeline can chain the two directly:
+
+```shell
+ocx package cascade repair --announce-tags tags.txt acme/cmake
+ocx package announce --package acme/cmake --tags-from-file tags.txt --fork myuser/index
+```
+
+The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce --package` names a single package, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. `--dry-run` writes nothing to the registry, so its file records the whole computed plan instead — every tag it *would* repair — since that is the only content a preview has to report. Either way the file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-from-file` unconditionally, the same way [`ocx package push --announce-file`][cmd-package-push] chains into `announce`. `--tags-from-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
+
+**Usage**
+
+```shell
+ocx package cascade repair [OPTIONS] <IDENTIFIER>...
+```
+
+**Arguments**
+
+- `<IDENTIFIER>...`: One or more package identifiers, logical or physical, each optionally carrying a tag that narrows scope (same rules as [`cascade check`](#package-cascade-check)). Required.
+
+**Options**
+
+| Name | Description | Default |
+|---|---|---|
+| `--dry-run` | Compute and report the repair plan without writing to the registry. | off |
+| `--announce-tags <PATH>` | Write this run's alias-tag handoff to [`ocx package announce --tags-from-file`][cmd-package-announce], one bare tag per line. One package per invocation only — a second package's tags in the same file has no owner to attribute them to (usage error, exit 64, nothing written). A real run records the tags whose write landed, unioned with any tag an index-staleness finding names; `--dry-run` records its whole computed plan instead. Written on every run; empty when there is nothing to hand off. | — |
+| `-h`, `--help` | Print help information. | — |
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| Every registry write this run attempted succeeded (an index-staleness finding from a logical identifier may remain — that is `announce`'s job, not a failure here) | 0 |
+| At least one finding remains after the run — a write failed, an alias raced by a concurrent publisher before it could write (rerun the repair), or an alias could not be repaired without new content (its only remaining reference to a needed platform manifest is gone, or repairing it would leave the index empty) | 65 |
+| `--dry-run` computed a non-empty plan — a preview that still names repairs is not a clean run, even though nothing was written | 65 |
+| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved or canonical `sha256.<hex>` tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
+
+**JSON report**
+
+```json
+{
+  "entries": [
+    {
+      "report": {
+        "identifier": "acme/cmake",
+        "logical": "ocx.sh/acme/cmake",
+        "aliases": {
+          "latest": { "state": "present" },
+          "3": { "state": "present" },
+          "3.28": { "state": "present" }
+        },
+        "rows": [
+          {
+            "tag": "3.28",
+            "platform": { "architecture": "arm64", "os": "linux" },
+            "status": "stale",
+            "observed": "sha256:aaaa…",
+            "expected": "sha256:bbbb…",
+            "source": "3.28.1_20260216120000",
+            "observed_source": null
+          }
+        ],
+        "index_findings": [],
+        "ignored_tags": [],
+        "unrepairable": []
+      },
+      "planned": [
+        {
+          "tag": "3.28",
+          "index": {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+              {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:bbbb…",
+                "size": 1234,
+                "platform": { "architecture": "arm64", "os": "linux" }
+              }
+            ],
+            "artifactType": "application/vnd.sh.ocx.package.v1"
+          },
+          "observed_digest": "sha256:aaaa…",
+          "referenced_digests": ["sha256:bbbb…"],
+          "reasons": [
+            {
+              "tag": "3.28",
+              "platform": { "architecture": "arm64", "os": "linux" },
+              "status": "stale",
+              "observed": "sha256:aaaa…",
+              "expected": "sha256:bbbb…",
+              "source": "3.28.1_20260216120000",
+              "observed_source": null
+            }
+          ]
+        }
+      ],
+      "outcomes": [
+        {
+          "tag": "3.28",
+          "outcome": {
+            "outcome": "written",
+            "digest": "sha256:bbbb…",
+            "verified": true,
+            "dropped": ["sha256:dead…"]
+          }
+        },
+        {
+          "tag": "3",
+          "outcome": {
+            "outcome": "raced",
+            "expected": "sha256:eeee…",
+            "live": "sha256:ffff…"
+          }
+        }
+      ],
+      "announce_tags": ["3.28"]
+    }
+  ],
+  "dry_run": false,
+  "announce_tags_path": "tags.txt"
+}
+```
+
+`entries[].report` is the same [`cascade check`](#package-cascade-check) report shape for this package — findings this run is repairing, not a separate schema. `planned` carries the whole replacement index computed for each broken alias, `reasons` echoing the exact rows that justified it; `outcomes` is empty for a preview (`dry_run: true`), since nothing was attempted. `written`'s `verified` is `false` when this run's post-write read-back found a different digest than it just pushed — evidence of a concurrent publisher, not a failure: the write still landed, and the plain-text table shows it as `written-unverified` rather than a distinct JSON outcome. `dropped` names the dead orphan-only digests this write removed before it went on the wire — omitted, never an empty array, when nothing was dropped. `raced` means a concurrent publisher moved the tag between this run's read and its write, so nothing was written for it (`expected`/`live` are each `null` when that side of the race never held the tag); rerunning the repair re-reads the new state. A `refused` outcome's `outcome` object nests the same tagged shape as `unrepairable` above (`{ "outcome": "refused", "reason": "child-manifest-missing", "tag": "…", "digest": "…" }`, and so on for the other two reasons) — this alias was never attempted; a `failed` outcome's is `{ "outcome": "failed", "message": "…" }`, a write the registry itself rejected. `entries[].announce_tags` is this package's contribution to the top-level `--announce-tags` file — `3.28` here, not `3`, because the raced write never landed. `announce_tags_path` is the path `--announce-tags` was given, `null` when the flag was not passed. Representative shape, as with `cascade check` above — the shipped report's exact key spelling is not a frozen contract, only the finding classes a script branches on.
+
 #### `create` {#package-create}
 
 Bundles a local directory into a compressed package archive ready for publishing. If the package
@@ -3934,3 +4153,9 @@ or a registry error) — the report then degrades to a local-state-only summary
 [cmd-package-announce]: #package-announce
 [env-ocx-announce-token]: ./environment.md#ocx-announce-token
 [config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts
+
+<!-- commands (package cascade) -->
+[cmd-index-update]: #index-update
+[config-registries-index]: ./configuration.md#keys-registries-index
+[in-depth-indices]: ../in-depth/indices.md
+[mdn-if-match]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-Match

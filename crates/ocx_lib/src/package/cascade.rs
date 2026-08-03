@@ -10,6 +10,18 @@
 //! The orchestration layer ([`resolve_cascade_tags`], [`push_with_cascade`])
 //! composes the algebra with [`Client`](crate::oci::Client) OCI transport
 //! to implement cascade pushes that correctly handle multi-platform registries.
+//!
+//! The submodules read the tag graph back and repair it — the audit half of
+//! the same algebra, behind `ocx package cascade check|repair`. They split
+//! along the one seam that makes the state space unit-testable: [`gather`]
+//! reads, [`graph`] computes with no I/O at all, [`apply`] writes.
+
+pub mod apply;
+pub mod gather;
+pub mod graph;
+
+#[cfg(test)]
+mod equivalence;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -42,18 +54,32 @@ pub struct CascadeDecomposition {
     pub latest_blockers: Vec<Version>,
 }
 
-/// Decomposes a version's cascade into discrete levels with pre-computed blocking ranges.
+/// The cascade chain of a version taken alone: which rolling tags it would
+/// update, and whether it could become `latest`, if nothing blocked it.
 ///
-/// Pre-releases without build produce zero levels (no cascade).
-/// Pre-releases with build produce at most one level (cascade to parent pre-release).
+/// The half of [`decompose`] that is a function of `version` only — no version
+/// set is consulted, and none could change the answer. That is what makes it
+/// safe for a caller who wants the chain and not the blockers to skip the
+/// per-level range scans.
+pub struct CascadeTargets {
+    /// The rolling tags to cascade to, most-specific first.
+    pub targets: Vec<Version>,
+    /// Whether this version is eligible to become `latest`.
+    /// Always `false` for pre-release versions.
+    pub latest_eligible: bool,
+}
+
+/// Derives a version's cascade chain, with no blocker analysis.
+///
+/// Pre-releases without build produce zero targets (no cascade).
+/// Pre-releases with build produce exactly one (the parent pre-release).
 /// Pre-releases are never eligible for `latest`.
-pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomposition {
+pub fn decompose_targets(version: &Version) -> CascadeTargets {
     // Pre-releases without build never cascade beyond their own level.
     if version.has_prerelease() && !version.has_build() {
-        return CascadeDecomposition {
-            levels: vec![],
+        return CascadeTargets {
+            targets: vec![],
             latest_eligible: false,
-            latest_blockers: vec![],
         };
     }
 
@@ -62,60 +88,88 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
         let parent = version
             .parent()
             .expect("Versions with build fragment shall always have a parent.");
-        let blockers: Vec<Version> = others
-            .range((Excluded(version), Unbounded))
-            .take_while(|v| {
-                v.variant() == version.variant()
-                    && v.major() == version.major()
-                    && v.minor() == version.minor()
-                    && v.patch() == version.patch()
-                    && v.prerelease() == version.prerelease()
-                    // Exclude the build-less rolling parent: Ord sorts it above its
-                    // build-tagged children, so without this it would block its own
-                    // cascade and freeze the floating tag at the first build.
-                    && v.has_build()
-            })
-            .cloned()
-            .collect();
-        return CascadeDecomposition {
-            levels: vec![CascadeLevel {
-                target: parent,
-                blockers,
-            }],
+        return CascadeTargets {
+            targets: vec![parent],
             latest_eligible: false,
+        };
+    }
+
+    CascadeTargets {
+        targets: std::iter::successors(version.parent(), Version::parent).collect(),
+        latest_eligible: true,
+    }
+}
+
+/// Decomposes a version's cascade into discrete levels with pre-computed blocking ranges.
+///
+/// The chain itself comes from [`decompose_targets`]; this adds the blocking
+/// range each level has to clear. Composed rather than duplicated, so the two
+/// can never disagree about where a version cascades to.
+pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomposition {
+    let CascadeTargets {
+        targets,
+        latest_eligible,
+    } = decompose_targets(version);
+
+    // A pre-release's blocking range is its own: only a later build of the same
+    // core and pre-release blocks it, and the build-less rolling parent must be
+    // excluded explicitly — Ord sorts it above its build-tagged children, so an
+    // unbounded range would let it block its own cascade and freeze the
+    // floating tag at the first build.
+    if version.has_prerelease() {
+        // At most one target, so the range is scanned at most once — and not at
+        // all for a build-less pre-release, which cascades nowhere.
+        let blockers = || {
+            others
+                .range((Excluded(version), Unbounded))
+                .take_while(|v| {
+                    v.variant() == version.variant()
+                        && v.major() == version.major()
+                        && v.minor() == version.minor()
+                        && v.patch() == version.patch()
+                        && v.prerelease() == version.prerelease()
+                        && v.has_build()
+                })
+                .cloned()
+                .collect()
+        };
+        return CascadeDecomposition {
+            levels: targets
+                .into_iter()
+                .map(|target| CascadeLevel {
+                    target,
+                    blockers: blockers(),
+                })
+                .collect(),
+            latest_eligible,
             latest_blockers: vec![],
         };
     }
 
-    let mut levels = Vec::new();
+    // Each level clears the half-open range between the level below it and its
+    // own target; `latest` clears everything above the last target on the same
+    // variant track (`take_while` works because Ord clusters a variant's
+    // versions together).
     let mut current = version.clone();
+    let mut levels = Vec::with_capacity(targets.len());
+    for target in targets {
+        levels.push(CascadeLevel {
+            blockers: others.range((Excluded(&current), Excluded(&target))).cloned().collect(),
+            target: target.clone(),
+        });
+        current = target;
+    }
 
-    loop {
-        let parent = current.parent();
-        match parent {
-            Some(parent) => {
-                let blockers: Vec<Version> = others.range((Excluded(&current), Excluded(&parent))).cloned().collect();
-                levels.push(CascadeLevel {
-                    target: parent.clone(),
-                    blockers,
-                });
-                current = parent;
-            }
-            None => {
-                // Filter to same variant track: take_while works because Ord
-                // clusters all same-variant versions together.
-                let latest_blockers: Vec<Version> = others
-                    .range((Excluded(&current), Unbounded))
-                    .take_while(|v| v.variant() == version.variant())
-                    .cloned()
-                    .collect();
-                return CascadeDecomposition {
-                    levels,
-                    latest_eligible: true,
-                    latest_blockers,
-                };
-            }
-        }
+    let latest_blockers: Vec<Version> = others
+        .range((Excluded(&current), Unbounded))
+        .take_while(|v| v.variant() == version.variant())
+        .cloned()
+        .collect();
+
+    CascadeDecomposition {
+        levels,
+        latest_eligible,
+        latest_blockers,
     }
 }
 
@@ -496,6 +550,50 @@ mod tests {
 
         assert_eq!(versions, vec![v, parent]);
         assert!(!is_latest);
+    }
+
+    /// The two halves of the decomposition agree about where a version
+    /// cascades to, whatever the version set is.
+    ///
+    /// `decompose_targets` exists so the audit's fold can derive an alias chain
+    /// without paying for a blocker scan at every level; the moment it answered
+    /// a different chain from the push path's `decompose`, check would expect a
+    /// graph no push would ever have written. Composition is what makes that
+    /// impossible, and this is the check on the composition.
+    #[test]
+    fn decompose_targets_is_the_chain_decompose_walks() {
+        let versions = [
+            "3.28.1_b1",
+            "3.28.1",
+            "3.28",
+            "3",
+            "debug-3.28.1_b1",
+            "pgo.lto-1.0",
+            "1.0.0-beta",
+            "1.0.0-beta_b1",
+        ];
+        let populations: [Vec<Version>; 3] = [
+            vec![],
+            vec![v("3.28.2_b1"), v("4.0.0_b1")],
+            vec![v("debug-3.28.2_b1"), v("1.0.0-beta_b2"), v("3.28.1")],
+        ];
+
+        for version in versions.map(v) {
+            let targets = decompose_targets(&version);
+            for population in &populations {
+                let others: BTreeSet<Version> = population.iter().cloned().collect();
+                let full = decompose(&version, &others);
+                assert_eq!(
+                    full.levels.iter().map(|level| &level.target).collect::<Vec<_>>(),
+                    targets.targets.iter().collect::<Vec<_>>(),
+                    "chain disagreement for {version} against {population:?}"
+                );
+                assert_eq!(
+                    full.latest_eligible, targets.latest_eligible,
+                    "latest eligibility disagreement for {version} against {population:?}"
+                );
+            }
+        }
     }
 
     #[test]

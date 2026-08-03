@@ -98,6 +98,14 @@ Cascades operate within a single variant track. Publishing `debug-3.28.1` update
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically: publish one build and let OCX re-point all rolling ancestors in a single command.
 :::
 
+Because cascading is a publishing convention rather than a registry-enforced rule, the chain above can also drift silently. A transient registry error partway through a cascade push can leave one alias level un-repointed — `cmake:3` still points at last week's build even though `cmake:3.28.1` published successfully as a newer version at that level — and nothing about ordinary resolution notices, because a rolling tag that resolves to *some* valid manifest looks the same whether or not it is the *latest* one.
+
+[`ocx package cascade check`][cmd-package-cascade-check] closes that gap by re-deriving what every alias tag *should* point to — not from the push that maybe updated it, but as a fold over every version currently published: for a given alias and platform, the expected build is the highest version under that alias which publishes the platform at all. Diffing the registry's actual tags against that fold finds exactly the aliases a swallowed push error left behind. [`ocx package cascade repair`][cmd-package-cascade-repair] rewrites the affected alias indexes to match.
+
+::: info Cascade the mechanism vs. `cascade` the command
+"Cascade" names two related but distinct things. `ocx package push --cascade` is the *push-time* mechanism above — it re-points rolling ancestors as part of publishing one build. `ocx package cascade check`/`repair` is a separate, *after-the-fact* command group: it reads the tag graph a series of pushes left behind and repairs whatever an interrupted push failed to keep consistent. Neither needs the other — `check`/`repair` work just as well on a package that was never pushed with `--cascade` at all.
+:::
+
 ## Platforms {#platforms}
 
 The [OCI Image Index specification][oci-image-index] defines a <Tooltip term="multi-platform manifest">An image index is a top-level OCI manifest that lists multiple per-platform sub-manifests under a single tag. Clients resolve the entry that matches their platform; the tag and repository name stay the same across all platforms.</Tooltip> format that allows multiple platform builds to live under a single tag. When you install a package, OCX reads your running system and selects the matching build automatically — no flags, no configuration, no separate repository per architecture.
@@ -161,6 +169,8 @@ The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote`
 <!-- commands -->
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-index-update]: ../reference/command-line.md#index-update
+[cmd-package-cascade-check]: ../reference/command-line.md#package-cascade-check
+[cmd-package-cascade-repair]: ../reference/command-line.md#package-cascade-repair
 
 <!-- environment -->
 [env-ocx-index]: ../reference/environment.md#ocx-index

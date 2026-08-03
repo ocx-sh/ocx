@@ -40,6 +40,9 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `metadata/visibility.rs` | `Visibility` two-axis struct (`private` + `interface` booleans); four constants `SEALED`/`PRIVATE`/`INTERFACE`/`PUBLIC`; `through_edge`, `merge` algebra; `has_interface()` / `has_private()` accessors; `deserialize_entry_visibility` + `entry_visibility_schema` for `Var.visibility` field restriction |
 | `bundle.rs` | `BundleBuilder`: tar archive creation with configurable compression |
 | `cascade.rs` | Cascade algebra: `decompose()`, `cascade()`, `resolve_cascade_tags()`, `push_with_cascade()` |
+| `cascade/graph.rs` | `ocx package cascade check`/`repair` pure fold + diff core — folds published versions into expected alias state, diffs against observed tags, plans registry rewrites; no I/O |
+| `cascade/gather.rs` | Concurrent, bounded registry tag fetch (plus, for a logical identifier, the live index root) feeding the fold above |
+| `cascade/apply.rs` | Batched, concurrent index PUTs applying a computed repair plan to the registry |
 | `tag.rs` | `Tag` enum: Latest, Internal(InternalTag), Version, Canonical, Other |
 | `version.rs` | `Version` struct: semver-inspired with build + prerelease, rolling tag support |
 | `install_info.rs` | `InstallInfo`: identifier + metadata + content path |

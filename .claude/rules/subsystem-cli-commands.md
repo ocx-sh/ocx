@@ -78,6 +78,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
 | `package announce` | Observe an owner-curated tag set and publish the rebuilt entry into the index — write locally (`--out`), or open/update a pull request from a fork (`--fork`) or from a branch on the index repo itself (neither flag; needs push access, verified up front, exit 80 naming repo + permission) | `--package`, `--tags`/`--tags-from-file`/`--tags-from-registry`/`--refresh`, `--out`/`--fork` (both optional), `--index-repo`, `--yank`/`--unyank`/`--yank-reason` |
+| `package cascade check <id>...` | Diff each identifier's observed registry tag graph (plus, for a logical `ocx.sh/…` identifier, the live public index root) against the fold-expected cascade state computed from every published concrete version; read-only, Pull-only auth, never writes. Exit 0 clean, 65 on any finding (including index staleness), 64 on a usage error (digest-pinned identifier, a non-version scope tag) | — |
+| `package cascade repair [--dry-run] [--announce-tags PATH] <id>...` | Recompute and PUT the whole alias index for every tag the fold disagrees with — batched, concurrent writes, preflighted against missing child manifests. `--dry-run` previews the same plan with zero registry writes. Exit 0 once every attempted registry write succeeded (remaining index staleness is `announce`'s job, not a failure here); 65 when a finding remains after the run (including an alias refused for lacking new content); 64 usage | `--dry-run`, `--announce-tags` |
 | `package install PKGS...` | Download and install packages (no `ocx.toml` touched) | `-s/--select`, `-p/--platform` |
 | `package uninstall PKGS...` | Remove candidate symlink | `-d/--deselect`, `--purge` |
 | `package select PKGS...` | Set `current` symlink | `-p` |
@@ -93,6 +95,13 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean`, `--env` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
+
+**`cascade` group notes:**
+- Files: `command/package_cascade.rs` (dispatcher) + `package_cascade_{check,repair}.rs` (one leaf per subcommand) — same flat, no-`mod.rs` shape as `patch.rs` + `patch_{...}.rs`, one level deeper under `package.rs`'s own `Cascade` variant (see `subsystem-cli.md` "Command Module Structure").
+- Both subcommands take one or more identifiers, logical (`ocx.sh/<ns>/<pkg>[:tag]`, resolved via `physical_reference` the same way `install` does) or physical (bare registry path); a digest-pinned identifier is a usage error (exit 64) — there is no tag graph to diff against a fixed digest.
+- The identifier's own tag selects scope: tagless = every variant track (`WholeGraph`); an explicit `:latest` = the default variant track only; a rolling tag (`:3.28`) = its subtree plus the path up to its own root; a fully build-tagged leaf = the path to root only (never a write target). Multiple identifiers for the same package union their scopes into one report.
+- A logical identifier gets a third finding layer (`index_findings`) from the live public index root; a physical identifier skips it — no reverse mapping from registry path back to a logical name.
+- `repair --announce-tags <PATH>` writes the tags this run re-pointed or created (newline-separated, `parse_tags_file`-compatible; empty file when nothing changed) — the follow-up publish step is `package announce --tags-from-file <PATH>` (union semantics, so it also picks up an alias that was never committed at all).
 
 ### Installation Management Commands (`ocx self`)
 

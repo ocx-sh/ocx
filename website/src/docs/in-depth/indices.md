@@ -208,6 +208,8 @@ Two things opt `ocx.sh` out: [`index = ""`][config-registries-index], and pinnin
 | `o/<algo>/<hex>.json` — the OCI image index this tag resolved to, verbatim | Immutable | Fetched once, verified against its own SHA-256 filename, cached forever. |
 | `c/index.json` catalog | Volatile | Fetched whole on an explicit refresh and compared against the local copy: OCX re-snapshots only the packages whose root digest actually moved — one request amortized across the full catalog instead of one probe per package. Nothing else is stored to decide that; the digest diff *is* the mechanism, so the local tree stays pure served content with no per-machine bookkeeping in it. An unchanged catalog re-derives to itself and rewrites nothing. A package OCX could not re-snapshot (publish skew: the catalog regenerated ahead of its root) keeps its previous entry, which is exactly what makes the next run diff it again and retry. Every other package still lands. |
 
+A registry alias that drifted between announces — the case the first row above is built to tolerate, where the registry-side digest moves past what the index still has committed — is exactly what [`ocx package cascade check`][cmd-package-cascade-check] flags from the publisher's side: it compares a package's live registry tags against the namespace's committed root and reports the mismatch as index staleness. [`ocx package cascade repair`][cmd-package-cascade-repair] fixes a drifted registry alias itself; the follow-up [`ocx package announce --tags-from-file`][cmd-package-announce] then re-observes the repaired tags and re-publishes the moved digests into the index. Neither command touches any machine's local copy — that hop is still [`ocx index update`][cmd-index-update], run whenever a particular machine wants the newly announced root.
+
 ### Local layout for index.ocx.sh sources {#public-index-layout}
 
 The local index uses the identical `p/<ns>/<pkg>.json` + `o/<algo>/<hex>.json` shape for an `index.ocx.sh` source as for any other — it is [one wire format](#format), not a special case:
@@ -309,6 +311,9 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 [cmd-index-catalog]: ../reference/command-line.md#index-catalog
 [cmd-index-list]: ../reference/command-line.md#index-list
 [cmd-package-push]: ../reference/command-line.md#package-push
+[cmd-package-announce]: ../reference/command-line.md#package-announce
+[cmd-package-cascade-check]: ../reference/command-line.md#package-cascade-check
+[cmd-package-cascade-repair]: ../reference/command-line.md#package-cascade-repair
 [cmd-config-push]: ../reference/command-line.md#config-push
 [cmd-package-info]: ../reference/command-line.md#package-info
 [cmd-self-update]: ../reference/command-line.md#self-update

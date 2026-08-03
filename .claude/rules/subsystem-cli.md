@@ -101,6 +101,12 @@ A command group with subcommands is **flat, not a subdirectory** — no `mod.rs`
 Exemplars: `package.rs` + `package_{create,push,test}.rs`; `index.rs` + `index_{list,update}.rs`;
 `patch.rs` + `patch_{freeze,sync,publish,test,why}.rs`.
 
+A subcommand's own leaf can itself be a dispatcher for a **nested** group — still flat files,
+one level deeper, no subdirectory: `package.rs` (`Package` enum gains a `Cascade(#[command(subcommand)] …)`
+variant) + `package_cascade.rs` (dispatcher — its own `Subcommand` enum, `CascadeGroup`) +
+`package_cascade_{check,repair}.rs` (leaves). `ocx package cascade check`/`repair` is the first
+command reaching two levels below `package`.
+
 ## Flag Naming Convention
 
 A flag is named for the thing it denotes — its semantic domain name — never suffixed

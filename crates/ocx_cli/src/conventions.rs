@@ -5,6 +5,7 @@ use ocx_lib::{
     ci::CiFlavor,
     cli::{MetadataResolutionError, UsageError},
     oci,
+    package::cascade::apply::WriteOutcome,
     package::metadata::env::entry::Entry,
     publisher::LayerRef,
     shell::Shell,
@@ -252,6 +253,58 @@ pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectRepo
     }
 }
 
+/// Exit code for `ocx package cascade check`: 65 when any package reported a
+/// finding.
+///
+/// `DataError` is the same code every other "the run succeeded, and what it
+/// found is not clean" verdict uses ([`inspect_exit_code`]), so a job that
+/// branches on 65 need not know which ocx command produced it. Index staleness
+/// counts: check's contract is whole-graph consistency, and the report carries
+/// the finding class a script needs to tell it from registry drift.
+///
+/// Returns the typed code rather than [`std::process::ExitCode`] (which
+/// [`inspect_exit_code`] above does): the process type is opaque and compares
+/// against nothing, so the verdict would only be assertable by running the
+/// binary. The caller converts.
+pub fn cascade_check_exit_code(
+    report: &crate::api::data::package_cascade_check::PackageCascadeCheck,
+) -> ocx_lib::cli::ExitCode {
+    if report.reports.iter().any(|report| report.has_findings()) {
+        ocx_lib::cli::ExitCode::DataError
+    } else {
+        ocx_lib::cli::ExitCode::Success
+    }
+}
+
+/// Exit code for `ocx package cascade repair`: 65 when a finding survived the
+/// run.
+///
+/// Deliberately not [`cascade_check_exit_code`]'s question. Index staleness is
+/// the expected residue of a repair — closing it is `ocx package announce`'s
+/// hop, and failing on it would make every healthy logical repair look broken.
+/// What counts is work this run could have done and did not: a write the
+/// registry rejected, an alias refused before it was attempted, and one the
+/// fold cannot rebuild without new content being published. A preview counts
+/// its whole plan, because a preview writes nothing — a `--dry-run` exiting 0
+/// while naming repairs would be useless as a gate.
+pub fn cascade_repair_exit_code(
+    report: &crate::api::data::package_cascade_repair::PackageCascadeRepair,
+) -> ocx_lib::cli::ExitCode {
+    let remains = report.entries.iter().any(|entry| {
+        !entry.report.unrepairable.is_empty()
+            || entry
+                .outcomes
+                .iter()
+                .any(|outcome| !matches!(outcome.outcome, WriteOutcome::Written { .. }))
+            || (report.dry_run && !entry.planned.is_empty())
+    });
+    if remains {
+        ocx_lib::cli::ExitCode::DataError
+    } else {
+        ocx_lib::cli::ExitCode::Success
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{export_ci, merge_tags_file, parse_tags_file, resolve_ci_arg, resolve_shell_arg};
@@ -354,5 +407,253 @@ mod tests {
         let existing = parse_tags_file(b"3.28.1,3.28,3,latest");
         let merged = merge_tags_file(&existing, &["3.28.2".to_string(), "latest".to_string()]);
         assert_eq!(merged, "3.28.1,3.28,3,latest,3.28.2");
+    }
+
+    // ── cascade exit codes ──────────────────────────────────────────────────
+    //
+    // The two commands answer different questions of the same graph, and the
+    // pair that matters most is index staleness: `check` fails on it because
+    // its contract is whole-graph consistency, `repair` does not because
+    // closing it is `announce`'s hop. Both directions are asserted below so
+    // neither code can quietly become the other's.
+
+    mod cascade {
+        use ocx_lib::cli::ExitCode;
+        use ocx_lib::oci;
+        use ocx_lib::package::cascade::apply::{RepairOutcome, WriteOutcome};
+        use ocx_lib::package::cascade::graph::{
+            AliasState, AliasTag, CascadeReport, IndexFinding, PlannedWrite, SlotRow, SlotStatus, Unrepairable,
+        };
+        use ocx_lib::package::version::Version;
+
+        use crate::api::data::package_cascade_check::PackageCascadeCheck;
+        use crate::api::data::package_cascade_repair::{PackageCascadeRepair, RepairEntry};
+        use crate::conventions::{cascade_check_exit_code, cascade_repair_exit_code};
+
+        fn version(text: &str) -> Version {
+            Version::parse(text).expect("fixture version parses")
+        }
+
+        fn tag(text: &str) -> AliasTag {
+            AliasTag::Version(version(text))
+        }
+
+        fn digest() -> oci::Digest {
+            oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .expect("fixture digest parses")
+        }
+
+        /// A second digest, so a staleness fixture's committed and live sides
+        /// actually differ - one value on both would describe an index that
+        /// agrees, which is the opposite of the case under test.
+        fn other_digest() -> oci::Digest {
+            oci::Digest::try_from("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+                .expect("fixture digest parses")
+        }
+
+        fn report() -> CascadeReport {
+            CascadeReport {
+                identifier: oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
+                logical: None,
+                aliases: [(tag("3.28"), AliasState::Present)].into_iter().collect(),
+                rows: Vec::new(),
+                index_findings: Vec::new(),
+                ignored_tags: Vec::new(),
+                unrepairable: Vec::new(),
+            }
+        }
+
+        fn stale_row() -> SlotRow {
+            SlotRow {
+                tag: tag("3.28"),
+                platform: oci::native::Platform {
+                    os: oci::native::Os::Linux,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: None,
+                },
+                status: SlotStatus::Stale,
+                observed: None,
+                expected: None,
+                source: None,
+                observed_source: None,
+            }
+        }
+
+        fn planned_write() -> PlannedWrite {
+            PlannedWrite {
+                tag: tag("3.28"),
+                index: oci::ImageIndex {
+                    schema_version: 2,
+                    media_type: None,
+                    manifests: Vec::new(),
+                    artifact_type: None,
+                    annotations: None,
+                },
+                observed_digest: None,
+                referenced_digests: Vec::new(),
+                reasons: Vec::new(),
+            }
+        }
+
+        fn repair(entry: RepairEntry, dry_run: bool) -> PackageCascadeRepair {
+            PackageCascadeRepair {
+                entries: vec![entry],
+                dry_run,
+                announce_tags_path: None,
+                index_layer_skipped: Vec::new(),
+            }
+        }
+
+        fn entry(report: CascadeReport) -> RepairEntry {
+            RepairEntry {
+                report,
+                planned: Vec::new(),
+                outcomes: Vec::new(),
+                announce_tags: Vec::new(),
+            }
+        }
+
+        // ── check ───────────────────────────────────────────────────────────
+
+        #[test]
+        fn check_on_a_clean_graph_succeeds() {
+            let check = PackageCascadeCheck::new(vec![report()]);
+            assert_eq!(cascade_check_exit_code(&check), ExitCode::Success);
+        }
+
+        #[test]
+        fn check_on_a_registry_finding_is_a_data_error() {
+            let mut clean = report();
+            clean.rows.push(stale_row());
+            let check = PackageCascadeCheck::new(vec![clean]);
+
+            assert_eq!(cascade_check_exit_code(&check), ExitCode::DataError);
+        }
+
+        #[test]
+        fn check_on_index_staleness_alone_is_a_data_error() {
+            let mut clean = report();
+            clean.index_findings.push(IndexFinding::Stale {
+                tag: tag("3.28"),
+                committed: digest(),
+                live: other_digest(),
+            });
+            let check = PackageCascadeCheck::new(vec![clean]);
+
+            assert_eq!(
+                cascade_check_exit_code(&check),
+                ExitCode::DataError,
+                "check's contract is the whole graph, index copy included"
+            );
+        }
+
+        #[test]
+        fn check_reports_a_finding_from_any_package_in_the_batch() {
+            let mut broken = report();
+            broken.rows.push(stale_row());
+            let check = PackageCascadeCheck::new(vec![report(), broken]);
+
+            assert_eq!(cascade_check_exit_code(&check), ExitCode::DataError);
+        }
+
+        // ── repair ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn repair_that_wrote_everything_succeeds() {
+            let mut written = entry(report());
+            written.planned = vec![planned_write()];
+            written.outcomes = vec![RepairOutcome {
+                tag: tag("3.28"),
+                outcome: WriteOutcome::Written {
+                    digest: digest(),
+                    verified: true,
+                    dropped: Vec::new(),
+                },
+            }];
+
+            assert_eq!(cascade_repair_exit_code(&repair(written, false)), ExitCode::Success);
+        }
+
+        #[test]
+        fn repair_leaves_index_staleness_to_announce() {
+            let mut stale_index = report();
+            stale_index.index_findings.push(IndexFinding::Stale {
+                tag: tag("3.28"),
+                committed: digest(),
+                live: other_digest(),
+            });
+
+            assert_eq!(
+                cascade_repair_exit_code(&repair(entry(stale_index), false)),
+                ExitCode::Success,
+                "the index hop is announce's job, not a repair failure"
+            );
+        }
+
+        #[test]
+        fn repair_fails_on_a_rejected_write() {
+            let mut failed = entry(report());
+            failed.planned = vec![planned_write()];
+            failed.outcomes = vec![RepairOutcome {
+                tag: tag("3.28"),
+                outcome: WriteOutcome::Failed {
+                    message: "registry said no".to_string(),
+                },
+            }];
+
+            assert_eq!(cascade_repair_exit_code(&repair(failed, false)), ExitCode::DataError);
+        }
+
+        #[test]
+        fn repair_fails_on_a_refused_alias() {
+            let mut refused = entry(report());
+            refused.planned = vec![planned_write()];
+            refused.outcomes = vec![RepairOutcome {
+                tag: tag("3.28"),
+                outcome: WriteOutcome::Refused(Unrepairable::ChildManifestMissing {
+                    tag: tag("3.28"),
+                    digest: digest().to_string(),
+                }),
+            }];
+
+            assert_eq!(cascade_repair_exit_code(&repair(refused, false)), ExitCode::DataError);
+        }
+
+        #[test]
+        fn repair_fails_on_something_no_write_can_fix() {
+            let mut unrepairable = report();
+            unrepairable
+                .unrepairable
+                .push(Unrepairable::WouldEmptyIndex { tag: tag("3.28") });
+
+            assert_eq!(
+                cascade_repair_exit_code(&repair(entry(unrepairable), false)),
+                ExitCode::DataError,
+                "an alias needing new content published is a finding that remains"
+            );
+        }
+
+        #[test]
+        fn a_preview_with_repairs_to_make_is_a_data_error() {
+            let mut preview = entry(report());
+            preview.planned = vec![planned_write()];
+
+            assert_eq!(
+                cascade_repair_exit_code(&repair(preview, true)),
+                ExitCode::DataError,
+                "a preview writes nothing, so everything it planned still needs doing"
+            );
+        }
+
+        #[test]
+        fn a_preview_with_nothing_to_do_succeeds() {
+            assert_eq!(
+                cascade_repair_exit_code(&repair(entry(report()), true)),
+                ExitCode::Success
+            );
+        }
     }
 }

@@ -53,6 +53,15 @@ pub(crate) struct StubTransportInner {
     /// When set, `pull_manifest_raw` returns a `Registry` error with this
     /// message for any image not in `manifests` (instead of `ManifestNotFound`).
     pub pull_manifest_error_override: Option<String>,
+    /// Image string → registry error message for that one image's manifest
+    /// fetch, whether or not a manifest is seeded for it.
+    ///
+    /// Exists because `pull_manifest_error_override` above only fires for
+    /// images that are ABSENT, so it cannot express the failure that matters
+    /// most here: a healthy, published version whose fetch fails transiently
+    /// mid-run. That is the shape a cascade swallows, and reproducing it needs
+    /// the error to win over a seeded manifest.
+    pub manifest_errors: HashMap<String, String>,
     /// When set, `ensure_auth` returns `ClientError::Authentication` with this
     /// message instead of succeeding. Drives a genuine authentication-failure
     /// path through any transport method that calls `ensure_auth` first (e.g.
@@ -182,6 +191,11 @@ impl OciTransport for StubTransport {
         self.record("fetch_manifest_digest");
         let key = image.to_string();
         let inner = self.data.read();
+        // A per-image error wins over every other answer, including a seeded
+        // manifest: it stands in for a registry that is failing this one read.
+        if let Some(message) = inner.manifest_errors.get(&key) {
+            return Err(ClientError::Registry(message.clone().into()));
+        }
         // Explicit `digest` override wins; otherwise mirror a real registry's
         // HEAD semantics: the digest of the manifest stored at the reference,
         // or 404 (`ManifestNotFound`) when nothing is stored there.
@@ -209,7 +223,9 @@ impl OciTransport for StubTransport {
             tokio::time::sleep(delay).await;
         }
         let inner = self.data.read();
-        if let Some(manifest) = inner.manifests.get(&key).cloned() {
+        if let Some(message) = inner.manifest_errors.get(&key) {
+            Err(ClientError::Registry(message.clone().into()))
+        } else if let Some(manifest) = inner.manifests.get(&key).cloned() {
             Ok(manifest)
         } else if let Some(msg) = &inner.pull_manifest_error_override {
             Err(ClientError::Registry(msg.clone().into()))
