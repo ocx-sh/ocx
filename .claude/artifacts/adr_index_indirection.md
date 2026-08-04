@@ -752,7 +752,7 @@ probing. There is no "tree store" abstraction: there is an index on disk, and `L
 | `LocalIndex` | Owns the local index **collection** — one index per source under the home (A1). Reads and writes per-source copies (roots, catalog, dispatch-object CAS) with verbatim bytes + recompute-verify (A4); serves the local half of the chain. Both provenance kinds go through it — the only divergence is two `if`s: catalog from `c/index.json` (published) vs directory enumeration (derived), and obs-object vs image-index decode. The atomic filesystem mechanics (tempfile+rename CAS, the `write_object` self-heal write, `file_structure/snapshot_store.rs`) are an internal detail of `LocalIndex`, not a headline component. |
 | `OcxIndex` | Remote client of a **published** ocx-index (root → obs → `select_best`; Decision C). |
 | `OciIndex` | Remote client that **derives** an index from a plain OCI registry's tags API. |
-| `IndexSync` | Keeps local copies current: conditional-GET catalog digest-diff for published indices (F2), per-repo tag refresh for derived ones. Auto-refresh is a **policy seam** here — no daemon now. |
+| `IndexSync` | **DELETED** by the 2026-08-05 amendment: the catalog digest-diff is gone and per-repo tag refresh is `LocalIndex::refresh_tags`, so the wrapper had one method and no reason to exist. |
 | `ChainedIndex` | `LocalIndex` ▸ **exactly one** remote per namespace. |
 
 - **`ChainedIndex` = `LocalIndex` ▸ exactly one remote per namespace.** The remote is `OcxIndex` or
@@ -760,7 +760,7 @@ probing. There is no "tree store" abstraction: there is an index on disk, and `L
   fallback chain and its `FormatProbe` / `OnceCell` negative caching (the `ensure_usable` gating on
   `resolve_root` / `sync_catalog`) dissolve — config states the kind, so there is nothing to probe.
 - **Separately consumable.** A future consumer — a search/TUI, `ocx-mcp`, an alternate index root — takes
-  `LocalIndex` + `IndexSync` directly, for read-only browsing and bulk refresh, without dragging in the
+  `LocalIndex` directly, for read-only browsing and bulk refresh, without dragging in the
   remote-resolution chain. That is the reason these are named components rather than private internals of
   the resolver.
 
@@ -1019,6 +1019,127 @@ future escape hatch, not a day-one shape.
   serialization + the sort-key caveat), `schema/{root,observation-object}.schema.json`
 - [issue #215](https://github.com/ocx-sh/ocx/issues/215), [issue #212](https://github.com/ocx-sh/ocx/issues/212)
 - [OCI image-index spec v1.1.1](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-index.md)
+
+---
+
+## Amendment — The local copy is the package-tier lock (owner doctrine, 2026-08-05)
+
+This ADR built the local copy as a *snapshot*: verbatim bytes, offline resolution, explicit
+refresh. The amendment names what that snapshot **is**, and derives three behaviours from it that
+the original decisions left implicit enough for the implementation to violate all three.
+
+### The invariant
+
+The local index copy (`$OCX_HOME/index/`, or wherever `--index`/`OCX_INDEX` points) is the
+**package tier's lock**. Tags are floating pointers; the copy pins both halves of what a tag
+answers — tag → digest, and logical → physical routing (a root's `repository` field). Therefore:
+
+1. Running the same `ocx package install|exec <pkg>:<tag>` twice gives the same result — offline,
+   and even when any online resource changed between the two runs.
+2. A pin moves **only** for a package the user explicitly names in `ocx index update <pkg>...`.
+   Never as a side effect of an operation about something else.
+3. GC (`ocx clean`) may evict blob **content** — refetched by digest, byte-stable — but never
+   changes **identity**: which digest a pin resolves to.
+
+### The silence principle
+
+If something is locally committed, resolving it performs no network access and reveals nothing
+about remote state: no drift warning, no drift error, no comparison. Remote data fetched during a
+genuine first-resolve contributes **only the missing entry**; everything else local-wins,
+silently. Available updates become visible exclusively through explicit staleness surfacing — the
+`ocx index update` report and `ocx index catalog` — never through resolution.
+
+The rationale is that a resolve has nothing it may act on. It cannot take the update (that would
+break invariant 2) and it cannot refuse (the committed answer is the correct one), so a diagnostic
+there is noise on a path that runs on every command, in every CI job, on a state that is working
+as designed.
+
+### What this changes
+
+- **F2 catalog sync is deleted, not narrowed.** `ocx index update` fetches the named packages'
+  roots and nothing else. `LocalIndex::sync_catalog`, `CatalogSyncOutcome`, `diff_moved`, the
+  catalog-key boundary validation, the staleness report and `IndexSync` itself are all gone;
+  `OcxIndex::sync_catalog` survives only as `fetch_catalog`, a live read for
+  `ocx index catalog --remote` that persists nothing.
+
+  The staleness report died with it, deliberately. Under merge semantics the local root's bytes
+  legitimately diverge from the remote's (local-only tags), so the old digest diff would report
+  every package as permanently stale; restoring it needs a recorded last-observed-remote digest,
+  and **every** home for one re-introduces mirroring one field at a time — in the catalog envelope,
+  in a sidecar (the `.etag` file's category, already rejected), or in machine-global state that
+  desyncs from a shipped index home. "Am I behind?" is a question about the remote and is asked
+  explicitly: `ocx index catalog --remote`, `ocx index list --remote`.
+
+  Consequence: default-mode `ocx index catalog` lists what this machine has materialized rather
+  than everything the site publishes. That is the intended split, not a regression — default is
+  the index you maintain.
+- **There is no whole-index sync, and none is added.** `ocx index update` stays named-only; the
+  behaviour the catalog sync used to perform implicitly is not re-offered behind a flag. A remote
+  index **floats** by definition — packages appear, platforms are added to existing versions, tags
+  move — so a local copy is not a mirror of it but the set of snapshots the user deliberately took,
+  one named update at a time. "Sync everything" has no well-defined referent against a partially
+  materialized copy: cloning the floating remote stops the copy being a lock, and re-snapshotting
+  "whatever happens to be present" is an arbitrary set nobody chose. The staleness report closes
+  the discoverability gap instead — it names the packages *and* is the command that takes them.
+  (An `--all` flag was briefly implemented alongside this amendment and removed for these reasons;
+  do not re-propose it.)
+- **A2 copy-a-mirror is retired: the local index is AUTHORED.** The distributable-subtree property
+  survives as *semantic* self-containment — a copied or shipped subtree resolves offline with the
+  same tags, platforms and routing — and byte-equality with the remote is no longer claimed
+  anywhere. Root documents are authored (merged, then re-emitted through the canonical
+  serializer); dispatch objects remain byte-verbatim registry content, which is what each object's
+  own filename digest attests. No writer replaces a local root with a fetched document, anywhere. `LocalIndex::commit_published_root` merges within a
+  `RootScope` — `Tag(t)` for a tagged update and every grow-on-resolve, `Package` for a bare
+  `ocx index update pkg` (which additionally adopts the package-level fields, making a bare named
+  update the sanctioned point to take a routing migration). `persist_published_root` is deleted.
+  **Neither scope deletes:** a tag the remote stopped listing survives locally with its pinned
+  digest, on both provenance kinds, because the copy records what this machine snapshotted rather
+  than mirroring the site's current tag list — otherwise a publisher retiring a version would
+  silently break every machine still pinned to it. First sight is not an exception: the merge runs
+  against the fetched document with `tags` emptied, so a tagged first-resolve lands one tag.
+- **C2 grow-on-resolve is re-read as surface-only.** Resolving a *new* tag of a published package
+  the copy already holds no longer replaces the whole root verbatim: only that tag's entry is
+  merged in field-wise (order-preserving `Value` + the canonical `serialize_root`, so unmodelled
+  fields ride through), leaving sibling pins and `repository` untouched, with no diagnostic on any
+  drift. A package the copy has never seen still lands verbatim — there is no pin to protect —
+  and `ocx index update` keeps whole-root replace, which is what the user asked it for.
+- **A bare-leaf resolve honours the pin.** When a committed root pins a tag whose content is
+  absent from `o/` and from the blob store, the source walk addresses the **pinned digest**, never
+  the tag. Addressing the tag returned the registry's current digest while the root still pinned
+  the old one — the same tag answering two different digests depending on whether a cache was
+  warm. Its sibling `fetch_manifest_digest` already short-circuited from the pin; the two now
+  agree by construction.
+- **A fetched leaf manifest warms the blob store.** The bytes are cached under the logical
+  registry + digest, so the next resolve of that pin recovers locally with zero network — which is
+  what `recover_absent_dispatch` exists to do. GC treats it as a cache (an installed package roots
+  it through its own `refs/blobs/`); an evicted copy is refetched by digest, byte-identical, so
+  invariant 3 holds.
+- **A digest-addressed walk verifies the answer.** A source answering a request for `sha256:AAA`
+  with different content would move the pin exactly as addressing the tag would, so the walk
+  refuses an answer whose digest is not the one requested (`WalkedDigestMismatch` → 65). This is
+  integrity, not drift comparison — it consults no remote state the caller did not already name —
+  so the silence principle is untouched.
+
+### Accepted outcome: a first-resolved pin can outlive its routing
+
+A first resolve of a tag commits `tags[<tag>].content` from the fetched root while leaving the
+existing `repository` pointer in place. If the source has ALSO moved that pointer, the pin now
+names a digest fetchable only at the new physical location, and the install fails as a plain
+not-found until the user runs `ocx index update <pkg>`, which takes both together.
+
+**This is the decided behaviour, not an oversight.** The alternatives were considered and
+rejected:
+
+- *Adopt the fetched `repository` along with the tag* — a resolve of one tag would silently
+  re-route every other pin in that root. That is invariant 2, and it is the violation this whole
+  amendment exists to remove.
+- *Warn on the drift* — a diagnostic on a path that runs on every command, about a state the user
+  cannot act on from there, on the hottest code in the binary. That is the silence principle.
+- *Fail on the drift* — refuses a resolve whose committed answer is correct, and makes every
+  routing change at the source a hard stop for machines that never asked for it.
+
+The residual is a clear not-found with a one-command fix, and it is bounded to the window between
+a source re-routing a package and the user next updating it. Future reviews should not re-flag it.
 
 ---
 

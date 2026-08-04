@@ -177,7 +177,7 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 | `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline. `-g` selects groups (hand-edit the generated `.envrc` line); an unknown group or malformed `--env` exits 64 — argv faults fail loudly, toolchain-state faults do not | `-g/--group`, `--env`, `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
 | `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
-| `index update PKGS...` | Sync local index collection from remote via `IndexSync::refresh_package` — writes the per-tag dispatch object plus root document (never a leaf manifest, A3), so a version choice resolves fully offline afterwards; fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
+| `index update PKGS...` | Merge the named packages' remote roots into the local index via `LocalIndex::refresh_tags` — per-tag dispatch object plus root document (never a leaf manifest, A3), so a version choice resolves fully offline afterwards. Tagged identifier = that tag only; bare = every remote tag plus package-level fields (routing). Never deletes a locally-known tag, never fetches anything about a package you did not name. At least one PACKAGE required (exit 64); fails fast on any per-package failure, aggregated to a single nonzero exit (first failure in input order, deterministic) | — |
 | `version` | Print version | — |
 | `about` | Print version + registry + platform + shell + home | — |
 

@@ -339,48 +339,6 @@ pub fn parse_physical_repository(value: &str) -> Result<(String, String)> {
     Ok((host.to_string(), path.to_string()))
 }
 
-// ── Catalog sync (F2) ────────────────────────────────────────────────────────
-
-/// Outcome of [`OcxIndex::sync_catalog`].
-#[derive(Debug, Clone)]
-pub struct CatalogSyncOutcome {
-    /// The catalog to persist as the next diff basis + offline listing source.
-    pub catalog: CatalogIndex,
-    /// Packages whose root digest moved (or appeared) versus the previous
-    /// catalog — the exact set to re-snapshot. Sorted, deduplicated.
-    pub moved: Vec<String>,
-}
-
-/// Diffs a freshly fetched catalog against the previously persisted (local)
-/// one, returning the packages that were ALREADY known locally and whose root
-/// digest moved.
-///
-/// A package ABSENT from `previous` is deliberately excluded: it is new to this
-/// local copy — a listing row recorded in `c/index.json` but materialized only
-/// when first `update`d (`adr_index_indirection.md` F2), so it must NOT trigger
-/// a re-snapshot fetch here. Counting every absent-from-previous entry as
-/// "moved" turned the first catalog sync (empty previous) into an unbounded
-/// fetch storm over the whole remote catalog. The consumer
-/// ([`LocalIndex::sync_catalog`](super::LocalIndex)) narrows this set further to
-/// the packages that actually have a local root document on disk, so a changed
-/// listing row (present in the catalog but never materialized) updates its
-/// catalog value without a fetch either.
-fn diff_moved(previous: &CatalogIndex, fetched: &CatalogIndex) -> Vec<String> {
-    let mut moved: Vec<String> = fetched
-        .iter()
-        .filter(|(pkg, digest)| match previous.get(*pkg) {
-            // Known locally and the root digest changed → a genuine move.
-            Some(previous_digest) => previous_digest != *digest,
-            // New to the local catalog → a listing row, never a re-snapshot (F2).
-            None => false,
-        })
-        .map(|(pkg, _)| pkg.clone())
-        .collect();
-    moved.sort();
-    moved.dedup();
-    moved
-}
-
 // ── Source ───────────────────────────────────────────────────────────────────
 
 /// Default base URL when no `[registries."<ns>"] index` field is configured.
@@ -857,39 +815,26 @@ impl OcxIndex {
 
     // ── catalog sync (F2) ────────────────────────────────────────────────────
 
-    /// Fetches `c/index.json` and diffs per-package root digests against
-    /// `previous`, returning only the packages whose root moved.
+    /// Fetches this source's `c/index.json` — the site's own listing, read live.
     ///
-    /// The digest diff **is** the sync mechanism (F2) — the catalog is small and
-    /// fetched once per `ocx index update`, so the fetch is unconditional and no
-    /// HTTP validator is stored anywhere. A `404` yields an empty catalog. The
-    /// returned catalog is what the caller persists at
-    /// `{index-home}/c/index.json` — both the offline listing source and the
-    /// next diff basis.
-    pub async fn sync_catalog(&self, previous: &CatalogIndex) -> Result<CatalogSyncOutcome> {
+    /// Nothing is persisted from it: the local `c/index.json` is authored from
+    /// the roots this machine snapshotted, never mirrored from here. This is
+    /// what answers `ocx index catalog --remote`, and it is the only reason the
+    /// remote catalog is fetched at all.
+    ///
+    /// A `404`, or a base URL with no `config.json`, yields an empty catalog
+    /// rather than an error — neither is a failure, just an index with nothing
+    /// to list.
+    pub async fn fetch_catalog(&self) -> Result<CatalogIndex> {
         // No config.json ⇒ not a version-pinned index: nothing to list, an
         // empty catalog (fail-closed, F1) — never a walk of an unversioned base.
         if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
-            return Ok(CatalogSyncOutcome {
-                catalog: CatalogIndex::new(),
-                moved: Vec::new(),
-            });
+            return Ok(CatalogIndex::new());
         }
         let url = format!("{}/c/index.json", self.base_url);
         match self.transport.get(&url).await? {
-            IndexFetch::NotFound => Ok(CatalogSyncOutcome {
-                catalog: CatalogIndex::new(),
-                moved: Vec::new(),
-            }),
-            IndexFetch::Found { bytes } => {
-                let document: CatalogDocument = parse_document(&bytes, &url)?;
-                let fetched = document.into_packages()?;
-                let moved = diff_moved(previous, &fetched);
-                Ok(CatalogSyncOutcome {
-                    catalog: fetched,
-                    moved,
-                })
-            }
+            IndexFetch::NotFound => Ok(CatalogIndex::new()),
+            IndexFetch::Found { bytes } => parse_document::<CatalogDocument>(&bytes, &url)?.into_packages(),
         }
     }
 }
@@ -953,8 +898,7 @@ impl index_impl::IndexImpl for OcxIndex {
         if registry != self.namespace {
             return Ok(Vec::new());
         }
-        let outcome = self.sync_catalog(&CatalogIndex::new()).await?;
-        let mut repositories: Vec<String> = outcome.catalog.into_keys().collect();
+        let mut repositories: Vec<String> = self.fetch_catalog().await?.into_keys().collect();
         repositories.sort();
         repositories.dedup();
         Ok(repositories)
@@ -1241,9 +1185,6 @@ mod tests {
             digest.algorithm().prefix(),
             digest.hex()
         )
-    }
-    fn catalog_url() -> String {
-        format!("{BASE}/c/index.json")
     }
 
     /// A served `c/index.json` body: `packages_json` (the bare `<ns>/<pkg>` →
@@ -1952,315 +1893,6 @@ mod tests {
     // ── catalog sync (F2): digest diff ───────────────────────────────────────
 
     #[tokio::test]
-    async fn sync_catalog_diff_returns_only_moved_packages() {
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert(
-            &catalog_url(),
-            &catalog_body(r#"{"kitware/cmake":"sha256:new","stable/tool":"sha256:same","fresh/pkg":"sha256:brand"}"#),
-        );
-        let source = make_source(transport, false);
-
-        let mut previous = CatalogIndex::new();
-        previous.insert("kitware/cmake".to_string(), "sha256:old".to_string());
-        previous.insert("stable/tool".to_string(), "sha256:same".to_string());
-
-        let outcome = source.sync_catalog(&previous).await.unwrap();
-        assert_eq!(
-            outcome.moved,
-            vec!["kitware/cmake".to_string()],
-            "only the previously-known root whose digest moved (kitware/cmake) is a move; stable/tool is \
-             unchanged and fresh/pkg is new-to-local — a listing row, never a re-snapshot (F2)"
-        );
-        assert!(
-            outcome.catalog.contains_key("fresh/pkg"),
-            "a new-to-local package is still recorded in the fetched catalog as a listing row"
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_catalog_against_an_unchanged_catalog_moves_nothing() {
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1}"#);
-        transport.insert(&catalog_url(), &catalog_body(r#"{"kitware/cmake":"sha256:x"}"#));
-        let source = make_source(transport, false);
-
-        let mut previous = CatalogIndex::new();
-        previous.insert("kitware/cmake".to_string(), "sha256:x".to_string());
-
-        // The fetch is unconditional; the DIGEST DIFF is what decides there is
-        // nothing to do — no validator is consulted or stored anywhere.
-        let outcome = source.sync_catalog(&previous).await.unwrap();
-        assert!(outcome.moved.is_empty());
-        assert_eq!(outcome.catalog, previous, "an unchanged remote catalog diffs to itself");
-    }
-
-    // ── physical reference parsing (C3, one-way door) ────────────────────────
-
-    #[test]
-    fn parse_physical_repository_accepts_oci_scheme() {
-        let (registry, repository) = parse_physical_repository("oci://ghcr.io/ocx-contrib/cmake").unwrap();
-        assert_eq!(registry, "ghcr.io");
-        assert_eq!(repository, "ocx-contrib/cmake");
-    }
-
-    #[test]
-    fn parse_physical_repository_rejects_missing_scheme_and_empty_parts() {
-        for bad in [
-            "ghcr.io/x/y",
-            "https://ghcr.io/x",
-            "oci://ghcr.io",
-            "oci:///x",
-            "oci://ghcr.io/",
-        ] {
-            assert!(
-                matches!(
-                    parse_physical_repository(bad),
-                    Err(crate::Error::OciIndex(
-                        super::super::error::Error::MalformedPhysicalRef { .. }
-                    ))
-                ),
-                "'{bad}' must be a MalformedPhysicalRef"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_physical_repository_rejects_grammar_violating_refs() {
-        // The Identifier round-trip rejects anything the registry grammar would
-        // not mint: whitespace / control chars in the repository, a smuggled tag
-        // (`repo:x`) or digest (`repo@sha256:…`), an uppercase segment, and a
-        // stray-colon (port) abuse in the repository path.
-        for bad in [
-            "oci://ghcr.io/foo bar",             // space in repository
-            "oci://ghcr.io/foo\tbar",            // control char in repository
-            "oci://ghcr.io/foo:3.28",            // smuggled tag
-            "oci://ghcr.io/foo@sha256:deadbeef", // smuggled digest
-            "oci://ghcr.io/Foo",                 // uppercase segment
-            "oci://ghcr.io:5000/foo:1.0",        // colon/port abuse in the path
-            "oci://ghcr.io/foo@bar",             // embedded @ (bad digest)
-        ] {
-            assert!(
-                matches!(
-                    parse_physical_repository(bad),
-                    Err(crate::Error::OciIndex(
-                        super::super::error::Error::MalformedPhysicalRef { .. }
-                    ))
-                ),
-                "'{bad}' must be a MalformedPhysicalRef"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_physical_repository_accepts_host_with_port() {
-        // A legitimate `host:port` registry (e.g. a private mirror) round-trips:
-        // the port colon lives in the host segment, never mistaken for a tag.
-        let (registry, repository) = parse_physical_repository("oci://localhost:5000/ocx-contrib/cmake").unwrap();
-        assert_eq!(registry, "localhost:5000");
-        assert_eq!(repository, "ocx-contrib/cmake");
-    }
-
-    #[tokio::test]
-    async fn physical_identifier_dereferences_root_pointer() {
-        let transport = StubIndexTransport::new();
-        let dispatch_digest = seed_package(&transport, false);
-        let source = make_source(transport, false);
-
-        // A resolved leaf: logical id carrying the physical manifest digest.
-        let leaf = oci::Digest::Sha256("a".repeat(64));
-        let logical = oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_digest(leaf.clone());
-        let physical = source
-            .physical_identifier(&logical)
-            .await
-            .unwrap()
-            .expect("root resolves");
-        assert_eq!(physical.registry(), "ghcr.io");
-        assert_eq!(physical.repository(), "ocx-contrib/cmake");
-        assert_eq!(
-            physical.digest(),
-            Some(leaf),
-            "the leaf digest is carried onto the physical location"
-        );
-        let _ = dispatch_digest; // silence unused in this path
-    }
-
-    // ── catalog sync orchestration: diff → re-snapshot → persist on disk ─────
-
-    #[tokio::test]
-    async fn local_index_sync_catalog_persists_and_snapshots_moved_package() {
-        // A moved package whose image index declares no platforms — so the
-        // re-snapshot writes the dispatch object without a physical leaf
-        // fetch (no OCI client needed).
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1}"#);
-        let dispatch_bytes =
-            br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
-        let dispatch_digest = Algorithm::Sha256.hash(dispatch_bytes);
-        let root =
-            format!(r#"{{"repository":"oci://ghcr.io/x/y","tags":{{"1.0":{{"content":"{dispatch_digest}"}}}}}}"#,);
-        transport.insert(&format!("{BASE}/p/ns/pkg.json"), root.as_bytes());
-        // The remote catalog entry IS sha256 of the root bytes (F1) — so the
-        // second, unchanged sync sees no diff. A mock literal that disagreed with
-        // the served root would make every sync re-diff the root-derived local
-        // entry against the stale claim and re-snapshot forever.
-        let catalog = catalog_body(&format!(
-            r#"{{"ns/pkg":"{}"}}"#,
-            crate::file_structure::IndexStore::root_catalog_entry(root.as_bytes())
-        ));
-        transport.insert(&catalog_url(), &catalog);
-        transport.insert(
-            &format!(
-                "{BASE}/p/ns/pkg/o/{}/{}.json",
-                dispatch_digest.algorithm().prefix(),
-                dispatch_digest.hex()
-            ),
-            dispatch_bytes,
-        );
-        let source = make_source(transport, false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let snapshot = crate::file_structure::IndexStore::new(dir.path().join("index"));
-        let local = super::super::LocalIndex::new(super::super::LocalConfig {
-            index_store: snapshot.clone(),
-        });
-
-        // Materialize `ns/pkg` with a STALE digest, so the remote catalog's newer
-        // digest is a MOVE of an existing local root — the only shape re-snapshotted
-        // under the corrected F2 listing-row contract (a brand-new package is a
-        // listing row, materialized only when first updated).
-        seed_stale_root(&snapshot, "ns/pkg").await;
-
-        let outcome = local.sync_catalog(&source).await.unwrap();
-        assert_eq!(
-            outcome.moved,
-            vec!["ns/pkg".to_string()],
-            "an already-materialized package whose digest moved must re-snapshot"
-        );
-
-        // The per-source catalog is persisted at <home>/<source>/c/index.json —
-        // the diff basis + offline source (A2/F2). A MOVED package's entry is set
-        // by the refresh path (sha256 of the actually-served root bytes), NOT the
-        // mock catalog literal — the reconcile-commit skips moved packages so it
-        // never clobbers the root-derived entry back to the pre-fetch claim.
-        let persisted = snapshot
-            .read_source_catalog(NAMESPACE)
-            .await
-            .unwrap()
-            .expect("per-source catalog persisted");
-        assert_eq!(
-            persisted.get("ns/pkg"),
-            Some(&crate::file_structure::IndexStore::root_catalog_entry(root.as_bytes())),
-            "the moved package's entry must be sha256 of the served root bytes, not the mock catalog literal"
-        );
-
-        // The moved package is re-snapshotted through the published grow path: its
-        // verbatim root document plus the referenced dispatch object
-        // land in the wire grammar, so a subsequent offline resolve walks the copy.
-        assert!(
-            snapshot.root_document_path(NAMESPACE, "ns/pkg").exists(),
-            "the re-snapshot must write the verbatim root document for the moved package"
-        );
-        assert!(
-            snapshot
-                .dispatch_object_path(NAMESPACE, "ns/pkg", &dispatch_digest)
-                .exists(),
-            "the re-snapshot must persist the image index as a dispatch object"
-        );
-
-        // A second sync with the catalog unchanged re-snapshots nothing AND
-        // rewrites nothing. The digest diff is the entire sync mechanism (F2):
-        // the catalog fetch is unconditional, so "nothing to do" has to fall out
-        // of the diff and the commit's no-op check, never out of a `304`. A
-        // byte-identical rewrite would still churn the mtime of a tree that gets
-        // committed to repos and rsync'd (A2).
-        let catalog_path = snapshot.source_catalog_path(NAMESPACE);
-        let root_path = snapshot.root_document_path(NAMESPACE, "ns/pkg");
-        let catalog_before = tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap();
-        let root_before = tokio::fs::metadata(&root_path).await.unwrap().modified().unwrap();
-
-        let again = local.sync_catalog(&source).await.unwrap();
-        assert!(again.moved.is_empty(), "an unchanged catalog must re-snapshot nothing");
-        assert_eq!(
-            tokio::fs::metadata(&catalog_path).await.unwrap().modified().unwrap(),
-            catalog_before,
-            "an unchanged catalog must not be rewritten"
-        );
-        assert_eq!(
-            tokio::fs::metadata(&root_path).await.unwrap().modified().unwrap(),
-            root_before,
-            "an unchanged catalog must leave every root document untouched"
-        );
-    }
-
-    // ── catalog-entry precedence: moved = root-derived, unmoved = fetched ─────
-
-    #[tokio::test]
-    async fn sync_catalog_moved_entry_is_root_derived_unmoved_adopts_fetched() {
-        // The remote catalog CLAIMS a digest for `moved/pkg` that does NOT match
-        // its actually-served root bytes (CDN skew). The moved entry must come
-        // from the refresh path (sha256 of the persisted root), never this claim.
-        const WRONG_CLAIM: &str = "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let transport = StubIndexTransport::new();
-        transport.insert(
-            &catalog_url(),
-            &catalog_body(&format!(
-                r#"{{"moved/pkg":"{WRONG_CLAIM}","unmoved/pkg":"sha256:oldunmoved"}}"#
-            )),
-        );
-        seed_empty_index(&transport, "moved/pkg", "1.0");
-        let source = make_source(transport, false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let snapshot = crate::file_structure::IndexStore::new(dir.path().join("index"));
-        let local = super::super::LocalIndex::new(super::super::LocalConfig {
-            index_store: snapshot.clone(),
-        });
-
-        // Materialize `moved/pkg` with a stale digest so the remote's WRONG_CLAIM
-        // is a MOVE of an existing local root (the only shape re-snapshotted, F2).
-        seed_stale_root(&snapshot, "moved/pkg").await;
-        // Pre-seed `unmoved/pkg` as a listing row (catalog entry, no local root)
-        // whose fetched digest equals the previous → UNMOVED, adopts fetched.
-        let mut seed = snapshot.begin_catalog_transaction(NAMESPACE).await.unwrap();
-        seed.catalog()
-            .insert("unmoved/pkg".to_string(), "sha256:oldunmoved".to_string());
-        seed.commit().await.unwrap();
-
-        let outcome = local.sync_catalog(&source).await.unwrap();
-        assert_eq!(
-            outcome.moved,
-            vec!["moved/pkg".to_string()],
-            "only the materialized package whose digest moved re-snapshots; the equal-digest listing row did not"
-        );
-
-        let persisted = snapshot.read_source_catalog(NAMESPACE).await.unwrap().unwrap();
-
-        // Moved: the entry is the root-derived digest set by the refresh path,
-        // never the (wrong) fetched claim — the reconcile-commit skipped it.
-        let root_bytes = std::fs::read(snapshot.root_document_path(NAMESPACE, "moved/pkg")).unwrap();
-        assert_eq!(
-            persisted.get("moved/pkg"),
-            Some(&crate::file_structure::IndexStore::root_catalog_entry(&root_bytes)),
-            "a moved package's entry must be the root-derived digest from the refresh path"
-        );
-        assert_ne!(
-            persisted.get("moved/pkg").map(String::as_str),
-            Some(WRONG_CLAIM),
-            "the fetched catalog claim must never clobber the root-derived moved entry"
-        );
-
-        // Unmoved: the fetched value is merged into the catalog.
-        assert_eq!(
-            persisted.get("unmoved/pkg").map(String::as_str),
-            Some("sha256:oldunmoved"),
-            "an unmoved (listing-row) package adopts its fetched catalog value"
-        );
-    }
-
-    // ── namespace isolation ──────────────────────────────────────────────────
-
-    #[tokio::test]
     async fn identifier_in_other_registry_is_not_this_sources_concern() {
         let transport = StubIndexTransport::new();
         seed_package(&transport, false);
@@ -2329,21 +1961,6 @@ mod tests {
             dispatch_bytes,
         );
         dispatch_digest
-    }
-
-    /// Pre-seed `repo` as a MATERIALIZED local root carrying a stale digest, so a
-    /// differing remote catalog entry counts as a MOVE of an existing local root.
-    /// Under the corrected F2 listing-row contract, `sync_catalog` re-snapshots
-    /// ONLY already-materialized packages whose digest changed — a package with
-    /// no local root is a listing row, updated in the catalog without a fetch — so
-    /// a test that wants to observe a re-snapshot must first materialize the
-    /// package. The stale root's own bytes are overwritten by the fetched root on
-    /// re-snapshot; only its existence and its (differing) catalog entry matter.
-    async fn seed_stale_root(snapshot: &crate::file_structure::IndexStore, repo: &str) {
-        let stale = br#"{"repository":"oci://ghcr.io/stale/root","tags":{}}"#;
-        let mut transaction = snapshot.begin_catalog_transaction(NAMESPACE).await.unwrap();
-        transaction.write_root(repo, stale, |_| Ok(())).await.unwrap();
-        transaction.commit().await.unwrap();
     }
 
     fn registry_manifest() -> (Vec<u8>, oci::Digest) {
@@ -3120,150 +2737,6 @@ mod tests {
             transport.request_count(&flat_root_url()),
             1,
             "both paths skip the declined source off ONE memoized jurisdiction probe: {:?}",
-            transport.request_urls()
-        );
-    }
-
-    // ── sync_catalog: a self-contradicting catalog row is skipped, not fatal ───
-
-    /// The catalog entry `source` currently holds for `repository`, or `None`.
-    async fn catalog_entry(local: &super::super::LocalIndex, repository: &str) -> Option<String> {
-        local
-            .index_store()
-            .read_source_catalog(NAMESPACE)
-            .await
-            .unwrap()
-            .and_then(|catalog| catalog.get(repository).cloned())
-    }
-
-    #[tokio::test]
-    async fn sync_catalog_neither_advances_nor_retires_an_out_of_jurisdiction_catalog_key() {
-        // R2: the flat key HAS a local root on disk, so without the guard step 3
-        // calls `refresh_tags` -> `refresh_derived` -> `list_tags` -> `Ok(None)`
-        // -> `RemoteManifestNotFound`, whose `?` aborts before the catalog
-        // commit — and every later `ocx index update` aborts identically,
-        // swallowed as a non-fatal warn.
-        //
-        // The row is skipped, but its FETCHED value must not be adopted either:
-        // the root that value names is unfetchable by construction (its 404 is
-        // what the `Outside` verdict was read off), so committing it would leave
-        // the on-disk root and the catalog straddled.
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert(&catalog_url(), &catalog_body(r#"{"go-task":"sha256:moved"}"#));
-        let source = make_source(transport.clone(), false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let local = local_index(&dir);
-        seed_stale_root(local.index_store(), FLAT_REPO).await;
-        let before = catalog_entry(&local, FLAT_REPO).await;
-
-        let outcome = local
-            .sync_catalog(&source)
-            .await
-            .expect("a grammar violation in the remote catalog must not fail the whole sync");
-        assert_eq!(outcome.moved, vec![FLAT_REPO.to_string()]);
-        assert_eq!(
-            transport.request_count(&flat_root_url()),
-            1,
-            "the declined row costs the one jurisdiction probe and is never re-snapshotted: {:?}",
-            transport.request_urls()
-        );
-        assert_eq!(
-            catalog_entry(&local, FLAT_REPO).await,
-            before,
-            "the entry must still describe the root actually on disk"
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_catalog_lands_the_healthy_rows_and_retries_the_failed_one_next_run() {
-        // Publish skew, no grammar violation anywhere: both keys are expressible
-        // and materialized, but `ns/skewed`'s root 404s (rolled back, or the
-        // catalog regenerated ahead of the roots). `refresh_tags` errors.
-        //
-        // Three properties, and the third is the point. The failure must not
-        // veto the source-wide commit (its `?` used to, stranding every other
-        // moved package on every later `ocx index update`). It must not advance
-        // the failed row either — the on-disk root is still the old one, so the
-        // fetched entry would straddle them, `read_root` would self-heal the
-        // catalog back and serve the STALE root past the yank gate. Keeping the
-        // old entry IS the retry: the next sync re-diffs it against the fetched
-        // catalog and tries again.
-        let transport = StubIndexTransport::new();
-        seed_empty_index(&transport, "ns/pkg", "1.0");
-        transport.insert(
-            &catalog_url(),
-            &catalog_body(r#"{"ns/pkg":"sha256:moved","ns/skewed":"sha256:moved"}"#),
-        );
-        let source = make_source(transport.clone(), false);
-        let skewed_root_url = format!("{BASE}/p/ns/skewed.json");
-
-        let dir = tempfile::tempdir().unwrap();
-        let local = local_index(&dir);
-        seed_stale_root(local.index_store(), "ns/pkg").await;
-        seed_stale_root(local.index_store(), "ns/skewed").await;
-        let skewed_before = catalog_entry(&local, "ns/skewed").await;
-        let healthy_before = catalog_entry(&local, "ns/pkg").await;
-
-        local
-            .sync_catalog(&source)
-            .await
-            .expect("one package's re-snapshot failure must not fail the source-wide sync");
-
-        assert!(
-            transport.request_urls().contains(&format!("{BASE}/p/ns/pkg.json")),
-            "the healthy moved key is still re-snapshotted: {:?}",
-            transport.request_urls()
-        );
-        let healthy_after = catalog_entry(&local, "ns/pkg").await;
-        assert!(
-            healthy_after.is_some() && healthy_after != healthy_before,
-            "the healthy row must land its re-snapshotted entry"
-        );
-        assert_eq!(
-            catalog_entry(&local, "ns/skewed").await,
-            skewed_before,
-            "the failed row must keep the entry matching the root actually on disk"
-        );
-        let attempts = transport.request_count(&skewed_root_url);
-        assert!(
-            attempts > 0,
-            "the first run must have tried: {:?}",
-            transport.request_urls()
-        );
-
-        // The whole point: the next update re-diffs the failed key and tries
-        // again. Had the fetched entry been adopted, the second sync would diff
-        // NEW against NEW, see no move, and never touch it.
-        local
-            .sync_catalog(&source)
-            .await
-            .expect("the retry must be an ordinary sync, not a failure");
-        assert!(
-            transport.request_count(&skewed_root_url) > attempts,
-            "the failed key must be re-diffed and retried: {:?}",
-            transport.request_urls()
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_catalog_still_refreshes_an_expressible_moved_key() {
-        let transport = StubIndexTransport::new();
-        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        seed_empty_index(&transport, "ns/pkg", "1.0");
-        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
-        transport.insert(&catalog_url(), &catalog_body(r#"{"ns/pkg":"sha256:moved"}"#));
-        let source = make_source(transport.clone(), false);
-
-        let dir = tempfile::tempdir().unwrap();
-        let local = local_index(&dir);
-        seed_stale_root(local.index_store(), "ns/pkg").await;
-
-        local.sync_catalog(&source).await.unwrap();
-        assert!(
-            transport.request_urls().contains(&format!("{BASE}/p/ns/pkg.json")),
-            "an expressible moved key is still re-snapshotted: {:?}",
             transport.request_urls()
         );
     }

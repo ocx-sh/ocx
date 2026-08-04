@@ -27,15 +27,10 @@ pub struct Context {
     /// when online from every merged `[registries."<ns>"]` entry that carries
     /// an `index` field (`adr_index_indirection.md` F5a — kind per NAMESPACE,
     /// see `build_index_sources`). Each is chained ahead of the plain-OCI
-    /// `oci_index` and reused for catalog sync (`ocx index update`); empty
-    /// under `--offline` or when no namespace is configured as index-kind.
+    /// `oci_index`; empty under `--offline` or when no namespace is configured
+    /// as index-kind.
     index_sources: Vec<oci::index::OcxIndex>,
     local_index: oci::index::LocalIndex,
-    /// Separately-consumable local-index refresh seam (`adr_index_indirection.md`
-    /// Decision H) — wraps `local_index`'s per-package refresh and per-source
-    /// catalog sync. `ocx index update` consumes this instead of calling
-    /// `local_index` write methods directly.
-    index_sync: oci::index::IndexSync,
     file_structure: file_structure::FileStructure,
     api: api::Api,
     ui: UserInterface,
@@ -219,7 +214,6 @@ impl Context {
             index_store: index_store.clone(),
         })
         .with_allow_yanked(allow_yanked);
-        let index_sync = index::IndexSync::new(local_index.clone());
 
         // Single `Index::from_chained` entry point; see
         // `chain_mode_and_sources` for the offline/online derivation.
@@ -451,7 +445,6 @@ impl Context {
             api,
             ui,
             local_index,
-            index_sync,
             default_index: selected_index,
             manager,
             default_registry,
@@ -504,14 +497,6 @@ impl Context {
 
     pub fn local_index(&self) -> &oci::index::LocalIndex {
         &self.local_index
-    }
-
-    /// Separately-consumable local-index refresh seam (`adr_index_indirection.md`
-    /// Decision H): per-package tag refresh + per-source catalog sync, with
-    /// no daemon and no scheduling policy. `ocx index update` consumes this
-    /// instead of calling [`Self::local_index`] write methods directly.
-    pub fn index_sync(&self) -> &oci::index::IndexSync {
-        &self.index_sync
     }
 
     /// Every configured `index.ocx.sh`-protocol source — one per index-bearing

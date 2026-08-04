@@ -346,15 +346,18 @@ def test_absent_dispatch_object_self_heals_on_next_online_update(
 # ---------------------------------------------------------------------------
 
 
-def test_copy_a_mirror_parity_offline_resolve_and_byte_identical_subtree(
+def test_a_copied_subtree_and_an_authored_one_resolve_identically(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ):
-    """A raw filesystem copy of a published fixture's served tree (`wget
-    --mirror` equivalent) resolves offline identically, and OCX's own
-    `ocx index update`-written subtree for the same package is
-    byte-identical to the fixture's own tree (A2, "copy-a-mirror" — a
-    published index copy is a verbatim site copy that verifies against
-    itself).
+    """A published tree is self-contained twice over: a raw filesystem copy of
+    the served site (`wget --mirror` equivalent) resolves offline, and so does
+    the subtree OCX authors for the same package via `ocx index update`.
+
+    The two are equivalent in what they RESOLVE, not in their bytes. OCX
+    authors its copy — merging tags into a root it owns and re-emitting through
+    the canonical serializer — so byte-equality with the site is neither
+    claimed nor wanted. What must hold is that either tree answers the same
+    question the same way, offline: same tags, same platform, same routing.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -383,32 +386,41 @@ def test_copy_a_mirror_parity_offline_resolve_and_byte_identical_subtree(
     clean_home = tmp_path / "clean_home"
     clean_home.mkdir()
     copy_runner = OcxRunner(ocx.binary, clean_home, ocx.registry)
-    result = copy_runner.plain(
+    copied = copy_runner.plain(
         "--offline", "--index", str(copy_home), "index", "list", f"ocx.sh/{repository}:1.0.0", "--platforms"
     )
-    assert pkg.platform in result.stdout, "a raw copy of the fixture's served tree must resolve offline identically"
+    assert pkg.platform in copied.stdout, "a raw copy of the fixture's served tree must resolve offline"
 
-    # 2. OCX's own written subtree for the same package equals the fixture's
-    #    own tree, byte-for-byte, for the same package's root + dispatch
-    #    object.
+    # 2. The subtree OCX authors for the same package answers identically.
     written_home = tmp_path / "written_home"
     written_home.mkdir()
-    ocx.plain("--index", str(written_home), "index", "update", f"ocx.sh/{repository}:1.0.0")
+    ocx.plain("--index", str(written_home), "index", "update", f"ocx.sh/{repository}")
 
-    fixture_root_bytes = (index_server.root / "p" / f"{repository}.json").read_bytes()
-    written_root_bytes = (written_home / "ocx.sh" / "p" / f"{repository}.json").read_bytes()
-    assert written_root_bytes == fixture_root_bytes, "the written root document must byte-equal the fixture's own"
+    authored_runner = OcxRunner(ocx.binary, tmp_path / "clean_home2", ocx.registry)
+    (tmp_path / "clean_home2").mkdir()
+    authored = authored_runner.plain(
+        "--offline", "--index", str(written_home), "index", "list", f"ocx.sh/{repository}:1.0.0", "--platforms"
+    )
+    assert authored.stdout == copied.stdout, (
+        "the authored subtree must resolve the same tags and platforms as a raw site copy"
+    )
 
+    # Semantic parity of the documents themselves: same tag pins, same routing.
+    fixture_root = json.loads((index_server.root / "p" / f"{repository}.json").read_text())
+    authored_root = json.loads((written_home / "ocx.sh" / "p" / f"{repository}.json").read_text())
+    assert authored_root["repository"] == fixture_root["repository"]
+    assert {tag: entry["content"] for tag, entry in authored_root["tags"].items()} == {
+        tag: entry["content"] for tag, entry in fixture_root["tags"].items()
+    }, "every tag the site publishes must pin to the same object in the authored copy"
+
+    # The dispatch objects ARE byte-verbatim — they are registry content, stored
+    # as served, and that is what the digest in each filename attests.
     fixture_dispatch_dir = index_server.root / "p" / repository / "o" / "sha256"
     written_dispatch_dir = written_home / "ocx.sh" / "p" / repository / "o" / "sha256"
-    fixture_dispatch_files = sorted(p.name for p in fixture_dispatch_dir.iterdir())
-    written_dispatch_files = sorted(p.name for p in written_dispatch_dir.iterdir())
-    assert fixture_dispatch_files == written_dispatch_files
-    for name in fixture_dispatch_files:
+    for name in sorted(p.name for p in fixture_dispatch_dir.iterdir()):
         assert (fixture_dispatch_dir / name).read_bytes() == (written_dispatch_dir / name).read_bytes(), (
             f"dispatch object {name} must byte-equal the fixture's own copy"
         )
-
 
 def test_copied_subtree_resolves_with_no_source_kind_configured(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
@@ -535,9 +547,10 @@ def test_catalog_entry_delete_self_heals_on_next_local_read(
     assert result.returncode == 0
     assert "1.0.0" in result.stdout
 
+    root_path = index_dir / "ocx.sh" / "p" / f"{repository}.json"
     restored = static_index.read_catalog(catalog_path)
-    assert restored.get(repository) == entry.root_digest, (
-        "the deleted catalog entry must be restored (re-derived) by the read path"
+    assert restored.get(repository) == f"sha256:{hashlib.sha256(root_path.read_bytes()).hexdigest()}", (
+        "the deleted catalog entry must be restored, re-derived from the on-disk root bytes"
     )
 
 
@@ -722,271 +735,18 @@ def test_catalog_concurrent_updates_of_distinct_packages_both_entries_survive(
     assert repo_b in catalog, f"catalog must retain repo_b's entry after concurrent updates: {catalog}"
 
     # Both root documents must also be present — the per-package upsert
-    # itself must not have been lost.
-    assert (index_dir / "ocx.sh" / "p" / f"{repo_a}.json").is_file()
-    assert (index_dir / "ocx.sh" / "p" / f"{repo_b}.json").is_file()
+    # itself must not have been lost — and each entry must describe its OWN
+    # root bytes, which is what a torn concurrent commit would break.
+    for repo in (repo_a, repo_b):
+        root_bytes = (index_dir / "ocx.sh" / "p" / f"{repo}.json").read_bytes()
+        assert catalog[repo] == f"sha256:{hashlib.sha256(root_bytes).hexdigest()}", (
+            f"{repo}'s catalog entry must match its own on-disk root bytes"
+        )
 
 
 # ---------------------------------------------------------------------------
 # #10 — catalog concurrency: a direct update races the OTHER process's
 #       piggyback catalog sync re-snapshotting the SAME moved package
-# ---------------------------------------------------------------------------
-
-
-def test_catalog_sync_race_direct_update_vs_piggyback_resnapshot_same_package(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
-):
-    """A direct `ocx index update <pkgA>` races ANOTHER process's piggyback
-    catalog sync that independently re-snapshots the SAME moved package as a
-    side effect of refreshing `pkgB`. Both write paths must land pkgA's root
-    + catalog entry coherently — this is exactly the sol-gate finding the
-    single catalog-transaction contract closes: a sync's read-then-replace
-    path racing a per-package upsert must never lose either write.
-    """
-    pkg_a = make_package(ocx, f"{unique_repo}a", "1.0.0", tmp_path, new=True, index=False)
-    pkg_b = make_package(ocx, f"{unique_repo}b", "1.0.0", tmp_path, new=True, index=False)
-    leaf_a = fetch_platform_manifest_digest(ocx.registry, pkg_a.repo, pkg_a.tag)
-    leaf_b = fetch_platform_manifest_digest(ocx.registry, pkg_b.repo, pkg_b.tag)
-    os_a, arch_a = pkg_a.platform.split("/")
-    os_b, arch_b = pkg_b.platform.split("/")
-
-    configure_index_source(ocx, index_server)
-    static_index.write_config(index_server.root)
-    repo_a = f"{unique_repo}/pkga"
-    repo_b = f"{unique_repo}/pkgb"
-    entry_a1 = static_index.write_package(
-        index_server.root,
-        repository=repo_a,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_a.repo}",
-        platform_digest=leaf_a,
-        os=os_a,
-        architecture=arch_a,
-    )
-    entry_b = static_index.write_package(
-        index_server.root,
-        repository=repo_b,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_b.repo}",
-        platform_digest=leaf_b,
-        os=os_b,
-        architecture=arch_b,
-    )
-    static_index.write_catalog(index_server.root, {repo_a: entry_a1.root_digest, repo_b: entry_b.root_digest})
-
-    index_dir = tmp_path / "index_dir"
-    index_dir.mkdir()
-    logical_a = f"ocx.sh/{repo_a}:1.0.0"
-    logical_b = f"ocx.sh/{repo_b}:1.0.0"
-
-    # First sync establishes both packages + the catalog + etag baseline.
-    ocx.plain("--index", str(index_dir), "index", "update", logical_a)
-
-    # Move pkgA's root (new status -> new root digest) and update the served
-    # catalog so BOTH the direct update and pkgB's piggyback see it as moved.
-    entry_a2 = static_index.write_package(
-        index_server.root,
-        repository=repo_a,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_a.repo}",
-        platform_digest=leaf_a,
-        os=os_a,
-        architecture=arch_a,
-        status="deprecated",
-        deprecated_message="moved",
-    )
-    static_index.write_catalog(index_server.root, {repo_a: entry_a2.root_digest, repo_b: entry_b.root_digest})
-
-    proc_direct = subprocess.Popen(
-        [str(ocx.binary), "--index", str(index_dir), "index", "update", logical_a],
-        env=ocx.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    proc_piggyback = subprocess.Popen(
-        [str(ocx.binary), "--index", str(index_dir), "index", "update", logical_b],
-        env=ocx.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    _, err_direct = proc_direct.communicate(timeout=30)
-    _, err_piggyback = proc_piggyback.communicate(timeout=30)
-    assert proc_direct.returncode == 0, f"direct update failed: {err_direct}"
-    assert proc_piggyback.returncode == 0, f"piggyback update failed: {err_piggyback}"
-
-    # Internal consistency: pkgA's persisted catalog entry must equal
-    # sha256(actual on-disk root bytes) — never a torn/stale straddle.
-    root_a_path = index_dir / "ocx.sh" / "p" / f"{repo_a}.json"
-    catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    root_a_bytes = root_a_path.read_bytes()
-    expected_entry = f"sha256:{hashlib.sha256(root_a_bytes).hexdigest()}"
-    catalog = static_index.read_catalog(catalog_path)
-    assert catalog.get(repo_a) == expected_entry, (
-        "pkgA's catalog entry must match its actual on-disk root bytes after the race, "
-        f"got {catalog.get(repo_a)!r}, expected {expected_entry!r}"
-    )
-    assert catalog.get(repo_b) is not None, "pkgB's own entry must survive the race"
-
-    # The root itself must reflect the MOVED (deprecated) content, not the
-    # stale pre-race version — proves the direct update's own write was not
-    # silently lost either.
-    root_a = json.loads(root_a_bytes)
-    assert root_a.get("status") == "deprecated", "pkgA's root must reflect the moved (post-race) content"
-
-
-# ---------------------------------------------------------------------------
-# #11 — catalog concurrency: two concurrent piggyback syncs both discover
-#       the same brand-new package and race to record it as a listing row
-# ---------------------------------------------------------------------------
-
-
-def test_catalog_sync_race_two_concurrent_syncs_keep_the_catalog_coherent(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
-):
-    """Two `ocx index update` calls for DIFFERENT already-known packages
-    both piggyback a whole-catalog sync at the same time; both also
-    discover a brand-new THIRD package in the served catalog and race to
-    record it. Under the F2 listing-row contract the brand-new package is
-    recorded as a LISTING ROW (its served catalog digest) WITHOUT being
-    materialized — a package new to the local catalog is fetched only when
-    first `update`d. The materialized packages' catalog entries must match
-    their own on-disk root bytes — no corrupted/torn write from the
-    concurrent reconcile-commits — and a follow-up run must re-diff the
-    served catalog coherently with no stored validator: the sync mechanism
-    is the digest diff, and nothing sends `If-None-Match` any more.
-    """
-    pkg_a = make_package(ocx, f"{unique_repo}a", "1.0.0", tmp_path, new=True, index=False)
-    pkg_b = make_package(ocx, f"{unique_repo}b", "1.0.0", tmp_path, new=True, index=False)
-    pkg_c = make_package(ocx, f"{unique_repo}c", "1.0.0", tmp_path, new=True, index=False)
-    leaf_a = fetch_platform_manifest_digest(ocx.registry, pkg_a.repo, pkg_a.tag)
-    leaf_b = fetch_platform_manifest_digest(ocx.registry, pkg_b.repo, pkg_b.tag)
-    leaf_c = fetch_platform_manifest_digest(ocx.registry, pkg_c.repo, pkg_c.tag)
-    os_a, arch_a = pkg_a.platform.split("/")
-    os_b, arch_b = pkg_b.platform.split("/")
-    os_c, arch_c = pkg_c.platform.split("/")
-
-    configure_index_source(ocx, index_server)
-    static_index.write_config(index_server.root)
-    repo_a = f"{unique_repo}/pkga"
-    repo_b = f"{unique_repo}/pkgb"
-    repo_c = f"{unique_repo}/pkgc"
-    entry_a = static_index.write_package(
-        index_server.root,
-        repository=repo_a,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_a.repo}",
-        platform_digest=leaf_a,
-        os=os_a,
-        architecture=arch_a,
-    )
-    entry_b = static_index.write_package(
-        index_server.root,
-        repository=repo_b,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_b.repo}",
-        platform_digest=leaf_b,
-        os=os_b,
-        architecture=arch_b,
-    )
-    static_index.write_catalog(index_server.root, {repo_a: entry_a.root_digest, repo_b: entry_b.root_digest})
-
-    index_dir = tmp_path / "index_dir"
-    index_dir.mkdir()
-    logical_a = f"ocx.sh/{repo_a}:1.0.0"
-    logical_b = f"ocx.sh/{repo_b}:1.0.0"
-
-    # Establish pkgA + pkgB locally (baseline catalog).
-    ocx.plain("--index", str(index_dir), "index", "update", logical_a)
-    ocx.plain("--index", str(index_dir), "index", "update", logical_b)
-
-    # A brand-new pkgC appears in the served catalog — neither concurrent
-    # call names it directly, so only the piggyback sync can discover it.
-    entry_c = static_index.write_package(
-        index_server.root,
-        repository=repo_c,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_c.repo}",
-        platform_digest=leaf_c,
-        os=os_c,
-        architecture=arch_c,
-    )
-    static_index.write_catalog(
-        index_server.root,
-        {repo_a: entry_a.root_digest, repo_b: entry_b.root_digest, repo_c: entry_c.root_digest},
-    )
-
-    proc_a = subprocess.Popen(
-        [str(ocx.binary), "--index", str(index_dir), "index", "update", logical_a],
-        env=ocx.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    proc_b = subprocess.Popen(
-        [str(ocx.binary), "--index", str(index_dir), "index", "update", logical_b],
-        env=ocx.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    _, err_a = proc_a.communicate(timeout=30)
-    _, err_b = proc_b.communicate(timeout=30)
-    assert proc_a.returncode == 0, f"concurrent sync A failed: {err_a}"
-    assert proc_b.returncode == 0, f"concurrent sync B failed: {err_b}"
-
-    catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    assert not (index_dir / "ocx.sh" / "c" / "index.json.etag").exists(), (
-        "no per-machine validator sidecar may appear in a tree that gets committed and rsync'd"
-    )
-
-    catalog = static_index.read_catalog(catalog_path)
-
-    # pkgA and pkgB were materialized by the named `index update` calls: each
-    # catalog entry must match its OWN on-disk root bytes (no torn write from the
-    # concurrent reconcile-commits).
-    for repository in (repo_a, repo_b):
-        assert repository in catalog, f"{repository} must survive the concurrent sync race: {catalog}"
-        root_bytes = (index_dir / "ocx.sh" / "p" / f"{repository}.json").read_bytes()
-        expected_entry = f"sha256:{hashlib.sha256(root_bytes).hexdigest()}"
-        assert catalog[repository] == expected_entry, (
-            f"{repository}'s catalog entry must match its own on-disk root bytes "
-            f"after the concurrent sync race, got {catalog[repository]!r}, expected {expected_entry!r}"
-        )
-
-    # pkgC was never named on the command line and had no local root before the
-    # race — the piggyback records it as a LISTING ROW (its served catalog
-    # digest) WITHOUT materializing its root (F2: materialized only when first
-    # `update`d). The race must still land that listing row coherently.
-    assert catalog.get(repo_c) == entry_c.root_digest, (
-        f"pkgC must be recorded as a listing row carrying its served catalog digest, got {catalog.get(repo_c)!r}"
-    )
-    assert not (index_dir / "ocx.sh" / "p" / f"{repo_c}.json").is_file(), (
-        "pkgC must NOT be materialized by the piggyback — it is a listing row until first updated (F2)"
-    )
-
-    # Coherence proof, validator-free: a follow-up run against the UNCHANGED
-    # fixture re-fetches the catalog unconditionally and re-diffs it against
-    # what the race wrote. The rows it does not name must come through
-    # byte-identical — if the race had left a torn map, the diff would move
-    # them. `index update logical_a` deliberately re-snapshots pkgA (that is
-    # what naming a package does), so only pkgB and pkgC are held invariant.
-    untouched_before = {repo_b: catalog[repo_b], repo_c: catalog[repo_c]}
-    checkpoint = len(index_server.requests)
-    ocx.plain("--index", str(index_dir), "index", "update", logical_a)
-    since = index_server.requests[checkpoint:]
-    catalog_requests = [record for record in since if record.path.endswith("/c/index.json")]
-    assert catalog_requests, "the follow-up run must still fetch the catalog"
-    assert all(record.if_none_match is None for record in since), (
-        "no request may carry If-None-Match — the fixture would answer 304 to one, and this "
-        f"binary must never send it: {[(r.path, r.if_none_match) for r in since if r.if_none_match]}"
-    )
-    assert catalog_requests[-1].status == 200, (
-        f"an unconditional catalog GET must be answered 200, got {catalog_requests[-1].status}"
-    )
-
-    after = static_index.read_catalog(catalog_path)
-    assert {repo: after.get(repo) for repo in untouched_before} == untouched_before, (
-        "a re-diff of the unchanged served catalog must leave every unnamed row exactly as the race wrote it"
-    )
-    root_a_bytes = (index_dir / "ocx.sh" / "p" / f"{repo_a}.json").read_bytes()
-    assert after[repo_a] == f"sha256:{hashlib.sha256(root_a_bytes).hexdigest()}", (
-        "the re-snapshotted row's entry must still match its own on-disk root bytes"
-    )
-
-
-# ---------------------------------------------------------------------------
-# #12 — root copy-first (F1): Default-mode resolve never re-fetches an
-#       already-snapshotted root; only `ocx index update` bumps `observed`
 # ---------------------------------------------------------------------------
 
 
@@ -1160,7 +920,11 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
     catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
     root_path = index_dir / "ocx.sh" / "p" / f"{repository}.json"
     stale_entry = static_index.read_catalog(catalog_path)[repository]
-    assert stale_entry == entry.root_digest, "precondition: the catalog must match the initial root"
+    # The entry is derived from the root bytes ON DISK, which are authored by
+    # the merge — not the site's own bytes (the local index is not a mirror).
+    assert stale_entry == f"sha256:{hashlib.sha256(root_path.read_bytes()).hexdigest()}", (
+        "precondition: the catalog must match the root actually on disk"
+    )
 
     # Hand-craft "root updated, catalog stale": overwrite the root document
     # directly (bypassing the CLI) with new content — the SAME tag

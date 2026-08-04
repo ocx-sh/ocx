@@ -8,6 +8,13 @@ use ocx_lib::{log, oci, oci::index};
 
 use crate::options;
 
+/// The one command that moves a pin.
+///
+/// The local index copy binds a tag to a digest and a package to a physical
+/// registry; resolving, installing and running all read it as it stands. This
+/// command is the only thing that changes it, and only for the packages named.
+/// The user-facing help lives on the `Index::Update` variant, which is what
+/// clap renders.
 #[derive(Parser)]
 pub struct IndexUpdate {
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -16,9 +23,8 @@ pub struct IndexUpdate {
 
 impl IndexUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // `ocx index update` refreshes tags via `IndexSync::refresh_package`
-        // (wraps `LocalIndex::refresh_tags`, `adr_index_indirection.md`
-        // Decision H): writes the tag → digest root document plus each tag's
+        // `ocx index update` refreshes tags via `LocalIndex::refresh_tags`
+        // (`adr_index_indirection.md` Decision H): writes the tag → digest root document plus each tag's
         // dispatch object (`o/<algo>/<hex>.json`) into the local index
         // collection — never the leaf platform manifest, which is fetched
         // into the machine-global blob store on demand (A3) — so a version
@@ -32,8 +38,8 @@ impl IndexUpdate {
         let packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         // Tag each refresh with its input index so any failures can be surfaced
-        // in input order. `IndexSync::refresh_package` returns `crate::Result<()>`
-        // (not a PackageManager op), so `drain_package_tasks` does not fit; the
+        // in input order. `refresh_tags` returns `crate::Result<()>` (not a
+        // PackageManager op), so `drain_package_tasks` does not fit; the
         // index-tagged fan-out is inlined here (same shape as `package info`).
         let mut join_set: tokio::task::JoinSet<(usize, ocx_lib::Result<()>)> = tokio::task::JoinSet::new();
         for (index, identifier) in packages.iter().enumerate() {
@@ -54,7 +60,7 @@ impl IndexUpdate {
             let source = selected.unwrap_or_else(|| oci_index.clone());
             let context = context.clone();
             let identifier = identifier.clone();
-            join_set.spawn(async move { (index, context.index_sync().refresh_package(&identifier, &source).await) });
+            join_set.spawn(async move { (index, context.local_index().refresh_tags(&identifier, &source).await) });
         }
 
         let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
@@ -82,27 +88,6 @@ impl IndexUpdate {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
             return Err(error.into());
-        }
-
-        // ── Piggyback: sync the static-file index catalog when online. ──
-        //
-        // Fetch `c/index.json`, re-snapshot only the packages whose
-        // root digest moved, and persist the catalog map at `{index-home}/c/index.json`
-        // — the offline catalog source and the next diff basis (F2). Best-effort:
-        // an absent index (config.json 404) yields an empty catalog with no error,
-        // and any transport failure warns rather than failing the tag refresh.
-        for source in context.index_sources() {
-            match context.index_sync().sync_catalog(source).await {
-                Ok(outcome) => log::debug!(
-                    "index update: catalog sync complete for '{}' ({} package(s) re-snapshotted)",
-                    source.namespace(),
-                    outcome.moved.len()
-                ),
-                Err(error) => log::warn!(
-                    "index update: catalog sync for '{}' failed (non-fatal): {error}",
-                    source.namespace()
-                ),
-            }
         }
 
         // ── Piggyback: refresh site-patch descriptors when the patch tier is active. ──

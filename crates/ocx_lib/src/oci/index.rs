@@ -7,21 +7,19 @@ use crate::{oci, prelude::*};
 
 pub mod error;
 
-pub use index_sync::IndexSync;
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
 pub use oci_index::OciIndex;
 pub use oci_index::OciIndexConfig;
 pub use ocx_index::{
-    CatalogSyncOutcome, DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig,
-    ReqwestIndexTransport, parse_physical_repository,
+    DEFAULT_INDEX_BASE_URL, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig, ReqwestIndexTransport,
+    parse_physical_repository,
 };
 pub use wire::{CatalogDocument, CatalogIndex, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION, YankMarker};
 pub use wire_writer::serialize_root;
 
 mod chained_index;
 mod index_impl;
-mod index_sync;
 mod local_index;
 mod oci_index;
 mod ocx_index;

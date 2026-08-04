@@ -23,6 +23,11 @@ pub enum Index {
     /// A tagged identifier (`cmake:3.28`) records only that tag; a bare
     /// identifier (`cmake`) records every tag.
     ///
+    /// Only the packages you name are touched: every other package keeps
+    /// the version it already resolves to. There is no whole-index sync: a
+    /// remote index floats, and the local copy is the set of snapshots you
+    /// asked for. Packages with an update waiting are reported afterward.
+    ///
     /// If any package fails to refresh, the whole command fails; packages
     /// that refresh successfully keep their updated tags. See
     /// [index update](https://ocx.sh/docs/reference/command-line#index-update)

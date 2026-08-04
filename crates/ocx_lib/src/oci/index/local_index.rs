@@ -128,9 +128,9 @@ impl LocalIndex {
     /// identifier (`cmake`) first enumerates the source's tags.
     ///
     /// Jurisdiction-unaware by design: whether `source` can express
-    /// `identifier` at all is the **caller's** call, because the two callers
-    /// want opposite outcomes — [`Self::sync_catalog`] skips a name the source
-    /// declined, while `ocx index update` reroutes it to the registry.
+    /// `identifier` at all is the **caller's** call. `ocx index update` picks
+    /// the source that will answer for each package before calling here, and
+    /// reroutes a name the index declines to the registry.
     pub async fn refresh_tags(&self, identifier: &oci::Identifier, source: &super::Index) -> Result<()> {
         // One info line per identifier; per-tag detail is debug-only so an index
         // update over a many-tagged package does not flood info logs.
@@ -145,8 +145,15 @@ impl LocalIndex {
         }
     }
 
-    /// Published-source refresh (`adr_index_indirection.md` A2/F1): persist each
-    /// referenced dispatch object, then copy the verbatim root document.
+    /// Published-source refresh (`adr_index_indirection.md` A2/F1, amended: the
+    /// local index is AUTHORED): persist the dispatch objects this write adopts,
+    /// then merge those tags into the local root.
+    ///
+    /// The identifier's shape is the scope. A tagged identifier
+    /// (`ocx index update pkg:3.28`) adopts that one tag and touches nothing
+    /// else. A bare one (`ocx index update pkg`) adopts every tag the remote
+    /// lists plus the package-level fields — and still keeps a tag only the
+    /// local copy holds, because merge never deletes.
     ///
     /// F1 write order — dispatch objects first (harmless orphans if interrupted),
     /// then the root plus its catalog entry — so a crash never leaves a root
@@ -158,12 +165,14 @@ impl LocalIndex {
         bytes: &[u8],
         root: &super::wire::IndexRoot,
     ) -> Result<()> {
-        // The full published root is persisted below (copy-a-mirror, A2), so
-        // EVERY distinct dispatch object it references must travel with the
-        // copy — not only the named tag's (B2). A tag-scoped update
-        // (`ocx index update pkg:1.0`) still writes the whole root, so a sibling
-        // tag left pointing at an object absent from `o/` could not resolve
-        // offline. Dedup by content digest (a dispatch object is
+        let scope = match identifier.tag() {
+            Some(tag) => RootScope::Tag(tag),
+            None => RootScope::Package,
+        };
+        // Every tag this write adopts needs its dispatch object present, or the
+        // pin it lands could not resolve offline (B2). Tags NOT adopted keep
+        // whatever object they already had — their pins are untouched, so their
+        // objects are too. Dedup by content digest (a dispatch object is
         // content-addressed) so tags a re-push aliased onto one index fetch it
         // once — one representative tag per distinct digest is enough, since
         // `persist_dispatch` fetches the object by tag.
@@ -171,6 +180,10 @@ impl LocalIndex {
         let tags: Vec<String> = root
             .tags
             .iter()
+            .filter(|(tag, _)| match scope {
+                RootScope::Tag(named) => *tag == named,
+                RootScope::Package => true,
+            })
             .filter(|(_, entry)| seen.insert(entry.content.clone()))
             .map(|(tag, _)| tag.clone())
             .collect();
@@ -185,8 +198,8 @@ impl LocalIndex {
                 let tagged = identifier.clone_with_tag(&tag);
                 async move {
                     log::debug!("Refreshing published tag '{}' for identifier '{}'.", tag, identifier);
-                    // `persist_dispatch` returns `(digest, manifest)` — a refresh
-                    // only needs the write side-effect.
+                    // `persist_dispatch` returns the fetched bytes/digest/manifest
+                    // — a refresh only needs the write side-effect.
                     this.persist_dispatch(source, &tagged).await.map(|_| ())
                 }
             })
@@ -194,7 +207,7 @@ impl LocalIndex {
             .try_collect::<()>()
             .await?;
 
-        self.persist_published_root(identifier, bytes).await
+        self.commit_published_root(identifier, bytes, scope).await
     }
 
     /// Derived-source refresh (`adr_index_indirection.md` A2/A3): persist each
@@ -239,7 +252,7 @@ impl LocalIndex {
                 async move {
                     log::debug!("Refreshing derived tag '{}' for identifier '{}'.", tag, identifier);
                     match this.persist_dispatch(source, &tagged).await? {
-                        Some((content, manifest)) => {
+                        Some((_, content, manifest)) => {
                             Ok::<_, crate::Error>(records_root_tag(&tag, &manifest).then_some((tag, content)))
                         }
                         None => {
@@ -270,200 +283,6 @@ impl LocalIndex {
         self.commit_root_tags(identifier, &fetched).await
     }
 
-    /// Sync one source's `c/index.json` catalog and re-snapshot the packages
-    /// whose root moved (`adr_index_indirection.md` F2).
-    ///
-    /// The catalog is **per-source** (A2): the diff basis and the persisted map
-    /// live at `<home>/<source>/c/index.json`, keyed by this source's namespace.
-    /// The flow, in F2's contract order:
-    ///
-    /// 1. Read the persisted per-source catalog as the diff basis.
-    /// 2. GET the remote catalog **outside** any lock and diff the per-package
-    ///    root digests against the persisted map. The digest diff is the whole
-    ///    sync mechanism — there is no HTTP validator anywhere.
-    /// 3. Re-snapshot only the moved (or new) packages via [`Self::refresh_tags`]
-    ///    — the published grow path (root + dispatch objects).
-    /// 4. Reconcile-commit the catalog under the source lock:
-    ///    [`IndexStore::begin_catalog_transaction`](crate::file_structure::IndexStore::begin_catalog_transaction)
-    ///    re-reads the on-disk map first, then the fetched entries are merged in
-    ///    — **never** a wholesale replace from the pre-lock read, so a concurrent
-    ///    per-package upsert is never clobbered. A moved row step 3 could not
-    ///    re-snapshot keeps its on-disk entry, which is exactly what makes the
-    ///    next sync re-diff and retry it (see the loop below). A commit that
-    ///    changes nothing writes nothing, so an unchanged catalog leaves the
-    ///    tree byte- and mtime-identical.
-    ///
-    /// Returns the sync outcome (the moved set) for reporting; remote-catalog
-    /// drift a caller did not re-snapshot is staleness ("update available"),
-    /// never an error (F1).
-    pub async fn sync_catalog(&self, source: &super::OcxIndex) -> Result<super::CatalogSyncOutcome> {
-        let namespace = source.namespace();
-
-        // Step 1 — the per-source catalog is the diff basis (F2). The
-        // reconcile-commit below re-reads under the lock, so this pre-lock read is
-        // only a basis for the network diff, never the map that gets written.
-        let previous = self
-            .index_store
-            .read_source_catalog(namespace)
-            .await?
-            .unwrap_or_default();
-
-        // Step 2 — network work happens OUTSIDE the transaction lock.
-        let outcome = source.sync_catalog(&previous).await?;
-
-        // Boundary validation (CWE-22, F2 "surfaces, never silently acts"): a
-        // published index's `c/index.json` keys are attacker-controlled for a
-        // mirrored or compromised source, and each key becomes a `repository`
-        // that `IndexStore` splits into path segments verbatim — so a key
-        // like `../../victim` would write outside the index home. Reject the
-        // WHOLE sync fail-closed if ANY key is not a well-formed repository
-        // path, before building a single filesystem path from one. `moved` is a
-        // subset of `catalog` (it is diffed from it), so this one pass guards
-        // both the re-snapshot loop below AND the persisted catalog map.
-        for key in outcome.catalog.keys() {
-            if let Err(error) = Self::validate_catalog_key(namespace, key) {
-                log::warn!("refusing catalog sync for index source '{namespace}': {error}");
-                return Err(error);
-            }
-        }
-
-        // Step 3 — re-snapshot only packages that ALREADY have a local root and
-        // whose digest moved (F2). `outcome.moved` is already restricted to
-        // entries present in the previous local catalog whose digest changed
-        // (`diff_moved`); this filter narrows it further to the MATERIALIZED
-        // subset. A package new to the local catalog, or a listing row (a catalog
-        // entry with no root document on disk), is NEVER auto-materialized here —
-        // it stays a listing row until first `update`d, and its catalog value is
-        // adopted in the batched merge below WITHOUT any fetch. The two filters
-        // together turn the old whole-catalog re-snapshot storm into
-        // O(changed-materialized) fetches. Each catalog key is the
-        // source-relative `<ns>/<pkg>` repository path; the published grow path
-        // routes through `fetch_root_document`.
-        let source_index = super::Index::from_source(source.clone());
-        let mut refreshed: std::collections::HashSet<&String> = std::collections::HashSet::new();
-        // Moved rows that ARE materialized locally but were not re-snapshotted,
-        // for either reason below. Their on-disk root is still the OLD one, so
-        // adopting the fetched (NEW) catalog value in step 4 would manufacture
-        // the exact root/catalog straddle A2 forbids, and both continuations of
-        // it dead-end: `IndexStore::read_root` self-heals the catalog BACK to
-        // the old root's digest and serves the STALE root — so a tag yanked in
-        // the new one is never surfaced — while a resolve-free run leaves the
-        // NEW value committed, and the next sync diffs NEW against NEW and sees
-        // no move. Either way the row is never retried. Keeping the on-disk
-        // entry (step 4) is what makes the next `ocx index update` re-diff it
-        // and try again.
-        let mut stale: std::collections::HashSet<&String> = std::collections::HashSet::new();
-        for repository in &outcome.moved {
-            if !crate::utility::fs::path_exists_lossy(&self.index_store.root_document_path(namespace, repository)).await
-            {
-                continue;
-            }
-            let identifier = oci::Identifier::new_registry(repository.clone(), namespace);
-            // A published index that lists a key its own `config.json` says it
-            // cannot express contradicts itself — and the root its fetched entry
-            // names is unfetchable by construction, since that 404 is what the
-            // `Outside` verdict was read off. Skip the row and keep syncing.
-            // Deliberately NOT hardened into `validate_catalog_key`, which fails
-            // the WHOLE sync closed because a traversal key is a filesystem-escape
-            // risk — a grammar violation is not, and failing there would abort
-            // before the catalog commit, leaving this source permanently stale on
-            // every later `index update`.
-            if source.jurisdiction(&identifier).await == super::Jurisdiction::Outside {
-                log::warn!(
-                    "index source '{namespace}' lists '{repository}', which its declared name grammar \
-                     cannot express — skipping re-snapshot"
-                );
-                stale.insert(repository);
-                continue;
-            }
-            // Non-fatal, for the same reason the skip above is: a per-package
-            // refresh failure must never veto the source-wide catalog commit.
-            // Publish skew alone reaches this (a catalog regenerated ahead of
-            // its roots, or a root rolled back, 404s `p/<key>.json`), and
-            // aborting here would leave every OTHER moved package unlanded —
-            // permanently, since each later `ocx index update` repeats it
-            // identically and exits 0. Keeping the row's old entry (step 4) is
-            // the retry, not a veto.
-            if let Err(error) = self.refresh_tags(&identifier, &source_index).await {
-                log::warn!(
-                    "index source '{namespace}': re-snapshot of '{repository}' failed, \
-                     keeping the local entry and retrying on the next update: {error}"
-                );
-                stale.insert(repository);
-                continue;
-            }
-            refreshed.insert(repository);
-        }
-
-        // Step 4 — reconcile-commit the fetched catalog in ONE transaction under
-        // the source lock. `commit` writes nothing when the merge changed
-        // nothing, so an unchanged catalog is a genuine no-op on disk.
-        {
-            let mut transaction = self.index_store.begin_catalog_transaction(namespace).await?;
-            // Merge the fetched entries into the freshly re-read on-disk map, but
-            // SKIP the re-snapshotted packages: step 3's refresh already committed
-            // their entries derived from the actually-persisted root bytes (F2
-            // "rewrite the root AND re-upsert its entry together"). Re-applying the
-            // fetched catalog value here would clobber that fresher, root-derived
-            // entry back to the pre-fetch remote claim — a manufactured
-            // root/catalog straddle under CDN skew. Every other fetched entry —
-            // unchanged rows, new listing rows, and changed listing rows — adopts
-            // its fetched value here in one batched write; an entry only in the
-            // on-disk map (a concurrent per-package upsert, or a package the remote
-            // dropped) survives. This is the reconcile, not a wholesale replace.
-            // A `stale` row is skipped for the OPPOSITE reason: its on-disk entry
-            // is the older one, and the only one that matches the root actually on
-            // disk. Adopting the fetched value would straddle them.
-            for (repository, catalog_entry) in &outcome.catalog {
-                if refreshed.contains(repository) || stale.contains(repository) {
-                    continue;
-                }
-                transaction.catalog().insert(repository.clone(), catalog_entry.clone());
-            }
-            transaction.commit().await?;
-        }
-        Ok(outcome)
-    }
-
-    /// Validates that a remote catalog `key` is a well-formed OCI repository
-    /// path under `namespace` before it is used to build a filesystem path
-    /// (CWE-22 boundary validation).
-    ///
-    /// A published index's `c/index.json` keys are attacker-controlled for a
-    /// mirrored or compromised source; each key becomes the `repository` of an
-    /// [`oci::Identifier`] (`new_registry`) and then a path via
-    /// `IndexStore::root_document_path` (`repository_path` splits it on `/`
-    /// verbatim), so a key like `../../victim` would escape the index home.
-    /// Rather than re-implement the grammar, reuse the canonical identifier
-    /// parser: parse `<namespace>/<key>` (which runs the directory-traversal +
-    /// repository-charclass checks) and require it round-trips to exactly this
-    /// namespace and repository with **no** tag or digest — so a `:` or `@`
-    /// smuggled into a key cannot slip through split as a tag/digest.
-    fn validate_catalog_key(namespace: &str, key: &str) -> Result<()> {
-        let malformed = |reason: String| super::error::Error::MalformedCatalogKey {
-            index_source: namespace.to_string(),
-            key: key.to_string(),
-            reason,
-        };
-        // The `reason` string IS this variant's design: two of its three call
-        // sites (the namespace/tag checks below) carry no underlying error at
-        // all, only a descriptive reason. For the parse case the parser's Display
-        // is exactly that reason, and nothing downstream matches on the parse
-        // error's structure (the boundary only needs "malformed → refuse
-        // fail-closed"), so flattening it into `reason` is intentional, not
-        // source erasure. A dedicated `#[source]`-bearing arm would have to live
-        // in `oci/index/error.rs`.
-        let identifier = oci::Identifier::parse(&format!("{namespace}/{key}"))
-            .map_err(|parse_error| malformed(parse_error.to_string()))?;
-        if identifier.registry() != namespace || identifier.repository() != key {
-            return Err(malformed("not a bare repository path under the source namespace".to_string()).into());
-        }
-        if identifier.tag().is_some() || identifier.digest().is_some() {
-            return Err(malformed("must not carry a tag or digest".to_string()).into());
-        }
-        Ok(())
-    }
-
     // ── Dispatch-only reads/writes (A3) ───────────────────────────────────────
 
     /// Persist the single dispatch object for `identifier` from `source` and
@@ -488,18 +307,20 @@ impl LocalIndex {
     ///   manifest is never copied into the local index (A3/B2) — it is fetched on
     ///   demand from the physical registry.
     ///
-    /// Returns the fetched `(digest, manifest)` — the dispatch object's digest
-    /// with its decoded shape, or the leaf manifest's own digest with the leaf
-    /// itself — or `Ok(None)` when the source has no manifest for `identifier`.
+    /// Returns the fetched `(bytes, digest, manifest)` verbatim — the dispatch
+    /// object's bytes and digest with its decoded shape, or the leaf manifest's
+    /// own — or `Ok(None)` when the source has no manifest for `identifier`.
     /// Callers that only need the digest for root growth (`refresh_published`,
-    /// `refresh_derived`) discard the manifest; `ChainedIndex`'s AbsentDispatch
-    /// recovery returns it directly to the caller instead of attempting a
-    /// doomed local-storage read-back (a leaf is never written to `o/`, A3).
+    /// `refresh_derived`) discard the rest; `ChainedIndex`'s AbsentDispatch
+    /// recovery returns the manifest directly to the caller instead of attempting
+    /// a doomed local-storage read-back (a leaf is never written to `o/`, A3),
+    /// and caches the bytes in the machine-global blob store, which is where a
+    /// leaf belongs.
     pub async fn persist_dispatch(
         &self,
         source: &super::Index,
         identifier: &oci::Identifier,
-    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+    ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
         let Some((bytes, digest, manifest)) = source.fetch_manifest_raw_bytes(identifier).await? else {
             return Ok(None);
         };
@@ -514,7 +335,7 @@ impl LocalIndex {
         if let oci::Manifest::ImageIndex(_) = &manifest {
             self.stage_dispatch_bytes(identifier, &digest, &bytes).await?;
         }
-        Ok(Some((digest, manifest)))
+        Ok(Some((bytes, digest, manifest)))
     }
 
     /// Like [`Self::persist_dispatch`], but fetches and decodes the dispatch
@@ -530,11 +351,8 @@ impl LocalIndex {
         &self,
         source: &super::Index,
         identifier: &oci::Identifier,
-    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-        Ok(source
-            .fetch_manifest_raw_bytes(identifier)
-            .await?
-            .map(|(_, digest, manifest)| (digest, manifest)))
+    ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
+        source.fetch_manifest_raw_bytes(identifier).await
     }
 
     /// Commit a single tag → `content` pointer for `identifier` into a DERIVED
@@ -852,38 +670,55 @@ impl LocalIndex {
         }))
     }
 
-    /// Persist a PUBLISHED (verbatim-copied) root document — the copy-a-mirror
-    /// counterpart to [`Self::commit_root_tag`] (`adr_index_indirection.md`
-    /// A2/F1/H). Takes the verbatim `bytes` a published source served
-    /// ([`super::Index::fetch_root_document`]) and writes them through the
-    /// source-scoped catalog transaction (`IndexStore::begin_catalog_transaction`
-    /// → `CatalogTransaction::write_root` → `commit`), so the local copy stays
-    /// byte-identical to the site and its `c/index.json` catalog entry
-    /// (`sha256(bytes)`) is upserted atomically alongside the root (F1).
+    /// Merge a fetched published root into the local copy
+    /// (`adr_index_indirection.md` A2, amended: the local index is AUTHORED,
+    /// not mirrored).
     ///
-    /// Unlike [`Self::commit_root_tag`], OCX never edits the bytes field-wise — a
-    /// published root is replaced whole, verbatim (copy-a-mirror). This is the
-    /// path `refresh_tags` / `sync_catalog` route published sources through, and
-    /// the grow-on-resolve path a Default write-through takes for a published
-    /// package (C2, per the plan's grow ≠ refresh ruling). `write_root` re-parses
-    /// `bytes` for its C3 cross-check and derives the catalog entry from those raw
-    /// bytes, so the caller passes no parsed form — the write is byte-verbatim.
-    pub(super) async fn persist_published_root(&self, identifier: &oci::Identifier, bytes: &[u8]) -> Result<()> {
+    /// **Merge is the only write verb.** The local copy is never replaced by a
+    /// fetched document, because it is not a mirror of one: it is the record of
+    /// what this machine snapshotted. So a write adds and updates within
+    /// `scope`, and never deletes — a tag only the local copy holds survives
+    /// every update, however the remote's own tag list has changed.
+    ///
+    /// [`RootScope`] decides how much is in scope: one named tag, or the whole
+    /// package. Nothing outside it is touched, which is what keeps
+    /// `ocx index update pkg:3.28` from moving a sibling pin, or the routing
+    /// pointer, on behalf of a user who named one version.
+    ///
+    /// Drift is adopted **silently**: no warning, no comparison, no diagnostic.
+    /// Whatever the fetched root says about tags outside the scope is not this
+    /// call's business, and reporting it here would make every resolve a
+    /// staleness check against the network. Staleness surfaces exactly once,
+    /// where it was asked for — `ocx index update`'s report.
+    ///
+    /// The merge runs on an order-preserving [`serde_json::Value`] and is
+    /// re-emitted through [`super::serialize_root`], the one canonical root
+    /// serializer, so every field OCX does not model rides through untouched and
+    /// the result stays in the hosted site's normal form.
+    pub(super) async fn commit_published_root(
+        &self,
+        identifier: &oci::Identifier,
+        fetched_bytes: &[u8],
+        scope: RootScope<'_>,
+    ) -> Result<()> {
         let source = identifier.registry();
         let repository = identifier.repository();
+        let repository_check =
+            |root: &super::wire::IndexRoot| super::parse_physical_repository(&root.repository).map(|_| ());
 
-        // Author the root + its `c/index.json` catalog entry atomically through
-        // the source-scoped transaction (F1): re-read + reconcile under the lock,
-        // then commit both together, so a concurrent per-package upsert of a
-        // DIFFERENT package is never clobbered.
+        // The whole read-merge-write runs under the source's catalog lock: the
+        // root and its `c/index.json` entry are one unit (F1), and a pre-lock
+        // read would let a concurrent writer's root be clobbered by this merge.
         let mut transaction = self.index_store.begin_catalog_transaction(source).await?;
-        transaction
-            .write_root(repository, bytes, |root| {
-                super::parse_physical_repository(&root.repository).map(|_| ())
-            })
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+
+        let committed = self.index_store.read_root_document_bytes(source, repository).await?;
+        // `None` = nothing in scope changed — the fetched root does not carry
+        // the named tag, or the copy already holds exactly these entries. A
+        // no-op write would churn the mtime of a tree people commit and rsync (A2).
+        if let Some(bytes) = merge_root(committed.as_deref(), fetched_bytes, scope) {
+            transaction.write_root(repository, &bytes, repository_check).await?;
+        }
+        transaction.commit().await
     }
 
     /// Stage already-fetched dispatch-object bytes into the wire-grammar object
@@ -903,6 +738,29 @@ impl LocalIndex {
         self.index_store
             .write_dispatch_object(identifier.registry(), identifier.repository(), digest, bytes)
             .await
+    }
+}
+
+#[cfg(test)]
+impl LocalIndex {
+    /// Seed `bytes` as `identifier`'s committed root, with the catalog entry
+    /// `CatalogTransaction::write_root` derives from them.
+    ///
+    /// Test scaffolding only. Production has no verbatim-replace writer any
+    /// more — every real write merges ([`LocalIndex::commit_published_root`]) —
+    /// but a test needs a way to put a package into a known committed state
+    /// without going through the code under test.
+    pub(super) async fn seed_root_document(&self, identifier: &oci::Identifier, bytes: &[u8]) -> Result<()> {
+        let mut transaction = self
+            .index_store
+            .begin_catalog_transaction(identifier.registry())
+            .await?;
+        transaction
+            .write_root(identifier.repository(), bytes, |root| {
+                super::parse_physical_repository(&root.repository).map(|_| ())
+            })
+            .await?;
+        transaction.commit().await
     }
 }
 
@@ -958,6 +816,111 @@ pub(super) enum DispatchResolution {
     /// the latter case the fetched bytes self-heal back into `o/`
     /// ([`LocalIndex::stage_dispatch_bytes`]) and dispatch continues.
     AbsentDispatch { content: oci::Digest },
+}
+
+/// How much of a fetched published root a write may adopt.
+///
+/// Both scopes only ever add and update. Neither deletes: the local index is
+/// authored, so a tag it holds is a snapshot this machine took, not a row that
+/// disappears because the site stopped listing it.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RootScope<'a> {
+    /// One named tag's entry. Every sibling pin and every package-level field —
+    /// `repository` included — stays exactly as committed. This is
+    /// `ocx index update pkg:3.28`, and every grow-on-resolve.
+    Tag(&'a str),
+    /// Every tag the remote lists, plus the package-level fields. This is
+    /// `ocx index update pkg` — the sanctioned point to take a routing
+    /// migration, because the user named the package and nothing narrower.
+    Package,
+}
+
+/// Merge a fetched published root into the `committed` one within `scope`,
+/// returning the bytes to write — or `None` when nothing in scope changed.
+///
+/// The document is walked as an order-preserving [`serde_json::Value`] rather
+/// than the typed [`super::wire::IndexRoot`], which is parse-only and models a
+/// subset: a typed round-trip would silently drop every human-governed field a
+/// newer index writer added. The emitted bytes come from
+/// [`super::serialize_root`], the canonical root serializer, so an untouched
+/// field cannot drift and the result stays in the site's normal form.
+///
+/// With no committed root — a package first seen — the merge runs against the
+/// fetched document with its `tags` emptied, so a first-sight `Tag` write lands
+/// exactly the tag it resolved rather than the site's whole tag list, and the
+/// package-level fields come along because there is nothing yet to protect.
+/// Committed bytes no reader accepts get the same treatment: recovering from a
+/// crashed write is not overwriting committed state, because bytes that do not
+/// parse hold no pin.
+fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) -> Option<Vec<u8>> {
+    let fetched_root: serde_json::Value = serde_json::from_slice(fetched).ok()?;
+    let adopted: Vec<(String, serde_json::Value)> = match scope {
+        RootScope::Tag(tag) => {
+            let Some(entry) = fetched_root.get("tags").and_then(|tags| tags.get(tag)).cloned() else {
+                // Publish skew: the source resolved the tag but its root does
+                // not list it. Inventing the pointer is not this path's business.
+                log::debug!("fetched root does not carry '{tag}' — leaving the committed root alone");
+                return None;
+            };
+            vec![(tag.to_string(), entry)]
+        }
+        RootScope::Package => fetched_root
+            .get("tags")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(tag, entry)| (tag.clone(), entry.clone()))
+            .collect(),
+    };
+
+    // The TYPED parse, not merely "is it JSON": a document missing `repository`
+    // merges cleanly and is then refused by `write_root`'s own `IndexRoot`
+    // parse, so every later update would re-merge and re-fail instead of healing.
+    let usable = committed.is_some_and(|bytes| serde_json::from_slice::<super::wire::IndexRoot>(bytes).is_ok());
+    let mut root: serde_json::Value = match committed.filter(|_| usable).map(serde_json::from_slice) {
+        Some(Ok(root)) => root,
+        _ => {
+            // Start from the fetched document with an empty tag map: its
+            // package-level fields are adopted (nothing to protect) while the
+            // scope still decides which tags land.
+            let mut base = fetched_root.clone();
+            if let Some(object) = base.as_object_mut() {
+                object.insert("tags".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+            }
+            base
+        }
+    };
+
+    let Some(object) = root.as_object_mut() else {
+        return Some(fetched.to_vec());
+    };
+    let mut changed = false;
+    if let RootScope::Package = scope {
+        // Package-level adoption: routing and every human-governed field the
+        // remote carries. Overwrite-only — a field the remote dropped stays,
+        // because merge never deletes.
+        for (key, value) in fetched_root.as_object().into_iter().flatten() {
+            if key != "tags" && object.get(key) != Some(value) {
+                object.insert(key.clone(), value.clone());
+                changed = true;
+            }
+        }
+    }
+    let tags = object
+        .entry("tags")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(tags) = tags.as_object_mut() else {
+        return Some(fetched.to_vec());
+    };
+    for (tag, entry) in adopted {
+        if tags.get(&tag) != Some(&entry) {
+            tags.insert(tag, entry);
+            changed = true;
+        }
+    }
+    // A first-sight package always writes: there is no committed document for
+    // an unchanged merge to leave alone.
+    (changed || !usable).then(|| super::serialize_root(&root))
 }
 
 /// Whether `tag` may be recorded as a version in an OCX-authored derived root
@@ -1191,10 +1154,15 @@ mod tests {
     }
 
     /// A minimal fake DERIVED source: one tag → the verbatim OCI image index a
-    /// registry would serve for it, and any digest → the flat platform manifest
-    /// that index names. Because it overrides `fetch_manifest_raw_bytes` with
-    /// matching `(bytes, digest)`, the index store's A3 verify accepts the
-    /// persisted objects.
+    /// registry would serve for it, plus that index and the flat platform
+    /// manifest it names, each addressable by its own digest. Because it
+    /// overrides `fetch_manifest_raw_bytes` with matching `(bytes, digest)`, the
+    /// index store's A3 verify accepts the persisted objects.
+    ///
+    /// A digest request is answered with the bytes that hash to THAT digest, as
+    /// a registry would — a fixture serving one fixed document for every digest
+    /// cannot tell a resolve that honours a committed pin from one that quietly
+    /// re-asks the floating tag.
     #[derive(Clone)]
     struct FakeSource {
         tag: String,
@@ -1228,11 +1196,14 @@ mod tests {
             &self,
             id: &oci::Identifier,
         ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
-            let (bytes, digest) = if id.digest().is_some() {
-                // The physical platform-manifest leaf.
-                image_manifest_bytes()
-            } else {
-                index_bytes()
+            let (leaf_bytes, leaf_digest) = image_manifest_bytes();
+            let (index_object_bytes, index_digest) = index_bytes();
+            let (bytes, digest) = match id.digest() {
+                Some(requested) if requested == index_digest => (index_object_bytes, index_digest),
+                // The physical platform-manifest leaf the index names.
+                Some(requested) if requested == leaf_digest => (leaf_bytes, leaf_digest),
+                Some(_) => return Ok(None),
+                None => (index_object_bytes, index_digest),
             };
             let manifest = serde_json::from_slice(&bytes).unwrap();
             Ok(Some((bytes, digest, manifest)))
@@ -1785,7 +1756,7 @@ mod tests {
         let index = make_index(dir);
         let id = tagged_id("3.28");
         let source = source_for_tag("3.28");
-        let (head, _manifest) = index
+        let (_bytes, head, _manifest) = index
             .persist_dispatch(&source, &id)
             .await
             .unwrap()
@@ -1989,7 +1960,7 @@ mod tests {
 
         // Persist the dispatch object and author the tag → content root pointer,
         // exactly as a chain walk would.
-        let (head, _manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
+        let (_bytes, head, _manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
         let (object_bytes, content) = index_bytes();
         assert_eq!(
             head, content,
@@ -2134,7 +2105,7 @@ mod tests {
             fetches: fetches.clone(),
         });
 
-        let (head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
+        let (_bytes, head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
         let (dispatch_bytes, dispatch_digest) = two_platform_index();
         assert_eq!(
             head, dispatch_digest,
@@ -2181,7 +2152,7 @@ mod tests {
         // A source whose tag resolves to a flat single-platform image MANIFEST.
         let source = bare_manifest_source_for_tag("3.28");
 
-        let (head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
+        let (_bytes, head, head_manifest) = index.persist_dispatch(&source, &id).await.unwrap().unwrap();
         let (_, manifest_digest) = image_manifest_bytes();
         assert_eq!(
             head, manifest_digest,
@@ -2758,7 +2729,7 @@ mod tests {
         // and its catalog entry == sha256(bytes) (copy-a-mirror, A2/F1).
         let bytes = br#"{  "repository" : "oci://ghcr.io/ocx-contrib/cmake" ,  "tags" : { }  }"#.to_vec();
 
-        index.persist_published_root(&tagged_id("3.28"), &bytes).await.unwrap();
+        index.seed_root_document(&tagged_id("3.28"), &bytes).await.unwrap();
 
         let store = store(&dir);
         let on_disk = std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap();
@@ -2788,7 +2759,7 @@ mod tests {
         seed.commit().await.unwrap();
 
         let bytes = br#"{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{}}"#.to_vec();
-        index.persist_published_root(&tagged_id("3.28"), &bytes).await.unwrap();
+        index.seed_root_document(&tagged_id("3.28"), &bytes).await.unwrap();
 
         let catalog = catalog_on_disk(&store.source_catalog_path(REGISTRY));
         assert_eq!(
@@ -2865,154 +2836,6 @@ mod tests {
         );
     }
 
-    // ── sync_catalog: catalog-key boundary validation (CWE-22, F2) ────────────
-    //
-    // A published index's `c/index.json` keys are attacker-controlled for a
-    // mirrored / compromised source. A key that is not a well-formed repository
-    // path — `../../victim`, a bare `..`, an absolute `/tmp/x`, an internal
-    // `a/../b`, a Windows-style `..\victim` — must fail the whole sync closed
-    // (`MalformedCatalogKey` → DataError) BEFORE any filesystem path is built,
-    // so nothing is written outside the index home.
-
-    /// A minimal [`IndexTransport`](super::super::IndexTransport) serving a
-    /// `format_version: 1` config and a caller-supplied `c/index.json` body, so
-    /// `LocalIndex::sync_catalog` reaches the catalog-key validation with an
-    /// attacker-chosen key set.
-    #[derive(Clone)]
-    struct CatalogTransport {
-        catalog_json: String,
-    }
-
-    #[async_trait]
-    impl super::super::IndexTransport for CatalogTransport {
-        async fn get(&self, url: &str) -> Result<super::super::IndexFetch> {
-            if url.ends_with("/config.json") {
-                return Ok(super::super::IndexFetch::Found {
-                    bytes: br#"{"format_version":1}"#.to_vec(),
-                });
-            }
-            if url.ends_with("/c/index.json") {
-                return Ok(super::super::IndexFetch::Found {
-                    bytes: self.catalog_json.clone().into_bytes(),
-                });
-            }
-            Ok(super::super::IndexFetch::NotFound)
-        }
-
-        fn box_clone(&self) -> Box<dyn super::super::IndexTransport> {
-            Box::new(self.clone())
-        }
-    }
-
-    /// Serialises a catalog with `key` (untrusted) plus one always-valid key so
-    /// the map is non-trivial. `serde_json` handles all escaping, so a
-    /// backslash in `key` round-trips into the JSON body verbatim.
-    /// A served `c/index.json` body carrying `key` alongside a benign entry —
-    /// in the format-version envelope the site serves, so the key check under
-    /// test is reached through the real parse.
-    fn catalog_with_key(key: &str) -> String {
-        let mut packages = serde_json::Map::new();
-        packages.insert(
-            key.to_string(),
-            serde_json::Value::String(format!("sha256:{}", "a".repeat(64))),
-        );
-        packages.insert(
-            "kitware/cmake".to_string(),
-            serde_json::Value::String(format!("sha256:{}", "b".repeat(64))),
-        );
-        serde_json::json!({ "format_version": 1, "packages": packages }).to_string()
-    }
-
-    fn ocx_source_with_catalog(catalog_json: String) -> super::super::OcxIndex {
-        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
-        super::super::OcxIndex::new(super::super::OcxIndexConfig {
-            transport: Box::new(CatalogTransport { catalog_json }),
-            base_url: "https://index.test".to_string(),
-            namespace: REGISTRY.to_string(),
-            client: oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new()))),
-            allow_yanked: false,
-            trusted_hosts: Vec::new(),
-        })
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sync_catalog_refuses_traversing_catalog_keys_and_writes_nothing() {
-        // `REGISTRY` is `example.com`, a valid registry host — `<ns>/<key>`
-        // therefore parses through the canonical grammar.
-        let malicious_keys = ["../../victim", "..", "/tmp/victim", "a/../b", "..\\victim"];
-
-        for key in malicious_keys {
-            let outside = TempDir::new().unwrap();
-            // A sentinel a sibling of the index home; its survival proves the
-            // refused sync never wrote outside the home.
-            let sentinel = outside.path().join("victim.json");
-            std::fs::write(&sentinel, b"original").unwrap();
-            let home = outside.path().join("index");
-
-            let local = LocalIndex::new(Config {
-                index_store: IndexStore::new(&home),
-            });
-            let source = ocx_source_with_catalog(catalog_with_key(key));
-
-            let error = local
-                .sync_catalog(&source)
-                .await
-                .expect_err(&format!("a malformed catalog key {key:?} must fail the sync closed"));
-            assert!(
-                matches!(
-                    error,
-                    crate::Error::OciIndex(super::super::error::Error::MalformedCatalogKey { .. })
-                ),
-                "expected MalformedCatalogKey for {key:?}, got {error:?}"
-            );
-
-            assert_eq!(
-                std::fs::read(&sentinel).unwrap(),
-                b"original",
-                "a refused catalog sync ({key:?}) must never write outside the index home"
-            );
-            // Nothing was snapshotted — no per-source catalog landed on disk.
-            assert!(
-                !home.join(REGISTRY).join("c").join("index.json").exists(),
-                "a refused catalog sync ({key:?}) must not persist a catalog"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_catalog_key_accepts_well_formed_repositories() {
-        for key in ["kitware/cmake", "cmake", "org/sub/tool", "foo.bar_baz-qux/a1"] {
-            LocalIndex::validate_catalog_key(REGISTRY, key)
-                .unwrap_or_else(|error| panic!("well-formed catalog key {key:?} must pass: {error}"));
-        }
-    }
-
-    #[test]
-    fn validate_catalog_key_rejects_traversal_and_malformed_keys() {
-        // Traversal escapes, an absolute path, a Windows-style backslash escape,
-        // an internal `..`, plus grammar violations (empty, uppercase, a
-        // tag-smuggling `:`), all refused as MalformedCatalogKey.
-        for key in [
-            "../../victim",
-            "..",
-            "/tmp/victim",
-            "a/../b",
-            "..\\victim",
-            "",
-            "Foo",
-            "pkg:tag",
-        ] {
-            assert!(
-                matches!(
-                    LocalIndex::validate_catalog_key(REGISTRY, key),
-                    Err(crate::Error::OciIndex(
-                        super::super::error::Error::MalformedCatalogKey { .. }
-                    ))
-                ),
-                "malformed catalog key {key:?} must be rejected as MalformedCatalogKey"
-            );
-        }
-    }
     // ── physical_reference: the local root IS the physical pointer ────────
 
     /// A published root document whose `repository` names a DIFFERENT physical
@@ -3027,7 +2850,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let local = make_index(&dir);
         local
-            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .seed_root_document(&repo_id(), &indirected_root_bytes())
             .await
             .unwrap();
 
@@ -3063,7 +2886,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let local = make_index(&dir);
         local
-            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .seed_root_document(&repo_id(), &indirected_root_bytes())
             .await
             .unwrap();
 
@@ -3119,7 +2942,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let local = make_index(&dir);
         local
-            .persist_published_root(&repo_id(), &indirected_root_bytes())
+            .seed_root_document(&repo_id(), &indirected_root_bytes())
             .await
             .unwrap();
 

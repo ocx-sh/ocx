@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::index_impl::IndexImpl;
-use super::local_index::{DispatchResolution, SourceKind};
+use super::local_index::{DispatchResolution, RootScope, SourceKind};
 use super::{ChainMode, Index, IndexOperation, Jurisdiction, LocalIndex, index_impl};
 use crate::file_structure::BlobStore;
 use crate::utility::singleflight;
@@ -81,6 +81,35 @@ fn is_plain_dns_name(host: &str) -> bool {
 /// post-fetch verify) so the recompute logic lives in exactly one place.
 fn digest_matches(bytes: &[u8], digest: &oci::Digest) -> bool {
     digest.algorithm().hash(bytes) == *digest
+}
+
+/// A digest-addressed walk must come back with the digest it asked for.
+///
+/// The requested digest is a pin — the committed root's `content`, or a lock's
+/// leaf — so a source answering with a different one moves it, which is exactly
+/// what addressing the walk by digest exists to prevent. `fetch_manifest_raw_bytes`
+/// only proves a source's bytes are self-consistent with the digest that source
+/// computed from them, never that either matches what the caller requested; the
+/// same gap `common.rs::verify_requested_digest` closes for the staging path.
+///
+/// This is integrity, not a drift comparison: it never consults remote state the
+/// caller did not already name, so the silence principle is untouched. A
+/// tag-addressed walk carries no requested digest and passes through.
+fn verify_walked_digest(
+    identifier: &oci::Identifier,
+    head: Option<(oci::Digest, oci::Manifest)>,
+) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+    let (Some(requested), Some((answered, _))) = (identifier.digest(), head.as_ref()) else {
+        return Ok(head);
+    };
+    if *answered != requested {
+        return Err(super::error::Error::WalkedDigestMismatch {
+            requested,
+            answered: answered.clone(),
+        }
+        .into());
+    }
+    Ok(head)
 }
 
 /// A curated local index plus an ordered list of upstream sources
@@ -617,7 +646,10 @@ impl ChainedIndex {
             .map_err(super::error::Error::SingleflightFailed)?;
         let handle = match acquisition {
             Acquisition::Leader(h) => h,
-            Acquisition::Resolved(head) => return Ok(head),
+            // A waiter reuses the leader's answer, so it must pass the same
+            // check — the leader verified its own, but this is the same
+            // untrusted answer reaching a second caller.
+            Acquisition::Resolved(head) => return verify_walked_digest(&walked, head),
         };
 
         // Leader path: walk sources and persist on first success. On
@@ -628,7 +660,7 @@ impl ChainedIndex {
         match self.fetch_and_persist_chain(&walked, grow_root).await {
             Ok(head) => {
                 handle.complete(head.clone());
-                Ok(head)
+                verify_walked_digest(&walked, head)
             }
             Err(e) => {
                 let arc = crate::error::ArcError::from(e);
@@ -668,7 +700,20 @@ impl ChainedIndex {
                 self.local_index.persist_dispatch(source, identifier).await
             };
             match fetched {
-                Ok(Some((digest, manifest))) => {
+                Ok(Some((bytes, digest, manifest))) => {
+                    // A leaf platform manifest belongs in the machine-global blob
+                    // store, not the index (A3/B2) — an image index is already in
+                    // `o/`. Caching it here is what lets the NEXT resolve of this
+                    // pin recover locally with zero network
+                    // (`recover_absent_dispatch`), which is the whole reason that
+                    // read exists. GC treats it as a cache: an installed package
+                    // roots it through its own `refs/blobs/`, and an evicted copy
+                    // is refetched by digest, byte-identical.
+                    if let (Some(store), oci::Manifest::Image(_)) = (&self.content_store, &manifest)
+                        && let Err(error) = store.write_blob(identifier.registry(), &digest, &bytes).await
+                    {
+                        log::debug!("could not cache the leaf manifest for '{identifier}' ({digest}): {error}");
+                    }
                     // Root growth gated on identifier shape (same contract as
                     // the legacy tag-pointer commit):
                     //   - tag-only (`cmake:1.0`)            → grow
@@ -697,10 +742,21 @@ impl ChainedIndex {
                             // C2 policy: a Default write-through resolve of a
                             // published package ALSO grows the local copy —
                             // symmetric with derived, removing the
-                            // install→offline asymmetry.
+                            // install→offline asymmetry. It grows by exactly the
+                            // tag it resolved and nothing else, first sight
+                            // included: sibling pins and the `repository`
+                            // pointer are not this resolve's to write, silently
+                            // (`RootScope::Tag`). Adopting a whole package is
+                            // `ocx index update <pkg>`, which the user runs
+                            // naming what they want moved.
                             SourceKind::Published => {
+                                let tag = identifier
+                                    .tag()
+                                    .expect("grow branch is gated on identifier.tag().is_some()");
                                 if let Some((root_bytes, _root)) = source.fetch_root_document(identifier).await? {
-                                    self.local_index.persist_published_root(identifier, &root_bytes).await?;
+                                    self.local_index
+                                        .commit_published_root(identifier, &root_bytes, RootScope::Tag(tag))
+                                        .await?;
                                 }
                             }
                             // The same gate the update path applies
@@ -972,7 +1028,21 @@ impl index_impl::IndexImpl for ChainedIndex {
                 // miss (`None`, no corruption) grows the local root on
                 // success (C2 policy).
                 let grow_root = !corrupt_known && !matches!(local, Some(DispatchResolution::AbsentDispatch { .. }));
-                self.walk_chain(identifier, grow_root).await
+                // The committed root ALREADY pins this tag to `content`, so the
+                // walk asks for that digest, never for the tag. Asking the tag
+                // would answer with whatever it points at now — moving a pin the
+                // user never named, which is exactly what the local copy exists
+                // to prevent. The sibling `fetch_manifest_digest` short-circuits
+                // from the same pin with zero network; addressing the walk by
+                // digest is what keeps the two answers identical. Digest-addressed
+                // callers already carry their own pin, so nothing changes for them.
+                let pinned = match &local {
+                    Some(DispatchResolution::AbsentDispatch { content }) if !is_digest_addressed => {
+                        Some(identifier.clone_with_digest(content.clone()))
+                    }
+                    _ => None,
+                };
+                self.walk_chain(pinned.as_ref().unwrap_or(identifier), grow_root).await
             }
         }
     }
@@ -1520,7 +1590,7 @@ mod chain_refs_tests {
     /// what a successful `ChainedIndex` walk would leave behind
     /// (`adr_index_indirection.md` A3 — `persist_dispatch` + `commit_root_tag`).
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let (digest, _manifest) = cache
+        let (_bytes, digest, _manifest) = cache
             .persist_dispatch(source, identifier)
             .await
             .unwrap()
@@ -2913,8 +2983,14 @@ mod chain_refs_tests {
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _identifier: &Identifier,
+            identifier: &Identifier,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            // Digest-honest, as a registry is: answering one fixed document for
+            // every digest lets a test green on a resolve that asked for
+            // something else entirely.
+            if identifier.digest().is_some_and(|requested| requested != digest_a()) {
+                return Ok(None);
+            }
             Ok(Some((
                 manifest_a_bytes().to_vec(),
                 digest_a(),
@@ -3155,8 +3231,12 @@ mod chain_refs_tests {
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _identifier: &Identifier,
+            identifier: &Identifier,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            // Digest-honest, as a registry is — see `PublishedSource`'s note.
+            if identifier.digest().is_some_and(|requested| requested != self.digest()) {
+                return Ok(None);
+            }
             *self.calls.lock().unwrap() += 1;
             Ok(Some((
                 self.bytes.to_vec(),
@@ -3374,6 +3454,455 @@ mod chain_refs_tests {
         assert_eq!(spy.calls(), 0, "policy block must fire before any source contact");
     }
 
+    // ── the committed pin decides, never the live tag (the index IS the lock) ─
+    //
+    // A bare-leaf tag (single-platform) never gains an `o/` object by design, so
+    // every resolve of one reports `AbsentDispatch` and, once the blob store no
+    // longer holds the leaf, reaches the source walk. What it must ask the
+    // source for is the digest the committed root PINS — asking for the tag
+    // would return whatever the tag points at now, silently moving a pin the
+    // user never named.
+
+    /// The leaf a committed root pins. Single-platform image manifests, so
+    /// nothing is ever written to `o/` (A3) — the shape that makes the walk the
+    /// deciding step.
+    const PINNED_LEAF_JSON: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
+    /// The leaf the same tag points at after a re-push — different bytes, so a
+    /// different digest, still fetchable by digest like the pinned one.
+    const CURRENT_LEAF_JSON: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":3},"layers":[]}"#;
+
+    fn pinned_leaf_digest() -> Digest {
+        Algorithm::Sha256.hash(PINNED_LEAF_JSON)
+    }
+    fn current_leaf_digest() -> Digest {
+        Algorithm::Sha256.hash(CURRENT_LEAF_JSON)
+    }
+
+    /// A registry whose tag was re-pushed: the tag now serves
+    /// [`CURRENT_LEAF_JSON`], while [`PINNED_LEAF_JSON`] stays addressable by
+    /// digest. Counts tag-addressed fetches so a test can prove a committed pin
+    /// is never re-resolved through the floating tag.
+    #[derive(Clone)]
+    struct RepushedLeafSource {
+        tag_fetches: Arc<Mutex<usize>>,
+    }
+
+    impl RepushedLeafSource {
+        fn new() -> Self {
+            Self {
+                tag_fetches: Arc::new(Mutex::new(0)),
+            }
+        }
+        fn tag_fetches(&self) -> usize {
+            *self.tag_fetches.lock().unwrap()
+        }
+        fn served(&self, identifier: &Identifier) -> Option<&'static [u8]> {
+            match identifier.digest() {
+                Some(digest) if digest == pinned_leaf_digest() => Some(PINNED_LEAF_JSON),
+                Some(digest) if digest == current_leaf_digest() => Some(CURRENT_LEAF_JSON),
+                Some(_) => None,
+                None => {
+                    *self.tag_fetches.lock().unwrap() += 1;
+                    Some(CURRENT_LEAF_JSON)
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for RepushedLeafSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(vec![TAG.to_string()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            Ok(self.served(identifier).map(|bytes| {
+                (
+                    bytes.to_vec(),
+                    Algorithm::Sha256.hash(bytes),
+                    serde_json::from_slice(bytes).unwrap(),
+                )
+            }))
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// The invariant: a tag the local root already pins resolves to the PINNED
+    /// digest even when the registry has moved the tag on. The blob store holds
+    /// nothing, so the answer comes from the source walk — which must address it
+    /// by the pinned digest, never by the tag.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn absent_dispatch_resolve_returns_the_pinned_leaf_not_the_moved_tag() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        assert_ne!(pinned_leaf_digest(), current_leaf_digest());
+
+        cache
+            .commit_root_tag(&tagged_id(), &pinned_leaf_digest())
+            .await
+            .unwrap();
+        let root_path = index_store(&dir).root_document_path(REGISTRY, REPO);
+        let root_before = std::fs::read(&root_path).unwrap();
+
+        // No content store: the blob-store recovery misses, so the source walk
+        // is what answers — exactly the state `ocx clean` leaves behind.
+        let source = RepushedLeafSource::new();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(source.clone())], ChainMode::Default);
+
+        let (digest, manifest) = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("the pinned leaf is still fetchable by digest");
+        assert_eq!(
+            digest,
+            pinned_leaf_digest(),
+            "the committed pin decides the resolve, never the source's current tag"
+        );
+        assert!(matches!(manifest, Manifest::Image(_)));
+        assert_eq!(
+            source.tag_fetches(),
+            0,
+            "a committed pin must be fetched by digest — asking the tag is what moves it"
+        );
+        assert_eq!(
+            std::fs::read(&root_path).unwrap(),
+            root_before,
+            "recovering a pinned leaf must not rewrite the root"
+        );
+
+        // `fetch_manifest_digest` already short-circuits from the pin with zero
+        // network; the two must agree or one command's answer contradicts the other.
+        let confirmed = chained
+            .fetch_manifest_digest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("the pin answers the digest read locally");
+        assert_eq!(confirmed, pinned_leaf_digest());
+    }
+
+    /// A source that answers a digest-addressed walk with different content moves
+    /// the pin unless the answer is checked. Addressing the walk by digest is
+    /// only half the guarantee — the other half is refusing an answer that does
+    /// not carry the digest that was asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_answering_a_pinned_walk_with_other_content_is_refused() {
+        /// Answers every request with `CURRENT_LEAF_JSON`, whatever was asked
+        /// for — a registry that re-pushed under a digest it kept serving, or a
+        /// hostile mirror.
+        #[derive(Clone)]
+        struct WrongAnswerSource;
+
+        #[async_trait]
+        impl index_impl::IndexImpl for WrongAnswerSource {
+            async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+                Ok(Some(vec![TAG.to_string()]))
+            }
+            async fn fetch_manifest(
+                &self,
+                identifier: &Identifier,
+                _op: IndexOperation,
+            ) -> Result<Option<(Digest, Manifest)>> {
+                Ok(self
+                    .fetch_manifest_raw_bytes(identifier)
+                    .await?
+                    .map(|(_, digest, manifest)| (digest, manifest)))
+            }
+            async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+                Ok(Some(current_leaf_digest()))
+            }
+            async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            async fn fetch_manifest_raw_bytes(&self, _: &Identifier) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+                Ok(Some((
+                    CURRENT_LEAF_JSON.to_vec(),
+                    current_leaf_digest(),
+                    serde_json::from_slice(CURRENT_LEAF_JSON).unwrap(),
+                )))
+            }
+            fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+                Box::new(self.clone())
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        cache
+            .commit_root_tag(&tagged_id(), &pinned_leaf_digest())
+            .await
+            .unwrap();
+        let root_path = index_store(&dir).root_document_path(REGISTRY, REPO);
+        let root_before = std::fs::read(&root_path).unwrap();
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(WrongAnswerSource)], ChainMode::Default);
+        let error = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("an answer that is not the digest we asked for must not be accepted");
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "a wrong answer at a trust boundary is a data error, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&root_path).unwrap(),
+            root_before,
+            "the pin must be exactly where it was"
+        );
+    }
+
+    /// The leaf bytes a resolve fetched land in the machine-global blob store, so
+    /// the next resolve of the same pin needs no source at all (A3 step 2 / B2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn leaf_resolve_warms_the_blob_store_for_the_next_offline_one() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        cache
+            .commit_root_tag(&tagged_id(), &pinned_leaf_digest())
+            .await
+            .unwrap();
+
+        let chained = Index::from_chained_with_content_store(
+            cache.clone(),
+            vec![Index::from_impl(RepushedLeafSource::new())],
+            ChainMode::Default,
+            blobs.clone(),
+        );
+        let (digest, _) = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("the pinned leaf resolves through the source");
+        assert_eq!(digest, pinned_leaf_digest());
+
+        assert_eq!(
+            blobs
+                .read_blob(REGISTRY, &pinned_leaf_digest())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(PINNED_LEAF_JSON),
+            "a fetched leaf manifest must be cached verbatim so the next recovery reads it locally"
+        );
+
+        // Same pin, no sources, offline: only the warmed blob store can answer.
+        let offline = Index::from_chained_with_content_store(cache, vec![], ChainMode::Offline, blobs);
+        let (offline_digest, manifest) = offline
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("the warmed blob store answers offline with zero network");
+        assert_eq!(offline_digest, pinned_leaf_digest());
+        assert!(matches!(manifest, Manifest::Image(_)));
+    }
+
+    // ── grow-on-resolve adopts one tag, never a whole root ────────────────
+    //
+    // Resolving a tag the local copy has never seen must add exactly that tag.
+    // Copying the fetched root over the committed one would move every sibling
+    // pin and the `repository` routing pointer at the same time — an update the
+    // user never asked for, performed by a command that only reads.
+
+    /// A published source whose root has moved on since the local copy was
+    /// taken: `TAG` now points at a different object, `SIBLING_TAG` is new, and
+    /// the physical `repository` was re-pointed at another host.
+    #[derive(Clone)]
+    struct MovedPublishedSource;
+
+    const SIBLING_TAG: &str = "3.29";
+    const LOCAL_REPOSITORY: &str = "oci://old.example/cmake";
+    const FETCHED_REPOSITORY: &str = "oci://new.example/cmake";
+
+    /// The root the SOURCE serves now — `TAG` re-pointed at `digest_b`,
+    /// `SIBLING_TAG` added, `repository` moved.
+    fn fetched_root_bytes() -> Vec<u8> {
+        format!(
+            "{{\n  \"repository\": \"{FETCHED_REPOSITORY}\",\n  \"tags\": {{\n    \
+             \"{TAG}\": {{ \"content\": \"{}\", \"observed\": \"2026-08-01T00:00:00Z\" }},\n    \
+             \"{SIBLING_TAG}\": {{ \"content\": \"{}\", \"observed\": \"2026-08-02T00:00:00Z\" }}\n  }}\n}}\n",
+            digest_b(),
+            digest_b()
+        )
+        .into_bytes()
+    }
+
+    /// The root the local copy COMMITTED earlier — `TAG` pinned to `digest_a`,
+    /// no sibling, the original `repository`.
+    fn committed_root_bytes() -> Vec<u8> {
+        format!(
+            "{{\n  \"repository\": \"{LOCAL_REPOSITORY}\",\n  \"tags\": {{\n    \
+             \"{TAG}\": {{ \"content\": \"{}\", \"observed\": \"2026-07-01T00:00:00Z\" }}\n  }}\n}}\n",
+            digest_a()
+        )
+        .into_bytes()
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for MovedPublishedSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(vec![TAG.to_string(), SIBLING_TAG.to_string()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, manifest)| (digest, manifest)))
+        }
+        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(self
+                .fetch_manifest_raw_bytes(identifier)
+                .await?
+                .map(|(_, digest, _)| digest))
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &Identifier,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            // Whatever is asked for, the source now serves `digest_b` — the
+            // moved-on state. Addressed by digest, it answers with the bytes
+            // hashing to it, as a registry does.
+            let digest = match identifier.digest() {
+                Some(requested) if requested == digest_a() => digest_a(),
+                Some(requested) if requested == digest_b() => digest_b(),
+                Some(_) => return Ok(None),
+                None => digest_b(),
+            };
+            Ok(Some((bytes_for(&digest), digest.clone(), manifest_for(&digest))))
+        }
+        async fn fetch_root_document(&self, _: &Identifier) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
+            let bytes = fetched_root_bytes();
+            let root = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, root)))
+        }
+        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn source_kind(&self) -> super::SourceKind {
+            super::SourceKind::Published
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Resolving a NEW sibling tag of an already-committed published package
+    /// adopts that one tag and nothing else: the tag the copy already pins keeps
+    /// its digest, and the `repository` routing pointer is untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grow_on_resolve_adopts_only_the_resolved_tag_of_a_committed_published_root() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let store = index_store(&dir);
+        store
+            .write_root_document(REGISTRY, REPO, &committed_root_bytes())
+            .await
+            .unwrap();
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(MovedPublishedSource)], ChainMode::Default);
+        let sibling = Identifier::new_registry(REPO, REGISTRY).clone_with_tag(SIBLING_TAG);
+        let (digest, _) = chained
+            .fetch_manifest(&sibling, IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("a first resolve of an unknown tag grows the local copy");
+        assert_eq!(digest, digest_b());
+
+        let after: super::super::IndexRoot =
+            serde_json::from_slice(&std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap()).unwrap();
+        assert_eq!(
+            after.tags.get(TAG).map(|entry| entry.content.clone()),
+            Some(digest_a()),
+            "a tag the copy already pins must keep its digest — nobody asked to update it"
+        );
+        assert_eq!(
+            after.tags.get(SIBLING_TAG).map(|entry| entry.content.clone()),
+            Some(digest_b()),
+            "the newly-resolved tag is adopted from the fetched root"
+        );
+        assert_eq!(
+            after.repository, LOCAL_REPOSITORY,
+            "the committed routing pointer must survive a resolve of an unrelated tag"
+        );
+    }
+
+    /// A package the local copy has never seen lands the tag that was resolved
+    /// and its routing pointer — not the site's whole tag list. First sight is
+    /// no exception to the scope: the resolve still only adds what it resolved,
+    /// it just has an empty document to add it to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grow_on_resolve_lands_only_the_resolved_tag_of_a_new_published_package() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let store = index_store(&dir);
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(MovedPublishedSource)], ChainMode::Default);
+        chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("first resolve of an unknown package");
+
+        let root: super::super::IndexRoot =
+            serde_json::from_slice(&std::fs::read(store.root_document_path(REGISTRY, REPO)).unwrap()).unwrap();
+        assert_eq!(
+            root.tags.keys().collect::<Vec<_>>(),
+            vec![TAG],
+            "only the resolved tag lands, though the site lists a sibling too"
+        );
+        assert_eq!(
+            root.repository, FETCHED_REPOSITORY,
+            "routing comes from the fetched root — there was no committed pointer to protect"
+        );
+    }
+
     // ── authoritative-stop on a clean miss (no silent fallthrough) ─────────
 
     /// A fake source claiming authoritative ownership of `REGISTRY`'s
@@ -3479,7 +4008,7 @@ mod chain_refs_tests {
     async fn seed_indirected_root(cache: &LocalIndex) {
         let bytes = format!(r#"{{"repository":"oci://{PHYSICAL_REGISTRY}/{PHYSICAL_REPO}","tags":{{}}}}"#);
         cache
-            .persist_published_root(&Identifier::new_registry(REPO, REGISTRY), bytes.as_bytes())
+            .seed_root_document(&Identifier::new_registry(REPO, REGISTRY), bytes.as_bytes())
             .await
             .unwrap();
     }
@@ -3827,7 +4356,7 @@ mod chain_refs_tests {
     async fn seed_root_pointing_at(cache: &LocalIndex, logical_registry: &str, physical: &str) {
         let bytes = format!(r#"{{"repository":"oci://{physical}","tags":{{}}}}"#);
         cache
-            .persist_published_root(&Identifier::new_registry(REPO, logical_registry), bytes.as_bytes())
+            .seed_root_document(&Identifier::new_registry(REPO, logical_registry), bytes.as_bytes())
             .await
             .unwrap();
     }
@@ -4361,7 +4890,7 @@ mod tests {
     /// Seed the cache with the full dispatch chain (root tag pointer +
     /// dispatch object) so subsequent cache-only reads succeed.
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let (digest, _manifest) = cache
+        let (_bytes, digest, _manifest) = cache
             .persist_dispatch(source, identifier)
             .await
             .unwrap()

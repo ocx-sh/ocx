@@ -96,10 +96,9 @@ impl IndexStore {
     /// host-independently, exactly the ways [`super::repository_path`]'s
     /// verbatim `/`-split could land a read or write outside the index home.
     ///
-    /// The primary boundary is the catalog-key validation in
-    /// [`crate::oci::index::LocalIndex::sync_catalog`]; this is the store-level
-    /// last line so no repository-keyed read or write ever touches a path
-    /// outside its source subtree, whatever the caller.
+    /// This is the only boundary: nothing turns a remote catalog key into a
+    /// local path any more, so no repository-keyed read or write ever touches a
+    /// path outside its source subtree, whatever the caller.
     fn ensure_repository_contained(repository: &str) -> Result<()> {
         crate::utility::fs::path::join_under_root(Path::new("/ocx-index-home"), Path::new(repository))
             .map(|_| ())
@@ -801,11 +800,10 @@ impl IndexStore {
     /// acquiring the lock, before committing" contract).
     ///
     /// This is the **single** entry point for every catalog mutation for
-    /// `source` — a per-package root+entry upsert
-    /// ([`CatalogTransaction::write_root`]) or a whole-catalog reconcile-merge
-    /// (F2 sync, mutate [`CatalogTransaction::catalog`] directly) — so no
-    /// writer can bypass the re-read. All network work (fetching a remote
-    /// root, dispatch object, or catalog) MUST happen before this call.
+    /// `source`, so no writer can bypass the re-read. In production there is
+    /// exactly one mutation: [`CatalogTransaction::write_root`]'s per-package
+    /// root+entry upsert. All network work (fetching a remote root or dispatch
+    /// object) MUST happen before this call.
     pub async fn begin_catalog_transaction(&self, source: &str) -> Result<CatalogTransaction<'_>> {
         let lock = self
             .lock_source("index-catalog", source, "c/index.json", SOURCE_LOCK_TIMEOUT)
@@ -886,9 +884,11 @@ pub struct CatalogTransaction<'store> {
 }
 
 impl CatalogTransaction<'_> {
-    /// The freshly re-read (post-lock) catalog map. Mutate in place for a
-    /// whole-catalog reconcile-merge (F2 sync); [`Self::write_root`] mutates
-    /// it too, for the per-package upsert case.
+    /// The freshly re-read (post-lock) catalog map.
+    ///
+    /// [`Self::write_root`] is the only production writer — it upserts the
+    /// entry it derives from the root bytes it just wrote. Direct mutation is a
+    /// test seam for putting a catalog into a chosen state.
     pub fn catalog(&mut self) -> &mut CatalogIndex {
         &mut self.catalog
     }
@@ -1154,8 +1154,9 @@ mod wire_grammar_tests {
 
     // ── 1b. Containment: a traversing repository is refused, nothing escapes ──
     //
-    // Defense-in-depth (CWE-22) behind `LocalIndex::sync_catalog`'s catalog-key
-    // boundary validation: a repository reaching a wire-grammar path builder is
+    // Containment (CWE-22) at the wire-grammar path builders — the only guard
+    // left now that nothing turns a remote catalog key into a local path: a
+    // repository reaching a wire-grammar path builder is
     // split on `/` verbatim (`repository_path`), so `..`, an absolute segment,
     // or a Windows/backslash escape would join outside the source subtree. Every
     // repository-keyed read/write refuses such a value as a `DataError` and
@@ -1166,8 +1167,7 @@ mod wire_grammar_tests {
     /// Windows-style backslash escape (rejected host-independently). `a/../b`
     /// resolves WITHIN the root, so it is intentionally NOT in this set — the
     /// containment invariant is "stays under the source root", not "contains no
-    /// `..` component"; the sync-catalog boundary (which parses full identifier
-    /// grammar) is the layer that rejects an internal `..`.
+    /// `..` component".
     const TRAVERSING_REPOSITORIES: &[&str] = &["../../victim", "..", "/tmp/victim", "..\\victim"];
 
     #[tokio::test(flavor = "multi_thread")]

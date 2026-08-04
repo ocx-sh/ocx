@@ -658,147 +658,6 @@ def test_deprecated_status_resolves_with_stderr_warning(
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_sync_unconditional_get_and_moved_diff(
-    ocx: OcxRunner,
-    unique_repo: str,
-    tmp_path: Path,
-    index_server: static_index.StaticIndexServer,
-) -> None:
-    """Catalog sync: unconditional GET + moved-only re-snapshot.
-
-    The catalog is fetched whole every run and diffed against the local copy;
-    no HTTP validator is sent or stored, so an unchanged catalog is a `200`
-    that moves nothing rather than a `304`.
-
-    Updated for the corrected B3 listing-row contract (F2): a package that is
-    merely NEW to the local catalog is recorded as a listing row and NOT
-    auto-materialized by the piggyback — only a package with an existing local
-    root whose remote digest moved is re-snapshotted. The first-sync assertion
-    below therefore now requires pkgB to be a listing row (root absent), the
-    opposite of the pre-fix behavior where `diff_moved` treated every
-    absent-from-previous entry as "moved" and re-snapshotted the whole catalog.
-    See `test_piggyback_catalog_sync_snapshots_only_the_named_package` for the
-    single-package proof of the same contract.
-    """
-    pkg_a = make_package(
-        ocx, f"{unique_repo}a", "1.0.0", tmp_path, new=True, index=False
-    )
-    pkg_b = make_package(
-        ocx, f"{unique_repo}b", "1.0.0", tmp_path, new=True, index=False
-    )
-    leaf_a = fetch_platform_manifest_digest(ocx.registry, pkg_a.repo, pkg_a.tag)
-    leaf_b = fetch_platform_manifest_digest(ocx.registry, pkg_b.repo, pkg_b.tag)
-    os_a, arch_a = pkg_a.platform.split("/")
-    os_b, arch_b = pkg_b.platform.split("/")
-
-    configure_index_source(ocx, index_server)
-    static_index.write_config(index_server.root)
-    repo_a = f"{unique_repo}/pkga"
-    repo_b = f"{unique_repo}/pkgb"
-    entry_a = static_index.write_package(
-        index_server.root,
-        repository=repo_a,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_a.repo}",
-        platform_digest=leaf_a,
-        os=os_a,
-        architecture=arch_a,
-    )
-    entry_b = static_index.write_package(
-        index_server.root,
-        repository=repo_b,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_b.repo}",
-        platform_digest=leaf_b,
-        os=os_b,
-        architecture=arch_b,
-    )
-    static_index.write_catalog(
-        index_server.root, {repo_a: entry_a.root_digest, repo_b: entry_b.root_digest}
-    )
-
-    index_dir = tmp_path / "index_dir"
-    index_dir.mkdir()
-
-    # First sync: only the NAMED package (pkgA) is materialized. pkgB is new to
-    # the local catalog, so the piggyback records it as a LISTING ROW in
-    # c/index.json without fetching its root — materialized only when first
-    # `update`d (F2, corrected contract).
-    ocx.plain("--index", str(index_dir), "index", "update", entry_a.logical_id)
-    assert _root_document_path(index_dir, repo_a).is_file()
-    assert not _root_document_path(index_dir, repo_b).is_file(), (
-        "the first catalog sync must NOT re-snapshot pkgB — a package new to the "
-        "local catalog is a listing row (F2), materialized only when first updated"
-    )
-    assert any(
-        record.path.endswith("/c/index.json") for record in index_server.requests
-    )
-
-    # Second sync: catalog content is unchanged -> the GET is re-issued in
-    # full and answered 200, the digest diff is empty, and neither package is
-    # touched by the piggyback. The fixture answers 304 to an `If-None-Match`,
-    # so asserting 200 also proves this binary sends none.
-    catalog_path = index_dir / "ocx.sh" / "c" / "index.json"
-    catalog_before = (catalog_path.read_bytes(), catalog_path.stat().st_mtime_ns)
-    checkpoint = len(index_server.requests)
-    ocx.plain("--index", str(index_dir), "index", "update", entry_a.logical_id)
-    since = index_server.requests[checkpoint:]
-    catalog_requests = [
-        record for record in since if record.path.endswith("/c/index.json")
-    ]
-    assert catalog_requests, "the second run must still fetch the catalog"
-    assert all(record.if_none_match is None for record in since), (
-        "nothing may send If-None-Match: "
-        f"{[(r.path, r.if_none_match) for r in since if r.if_none_match]}"
-    )
-    assert catalog_requests[-1].status == 200, (
-        f"an unconditional GET must be answered 200, got {catalog_requests[-1].status}"
-    )
-    assert not any(repo_b in record.path for record in since), (
-        "pkgB must not be re-fetched by the piggyback when its catalog entry did not move"
-    )
-    assert (catalog_path.read_bytes(), catalog_path.stat().st_mtime_ns) == catalog_before, (
-        "an unchanged catalog must not be rewritten — a byte-identical rewrite still churns the "
-        "mtime of a tree that gets committed and rsync'd, so compare the timestamp too"
-    )
-    assert not (index_dir / "ocx.sh" / "c" / "index.json.etag").exists(), (
-        "no per-machine validator sidecar may be written into the index tree"
-    )
-
-    # Third sync: only pkgB's root changes (its catalog digest moves) -> the
-    # piggyback re-snapshots pkgB only. Name pkgB directly this time so a hit
-    # on pkgA's URLs can only come from the (absent) piggyback re-snapshot.
-    entry_b2 = static_index.write_package(
-        index_server.root,
-        repository=repo_b,
-        tag="1.0.0",
-        physical_repository=f"oci://{ocx.registry}/{pkg_b.repo}",
-        platform_digest=leaf_b,
-        os=os_b,
-        architecture=arch_b,
-        status="deprecated",
-        deprecated_message="refreshed",
-    )
-    static_index.write_catalog(
-        index_server.root, {repo_a: entry_a.root_digest, repo_b: entry_b2.root_digest}
-    )
-    checkpoint = len(index_server.requests)
-    ocx.plain("--index", str(index_dir), "index", "update", entry_b.logical_id)
-    since = index_server.requests[checkpoint:]
-    assert any(repo_b in record.path for record in since), (
-        "pkgB (moved) must be re-fetched"
-    )
-    assert not any(repo_a in record.path for record in since), (
-        "pkgA (unchanged in the catalog) must not be re-fetched by the piggyback"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 7 — migration-resolve: repository pointer moves, logical id + committed
-#     lock survive
-# ---------------------------------------------------------------------------
-
-
 def test_repository_migration_preserves_logical_id_and_committed_lock(
     ocx: OcxRunner,
     unique_repo: str,
@@ -868,9 +727,11 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
         os=os_name,
         architecture=arch_name,
     )
-    # A live re-fetch (the root is volatile, only refreshed by `index update`)
-    # re-verifies + re-persists the root against the new physical host.
-    ocx.plain("--index", str(index_dir), "index", "update", logical_id)
+    # A BARE named update is the sanctioned point to take a migration: naming
+    # the package with no tag is what adopts its package-level fields, routing
+    # pointer included. A tagged update would move the tag's pin and leave the
+    # pointer alone, which is the whole reason the two scopes differ.
+    ocx.plain("--index", str(index_dir), "index", "update", f"ocx.sh/{repository}")
 
     # The migrated root re-verifies and re-stores under the SAME logical id,
     # naming the NEW physical repository. The dispatch object (keyed by content
@@ -1190,13 +1051,14 @@ def test_tag_scoped_update_preserves_sibling_tag_in_persisted_root(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """Guards `ocx index update pkg:tag` (tag-scoped form): the two-hop
-    resolve fetches and persists the FULL published root document (every tag
-    the publisher wrote), never a root narrowed to just the named tag. A
-    sibling tag (`2.0`) absent from the invocation (`pkg:1.0`) must stay
-    resolvable from the persisted local index afterwards — regression guard
-    against a future "narrow the root fetch to the named tag only" change
-    silently dropping sibling tags.
+    """Guards `ocx index update pkg:tag` (tag-scoped form): the update merges
+    the named tag into the local root and touches nothing else. A sibling tag
+    (`2.0`) already snapshotted must survive with the digest it was pinned to —
+    the local index is authored, so a narrower update never drops what a wider
+    one recorded.
+
+    Seeded by a BARE update first: with no prior copy there is no sibling to
+    preserve, and a tagged first-sight lands only the tag it names.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -1227,14 +1089,18 @@ def test_tag_scoped_update_preserves_sibling_tag_in_persisted_root(
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
+    # Snapshot the whole package first, so both tags are committed locally.
+    ocx.plain("--index", str(index_dir), "index", "update", f"ocx.sh/{repository}")
+    seeded = json.loads(_root_document_path(index_dir, repository).read_text())
+    assert sorted(seeded["tags"]) == ["1.0", "2.0"], "precondition: both tags snapshotted"
+
     # Tag-scoped update names ONLY "1.0".
     ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
 
-    # Direct check: the persisted root document still carries both tags.
+    # Direct check: the sibling pin is exactly as it was.
     persisted_root = json.loads(_root_document_path(index_dir, repository).read_text())
-    assert "2.0" in persisted_root["tags"], (
-        "a tag-scoped update must persist the full published root — the "
-        "sibling '2.0' tag must not be dropped"
+    assert persisted_root["tags"].get("2.0") == seeded["tags"]["2.0"], (
+        "a tag-scoped update must leave the sibling '2.0' pin untouched"
     )
 
     # Behavioral check: "2.0" — never named on the command line — resolves
@@ -1279,19 +1145,15 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_dispatch_object(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """B2 (Codex-high): `ocx index update pkg:1.0` persists the FULL published
-    root document (every tag the publisher wrote), so it must also fetch every
-    DISTINCT dispatch object those sibling tags reference — otherwise the
-    committed root points a sibling tag at an object absent from `o/`, and
-    that sibling cannot resolve offline (`adr_index_indirection.md` A2/A3/F1).
+    """The invariant behind the write: every tag the local root pins has its
+    dispatch object present in `o/`, or that tag cannot resolve offline
+    (`adr_index_indirection.md` A2/A3/F1).
 
-    Distinct from the existing
-    `test_tag_scoped_update_preserves_sibling_tag_in_persisted_root`: that one
-    makes both tags share ONE dispatch digest, so persisting the named tag's
-    object incidentally covers the sibling and the gap stays hidden. Here tag
-    `2.0` points at a DISTINCT dispatch digest, so only fetching `1.0`'s leaves
-    `2.0` dangling — the actual bug `refresh_published` carries (it fans the
-    persists over `identifier.tag()` only, then writes the whole root).
+    A tagged update lands one pin, so it fetches one object — a sibling it does
+    not pin is not its business. A BARE update lands every remote tag, so it
+    must fetch every DISTINCT object those tags reference; tag `2.0` points at
+    a distinct digest here precisely so a fetch narrowed to `1.0`'s would leave
+    it dangling.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -1342,17 +1204,21 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_dispatch_object(
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
-    # Tag-scoped update names ONLY "1.0".
+    # Tag-scoped update names ONLY "1.0" — it pins one tag, so it fetches one
+    # object and leaves the sibling entirely alone.
     ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
-
-    # Direct check: the sibling tag's DISTINCT dispatch object must be present
-    # in the local dispatch-object CAS. Fetching only the named tag's (the bug)
-    # leaves it absent even though the persisted root references it.
     sibling_local = _dispatch_object_path(index_dir, repository, sibling_index_hex)
+    assert not sibling_local.exists(), (
+        "a tag-scoped update pins only the tag it names, so it must not fetch a "
+        "sibling's dispatch object either"
+    )
+    assert "2.0" not in json.loads(_root_document_path(index_dir, repository).read_text())["tags"]
+
+    # The BARE update lands both pins, so both objects must travel with them.
+    ocx.plain("--index", str(index_dir), "index", "update", f"ocx.sh/{repository}")
     assert sibling_local.is_file(), (
-        "a tag-scoped update must fetch every DISTINCT dispatch object the "
-        "persisted root references, not only the named tag's — sibling '2.0' "
-        "is missing"
+        "a bare update pins every remote tag, so it must fetch every DISTINCT "
+        "dispatch object those tags reference — sibling '2.0' is missing"
     )
     assert hashlib.sha256(sibling_local.read_bytes()).hexdigest() == sibling_index_hex
 
@@ -1371,98 +1237,6 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_dispatch_object(
 # B3 — catalog diff semantics: the piggyback catalog sync after a single-package
 #      update materializes ONLY the named package; siblings that are merely NEW
 #      in the remote catalog are listing rows. (`diff_moved`, F2.)
-# ---------------------------------------------------------------------------
-
-
-def test_piggyback_catalog_sync_snapshots_only_the_named_package(
-    ocx: OcxRunner,
-    unique_repo: str,
-    tmp_path: Path,
-    index_server: static_index.StaticIndexServer,
-) -> None:
-    """B3 (Codex-medium + perf): the first piggyback catalog sync after a
-    single-package `ocx index update` must materialize ONLY the named package's
-    root + dispatch object on disk. Sibling packages that are merely NEW in the remote
-    catalog (absent from the local catalog) are LISTING ROWS — recorded in
-    `c/index.json`, materialized only when first `update`d
-    (`adr_index_indirection.md` F2: "for packages in the remote catalog but not
-    yet snapshotted locally, records nothing to verify against yet — they are
-    listing rows, materialized only when first updated").
-
-    `diff_moved` currently treats every catalog entry absent-from-`previous` as
-    "moved", so the first piggyback re-snapshots EVERY remote package — a
-    fetch storm scaling with catalog size, and an F2 violation.
-
-    NOTE (conflict to resolve during the fix): the existing
-    `test_catalog_sync_unconditional_get_and_moved_diff` asserts the OPPOSITE for
-    the first sync ("the first catalog sync must re-snapshot pkgB too — it is
-    new against an empty previous catalog"). That assertion encodes the buggy
-    behavior and must be updated when `diff_moved` is corrected. This test and
-    that one cannot both pass.
-    """
-    packages = {
-        suffix: make_package(
-            ocx, f"{unique_repo}{suffix}", "1.0.0", tmp_path, new=True, index=False
-        )
-        for suffix in ("a", "b", "c")
-    }
-
-    configure_index_source(ocx, index_server)
-    static_index.write_config(index_server.root)
-
-    entries: dict[str, static_index.PackageEntry] = {}
-    catalog: dict[str, str] = {}
-    for suffix, pkg in packages.items():
-        leaf = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
-        os_name, arch_name = pkg.platform.split("/")
-        repository = f"{unique_repo}/pkg{suffix}"
-        entries[suffix] = static_index.write_package(
-            index_server.root,
-            repository=repository,
-            tag="1.0.0",
-            physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
-            platform_digest=leaf,
-            os=os_name,
-            architecture=arch_name,
-        )
-        catalog[repository] = entries[suffix].root_digest
-    static_index.write_catalog(index_server.root, catalog)
-
-    index_dir = tmp_path / "index_dir"
-    index_dir.mkdir()
-    # Update exactly ONE package (a). Its piggyback catalog sync sees b and c as
-    # new remote entries against an empty local catalog.
-    ocx.plain("--index", str(index_dir), "index", "update", entries["a"].logical_id)
-
-    repo_a = f"{unique_repo}/pkga"
-    repo_b = f"{unique_repo}/pkgb"
-    repo_c = f"{unique_repo}/pkgc"
-
-    # The named package IS materialized.
-    assert _root_document_path(index_dir, repo_a).is_file()
-
-    # The sibling packages are listing rows ONLY — no root document on disk.
-    assert not _root_document_path(index_dir, repo_b).is_file(), (
-        "a one-package update must NOT materialize sibling pkgB's root — it is "
-        "a listing row until first updated (F2); diff_moved re-snapshots it today"
-    )
-    assert not _root_document_path(index_dir, repo_c).is_file(), (
-        "a one-package update must NOT materialize sibling pkgC's root (F2)"
-    )
-
-    # ...but the synced catalog (offline listing source) still lists ALL three.
-    catalog_path = _source_dir(index_dir) / "c" / "index.json"
-    local_catalog = static_index.read_catalog(catalog_path)
-    assert set(local_catalog) == {repo_a, repo_b, repo_c}, (
-        "the synced catalog must list every remote package as a row, even the "
-        "unmaterialized siblings"
-    )
-
-
-# ---------------------------------------------------------------------------
-# B1 — offline yank / deprecation surfacing: `resolve_dispatch` reading the
-#      committed local root must surface the human-governed lane (F3), which it
-#      currently ignores. Anchored on ADR F3 + Validation item V13.
 # ---------------------------------------------------------------------------
 
 

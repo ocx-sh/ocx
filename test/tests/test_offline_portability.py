@@ -16,6 +16,7 @@ the manager holds no OCI client at all.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import urllib.error
@@ -250,25 +251,24 @@ def _subtree(root: Path) -> dict[str, bytes]:
     }
 
 
-def test_index_update_subtree_is_byte_identical_to_a_recursive_mirror(
+def test_index_update_subtree_carries_every_file_a_recursive_mirror_would(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ) -> None:
-    """`adr_oci_index_only_dispatch.md` Validation bullet 11: "`ocx index
-    update` output for a published package is byte-identical to `wget
-    --mirror` of the same subtree".
+    """The copy-paste property D1 exists for: an `ocx index update` subtree
+    holds exactly the files a `wget --mirror` of the same subtree would — no
+    file missing, and none of ocx's own added beside them.
 
-    This is the executable form of the copy-paste property D1 exists for — a
-    hosted index subtree pasted into a machine's local index just works,
-    because ocx writes exactly what the site serves and nothing else. It is
-    asserted as a recursive comparison of the two `p/<ns>/<pkg>` subtrees:
-    every file present on both sides, same bytes, and no file on either side
-    the other does not have. A per-file spot check would miss the last of
-    those, which is the half that catches ocx *adding* something of its own.
+    The ROOT DOCUMENT is authored, not mirrored: ocx merges tags into a root it
+    owns and re-emits it through the canonical serializer, so its bytes are the
+    site's content in the site's normal form, not the site's bytes. Everything
+    below it — the dispatch objects — is registry content stored verbatim, and
+    is compared byte-for-byte, which is what each object's own filename digest
+    attests.
 
     Rendering the served tree rather than shelling out to `wget` keeps the
-    assertion on byte-identity of a subtree instead of one tool's behaviour:
-    the fixture server serves its root directory verbatim, so that directory
-    IS the mirror, with no new tool dependency and nothing to run in CI.
+    assertion on the subtree instead of one tool's behaviour: the fixture
+    server serves its root directory verbatim, so that directory IS the mirror,
+    with no new tool dependency and nothing to run in CI.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -311,7 +311,14 @@ def test_index_update_subtree_is_byte_identical_to_a_recursive_mirror(
         f"only written: {sorted(set(written) - set(mirrored))}\n"
         f"only mirrored: {sorted(set(mirrored) - set(written))}"
     )
+    root_relative = f"{Path(repository).name}.json"
     for relative, expected in mirrored.items():
+        if relative == root_relative:
+            # Authored, so compared on content rather than bytes.
+            assert json.loads(written[relative]) == json.loads(expected), (
+                "the authored root must carry the same tags and routing as the mirrored one"
+            )
+            continue
         assert written[relative] == expected, f"{relative} differs from the mirrored copy"
 
 

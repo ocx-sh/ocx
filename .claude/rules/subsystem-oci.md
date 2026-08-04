@@ -8,6 +8,37 @@ paths:
 
 OCI registry client, index management, identifiers, platform matching at `crates/ocx_lib/src/oci/`.
 
+## The local index copy IS the package-tier lock (load-bearing)
+
+Read this before changing anything under `oci/index/**`. Every routing rule below serves it.
+
+`$OCX_HOME/index/` (or `--index`/`OCX_INDEX`) pins **both halves** of what a tag answers: tag →
+digest, and logical → physical routing (a root's `repository` field). Three consequences:
+
+1. **Determinism.** The same `ocx package install|exec <pkg>:<tag>` twice gives the same result —
+   offline, and even when any online resource changed in between.
+2. **A pin moves only when named.** `ocx index update <pkg>...` moves the packages listed and
+   nothing else — not a resolve, not a catalog sync, not an update of a *different* package.
+   There is deliberately no whole-index sync: a remote index floats (packages appear, platforms
+   are added, tags move), so cloning it would stop the copy being a lock, and re-snapshotting
+   "whatever is present" is an arbitrary set nobody chose.
+3. **GC never changes identity.** `ocx clean` may evict blob CONTENT (refetched by digest,
+   byte-stable); which digest a pin resolves to is out of its reach.
+
+**Silence principle.** If something is locally committed, resolving it makes no network request and
+reveals nothing about remote state — no drift warning, no drift error, no comparison. Remote data
+fetched during a genuine first-resolve contributes ONLY the missing entry; everything else
+local-wins, silently. A resolve has nothing it may act on: it cannot take the update (violates 2)
+and cannot refuse (the committed answer is the correct one), so a diagnostic there is noise on the
+hottest path in the binary. Available updates surface exclusively through explicit staleness
+reporting — the `ocx index update` report, `ocx index catalog` — never through resolution.
+
+Practical test for a change under `oci/index/**`: name the command the user ran, and the package
+they named. If the diff can move a pin (a tag's `content`, or a root's `repository`) for anything
+outside that set, it is wrong however well-motivated the fetch is.
+
+ADR: `adr_index_indirection.md`, amendment "The local copy is the package-tier lock" (2026-08-05).
+
 ## Design Rationale
 
 Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transports without changing callers. `OcxIndex`/`OciIndex` cache aggressive (RwLock per clone) avoid redundant registry calls in batch ops. `IndexImpl` methods return `Option` (None = not found) — absence normal query result at index layer, not error. See `arch-principles.md` for full pattern catalog.
@@ -22,7 +53,6 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/index/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
 | `oci/index/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
 | `oci/index/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
-| `oci/index/index_sync.rs` | `IndexSync`: per-package refresh + per-source catalog digest-diff sync; no daemon, a policy seam only |
 | `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
 | `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
@@ -78,7 +108,7 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 **Update-family (lock-scoped) routing.** `ocx update` resolves Remote-style by default and **never persists tag pointers**: `Context::update_index()` builds `Index::from_chained_lock_scoped` (mode ladder `--offline` ▸ `--frozen` ▸ `Remote` — no `Default` arm), which sets `ChainedIndex.suppress_tag_commit`. The gate skips `commit_root_tag` in `fetch_and_persist_chain`; manifest blobs still persist (content-addressed). `walk_chain` returns the persisted chain's head digest so the suppressed tag-addressed `Resolve` read-back can address the blob by digest instead of the (deliberately absent) tag pointer. `--offline`/`--frozen` keep the `PolicyBlocked` (81) contract because everything stays `Op::Resolve`. ADR: `adr_toolchain_update_family.md`.
 
-**Design note — write paths.** Local index mutation is owned by exactly three entry points: `LocalIndex::refresh_tags` (called from `ocx index update`; grows a package's root + dispatch objects, A2/A3), `LocalIndex::persist_dispatch` (single dispatch-object write per chain fetch — never walks child manifests, A3), and `LocalIndex::commit_root_tag` (`pub(super)`, the only root-document tag writer outside `refresh_tags`; called only from `ChainedIndex::fetch_and_persist_chain`). Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_root_tag` step because `ocx.lock` is canonical.
+**Design note — write paths.** Local index mutation is owned by exactly four entry points: `LocalIndex::refresh_tags` (called from `ocx index update`; grows a package's root + dispatch objects, A2/A3), `LocalIndex::persist_dispatch` (single dispatch-object write per chain fetch — never walks child manifests, A3), `LocalIndex::commit_root_tag` (`pub(super)`, the derived root-document tag writer outside `refresh_tags`), and `LocalIndex::commit_published_root` (`pub(super)`, its published counterpart — merges within a `RootScope`). Both root writers merge; neither replaces. `commit_root_tag` and `commit_published_root` are called from `ChainedIndex::fetch_and_persist_chain`, and `commit_published_root` additionally from `refresh_published`. Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_root_tag` step because `ocx.lock` is canonical.
 
 **`LocalWritePolicy` — how much a `Resolve` may write.** `ChainedIndex` carries a `LocalWritePolicy` (replaces the former `suppress_tag_commit` bool), a descending ladder of local-index mutation independent of `ChainMode`:
 
@@ -184,12 +214,62 @@ absent (`AbsentDispatch`, `false` — recovery only, the root is never re-copied
 published root is never auto-refreshed under Default) holds because `grow_root` is only ever
 `true` on a genuine first-time miss, never on an `AbsentDispatch` recovery of an already-present root.
 
+**Merge is the only write verb — the local index is AUTHORED, not mirrored.** There is no
+verbatim-replace writer anywhere: `LocalIndex::commit_published_root(identifier, bytes, scope)` is
+the one published-root writer, and it merges within `RootScope`:
+
+| Scope | Written by | Adopts | Leaves alone |
+|---|---|---|---|
+| `RootScope::Tag(t)` | `ocx index update pkg:t`, every grow-on-resolve | `tags[t]` | every sibling pin, `repository`, every package-level field |
+| `RootScope::Package` | `ocx index update pkg` (bare) | every tag the remote lists + package-level fields (routing) | any tag only the local copy holds |
+
+**Neither scope deletes.** A tag the remote stopped listing survives locally with its pinned
+digest, both provenance kinds — `commit_root_tags` (derived) always upserted, and
+`commit_published_root` now does too. The copy records what this machine snapshotted, so a
+publisher retiring a version cannot break a machine pinned to it.
+
+First sight is not an exception: with no committed root the merge runs against the fetched
+document with its `tags` emptied, so a tagged first-resolve lands exactly the tag it resolved
+(not the site's whole list) while the package-level fields come along — there is nothing yet to
+protect. Committed bytes no reader accepts get the same treatment: recovering a crashed write is
+not overwriting committed state. All of it silent — no diagnostic on whatever else the fetched
+root has moved on to (silence principle). `refresh_published` scopes its dispatch-object persists
+the same way: only the tags a write adopts need their objects, since unadopted tags keep the pins
+— and therefore the objects — they already had.
+
+**An `AbsentDispatch` recovery walks the PIN, not the tag.** The committed root already binds this
+tag to `content`, so `fetch_manifest` addresses the walk with `identifier.clone_with_digest(content)`.
+Addressing the tag would return the registry's current digest while the root still pinned the old
+one — the same tag answering two digests depending on whether a cache was warm. Its sibling
+`fetch_manifest_digest` short-circuits from the same pin with zero network; the digest-addressed
+walk is what keeps the two answers identical. Reachable for a bare-leaf tag (single-platform; `o/`
+never holds a dispatch object for it by design) whose blob was evicted, and for an image index
+missing from a partial copy.
+
+**A fetched leaf manifest warms the blob store.** `fetch_and_persist_chain` writes a
+`Manifest::Image` result's verbatim bytes to the attached `content_store` under the LOGICAL
+registry + digest — the same key `recover_absent_dispatch` reads — so the next resolve of that pin
+needs no network. Best-effort (a write failure is `debug!`, never fails the resolve). An image
+index is not written there: it is already in `o/`. GC treats it as a cache; an installed package
+roots it through its own `refs/blobs/`, and an evicted copy refetches by digest, byte-identical.
+
 **Authoritative-stop, no silent fallthrough.** When the one configured source for a namespace
 (Decision H — exactly one remote per namespace) is authoritative for an identifier and errors
 (yanked tag, dispatch-object tamper, fail-closed unknown `config.json` version, network failure), the walk
 returns that error immediately rather than falling through to a "not found" result — a broken or
 misconfigured `[registries."<ns>"] index` endpoint fails loud, never silently resolves as absent.
 Its clean miss is equally terminal.
+
+*Scope of the yank half.* The published yank gate lives on the **tag** path
+(`OcxIndex::fetch_manifest_raw_bytes` → `surface_status`); a digest-addressed fetch skips it by
+design, because a yank is a tag-lane publisher signal and an immutable pin is not a tag. So a
+recovery walk addressed by the committed `content` digest — the AbsentDispatch path above — does
+not re-ask the published root and does not re-surface a yank published since the pin was taken.
+A yank **already recorded in the committed root** still enforces: `resolve_dispatch` runs
+`surface_root_status` on the tag read before any walk happens, so the refusal fires locally with
+zero network. Whether a resolve *should* re-consult the source for a yank published after the pin
+is an open semantics question (it trades against the silence principle and against invariant 2) —
+this paragraph describes what happens today and decides nothing.
 
 **Index-declared jurisdiction (`Jurisdiction`, `oci/index.rs`).** Whether a source is asked at all is
 a *three*-valued question, asked before any fetch — never an `Ok(None)` read after one:
@@ -246,31 +326,34 @@ never per-name, so every name under a published registry reports `Published` reg
 Deriving provenance from a per-name predicate would flip a declined name to `Derived` and silently
 drop the published root's catalog cross-check. There is no placeholder identifier anywhere.
 
-`LocalIndex::sync_catalog` step 3 is non-fatal end to end: it skips (warn, `continue`) a moved catalog
-key its own source declares inexpressible, **and** warns-and-continues when `refresh_tags` itself fails
-(publish skew alone reaches that — a catalog regenerated ahead of its roots 404s `p/<key>.json`). Both
-are deliberately **not** in `validate_catalog_key`, which fails the whole sync closed for a traversal
-key; aborting there would skip the step-4 catalog commit, so no other moved package would land, and
-every later `ocx index update` would repeat it and exit 0 — a permanently, silently stale source. A per-package failure is already reported by `ocx index update`'s
-own fan-out; it must not veto the source-wide commit.
+**There is no catalog sync.** `ocx index update <pkg>...` fetches the named packages' roots and
+nothing else — no `c/index.json` fetch, no diff, no report about other packages. A named update
+performs exactly its named work.
 
-Non-fatal is not "adopt anyway". Both skips collect the key into a `stale` set that step 4 reads when
-merging: the fetched entry is **not** adopted (the on-disk root is still the old one, so adopting the
-new entry manufactures the root/catalog straddle — `read_root` then self-heals the catalog back and
-serves the STALE root past the yank gate). Keeping the old entry IS the retry: the next sync fetches
-the catalog again and re-diffs the failed key against it. Adopting the fetched value instead would
-retire the retry permanently — `diff_moved` would compare NEW against NEW and see no move. Healthy
-rows land either way.
+**The local `c/index.json` is AUTHORED, not mirrored.** Its entries are `sha256(local root bytes)`,
+written by `CatalogTransaction::write_root` — the only writer — in the same transaction that writes
+the root. Nothing is ever persisted from a remote catalog, so the root/catalog straddle that the
+old sync's keep-the-stale-row logic existed to avoid cannot arise.
+`OcxIndex::fetch_catalog` reads the site's listing live and persists nothing; it exists for
+`ocx index catalog --remote`.
 
-**No HTTP validator anywhere.** The catalog fetch is unconditional and nothing is stored beside
-`c/index.json` — the local tree is a distributable artifact (A2), and a per-machine `.etag` sidecar
-was the one file in it that was neither served nor content-addressed. The digest diff is the whole
-mechanism; `CatalogTransaction::commit` writes nothing when the merged map equals the one it read, so
-an unchanged catalog leaves the tree byte- and mtime-identical, and it opportunistically deletes a
+Consequence for listing: default-mode `ocx index catalog` lists what this machine has materialized
+(the catalog keys are exactly the roots on disk); `--remote` asks the site. That is the intended
+split — default is the index you maintain, `--remote` is the site's answer.
+
+"Am I behind?" is deliberately a question about the remote, asked explicitly (`ocx index catalog
+--remote`, `ocx index list --remote`), never answered from locally recorded shadow state: every
+storage option for a last-observed-remote digest re-introduces mirroring one field at a time.
+**No per-machine bookkeeping in the tree.** The local tree is a distributable artifact (A2), so
+nothing lands in it that is neither served content nor authored from it — which is why the `.etag`
+sidecar was removed and why no last-observed-remote digest replaced it.
+`CatalogTransaction::commit` writes nothing when the merged map equals the one it read, so a
+no-op leaves the tree byte- and mtime-identical, and it opportunistically deletes a
 `c/index.json.etag` left by an older ocx.
 
-`LocalIndex::refresh_tags` stays jurisdiction-unaware: its two callers want opposite
-outcomes (`sync_catalog` skips, `ocx index update` reroutes to the registry).
+`LocalIndex::refresh_tags` stays jurisdiction-unaware: `ocx index update` picks the source that
+will answer for each package before calling it, and reroutes a name the index declines to the
+registry.
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`
 re-serialization. The digest is recomputed from those bytes and verified against the
@@ -311,7 +394,6 @@ to protect against. `adr_index_indirection.md` Decision D.
 | `LocalIndex` | Owns the collection above. Both provenance kinds go through it — the only divergence is catalog source (file vs directory enumeration) — dispatch decode is unconditional, one OCI parse for both provenance kinds. Filesystem mechanics (tempfile+rename CAS, the self-heal write) are an internal, non-headline detail. |
 | `OcxIndex` | Remote client of a **published** ocx-index — root → dispatch object → `select_best`. |
 | `OciIndex` | Remote client that **derives** an index from a plain OCI registry's tags API. |
-| `IndexSync` | Thin wrapper over `LocalIndex`'s two write paths — `refresh_package` (per-package dispatch object + root write, either provenance) and `sync_catalog` (published-source-only digest-diff; a derived source has no catalog). `ocx index update` piggybacks both. No daemon — a policy seam only. |
 | `ChainedIndex` | `LocalIndex` ▸ **exactly one** remote per namespace, chosen by config (`[registries."<ns>"] index` field presence), never probed. |
 
 ADR: `adr_index_indirection.md` Decision H.

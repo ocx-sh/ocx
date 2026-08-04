@@ -918,6 +918,20 @@ recorded — the remote tag listing is skipped entirely. This is ideal for lockf
 the local index should contain only explicitly requested tags. When a bare identifier is used
 (e.g., `cmake`), every tag is recorded.
 
+**Only the packages you name are touched, and nothing else is fetched.** The command requests the
+named packages' roots and their dispatch objects — no catalog, no other package. A package left
+unnamed keeps every tag pin and its `repository` pointer exactly as committed, even when the source
+has moved on.
+
+Naming packages is the only form: there is no whole-index sync, because a remote index floats
+(packages appear, platforms get added, tags move) while the local copy is the set of snapshots you
+deliberately asked for. See [Indices][in-depth-indices-update] for why that is the shape. To ask
+what the site has now, ask it: [`ocx index catalog --remote`](#index-catalog) or
+[`ocx index list --remote`](#index-list).
+
+A bare `ocx index update` with no PACKAGE is a usage error ([exit 64][exit-codes]) — with no
+"everything" to fall back on, there is nothing for it to mean.
+
 `ocx index update` never writes to `$OCX_HOME/blobs/` or `$OCX_HOME/layers/` — those are populated
 only by an online `ocx package install` or `ocx package pull` that actually materializes a package.
 After running `ocx index update <pkg>`, an `ocx --offline package install <pkg>` resolves the
@@ -931,7 +945,7 @@ their updated tags.
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags.
+- `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags. At least one is required.
 
 ### `about` {#about}
 
@@ -4029,6 +4043,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [in-depth-ci]: ../in-depth/ci.md
 [in-depth-indices-layout]: ../in-depth/indices.md#local-layout
+[in-depth-indices-update]: ../in-depth/indices.md#update-modes
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 
 <!-- environment -->

@@ -74,6 +74,18 @@ pub enum Error {
         computed: crate::oci::Digest,
     },
 
+    /// A source answered a digest-addressed chain walk with a DIFFERENT digest
+    /// than the one requested. The requested digest is the committed pin (or a
+    /// lock's), so accepting the answer would move it — the same trust-boundary
+    /// class as [`Self::DispatchObjectDigestMismatch`], one hop further out:
+    /// there the bytes disagree with their own claimed digest, here the source's
+    /// self-consistent answer disagrees with what was asked for.
+    #[error("source answered a request for '{requested}' with '{answered}'")]
+    WalkedDigestMismatch {
+        requested: crate::oci::Digest,
+        answered: crate::oci::Digest,
+    },
+
     /// A tag resolved to a yanked entry (per-tag `yanked` marker or root
     /// `status: yanked`) and no explicit opt-in was given. A yank is a
     /// publisher signal, not a delete — a digest-pinned resolve of the same
@@ -205,6 +217,7 @@ impl ClassifyExitCode for Error {
             // boundary — the OCI data-error class (65).
             Self::UnsupportedIndexFormat { .. }
             | Self::DispatchObjectDigestMismatch { .. }
+            | Self::WalkedDigestMismatch { .. }
             | Self::YankedRefused { .. }
             | Self::MalformedPhysicalRef { .. }
             | Self::RootRepositoryMismatch { .. }
