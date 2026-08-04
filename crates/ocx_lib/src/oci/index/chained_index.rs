@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::index_impl::IndexImpl;
 use super::local_index::{DispatchResolution, SourceKind};
 use super::{ChainMode, Index, IndexOperation, Jurisdiction, LocalIndex, index_impl};
 use crate::file_structure::BlobStore;
@@ -289,22 +290,6 @@ impl ChainedIndex {
         candidates
     }
 
-    /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
-    /// of the source that owns it, or empty when none does.
-    ///
-    /// Reuses the source's own construction input rather than re-reading config:
-    /// `[registries."<ns>"].trusted_hosts` reaches `OcxIndex` exactly once, in
-    /// `context.rs`, and both the pre-flight there and the guard here read that
-    /// one value. Keyed on the registry (ownership) like [`Self::kind_for_registry`],
-    /// never on per-name jurisdiction — a name the owning index's grammar cannot
-    /// express is still that operator's namespace and must keep their exemption.
-    fn trusted_hosts_for(&self, registry: &str) -> &[String] {
-        self.sources
-            .iter()
-            .find(|source| source.serves_registry(registry))
-            .map_or(&[], |source| source.trusted_hosts())
-    }
-
     /// SSRF floor for a physical target the **local copy** minted.
     ///
     /// [`super::OcxIndex::physical_identifier`] pre-flights its own answer before
@@ -340,6 +325,14 @@ impl ChainedIndex {
     /// turns into the logical identifier — the silent lie this branch exists to
     /// fix.
     ///
+    /// A host admitted here by the tolerated-lookup-failure arm is **not** an
+    /// admitted transport target: [`Index::guard_physical_dial`] re-validates it,
+    /// fail-closed, at the dial site before any request uses it. That split is
+    /// what makes the tolerance safe — this pre-flight runs on every resolve,
+    /// including ones that will never fetch, so it cannot fail on a missing
+    /// resolver; the dial-site half runs only when a request is imminent, so it
+    /// can.
+    ///
     /// # Errors
     ///
     /// [`Error::Ssrf`](super::error::Error::Ssrf) when the physical host resolves
@@ -360,6 +353,42 @@ impl ChainedIndex {
                      judge it; proceeding — a connection cannot succeed where the lookup failed: {error}"
                 );
                 Ok(())
+            }
+        }
+    }
+
+    /// The committed local root's physical pointer for `identifier`, SSRF-guarded
+    /// — the local half of [`Self::physical_reference`], in whichever order that
+    /// method's mode split puts it.
+    ///
+    /// A local-index read **failure** is a miss, never fatal — the same tolerance
+    /// [`Self::walk_chain`] gives its own local read. An unreadable or
+    /// half-written index home (a broken `OCX_INDEX`, a shipped copy on a failing
+    /// mount) must not turn a resolve that was already going to succeed into a
+    /// hard error; without this the physical lookup would be the one place a
+    /// damaged cache is fatal.
+    ///
+    /// A guard **refusal** is not a miss and propagates: a forbidden local pointer
+    /// must not be papered over by then asking a source, which would turn the
+    /// guard into a no-op for exactly the caller it exists to stop.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ssrf`](super::error::Error::Ssrf) from [`Self::guard_local_physical`].
+    async fn local_physical_answer(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        match self
+            .local_index
+            .physical_reference(identifier, self.kind_for(identifier))
+            .await
+        {
+            Ok(Some(physical)) => {
+                self.guard_local_physical(identifier, &physical).await?;
+                Ok(Some(physical))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                log::warn!("Local index physical reference read failed for '{identifier}': {e}");
+                Ok(None)
             }
         }
     }
@@ -1154,49 +1183,78 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     /// The physical transport identifier for `identifier` (`adr_index_indirection.md`
-    /// C2): sources in priority order first (only `OcxIndex` answers), the local
-    /// copy's committed root second.
+    /// C2): the local copy's committed root first, the sources on a miss — except
+    /// under [`ChainMode::Remote`], where the order is inverted.
     ///
-    /// **Deliberately NOT the local-first shape [`Self::fetch_manifest`] and
-    /// [`Self::fetch_blob`] use.** Those read *content*, digest-verified on the
-    /// way out, so a local hit is exactly as trustworthy as a fetch. This reads a
-    /// *pointer* that lives in remote-controlled data: the answer `OcxIndex`
-    /// mints has passed the SSRF floor
-    /// ([`oci::ssrf::resolve_and_validate`](crate::oci::ssrf::resolve_and_validate),
-    /// ocx#218) against that namespace's `trusted_hosts`, while the layer pull
-    /// that consumes the result runs on the shared, unguarded client. Reading the
-    /// local root ahead of a reachable source would skip that pre-flight on every
-    /// warm-cache resolve — and buy nothing, because the same resolve has already
-    /// fetched and memoized that very root to resolve the tag.
+    /// This reads a *pointer* living in remote-controlled data, not
+    /// digest-verified *content* like [`Self::fetch_manifest`] and
+    /// [`Self::fetch_blob`] — a copied index tree is a supported distribution
+    /// mechanism (A2), and the layer pull that consumes the answer runs on the
+    /// shared, **unguarded** client. What makes local-first sound is therefore
+    /// not that the local root is trusted: it is that the local answer carries
+    /// its own SSRF floor ([`Self::guard_local_physical`],
+    /// [`oci::ssrf::resolve_and_validate`](crate::oci::ssrf::resolve_and_validate),
+    /// ocx#218) applied with the **same** `trusted_hosts` set `OcxIndex` applies
+    /// to its own — and that whatever that floor had to admit unjudged (a lookup
+    /// that failed) is judged again, fail-closed, by
+    /// [`Index::guard_physical_dial`] before the pull's first request reaches it.
+    /// That guarded local path is already the *ordinary* one in
+    /// production: a source declaring the name outside its jurisdiction is
+    /// skipped entirely ([`Self::candidate_sources`]) and the live
+    /// `index.ocx.sh` declares `Outside` for every flat `ocx.sh/<tool>` name, so
+    /// for those the source loop has never executed. Local-first extends that
+    /// path to the indirected names; it does not open a new one.
     ///
-    /// The local copy answers whenever no source did, which is **not** the same
-    /// as "no source could": a source is skipped entirely when it declares the
-    /// name outside its jurisdiction ([`Self::candidate_sources`]), and the live
-    /// `index.ocx.sh` declares `Outside` for every flat `ocx.sh/<tool>` name. For
-    /// such a name, on a fully online run with no flags, the local root is the
-    /// **only** answer and the source loop never executes. The local answer is
-    /// therefore SSRF-guarded in its own right — see [`Self::guard_local_physical`]
-    /// — rather than treated as a rare offline-only fallback.
+    /// The committed tree is therefore the **authority** for the pointer on the
+    /// warm path: its *provenance* is delegated to the local tree deliberately,
+    /// as trusted deployment-managed input in the same trust domain as
+    /// `$OCX_HOME` (A2). The two trust senses are distinct — the *bytes* are
+    /// remote-authored and stay untrusted (hence the floor), while their
+    /// *placement* into the tree is the operator's act and is what the
+    /// delegation trusts. The SSRF floor below is a floor on what that
+    /// authority may name, not a substitute for the provenance it is trusted
+    /// with.
     ///
-    /// Two more shapes reach it:
+    /// What it buys is that a warm resolve costs **no** requests. Asking the
+    /// sources first spends a `GET <base>/config.json` (the jurisdiction
+    /// declaration) plus a `GET <base>/p/<ns>/<pkg>.json` per source, on every
+    /// invocation of every identifier-resolving command, to re-derive a pointer
+    /// the committed root already carries. The former justification for paying
+    /// it — that the resolve had already fetched and memoized that root anyway —
+    /// is false on precisely the common case: [`Self::fetch_manifest`] is
+    /// local-first, so a warm resolve answers from [`LocalIndex`] and the
+    /// source-side memo is empty.
     ///
-    /// - **`--offline`** — `self.sources` is empty by construction, so the loop
-    ///   is a no-op and the local root decides. This is why there is **no**
-    ///   `ChainMode::Offline` early return here, unlike
+    /// [`ChainMode::Remote`] keeps source-first. There the tag resolution
+    /// genuinely did go to the source (so the root really is memoized), and the
+    /// update family asking it wants the **live** pointer, not the snapshotted
+    /// one — its whole purpose is to observe upstream movement.
+    ///
+    /// Two shapes reach the local read with no source able to answer:
+    ///
+    /// - **`--offline`** — `self.sources` is empty by construction. This is why
+    ///   there is **no** `ChainMode::Offline` early return here, unlike
     ///   [`Self::fetch_manifest_raw_bytes`]: ahead of the local read it would
     ///   reproduce the bug it looks like it guards — `Ok(None)` reads as "no
     ///   rewrite", so an indirected package reports the LOGICAL identifier as
     ///   its own transport, indistinguishable from a genuinely registry-backed
     ///   one; after the local read it is unreachable.
-    /// - **the index site is unreachable** — a source's *transport* failure
-    ///   ([`is_source_outage`]) is held rather than propagated, so a warm store
-    ///   still resolves instead of exiting 69 on a `GET /config.json` that would
-    ///   only have re-derived a pointer the committed root already carries. It is
-    ///   re-raised when the local copy has no root either, so a genuine outage
-    ///   still fails loudly. Every **other** source error is a refusal, not an
-    ///   outage, and propagates immediately: an `SsrfError` says "this target is
-    ///   forbidden", and answering around it with the local root would turn the
-    ///   guard into a no-op.
+    /// - **the index site is unreachable** — reached only on a local miss under
+    ///   the local-first modes, and ahead of the local read under `Remote`. A
+    ///   source's *transport* failure ([`is_source_outage`]) is held rather than
+    ///   propagated, so a `Remote` walk still falls back to the committed root
+    ///   instead of exiting 69. It is re-raised when no local root answers, so a
+    ///   genuine outage still fails loudly. Every **other** source error is a
+    ///   refusal, not an outage, and propagates immediately: an `SsrfError` says
+    ///   "this target is forbidden", and answering around it — from the local
+    ///   root, or by falling through to a second source — would turn the guard
+    ///   into a no-op. Symmetrically, a **local** guard refusal propagates
+    ///   without consulting a source, so the local-first order cannot launder a
+    ///   forbidden local pointer either.
+    ///
+    /// The local read runs exactly once per call: on a local-first miss the
+    /// source walk's own failure is final, never re-checked against a local copy
+    /// that already said no.
     ///
     /// `Ok(None)` = no rewrite, physical == logical. That is deliberately not
     /// distinguished from "indirected, but no local root": for a registry-backed
@@ -1207,6 +1265,12 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// upstream ([`Self::ensure_locally_resolvable`] → `PolicyResolutionBlocked`,
     /// exit 81), and a source outage re-raises above.
     async fn physical_reference(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        // `Remote` is the one mode that wants the live pointer; every other mode
+        // answers from the committed root when it has one.
+        let source_first = self.mode == ChainMode::Remote;
+        if !source_first && let Some(physical) = self.local_physical_answer(identifier).await? {
+            return Ok(Some(physical));
+        }
         let mut last_error: Option<crate::Error> = None;
         for (source, _) in self.candidate_sources(identifier).await {
             match source.physical_reference(identifier).await {
@@ -1223,23 +1287,8 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
             }
         }
-        // A local-index read failure is a miss, never fatal — same tolerance
-        // [`Self::walk_chain`] gives its own local read. An unreadable or
-        // half-written index home (a broken `OCX_INDEX`, a shipped copy on a
-        // failing mount) must not turn a resolve that was already going to
-        // succeed into a hard error; without this the physical lookup would be
-        // the one place a damaged cache is fatal.
-        match self
-            .local_index
-            .physical_reference(identifier, self.kind_for(identifier))
-            .await
-        {
-            Ok(Some(physical)) => {
-                self.guard_local_physical(identifier, &physical).await?;
-                return Ok(Some(physical));
-            }
-            Ok(None) => {}
-            Err(e) => log::warn!("Local index physical reference read failed for '{identifier}': {e}"),
+        if source_first && let Some(physical) = self.local_physical_answer(identifier).await? {
+            return Ok(Some(physical));
         }
         last_error.map_or(Ok(None), Err)
     }
@@ -1263,6 +1312,22 @@ impl index_impl::IndexImpl for ChainedIndex {
 
     fn serves_registry(&self, registry: &str) -> bool {
         self.sources.iter().any(|source| source.serves_registry(registry))
+    }
+
+    /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
+    /// of the source that owns it, or empty when none does.
+    ///
+    /// Reuses the source's own construction input rather than re-reading config:
+    /// `[registries."<ns>"].trusted_hosts` reaches `OcxIndex` exactly once, in
+    /// `context.rs`, and every guard that consults it — [`Self::guard_local_physical`]
+    /// at resolve time, [`Index::guard_physical_dial`] at the dial site — reads
+    /// that one value. Keyed on the registry (ownership) like
+    /// [`Self::kind_for_registry`], never on per-name jurisdiction.
+    fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        self.sources
+            .iter()
+            .find(|source| source.serves_registry(registry))
+            .map_or(&[], |source| source.trusted_hosts())
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -3515,8 +3580,22 @@ mod chain_refs_tests {
 
     /// A source that answers with its own distinct physical address — stands in
     /// for the `OcxIndex` whose answer has passed the SSRF pre-flight.
-    #[derive(Clone)]
-    struct PhysicalSource;
+    ///
+    /// Counts **every** question the chain asks it, `jurisdiction` as well as
+    /// `physical_reference`: in production both are HTTP (a `GET
+    /// <base>/config.json` for the jurisdiction declaration, a `GET
+    /// <base>/p/<ns>/<pkg>.json` for the root), so a non-zero count here is a
+    /// request on the wire on a resolve that already had every byte locally.
+    #[derive(Clone, Default)]
+    struct PhysicalSource {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl PhysicalSource {
+        fn calls(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
 
     #[async_trait]
     impl index_impl::IndexImpl for PhysicalSource {
@@ -3536,11 +3615,16 @@ mod chain_refs_tests {
             Ok(None)
         }
         async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+            *self.calls.lock().unwrap() += 1;
             let mut physical = Identifier::new_registry("mirror.example.com/from-source", "mirror.example.com");
             if let Some(digest) = identifier.digest() {
                 physical = physical.clone_with_digest(digest);
             }
             Ok(Some(physical))
+        }
+        async fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
+            *self.calls.lock().unwrap() += 1;
+            Jurisdiction::FallThrough
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -3566,11 +3650,13 @@ mod chain_refs_tests {
         assert_is_physical(&physical);
     }
 
-    /// No policy flag, no network: the source is asked, its dereference fails
-    /// mid-walk, and the committed root answers instead of the walk's error
-    /// escaping as exit 69.
+    /// No policy flag, no network: the committed root answers and the source's
+    /// transport failure never escapes as exit 69. Under the local-first order
+    /// the source is not even reached — the regression this guards is closed by
+    /// construction rather than by the outage hold, which now only backs
+    /// `--remote`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn unreachable_source_falls_back_to_the_local_root_instead_of_failing() {
+    async fn an_unreachable_index_site_does_not_stop_a_warm_resolve() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         seed_indirected_root(&cache).await;
@@ -3584,23 +3670,117 @@ mod chain_refs_tests {
         assert_is_physical(&physical);
     }
 
-    /// Ordering lock: a source that CAN answer wins over the local root. The
-    /// source answer is the one that has passed the SSRF pre-flight
-    /// (`OcxIndex::physical_identifier`), and the layer pull that consumes the
-    /// result runs on the shared, unguarded client — so a local-first read here
-    /// would skip that floor on every warm-cache resolve.
+    /// Ordering lock, `Default`: the committed root answers and **no source is
+    /// asked at all**.
+    ///
+    /// The count is the assertion, not the answer: a source-first order returns
+    /// the same physical address whenever the source happens to agree, so only
+    /// the absence of the two requests (`config.json` for jurisdiction, the root
+    /// document for the pointer) distinguishes the orders. Every warm resolve —
+    /// `install`, `exec`, `which`, `run`, `lock` — pays those two per
+    /// invocation when the local read comes second, on data it already has.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_reachable_source_answers_ahead_of_the_local_root() {
+    async fn default_mode_answers_from_the_local_root_without_asking_any_source() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         seed_indirected_root(&cache).await;
 
-        let chained = Index::from_chained(cache, vec![Index::from_impl(PhysicalSource)], ChainMode::Default);
+        let spy = PhysicalSource::default();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Default);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("the committed root's `repository` pointer is the physical address");
+        assert_is_physical(&physical);
+        assert_eq!(
+            spy.calls(),
+            0,
+            "a warm resolve must not touch the index site: the committed root already carries the pointer"
+        );
+    }
+
+    /// `--frozen` freezes resolution to the local index, so the same local-first
+    /// order applies — asserted separately because the mode split is a `match`
+    /// on `ChainMode` and a wrong arm here is invisible to the `Default` test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frozen_mode_answers_from_the_local_root_without_asking_any_source() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let spy = PhysicalSource::default();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Frozen);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("the committed root answers under --frozen too");
+        assert_is_physical(&physical);
+        assert_eq!(
+            spy.calls(),
+            0,
+            "--frozen resolves from the local index; it asks no source"
+        );
+    }
+
+    /// `--remote` keeps the source-first order: the update family has just
+    /// resolved the tag against the source (so the root really is memoized
+    /// there) and deliberately wants the *live* pointer, not the snapshotted
+    /// one. The local root can answer here, so only the order decides.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_mode_asks_the_source_ahead_of_the_local_root() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let spy = PhysicalSource::default();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Remote);
         let physical = chained.physical_reference(&digest_only_id()).await.unwrap().unwrap();
         assert_eq!(
             physical.registry(),
             "mirror.example.com",
-            "the source's answer must win while it is reachable"
+            "under --remote the source's live answer must win over the committed root"
+        );
+        assert!(spy.calls() > 0, "the source must have been asked");
+    }
+
+    /// Local-first is not local-only: a name the local copy knows nothing about
+    /// still walks the sources under `Default`, which is what makes a first-time
+    /// resolve work at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_miss_still_walks_the_sources_under_default() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+
+        let spy = PhysicalSource::default();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Default);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("with no local root the source must be asked");
+        assert_eq!(physical.registry(), "mirror.example.com");
+        assert!(spy.calls() > 0, "the source must have been asked on a local miss");
+    }
+
+    /// The source walk's refusal semantics are unchanged by the mode split: on
+    /// the local miss that reaches the walk under `Default`, a refusal still
+    /// propagates instead of degrading to `Ok(None)` (which the caller reads as
+    /// "no rewrite" and turns into the logical identifier).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_refusal_on_a_local_miss_propagates_under_default() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+
+        let chained = Index::from_chained(cache, vec![Index::from_impl(RefusingSource)], ChainMode::Default);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("an SSRF refusal must not degrade to a clean no-rewrite");
+        assert!(
+            matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf(_))),
+            "expected the source's own SSRF refusal, got: {error:?}"
         );
     }
 
@@ -3671,9 +3851,9 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, REGISTRY, &format!("{forbidden}/evil/pkg")).await;
 
-        // Default mode, online shape: the one source cannot answer (held
-        // outage), so the local root is the only answer — exactly the position
-        // a flat `ocx.sh/<tool>` name is in on every ordinary online run.
+        // Default mode, online shape: the local root is the answer — by the
+        // local-first order, and by the source being unable to answer anyway.
+        // Exactly the position every warm resolve is in.
         let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default);
         match chained.physical_reference(&digest_only_id()).await {
             Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
@@ -3696,6 +3876,44 @@ mod chain_refs_tests {
                 );
             }
         }
+    }
+
+    /// The same refusal against a source that **can** answer: a local guard
+    /// refusal propagates without consulting a source, so a healthy source cannot
+    /// launder a forbidden local pointer into a clean answer.
+    ///
+    /// Its twin above pairs the forbidden root with [`UnreachableSource`], which
+    /// cannot answer under either ordering — a guard error that regressed into a
+    /// swallowed miss would surface there as the source's own `IndexHttpFailed`,
+    /// which is still an `Err` and still not the forbidden target. Here the source
+    /// answers, so the swallowed-refusal shape is `Ok(Some(mirror.example.com))`:
+    /// the pull proceeds, and the only trace the guard ever ran is a log line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_guard_refusal_is_not_laundered_by_a_source_that_can_answer() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_root_pointing_at(&cache, REGISTRY, "127.0.0.1:5999/evil/pkg").await;
+
+        let spy = PhysicalSource::default();
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Default);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("a forbidden local pointer must be refused, never answered around");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
+                ))
+            ),
+            "expected the local root's own SSRF refusal, got: {error:?}"
+        );
+        assert_eq!(
+            spy.calls(),
+            0,
+            "the refusal must propagate before any source is asked — consulting one is what makes laundering possible"
+        );
     }
 
     /// The guard judges a **rewrite**, never a root that names the identifier's
@@ -3741,17 +3959,110 @@ mod chain_refs_tests {
         assert_eq!(physical.registry(), "127.0.0.1:5999");
     }
 
+    /// The guard's **tolerated lookup failure** arm ([`is_plain_dns_name`]): a
+    /// physical host that is a genuine DNS name and does not resolve is admitted,
+    /// because that is the steady state of the warm-store-no-network case
+    /// local-first serves — and a connect can no more succeed than the lookup did.
+    /// Refusing here re-raises the exit-69 bug local-first closes, and local-first
+    /// makes this arm the ordinary warm path rather than an edge.
+    ///
+    /// The pre-condition assertion is what proves the arm: `.invalid` is reserved
+    /// by RFC 6761 and never resolves, so the answer below can only have come from
+    /// a tolerated failure, not from a host that quietly resolved fine.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_root_naming_an_unresolvable_dns_host_is_tolerated_by_the_guard() {
+        const UNRESOLVABLE: &str = "physical.invalid";
+        let (host, port) = crate::oci::ssrf::split_host_port(UNRESOLVABLE);
+        assert!(
+            matches!(
+                crate::oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(crate::oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must genuinely fail to resolve, or this test says nothing about the tolerated arm"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_root_pointing_at(&cache, REGISTRY, &format!("{UNRESOLVABLE}/evil/pkg")).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect("a DNS name that does not resolve must not fail the warm read")
+            .expect("the committed root answers");
+        assert_eq!(physical.registry(), UNRESOLVABLE);
+    }
+
+    /// The fail-closed sibling of the arm above: an **address-shaped** authority
+    /// whose lookup fails is refused. [`oci::ssrf::split_host_port`](crate::oci::ssrf::split_host_port)
+    /// deliberately leaves a bracketed IPv6 authority bracketed, so `getaddrinfo`
+    /// rejects it while a URL parser accepts those brackets natively — tolerating
+    /// this lookup failure would hand the pull a loopback target the guard never
+    /// judged.
+    ///
+    /// The `.invalid` suffix is what keeps the test deterministic *and* fast: a
+    /// bare `[::1]` carries no dot, so the resolver expands it against the search
+    /// list and the query is dropped rather than answered — measured at 120 s on a
+    /// glibc host, which is a network-latency time bomb, not a unit test. With the
+    /// suffix the name is absolute and RFC 6761 guarantees the NXDOMAIN.
+    ///
+    /// The pre-condition separates this from the [`SsrfError::ForbiddenTarget`](crate::oci::ssrf::SsrfError::ForbiddenTarget)
+    /// arm the loopback tests cover: the refusal below must come from an
+    /// unjudgeable host, not from one judged and found forbidden.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_root_naming_an_unresolvable_address_shaped_host_fails_closed() {
+        const BRACKETED_LOOPBACK: &str = "[::1].invalid:5000";
+        let (host, port) = crate::oci::ssrf::split_host_port(BRACKETED_LOOPBACK);
+        assert!(
+            !super::is_plain_dns_name(host),
+            "the fixture must be classified address-shaped, or the tolerated arm runs instead"
+        );
+        assert!(
+            matches!(
+                crate::oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(crate::oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must fail to RESOLVE, not resolve-and-be-forbidden, or this test duplicates the loopback one"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_root_pointing_at(&cache, REGISTRY, &format!("{BRACKETED_LOOPBACK}/evil/pkg")).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("an unjudgeable address-shaped host must not be admitted");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                    crate::oci::ssrf::SsrfError::Resolution { .. }
+                ))
+            ),
+            "expected the guard's fail-closed resolution refusal, got: {error:?}"
+        );
+    }
+
     /// **F2.** A source REFUSAL is not an outage. Holding it and then answering
     /// from the local root discards the verdict the source was asked for — the
     /// guard fires and is then overridden. The local root here can answer, so
     /// only propagation distinguishes the two.
+    ///
+    /// `Remote` is the mode where the source walk runs with a local root
+    /// present, so it is the only one where "answered around locally" is even
+    /// expressible; the `Default` half of this invariant (a refusal on the local
+    /// miss that reaches the walk) is
+    /// [`a_source_refusal_on_a_local_miss_propagates_under_default`].
     #[tokio::test(flavor = "multi_thread")]
     async fn a_source_refusal_propagates_instead_of_being_answered_around_locally() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         seed_indirected_root(&cache).await;
 
-        let chained = Index::from_chained(cache, vec![Index::from_impl(RefusingSource)], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![Index::from_impl(RefusingSource)], ChainMode::Remote);
         let error = chained
             .physical_reference(&digest_only_id())
             .await
@@ -3764,14 +4075,16 @@ mod chain_refs_tests {
 
     /// The refusal/outage split cuts both ways: a transport outage from the SAME
     /// chain shape is still held, so [`is_source_outage`] is not simply
-    /// "propagate everything".
+    /// "propagate everything". Asserted under `Remote` for the same reason the
+    /// refusal twin above is: it is the mode whose source walk runs with a local
+    /// root present, so held-then-answered-locally is observable there.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_source_outage_is_still_held_while_a_refusal_is_not() {
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
         seed_indirected_root(&cache).await;
 
-        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Remote);
         let physical = chained
             .physical_reference(&digest_only_id())
             .await
