@@ -375,13 +375,22 @@ pub enum ProjectErrorKind {
 
     /// The binding already exists in the target group in `ocx.toml`.
     /// Surfaced by `ocx add` when the user attempts to add a tool that is
-    /// already declared in the same group. Callers should surface a hint
-    /// to use `ocx remove` first or edit `ocx.toml` directly.
+    /// already declared in the same group — most often because two packages
+    /// share a repository basename (`gitlab/cli` and `github/cli` both derive
+    /// the key `cli`). The message names the `NAME=IDENTIFIER` form so the
+    /// remedy is discoverable from the failure alone, following the
+    /// `BindingAmbiguous` precedent of naming the CLI syntax that resolves it.
     ///
     /// `group` is `"default"` for the implicit top-level `[tools]` table,
     /// or the named group string for `[group.<name>]` tables.
-    #[error("binding '{name}' already exists in group '{group}'")]
+    #[error("binding '{name}' already exists in group '{group}' — pass NAME=IDENTIFIER to bind under a different name")]
     BindingAlreadyExists { name: String, group: String },
+
+    /// An explicit binding name from the `NAME=IDENTIFIER` form of `ocx add`
+    /// is empty or contains characters that are invalid for a TOML table key
+    /// in `ocx.toml`.
+    #[error("invalid binding name '{name}': allowed characters are alphanumerics, '.', '_', and '-'")]
+    InvalidBindingName { name: String },
 
     /// The binding to remove was found in multiple groups, making the
     /// target ambiguous. Surfaced by `ocx remove` when `--group` is not
@@ -538,6 +547,7 @@ impl ClassifyExitCode for Error {
                 ProjectErrorKind::BindingNotFound { .. } => ExitCode::NotFound,
                 ProjectErrorKind::ConfigAlreadyExists { .. } => ExitCode::UsageError,
                 ProjectErrorKind::InvalidGroupName { .. } => ExitCode::UsageError,
+                ProjectErrorKind::InvalidBindingName { .. } => ExitCode::UsageError,
                 // Stale predecessor on partial-resolve: the caller's lock
                 // snapshot is out of date with the live config. Same
                 // classification as the read-side staleness gate

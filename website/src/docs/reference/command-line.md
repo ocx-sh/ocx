@@ -365,12 +365,12 @@ ocx add --group ci shfmt:3.13   # also legal — coexists in [group.ci]
 **Usage**
 
 ```shell
-ocx add [OPTIONS] <IDENTIFIER>...
+ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale.
+- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
 
 **Options**
 
@@ -393,7 +393,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
 | 1 | The in-place `ocx.toml` edit could not be expressed safely (rare); the command aborts rather than falling back to a lossy rewrite. |
-| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
+| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, invalid binding `NAME`, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
@@ -401,6 +401,19 @@ See [`--global`][global-flag] for the full root-flag reference.
 | 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
+
+#### Binding names {#add-binding-names}
+
+Without `NAME=`, the binding key is the repository basename — `ocx add ocx.sh/cmake:3.28` binds under `cmake`. Two tools that share a basename in different namespaces collide under that default: `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists".
+
+Prefix either identifier with an explicit `NAME=` to bind it under a distinct key instead:
+
+```shell
+ocx add gh=ocx.sh/github/cli:2.40
+ocx add glab=ocx.sh/gitlab/cli:1.30
+```
+
+Both tools now coexist under their own keys — `ocx run gh`, `ocx run glab`, `ocx remove glab`, and the `ocx.lock` entry all key on the name you gave, not the repository path. `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
 
 ### `clean` {#clean}
 
@@ -1652,7 +1665,7 @@ See [Project Toolchain In Depth → Running tools][in-depth-project-running] for
 
 Removes one or more tool bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tools.
 
-Each argument accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). The binding key is always the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
+Each argument accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). An identifier form is reduced to the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. A binding added under an explicit name ([`ocx add glab=ocx.sh/gitlab/cli`](#add-binding-names)) is matched only by that name — remove it with `ocx remove glab`, not its identifier. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
 
 When the same binding name appears in more than one group (e.g. in both `[tools]` and `[group.ci]`), `ocx remove` cannot determine which entry to drop and exits with code 64. Pass `--group` to make the target group explicit:
 
@@ -1670,7 +1683,7 @@ ocx remove [OPTIONS] <IDENTIFIER>...
 
 **Arguments**
 
-- `<IDENTIFIER>...`: One or more binding names or fully-qualified identifiers to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`).
+- `<IDENTIFIER>...`: One or more binding names or fully-qualified identifiers to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`). A binding added under an explicit [`NAME=`](#add-binding-names) is addressed by that name only.
 
 **Options**
 

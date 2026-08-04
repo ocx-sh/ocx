@@ -22,6 +22,11 @@ use crate::options;
 /// Resolves only the new bindings, carries every existing lock entry
 /// forward unchanged, and installs the tools (default eager behavior).
 ///
+/// Each binding is named after the repository basename, so two packages
+/// with the same basename collide. Prefix an identifier with `NAME=` to
+/// choose the name yourself: `ocx add glab=ocx.sh/gitlab/cli`. A name may
+/// contain alphanumerics, `.`, `_`, and `-`.
+///
 /// All identifiers are validated and staged before anything is written:
 /// a duplicate identifier (already bound, or repeated in the same batch)
 /// aborts the whole command with `ocx.toml` left untouched.
@@ -39,7 +44,8 @@ use crate::options;
 /// `--no-pull --pull` resolves to pull; `--pull --no-pull` resolves to
 /// no-pull.
 ///
-/// Fails if the binding name already exists in any group.
+/// Fails if the binding name already exists in the target group. The
+/// same name in a different group is legal.
 #[derive(Parser, Clone)]
 pub struct Add {
     /// Named group to add the bindings to. Defaults to the implicit
@@ -53,8 +59,9 @@ pub struct Add {
     #[clap(flatten)]
     pub platform: options::PlatformOption,
 
-    /// Fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28`).
-    #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
+    /// Tool identifiers to add, each optionally prefixed with `NAME=`
+    /// (e.g. `ocx.sh/cmake:3.28`, `glab=ocx.sh/gitlab/cli`).
+    #[arg(required = true, num_args = 1.., value_name = "[NAME=]IDENTIFIER")]
     pub identifiers: Vec<String>,
 }
 
@@ -66,23 +73,32 @@ impl Add {
         // or the file already exists.
         ensure_global_project_initialized(&context).await?;
 
-        // Parse every identifier up front — before the flock — applying the
+        // Parse every positional up front — before the flock — applying the
         // default registry if unqualified and the `:latest` default for bare
         // identifiers (no tag, no digest). Parsing all of them first means a
         // malformed identifier fails fast without touching the flock or
         // `ocx.toml`. The `:latest` default is intentionally NOT a duplicate
         // of the config-parse-layer default in `ProjectConfig::from_toml_str`.
-        let identifiers: Vec<ocx_lib::oci::Identifier> = self
+        //
+        // A leading `NAME=` picks the binding key explicitly. `=` never
+        // appears in a valid OCI identifier, so splitting on the FIRST `=` is
+        // unambiguous. The name itself is validated by the library
+        // (`InvalidBindingName`), so an empty `=foo` fails there, not here.
+        let bindings: Vec<(Option<String>, ocx_lib::oci::Identifier)> = self
             .identifiers
             .iter()
             .map(|raw| {
-                let id = ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry())?;
+                let (name, reference) = match raw.split_once('=') {
+                    Some((name, reference)) => (Some(name.to_owned()), reference),
+                    None => (None, raw.as_str()),
+                };
+                let id = ocx_lib::oci::Identifier::parse_with_default_registry(reference, context.default_registry())?;
                 let id = if id.tag().is_none() && id.digest().is_none() {
                     id.clone_with_tag("latest")
                 } else {
                     id
                 };
-                Ok::<_, anyhow::Error>(id)
+                Ok::<_, anyhow::Error>((name, id))
             })
             .collect::<Result<_, _>>()?;
 
@@ -98,11 +114,11 @@ impl Add {
         // which aborts before any disk write. Atomic: all bindings land or
         // none do; `ocx.toml` is never left half-edited.
         let config_path = guard.config_path().to_path_buf();
-        let identifiers_for_stage = identifiers.clone();
+        let bindings_for_stage = bindings.clone();
         let group = self.group.clone();
         let staged = guard.stage(move |cfg| {
-            for identifier in &identifiers_for_stage {
-                add_binding_in_memory(cfg, &config_path, identifier, group.as_deref())?;
+            for (name, identifier) in &bindings_for_stage {
+                add_binding_in_memory(cfg, &config_path, identifier, name.as_deref(), group.as_deref())?;
             }
             Ok(())
         })?;
@@ -123,9 +139,14 @@ impl Add {
             .group
             .clone()
             .unwrap_or_else(|| ocx_lib::project::DEFAULT_GROUP.to_string());
-        let touched: Vec<(String, String)> = identifiers
+        let touched: Vec<(String, String)> = bindings
             .iter()
-            .map(|identifier| (group.clone(), ocx_lib::project::binding_key(identifier)))
+            .map(|(name, identifier)| {
+                let key = name
+                    .clone()
+                    .unwrap_or_else(|| ocx_lib::project::binding_key(identifier));
+                (group.clone(), key)
+            })
             .collect();
         let new_lock = match guard.previous_lock().cloned() {
             Some(prev) => {
@@ -233,6 +254,14 @@ mod tests {
             add.identifiers,
             vec!["a:1".to_string(), "b:2".to_string(), "c:3".to_string()]
         );
+    }
+
+    /// A `NAME=IDENTIFIER` positional reaches `execute` verbatim — the split
+    /// happens there, not in clap (`=` is not a flag separator for positionals).
+    #[test]
+    fn parse_keeps_named_positional_verbatim() {
+        let add = parse(&["add", "glab=ocx.sh/gitlab/cli"]);
+        assert_eq!(add.identifiers, vec!["glab=ocx.sh/gitlab/cli".to_string()]);
     }
 
     /// `num_args=1..` rejects zero positionals.

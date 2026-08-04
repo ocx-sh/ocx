@@ -15,11 +15,15 @@ use crate::app::project_context::load_project_for_mutate;
 
 /// Remove one or more tool bindings from `ocx.toml`.
 ///
-/// Searches the implicit default `[tools]` table and all named groups for
-/// each binding whose key or identifier matches the given identifiers,
-/// removes them, rewrites `ocx.lock` with every surviving entry carried
-/// forward unchanged, and uninstalls the tools. If any identifier matches
-/// no binding, the whole command fails and `ocx.toml` is left untouched.
+/// Each argument is reduced to a binding name — an identifier form like
+/// `ocx.sh/cmake:3.28` matches the binding named `cmake` — and the
+/// implicit default `[tools]` table and all named groups are searched for
+/// that name. A binding added under an explicit name
+/// (`ocx add glab=ocx.sh/gitlab/cli`) is matched only by that name.
+/// Matched bindings are removed, `ocx.lock` is rewritten with every
+/// surviving entry carried forward unchanged, and the tools are
+/// uninstalled. If any argument matches no binding, the whole command
+/// fails and `ocx.toml` is left untouched.
 ///
 /// Removing a binding never re-resolves the surviving tools: their pins
 /// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
@@ -70,11 +74,10 @@ impl Remove {
 
         // For each identifier, derive the binding key + look up the live
         // identifier from the pre-mutation snapshot so we can uninstall it
-        // after the commit. `remove_ids` carries one synthetic identifier per
-        // input (the in-memory remover only consults the repo basename);
+        // after the commit. `remove_keys` carries the TOML key per input;
         // `install_identifiers` collects only the bindings that were live so
         // the post-commit uninstall targets exactly those.
-        let mut remove_ids: Vec<ocx_lib::oci::Identifier> = Vec::with_capacity(self.identifiers.len());
+        let mut remove_keys: Vec<String> = Vec::with_capacity(self.identifiers.len());
         let mut install_identifiers: Vec<ocx_lib::oci::Identifier> = Vec::new();
 
         for raw in &self.identifiers {
@@ -105,23 +108,10 @@ impl Remove {
                     .cloned(),
             };
 
-            // Build the synthetic identifier the in-memory remover requires.
-            // remove_binding_in_memory only consults the binding key (repo
-            // basename), so either the live identifier or a parse of the
-            // user-supplied string suffices.
-            let dummy_id = ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry());
-            let remove_id = match &install_identifier {
-                Some(id) => id.clone(),
-                None => match dummy_id {
-                    Ok(id) => id,
-                    Err(_) => ocx_lib::oci::Identifier::new_registry(&binding_key, context.default_registry()),
-                },
-            };
-
             if let Some(id) = install_identifier {
                 install_identifiers.push(id);
             }
-            remove_ids.push(remove_id);
+            remove_keys.push(binding_key);
         }
 
         // Stage: in-memory remove of every identifier on a clone of the
@@ -131,8 +121,8 @@ impl Remove {
         let config_path = guard.config_path().to_path_buf();
         let group = self.group.clone();
         let staged = guard.stage(move |cfg| {
-            for remove_id in &remove_ids {
-                remove_binding_in_memory(cfg, &config_path, remove_id, group.as_deref())?;
+            for key in &remove_keys {
+                remove_binding_in_memory(cfg, &config_path, key, group.as_deref())?;
             }
             Ok(())
         })?;

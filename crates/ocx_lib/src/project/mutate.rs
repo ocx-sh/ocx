@@ -77,6 +77,20 @@ pub fn binding_key(identifier: &Identifier) -> String {
         .to_owned()
 }
 
+/// Validate an explicit binding name supplied via the `NAME=IDENTIFIER` form
+/// of `ocx add`.
+///
+/// Valid names: non-empty, consist solely of ASCII alphanumeric characters,
+/// `.`, `_`, and `-` — the same character set `StringExt::to_relaxed_slug`
+/// preserves. The name is a TOML map key (and the lock entry's `name`
+/// field), nothing more — it never becomes a filesystem path segment.
+fn validate_binding_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Validate a group name supplied via `--group`.
 ///
 /// Valid names: non-empty, consist solely of ASCII alphanumeric characters,
@@ -152,20 +166,39 @@ async fn read_config_via_guard(
 /// `path` is used solely for error context (`ProjectError::new(path, ...)`)
 /// when surfacing structured errors; it is NOT read from or written to.
 ///
+/// `name` is the explicit binding key from the `NAME=IDENTIFIER` form of
+/// `ocx add`; when `None` the key is derived with [`binding_key`] (the
+/// repository basename). An explicit name lets two packages that share a
+/// basename — `gitlab/cli` and `github/cli` — coexist in one group.
+///
 /// # Errors
 ///
 /// Same set as [`add_binding`] minus the I/O / parse variants
 /// (`Io`, `FileTooLarge`, `TomlParse`, `TomlSerialize`, `Locked`):
 ///
+/// - [`ProjectErrorKind::InvalidBindingName`] — `name` is empty or contains
+///   characters outside `[A-Za-z0-9._-]`.
 /// - [`ProjectErrorKind::InvalidGroupName`] — `group` contains invalid characters.
-/// - [`ProjectErrorKind::BindingAlreadyExists`] — the derived key already
-///   exists in the target group.
+/// - [`ProjectErrorKind::BindingAlreadyExists`] — the key already exists in
+///   the target group.
 pub fn add_binding_in_memory(
     config: &mut crate::project::config::ProjectConfig,
     path: &Path,
     identifier: &Identifier,
+    name: Option<&str>,
     group: Option<&str>,
 ) -> Result<String, Error> {
+    if let Some(binding_name) = name
+        && !validate_binding_name(binding_name)
+    {
+        return Err(Error::Project(ProjectError::new(
+            path.to_path_buf(),
+            ProjectErrorKind::InvalidBindingName {
+                name: binding_name.to_owned(),
+            },
+        )));
+    }
+
     if let Some(group_name) = group
         && !validate_group_name(group_name)
     {
@@ -177,7 +210,7 @@ pub fn add_binding_in_memory(
         )));
     }
 
-    let key = binding_key(identifier);
+    let key = name.map_or_else(|| binding_key(identifier), str::to_owned);
 
     // Duplicate check: scoped to the target group only.
     match group {
@@ -225,7 +258,9 @@ pub fn add_binding_in_memory(
 
 /// Append a binding to the project config file at `config_path`. If
 /// `group` is `None`, lands in the implicit default `[tools]` table;
-/// otherwise lands under `[group.<group>]`.
+/// otherwise lands under `[group.<group>]`. `name` is the explicit binding
+/// key (`None` derives it from the identifier — see
+/// [`add_binding_in_memory`]).
 ///
 /// Acquires an exclusive advisory flock on the config file itself for
 /// the duration of the read-modify-write cycle.
@@ -242,12 +277,19 @@ pub fn add_binding_in_memory(
 /// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
 ///   produced a document that no longer describes the staged configuration;
 ///   the write is abandoned rather than falling back to a whole-file rewrite.
-/// - [`ProjectErrorKind::BindingAlreadyExists`] — the derived binding key
-///   already exists in the target group. The same name may exist in other
-///   groups without error.
+/// - [`ProjectErrorKind::InvalidBindingName`] — `name` is empty or contains
+///   characters outside `[A-Za-z0-9._-]`.
+/// - [`ProjectErrorKind::BindingAlreadyExists`] — the binding key already
+///   exists in the target group. The same name may exist in other groups
+///   without error.
 /// - [`ProjectErrorKind::Locked`] — another process holds the exclusive flock
 ///   on the config file; the caller should retry with backoff.
-pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Option<&str>) -> Result<(), Error> {
+pub async fn add_binding(
+    config_path: &Path,
+    identifier: &Identifier,
+    name: Option<&str>,
+    group: Option<&str>,
+) -> Result<(), Error> {
     // Validate the group name before acquiring the lock so invalid input is
     // rejected cheaply — no filesystem operations needed.
     if let Some(group_name) = group
@@ -266,7 +308,7 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
     let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
 
     // Compose: in-memory mutation + write-back through the lock-owning handle.
-    add_binding_in_memory(&mut config, config_path, identifier, group)?;
+    add_binding_in_memory(&mut config, config_path, identifier, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
     // Rewrite ocx.toml IN PLACE through the lock-owning handle. A tempfile +
@@ -291,8 +333,10 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 /// searched: 0 hits → `BindingNotFound`, 1 hit → removed, 2+ hits →
 /// `BindingAmbiguous` (caller should re-invoke with `--group`).
 ///
-/// Match key = the binding name derived from `identifier` (typically the
-/// repo basename, same key used by the TOML `[tools]` table).
+/// `name` is the binding key verbatim — the TOML `[tools]` key. Callers that
+/// hold an identifier derive it with [`binding_key`]; deriving it here would
+/// make a binding added under an explicit `NAME=IDENTIFIER` alias
+/// unremovable by its own name.
 ///
 /// Acquires an exclusive advisory flock on the config file itself for
 /// the duration of the read-modify-write cycle.
@@ -307,19 +351,19 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 /// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
 ///   produced a document that no longer describes the staged configuration;
 ///   the write is abandoned rather than falling back to a whole-file rewrite.
-/// - [`ProjectErrorKind::BindingNotFound`] — the derived binding key was not
-///   found in the targeted group (or any group when `group` is `None`).
+/// - [`ProjectErrorKind::BindingNotFound`] — `name` was not found in the
+///   targeted group (or any group when `group` is `None`).
 /// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the
 ///   binding name appears in more than one group; pass `--group` to
 ///   disambiguate.
 /// - [`ProjectErrorKind::Locked`] — another process holds the exclusive flock
 ///   on the config file; the caller should retry with backoff.
-pub async fn remove_binding(config_path: &Path, identifier: &Identifier, group: Option<&str>) -> Result<(), Error> {
+pub async fn remove_binding(config_path: &Path, name: &str, group: Option<&str>) -> Result<(), Error> {
     let mut guard = acquire_project_lock_for_file(config_path).await?;
 
     let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
 
-    remove_binding_in_memory(&mut config, config_path, identifier, group)?;
+    remove_binding_in_memory(&mut config, config_path, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
     // Rewrite in place through the lock-owning handle (see add_binding).
@@ -339,19 +383,21 @@ pub async fn remove_binding(config_path: &Path, identifier: &Identifier, group: 
 /// performs NO filesystem I/O. `path` is used only for error context.
 /// See [`add_binding_in_memory`] for the full library/CLI split rationale.
 ///
+/// `name` is the binding key verbatim (see [`remove_binding`]).
+///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::BindingNotFound`] — the derived key was not
-///   found in the targeted group (or any group when `group` is `None`).
+/// - [`ProjectErrorKind::BindingNotFound`] — `name` was not found in the
+///   targeted group (or any group when `group` is `None`).
 /// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the
 ///   binding appears in more than one group.
 pub fn remove_binding_in_memory(
     config: &mut crate::project::config::ProjectConfig,
     path: &Path,
-    identifier: &Identifier,
+    name: &str,
     group: Option<&str>,
 ) -> Result<(), Error> {
-    let key = binding_key(identifier);
+    let key = name.to_owned();
 
     match group {
         // ── explicit group: remove from that group only ───────────────────
@@ -543,7 +589,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, None).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -559,7 +605,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -579,8 +625,8 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
 
         // Dup in default group → error when re-added to default.
-        add_binding(&toml(dir.path()), &id, None).await.unwrap();
-        let err = add_binding(&toml(dir.path()), &id, None)
+        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
+        let err = add_binding(&toml(dir.path()), &id, None, None)
             .await
             .expect_err("second add to default must fail");
         assert!(
@@ -591,8 +637,8 @@ mod tests {
         // Dup in [group.ci] → error only when re-added to [group.ci],
         // NOT when added to [group.staging].
         let id2 = test_id("example.com", "ninja", "1.11");
-        add_binding(&toml(dir.path()), &id2, Some("ci")).await.unwrap();
-        let err2 = add_binding(&toml(dir.path()), &id2, Some("ci"))
+        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
+        let err2 = add_binding(&toml(dir.path()), &id2, None, Some("ci"))
             .await
             .expect_err("second add to ci must fail");
         assert!(
@@ -600,7 +646,7 @@ mod tests {
             "expected BindingAlreadyExists with group=ci; got: {err2}"
         );
         // Same name in [group.staging] must succeed.
-        add_binding(&toml(dir.path()), &id2, Some("staging"))
+        add_binding(&toml(dir.path()), &id2, None, Some("staging"))
             .await
             .expect("same name in staging must succeed");
     }
@@ -613,10 +659,10 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
         let id2 = test_id("example.com", "cmake", "3.29");
 
-        add_binding(&toml(dir.path()), &id, None)
+        add_binding(&toml(dir.path()), &id, None, None)
             .await
             .expect("add cmake to default must succeed");
-        add_binding(&toml(dir.path()), &id2, Some("ci"))
+        add_binding(&toml(dir.path()), &id2, None, Some("ci"))
             .await
             .expect("add cmake to [group.ci] must succeed");
 
@@ -631,6 +677,124 @@ mod tests {
         );
     }
 
+    // ── explicit binding name (NAME=IDENTIFIER) ──────────────────────────────
+
+    /// An explicit name becomes the binding key verbatim, with the full
+    /// identifier as the value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_with_explicit_name_uses_that_key() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "gitlab/cli", "1.0");
+
+        add_binding(&toml(dir.path()), &id, Some("glab"), None)
+            .await
+            .expect("explicit name must be accepted");
+
+        let cfg = reload_config(dir.path());
+        assert_eq!(
+            cfg.tools.get("glab").map(ToString::to_string),
+            Some(id.to_string()),
+            "explicit name must key the full identifier; got: {:?}",
+            cfg.tools
+        );
+        assert!(
+            !cfg.tools.contains_key("cli"),
+            "the basename key must NOT be written when a name is explicit"
+        );
+    }
+
+    /// Issue #279: two packages sharing a repository basename coexist when
+    /// the second is bound under an explicit name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_explicit_name_resolves_basename_collision() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let gitlab = test_id("example.com", "gitlab/cli", "1.0");
+        let github = test_id("example.com", "github/cli", "2.0");
+
+        add_binding(&toml(dir.path()), &gitlab, None, None)
+            .await
+            .expect("first add derives the basename key");
+        add_binding(&toml(dir.path()), &github, Some("cli2"), None)
+            .await
+            .expect("colliding basename must succeed under an explicit name");
+
+        let cfg = reload_config(dir.path());
+        assert!(cfg.tools.contains_key("cli"), "derived key must remain");
+        assert!(cfg.tools.contains_key("cli2"), "explicit key must be present");
+    }
+
+    /// A duplicate explicit name in the same group is still rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_errors_on_duplicate_explicit_name() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let first = test_id("example.com", "gitlab/cli", "1.0");
+        let second = test_id("example.com", "github/cli", "2.0");
+
+        add_binding(&toml(dir.path()), &first, Some("glab"), None)
+            .await
+            .unwrap();
+        let err = add_binding(&toml(dir.path()), &second, Some("glab"), None)
+            .await
+            .expect_err("second add under the same explicit name must fail");
+
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::BindingAlreadyExists { name, group } if name == "glab" && group == "default")),
+            "expected BindingAlreadyExists for the explicit name; got: {err}"
+        );
+    }
+
+    /// An explicit name outside `[A-Za-z0-9._-]`, or an empty one, is rejected
+    /// before anything is written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_rejects_invalid_explicit_name() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "gitlab/cli", "1.0");
+
+        for candidate in ["gitlab/cli", "", "with space"] {
+            let err = add_binding(&toml(dir.path()), &id, Some(candidate), None)
+                .await
+                .expect_err("invalid explicit name must be rejected");
+            assert!(
+                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidBindingName { name } if name == candidate)),
+                "expected InvalidBindingName for {candidate:?}; got: {err}"
+            );
+        }
+
+        let cfg = reload_config(dir.path());
+        assert!(cfg.tools.is_empty(), "a rejected name must leave [tools] untouched");
+    }
+
+    /// A binding added under an explicit name is removable by that name, and
+    /// the sibling that owns the derived basename key survives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_binding_targets_the_explicit_name_not_the_basename() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let gitlab = test_id("example.com", "gitlab/cli", "1.0");
+        let github = test_id("example.com", "github/cli", "2.0");
+
+        add_binding(&toml(dir.path()), &gitlab, None, None).await.unwrap();
+        add_binding(&toml(dir.path()), &github, Some("glab"), None)
+            .await
+            .unwrap();
+
+        remove_binding(&toml(dir.path()), "glab", None)
+            .await
+            .expect("remove by explicit name must succeed");
+
+        let cfg = reload_config(dir.path());
+        assert!(!cfg.tools.contains_key("glab"), "the named binding must be gone");
+        assert!(
+            cfg.tools.contains_key("cli"),
+            "the basename-keyed sibling must survive; got: {:?}",
+            cfg.tools
+        );
+    }
+
     // ── remove_binding ───────────────────────────────────────────────────────
 
     /// Spec: mutate §5 bullet 4 — remove from default group (no --group).
@@ -639,9 +803,9 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, None).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
 
-        remove_binding(&toml(dir.path()), &id, None).await.unwrap();
+        remove_binding(&toml(dir.path()), "cmake", None).await.unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -656,9 +820,9 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
 
-        remove_binding(&toml(dir.path()), &id, None).await.unwrap();
+        remove_binding(&toml(dir.path()), "cmake", None).await.unwrap();
 
         let cfg = reload_config(dir.path());
         let gone = cfg
@@ -674,9 +838,8 @@ mod tests {
     async fn remove_binding_errors_when_missing() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
-        let id = test_id("example.com", "cmake", "3.28");
 
-        let err = remove_binding(&toml(dir.path()), &id, None)
+        let err = remove_binding(&toml(dir.path()), "cmake", None)
             .await
             .expect_err("remove_binding on absent entry must fail");
 
@@ -696,11 +859,11 @@ mod tests {
         let id2 = test_id("example.com", "cmake", "3.29");
 
         // Same binding name in default and [group.ci].
-        add_binding(&toml(dir.path()), &id, None).await.unwrap();
-        add_binding(&toml(dir.path()), &id2, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
+        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
 
         // Remove from ci only.
-        remove_binding(&toml(dir.path()), &id, Some("ci"))
+        remove_binding(&toml(dir.path()), "cmake", Some("ci"))
             .await
             .expect("targeted remove from ci must succeed");
 
@@ -722,10 +885,10 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
         let id2 = test_id("example.com", "cmake", "3.29");
 
-        add_binding(&toml(dir.path()), &id, None).await.unwrap();
-        add_binding(&toml(dir.path()), &id2, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
+        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
 
-        let err = remove_binding(&toml(dir.path()), &id, None)
+        let err = remove_binding(&toml(dir.path()), "cmake", None)
             .await
             .expect_err("remove_binding without --group on ambiguous entry must fail");
         assert!(
@@ -740,9 +903,9 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
 
-        remove_binding(&toml(dir.path()), &id, None)
+        remove_binding(&toml(dir.path()), "cmake", None)
             .await
             .expect("unique binding without --group must succeed");
 
@@ -867,7 +1030,7 @@ mod tests {
         // attempts LockedFile::try_exclusive on ocx.toml. Because the first
         // guard holds that lock, try_exclusive returns None → Locked.
         let id = test_id("example.com", "cmake", "3.28");
-        let err = add_binding(&toml(dir.path()), &id, None)
+        let err = add_binding(&toml(dir.path()), &id, None, None)
             .await
             .expect_err("add_binding must fail with Locked while ocx.toml is exclusively held");
 
@@ -889,7 +1052,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        let err = add_binding(&toml(dir.path()), &id, Some("all"))
+        let err = add_binding(&toml(dir.path()), &id, None, Some("all"))
             .await
             .expect_err("add_binding with group 'all' must fail");
 
@@ -909,7 +1072,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        let err = add_binding(&toml(dir.path()), &id, Some("default"))
+        let err = add_binding(&toml(dir.path()), &id, None, Some("default"))
             .await
             .expect_err("add_binding with group 'default' must fail");
 
@@ -928,7 +1091,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, Some("ci"))
+        add_binding(&toml(dir.path()), &id, None, Some("ci"))
             .await
             .expect("add_binding with group 'ci' must succeed");
 

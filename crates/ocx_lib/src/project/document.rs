@@ -239,14 +239,14 @@ mod tests {
     /// Parse `original`, apply an `add` of `repo:tag` into `group`, and render.
     fn render_after_add(original: &str, repo: &str, tag: &str, group: Option<&str>) -> String {
         let mut candidate = ProjectConfig::from_toml_str(original).expect("fixture parses");
-        add_binding_in_memory(&mut candidate, &path(), &identifier(repo, tag), group).expect("add applies");
+        add_binding_in_memory(&mut candidate, &path(), &identifier(repo, tag), None, group).expect("add applies");
         render_preserving(original, &candidate, &path()).expect("render succeeds")
     }
 
     /// Parse `original`, apply a `remove` of `repo`, and render.
     fn render_after_remove(original: &str, repo: &str) -> String {
         let mut candidate = ProjectConfig::from_toml_str(original).expect("fixture parses");
-        remove_binding_in_memory(&mut candidate, &path(), &identifier(repo, "1"), None).expect("remove applies");
+        remove_binding_in_memory(&mut candidate, &path(), repo, None).expect("remove applies");
         render_preserving(original, &candidate, &path()).expect("render succeeds")
     }
 

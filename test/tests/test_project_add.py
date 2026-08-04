@@ -806,3 +806,59 @@ def test_add_no_pull_batch_stays_cold(
     assert _packages_present_count(ocx) == 0, (
         "batch --no-pull must not materialize any package into the object store"
     )
+
+
+# ---------------------------------------------------------------------------
+# Explicit binding name — `ocx add NAME=IDENTIFIER` (issue #279)
+# ---------------------------------------------------------------------------
+
+
+def test_add_explicit_name_resolves_basename_collision(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Two packages sharing a repository basename coexist when the second is
+    bound under an explicit ``NAME=`` alias, and the alias is what
+    ``ocx remove`` takes.
+
+    Issue #279: the binding key is the repo basename, so
+    ``ocx add gitlab/cli`` then ``ocx add github/cli`` used to fail with
+    BindingAlreadyExists (64).
+    """
+    import tomllib
+
+    short = uuid4().hex[:8]
+    gitlab_repo = f"gl_{short}/cli"
+    github_repo = f"gh_{short}/cli"
+    gitlab_pkg = make_package(ocx, gitlab_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    github_pkg = make_package(ocx, github_repo, "2.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    first = _run_cmd(ocx, project_dir, "add", "--no-pull", gitlab_pkg.fq)
+    assert first.returncode == EXIT_SUCCESS, (
+        f"first add failed: rc={first.returncode}, stderr={first.stderr!r}"
+    )
+
+    second = _run_cmd(ocx, project_dir, "add", "--no-pull", f"glab={github_pkg.fq}")
+    assert second.returncode == EXIT_SUCCESS, (
+        f"aliased add of a colliding basename failed: "
+        f"rc={second.returncode}, stderr={second.stderr!r}"
+    )
+
+    tools = tomllib.loads((project_dir / "ocx.toml").read_text())["tools"]
+    assert tools["cli"] == gitlab_pkg.fq, f"derived key must hold the first package; got {tools!r}"
+    assert tools["glab"] == github_pkg.fq, f"alias key must hold the second package; got {tools!r}"
+
+    lock_tools = tomllib.loads((project_dir / "ocx.lock").read_text())["tool"]
+    locked_names = {entry["name"] for entry in lock_tools}
+    assert {"cli", "glab"} <= locked_names, f"both bindings must be locked; got {locked_names!r}"
+
+    removed = _run_cmd(ocx, project_dir, "remove", "glab")
+    assert removed.returncode == EXIT_SUCCESS, (
+        f"ocx remove <alias> failed: rc={removed.returncode}, stderr={removed.stderr!r}"
+    )
+    tools_after = tomllib.loads((project_dir / "ocx.toml").read_text())["tools"]
+    assert "glab" not in tools_after, f"alias must be gone after remove; got {tools_after!r}"
+    assert "cli" in tools_after, f"the other binding must survive; got {tools_after!r}"
