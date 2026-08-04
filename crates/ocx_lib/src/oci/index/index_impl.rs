@@ -151,6 +151,21 @@ pub trait IndexImpl: Send + Sync {
         &[]
     }
 
+    /// The exemption set that applies to `registry` — [`Self::trusted_hosts`]
+    /// asked of an index that holds several sources.
+    ///
+    /// Keyed on the registry (ownership), never on per-name jurisdiction: a name
+    /// the owning index's grammar cannot express is still that operator's
+    /// namespace and keeps their exemption. The default ignores `registry` and
+    /// answers with this source's own set — a single source is the owner of
+    /// every registry it answers for; only
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) overrides it, picking
+    /// the owning source out of the chain.
+    fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        let _ = registry;
+        self.trusted_hosts()
+    }
+
     /// Whether this source is the configured owner of `registry` — a cheap,
     /// no-I/O ownership test, deliberately distinct from the per-name
     /// [`Self::jurisdiction`].

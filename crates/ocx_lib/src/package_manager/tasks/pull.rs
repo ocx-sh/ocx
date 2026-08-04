@@ -748,6 +748,12 @@ async fn extract_layers(
         parsed.push((layer.clone(), digest));
     }
 
+    // One SSRF pre-flight per pull operation, run by whichever layer task first
+    // finds it has to dial (see `Index::guard_physical_dial`). Shared rather than
+    // hoisted here so a pull whose layers are all cached never resolves the
+    // physical host at all.
+    let dial_guard: Arc<tokio::sync::OnceCell<DialVerdict>> = Arc::new(tokio::sync::OnceCell::new());
+
     // Dispatch extractions in parallel. JoinSet results come back in
     // completion order, so we tag each task with its index and reorder at
     // the end to preserve manifest declaration order.
@@ -757,8 +763,9 @@ async fn extract_layers(
         let pinned = pinned.clone();
         let transport = transport.clone();
         let layer_group = layer_group.clone();
+        let dial_guard = dial_guard.clone();
         tasks.spawn(crate::cli::progress::inherit_scope(async move {
-            let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group).await;
+            let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group, &dial_guard).await;
             (idx, res)
         }));
     }
@@ -793,6 +800,43 @@ async fn extract_layers(
 ///    (another process finishing between step 4 and step 7) is still
 ///    tolerated as a no-op cleanup.
 /// 8. Broadcast completion via the singleflight handle.
+///
+/// The memoized outcome of a pull operation's dial-site SSRF pre-flight.
+///
+/// The **whole verdict** is memoized, not just success:
+/// [`tokio::sync::OnceCell::get_or_try_init`] leaves the cell uninitialized when
+/// its initializer fails, so caching only the `Ok` would let every missing layer
+/// re-ask — and a host that answers differently between two adjacent lookups
+/// needs exactly one `Ok` to be dialled. One refusal is therefore final for the
+/// operation.
+type DialVerdict = Result<(), DialRefusal>;
+
+/// A dial-site refusal, shared across the layer tasks that observe it.
+///
+/// [`crate::Error`] is not `Clone`, and every waiter needs the same verdict, so
+/// the refusal is shared behind an `Arc` and the original is exposed as the
+/// chain successor — `cli::classify_error` walks to it and still reports the
+/// `SsrfError`'s exit code. Same shape as
+/// [`singleflight::SharedError`](crate::utility::singleflight::SharedError),
+/// which cannot be constructed outside its own `Handle::fail`.
+#[derive(Debug, Clone)]
+struct DialRefusal(Arc<crate::Error>);
+
+impl std::fmt::Display for DialRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for DialRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
+}
+
+/// `dial_guard` memoizes the pull operation's SSRF pre-flight over the physical
+/// target, so the check runs once however many layers are fetched — and a
+/// refusal stays refused ([`DialVerdict`]).
 async fn extract_layer_atomic(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
@@ -800,6 +844,7 @@ async fn extract_layer_atomic(
     layer: &oci::Descriptor,
     layer_digest: &oci::Digest,
     layer_group: LayerGroup,
+    dial_guard: &tokio::sync::OnceCell<DialVerdict>,
 ) -> Result<oci::Digest, PackageErrorKind> {
     let fs = mgr.file_structure();
     let registry = pinned.registry().to_string();
@@ -832,6 +877,24 @@ async fn extract_layer_atomic(
             return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
         }
     };
+
+    // The layer is genuinely absent, so a request to the PHYSICAL location is
+    // imminent — and `client` carries no SSRF resolver of its own. This is the
+    // one point where a target the index rewrote is validated before anything
+    // dials it; the pre-flight `physical_reference` ran at resolve time had to
+    // tolerate a lookup failure, so its verdict cannot stand in for this one.
+    if let Err(refusal) = dial_guard
+        .get_or_init(|| async {
+            mgr.index()
+                .guard_physical_dial(pinned.as_identifier(), transport.as_identifier())
+                .await
+                .map_err(|error| DialRefusal(Arc::new(error)))
+        })
+        .await
+    {
+        let shared = handle.fail(refusal.clone());
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+    }
 
     // We own the handle. Either complete on Ok or fail on Err before return.
     match extract_layer_inner(pinned, transport, layer, layer_digest, client, fs).await {
@@ -971,20 +1034,27 @@ fn link_layers_in_temp(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::{SetupGroups, setup_owned};
     use crate::{
         cli::{ExitCode, classify_error},
         file_structure::{FileStructure, IndexStore},
         oci::{
             self,
-            index::{ChainMode, Index, LocalConfig, LocalIndex},
+            client::test_transport::{StubTransport, StubTransportData},
+            index::{ChainMode, Index, LocalConfig, LocalIndex, test_source::TrustingSource},
         },
-        package::metadata::{
-            Metadata,
-            bundle::{Bundle, Version},
-            dependency::Dependencies,
-            entrypoint::Entrypoints,
-            env::Env,
+        package::{
+            install_info::InstallInfo,
+            metadata::{
+                Metadata,
+                bundle::{Bundle, Version},
+                dependency::Dependencies,
+                entrypoint::Entrypoints,
+                env::Env,
+            },
         },
         package_manager::{
             PackageManager,
@@ -1135,6 +1205,250 @@ mod tests {
         assert!(
             message.contains("application/vnd.example.other.config.v1+json"),
             "the error must name the offending config media type: {message}"
+        );
+    }
+
+    // ── The dial-site SSRF floor over a rewritten physical target ────────────
+
+    /// Whatever a layer fetch touches on the transport — the request log and the
+    /// auth handshake that precedes it. Both must be empty for "no dial".
+    struct TransportTouches {
+        calls: Vec<String>,
+        auth: usize,
+    }
+
+    impl TransportTouches {
+        fn none(&self) -> bool {
+            self.calls.is_empty() && self.auth == 0
+        }
+    }
+
+    /// What a pull left behind for the assertions: the outcome, what reached the
+    /// transport, and how many times the dial-site guard was evaluated.
+    struct PullObservation {
+        outcome: Result<InstallInfo, PackageErrorKind>,
+        touches: TransportTouches,
+        guard_evaluations: usize,
+    }
+
+    /// Runs a real `setup_owned` for a `layers`-layer package whose physical
+    /// transport registry differs from its logical one — the index-indirected
+    /// shape.
+    ///
+    /// `layers_cached` decides whether the pull has anything to fetch: with every
+    /// layer already extracted on disk the operation is fully warm and no dial is
+    /// imminent, which is exactly the case the guard must not judge.
+    ///
+    /// The chain always carries a `TrustingSource` owning the LOGICAL registry.
+    /// It trusts nothing, so it changes no verdict — it is there to count, since
+    /// `guard_physical_dial` asks it for `trusted_hosts` exactly once per
+    /// evaluation.
+    async fn pull_indirected_package(physical_registry: &str, layers: usize, layers_cached: bool) -> PullObservation {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let guard_evaluations = Arc::new(AtomicUsize::new(0));
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            vec![TrustingSource::new("example.com", Vec::new(), guard_evaluations.clone()).into_index()],
+            ChainMode::Default,
+        );
+        let transport_data = StubTransportData::new();
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(transport_data.clone())));
+        let manager = PackageManager::new(file_structure.clone(), index, Some(client), "example.com");
+
+        let manifest_digest = oci::Digest::Sha256("d".repeat(64));
+        let layer_digests: Vec<oci::Digest> = (0..layers)
+            .map(|index| oci::Digest::Sha256(format!("{index:064}")))
+            .collect();
+        let pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry("test/indirected", "example.com")
+                .clone_with_tag("1.0.0")
+                .clone_with_digest(manifest_digest.clone()),
+        )
+        .expect("pinned identifier");
+        // The physical pointer an index root would mint: a different registry,
+        // carrying the same leaf digest (transport-only, Decision C2).
+        let transport_pinned = oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry("mirror/indirected", physical_registry)
+                .clone_with_digest(manifest_digest.clone()),
+        )
+        .expect("pinned physical identifier");
+
+        if layers_cached {
+            for layer_digest in &layer_digests {
+                tokio::fs::create_dir_all(file_structure.layers.content(pinned.registry(), layer_digest))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let platform = oci::Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        };
+
+        let final_manifest = oci::ImageManifest {
+            artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+            config: oci::Descriptor {
+                media_type: crate::MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
+                digest: manifest_digest.to_string(),
+                size: 2,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            layers: layer_digests
+                .iter()
+                .map(|layer_digest| oci::Descriptor {
+                    media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+                    digest: layer_digest.to_string(),
+                    size: 1,
+                    urls: None,
+                    artifact_type: None,
+                    annotations: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned,
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest,
+            platform: platform.clone(),
+        };
+
+        let outcome = setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            platform,
+            SetupGroups::new(),
+            None,
+            Some(bundle_metadata()),
+        )
+        .await;
+
+        PullObservation {
+            outcome,
+            touches: TransportTouches {
+                calls: transport_data.read().calls.clone(),
+                auth: transport_data.read().auth_calls.len(),
+            },
+            guard_evaluations: guard_evaluations.load(Ordering::SeqCst),
+        }
+    }
+
+    /// The gap the dial-site guard closes: `physical_reference` resolves the
+    /// pointer on every resolve, so its own pre-flight must tolerate a lookup
+    /// failure — and the pull then dials the admitted host on the shared client,
+    /// which performs its own independent lookup and carries no
+    /// `GuardedResolver`. A hostile local index tree (an rsync'd copy is a
+    /// supported distribution mechanism) naming a host that answers NXDOMAIN at
+    /// check time and loopback at dial time would otherwise reach a forbidden
+    /// target deterministically.
+    ///
+    /// `localhost` is the fixture because it is a plain DNS name that genuinely
+    /// resolves into the forbidden range — the *post*-rebind state of that
+    /// attack, judged the way the dial would judge it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rewritten_forbidden_transport_is_refused_before_the_first_layer_request() {
+        let (host, port) = crate::oci::ssrf::split_host_port("localhost:5999");
+        assert!(
+            matches!(
+                crate::oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(crate::oci::ssrf::SsrfError::ForbiddenTarget { .. })
+            ),
+            "the fixture must resolve into the forbidden range, or the refusal below proves nothing"
+        );
+
+        let observed = pull_indirected_package("localhost:5999", 1, false).await;
+
+        let error = observed
+            .outcome
+            .expect_err("a forbidden physical target must not be dialled");
+        // Asserted before the exit code: without the guard the pull still fails
+        // (the stub serves no blob), so only the empty log distinguishes "refused"
+        // from "dialled and happened to fail".
+        assert!(
+            observed.touches.none(),
+            "the refusal must land BEFORE any request reaches the transport; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
+        );
+        assert_eq!(
+            classify_error(&error),
+            ExitCode::ConfigError,
+            "an SSRF refusal is a configuration error (add it to trusted_hosts); got: {error}"
+        );
+    }
+
+    /// The verdict is memoized **whole**, so one refusal is final for the pull.
+    ///
+    /// Caching only success would leave every missing layer free to re-ask, and a
+    /// host that answers differently between two adjacent lookups needs exactly
+    /// one `Ok` to be dialled — N missing layers would hand a rebinding attacker
+    /// N attempts at it. Two layers, both missing: the guard must be evaluated
+    /// once, not twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dial_refusal_is_evaluated_once_however_many_layers_are_missing() {
+        let observed = pull_indirected_package("localhost:5999", 2, false).await;
+
+        observed
+            .outcome
+            .expect_err("a forbidden physical target must not be dialled");
+        assert_eq!(
+            observed.guard_evaluations, 1,
+            "a refusal must stay refused for the whole pull; the second missing layer re-asked it"
+        );
+        assert!(
+            observed.touches.none(),
+            "no layer may reach the transport; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
+        );
+    }
+
+    /// The check is gated on a dial, not on a resolve: a fully-warm pull whose
+    /// layer is already extracted never resolves the physical host at all. The
+    /// fixture is an unresolvable name, so if the guard ran the pull would fail
+    /// closed — the warm-store-no-network property `physical_reference`'s
+    /// local-first order exists to serve would be gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_warm_pull_never_judges_an_unresolvable_transport_host() {
+        let (host, port) = crate::oci::ssrf::split_host_port("physical.invalid");
+        assert!(
+            matches!(
+                crate::oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(crate::oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must genuinely fail to resolve, or a skipped guard is indistinguishable from a passing one"
+        );
+
+        let observed = pull_indirected_package("physical.invalid", 1, true).await;
+
+        observed
+            .outcome
+            .expect("a fully-warm pull must not depend on resolving the physical host");
+        assert_eq!(
+            observed.guard_evaluations, 0,
+            "a warm pull must not evaluate the guard at all"
+        );
+        assert!(
+            observed.touches.none(),
+            "a warm pull must reach the transport for nothing; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
         );
     }
 }

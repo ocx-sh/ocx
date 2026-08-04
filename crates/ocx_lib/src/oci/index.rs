@@ -324,6 +324,52 @@ impl Index {
         self.inner.physical_reference(identifier).await
     }
 
+    /// SSRF floor for a **rewritten** physical target, applied at the dial site —
+    /// immediately before the first request that would reach it, and only when
+    /// one is imminent.
+    ///
+    /// [`Self::physical_reference`] resolves the pointer on *every* resolve, warm
+    /// or cold, so its own guard
+    /// ([`guard_local_physical`](chained_index::ChainedIndex::guard_local_physical))
+    /// must tolerate a lookup failure — a machine with no resolver has to keep
+    /// resolving from its committed index. That tolerance admits an answer the
+    /// guard could not judge, and the pull that later consumes it dials on the
+    /// shared `PackageManager` client, which carries no
+    /// [`GuardedResolver`](oci::ssrf::GuardedResolver) and performs its own,
+    /// independent lookup. A hostile local tree naming an attacker-controlled
+    /// domain therefore only has to answer NXDOMAIN while the pre-flight asks and
+    /// a loopback address when the pull dials.
+    ///
+    /// So this half **fails closed on everything**, a lookup failure included:
+    /// here a dial is about to happen, and a connection can no more succeed on a
+    /// name that does not resolve than the lookup did — while an answer that
+    /// appears only between the two questions is precisely the attack. The two
+    /// halves share the carve-out for a **non-rewrite** (`physical.registry() ==
+    /// logical.registry()`) and the one `trusted_hosts` set
+    /// ([`index_impl::IndexImpl::trusted_hosts_for`], keyed on the LOGICAL
+    /// registry): a pull that was always going to that host is not something the
+    /// index added, and guarding it would refuse every private registry that
+    /// predates indices.
+    ///
+    /// Residual: the validate → connect window stays open, because the shared
+    /// client resolves the name again for itself. Closing it needs a
+    /// per-namespace `GuardedResolver` on that client.
+    ///
+    /// # Errors
+    ///
+    /// [`error::Error::Ssrf`] when the physical host resolves into a forbidden
+    /// range without a `trusted_hosts` entry, or cannot be resolved at all.
+    pub async fn guard_physical_dial(&self, logical: &oci::Identifier, physical: &oci::Identifier) -> Result<()> {
+        if physical.registry() == logical.registry() {
+            return Ok(());
+        }
+        let (host, port) = oci::ssrf::split_host_port(physical.registry());
+        oci::ssrf::resolve_and_validate(host, port, self.inner.trusted_hosts_for(logical.registry()))
+            .await
+            .map_err(|error| crate::Error::from(error::Error::from(error)))?;
+        Ok(())
+    }
+
     /// Fetch a published index root document verbatim (bytes + parsed
     /// [`IndexRoot`](wire::IndexRoot)) so a published source's local copy can be
     /// grown byte-for-byte (copy-a-mirror, `adr_index_indirection.md` A2). A
@@ -552,6 +598,80 @@ fn candidates_sharing_host_os_arch(
     matched.sort_by_key(|platform| platform.to_string());
     matched.dedup();
     matched
+}
+
+/// Test-only sources for tests **outside** this module: [`index_impl::IndexImpl`]
+/// is private here, so a consumer cannot write its own.
+#[cfg(test)]
+pub(crate) mod test_source {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
+    use super::{Index, IndexOperation, index_impl};
+    use crate::oci::{self, Digest, Identifier, Manifest};
+
+    /// A source that owns a namespace and carries its `trusted_hosts` exemption —
+    /// the `OcxIndex` shape the chain keys on, with nothing else wired up.
+    ///
+    /// It also **counts** every time it is asked for that set, which is the one
+    /// question [`Index::guard_physical_dial`] asks per evaluation. That makes
+    /// the counter an evaluation counter, so a caller can prove a memoized
+    /// verdict is asked for once rather than once per layer — without asserting
+    /// on `tokio::sync::OnceCell`'s internals.
+    #[derive(Clone)]
+    pub(crate) struct TrustingSource {
+        namespace: String,
+        trusted: Vec<String>,
+        asked: Arc<AtomicUsize>,
+    }
+
+    impl TrustingSource {
+        /// `asked` is bumped once per `trusted_hosts` question; pass a clone of a
+        /// counter the test keeps, since building an [`Index`] consumes the source.
+        pub(crate) fn new(namespace: &str, trusted: Vec<String>, asked: Arc<AtomicUsize>) -> Self {
+            Self {
+                namespace: namespace.to_string(),
+                trusted,
+                asked,
+            }
+        }
+
+        /// This source wrapped as an [`Index`], ready to hand to `from_chained`.
+        pub(crate) fn into_index(self) -> Index {
+            Index::from_impl(self)
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for TrustingSource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == self.namespace
+        }
+        fn trusted_hosts(&self) -> &[String] {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            &self.trusted
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
 }
 
 // ── Index::select integration tests with multi-libc ImageIndex (Step 3.4) ──
@@ -1390,5 +1510,120 @@ mod tests {
             .unwrap()
             .expect("the mock answers");
         assert_eq!(tags, vec!["3.28".to_string(), "latest".to_string()]);
+    }
+
+    // ── The dial-site SSRF floor (`guard_physical_dial`) ─────────────────────
+
+    /// A loopback authority nothing needs to be listening on: the guard resolves
+    /// the host and never connects.
+    const LOOPBACK: &str = "localhost:5999";
+    /// RFC 6761 reserves `.invalid`, so this never resolves — the input the
+    /// resolve-time guard tolerates and this one must refuse.
+    const UNRESOLVABLE: &str = "physical.invalid";
+
+    /// A chained index over `sources` — the production shape, so the
+    /// `trusted_hosts` lookup goes through the same registry-ownership keying
+    /// `ChainedIndex` uses rather than a single source's own set.
+    fn chained_with(directory: &tempfile::TempDir, sources: Vec<Index>) -> Index {
+        Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: crate::file_structure::IndexStore::new(directory.path().join("index")),
+            }),
+            sources,
+            ChainMode::Default,
+        )
+    }
+
+    fn logical_id() -> Identifier {
+        Identifier::new_registry("kitware/cmake", "example.com")
+    }
+
+    fn physical_id(registry: &str) -> Identifier {
+        Identifier::new_registry("evil/pkg", registry)
+    }
+
+    fn is_forbidden_refusal(error: &crate::Error) -> bool {
+        matches!(
+            error,
+            crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::ForbiddenTarget { .. }))
+        )
+    }
+
+    /// The refusal the resolve-time guard also makes: a rewritten target that
+    /// resolves into a forbidden range never reaches the pull's client.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_refuses_a_rewritten_forbidden_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = chained_with(&directory, vec![])
+            .guard_physical_dial(&logical_id(), &physical_id(LOOPBACK))
+            .await
+            .expect_err("a rewritten loopback target must be refused at the dial site");
+        assert!(is_forbidden_refusal(&error), "expected an SSRF refusal, got: {error:?}");
+    }
+
+    /// The one place the two halves of the floor differ, and the reason this one
+    /// exists: `ChainedIndex::guard_local_physical` **tolerates** a failed lookup
+    /// on a plain DNS name (proven by its own
+    /// `a_local_root_naming_an_unresolvable_dns_host_is_tolerated_by_the_guard`),
+    /// because it runs on every resolve including ones that never fetch. An
+    /// attacker-controlled domain can therefore answer NXDOMAIN while that guard
+    /// asks and loopback when the pull's own lookup dials. Here a request is
+    /// imminent, so the same input fails closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_fails_closed_where_the_resolve_time_guard_tolerates() {
+        let (host, port) = oci::ssrf::split_host_port(UNRESOLVABLE);
+        assert!(
+            matches!(
+                oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must genuinely fail to resolve, or this says nothing about the tolerated arm"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let error = chained_with(&directory, vec![])
+            .guard_physical_dial(&logical_id(), &physical_id(UNRESOLVABLE))
+            .await
+            .expect_err("an unjudgeable host must not be dialled");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+            ),
+            "expected the lookup failure to refuse, got: {error:?}"
+        );
+    }
+
+    /// The escape hatch reaches this guard through the chain's registry-ownership
+    /// keying: the exemption is configured on the LOGICAL namespace's source, not
+    /// on the physical host's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_admits_a_target_the_logical_namespace_trusts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (host, _) = oci::ssrf::split_host_port(LOOPBACK);
+        let source = super::test_source::TrustingSource::new(
+            "example.com",
+            vec![host.to_string()],
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .into_index();
+        chained_with(&directory, vec![source])
+            .guard_physical_dial(&logical_id(), &physical_id(LOOPBACK))
+            .await
+            .expect("a host the namespace's trusted_hosts names must be admitted");
+    }
+
+    /// Same forbidden host, no exemption — but the "rewrite" carve-out applies
+    /// because the physical target IS the identifier's own registry. Guarding it
+    /// would refuse every private registry that predates indices, including the
+    /// loopback registry the acceptance suite pulls from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_does_not_judge_a_target_that_is_not_a_rewrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let logical = Identifier::new_registry("kitware/cmake", LOOPBACK);
+        chained_with(&directory, vec![])
+            .guard_physical_dial(&logical, &physical_id(LOOPBACK))
+            .await
+            .expect("a root naming the identifier's own registry is not a rewrite");
     }
 }
