@@ -2410,6 +2410,10 @@ mod tests {
 
     /// macOS puts `TempDir` under the `/tmp` -> `/private/tmp` symlink, so a
     /// raw tempdir path never equals a resolved one. Compare canonical forms.
+    ///
+    /// Gated like every one of its callers: they are all `#[cfg(unix)]`, so on
+    /// Windows this is uncallable and `dead_code` refuses the build.
+    #[cfg(unix)]
     fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
         match (dunce::canonicalize(left), dunce::canonicalize(right)) {
             (Ok(l), Ok(r)) => l == r,
