@@ -12,6 +12,7 @@ pub mod clean;
 pub mod config;
 pub mod config_push;
 pub mod config_setup;
+pub mod config_test;
 pub mod config_update;
 pub mod deps;
 pub mod deselect;

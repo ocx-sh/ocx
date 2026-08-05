@@ -95,7 +95,7 @@ A fleet is never on one ocx version — that is the whole reason this tier exist
 
 OCX answers that by [ignoring what it does not recognize][config-unknown-keys]: an unknown section, and an unknown key inside a known section, are skipped, and everything else in the file still applies. The alternative — rejecting the file — is the failure mode worth naming, because it is the one that looks safe: a single new key would take the *entire* payload out of service on every host that had not upgraded yet, and a fleet-wide mirror map and patch registry would vanish at once. Degrading to "the parts I understand" keeps a rollout independent of upgrade order, which is what makes publishing centrally safe at all.
 
-The trade is that a typo silently does nothing rather than failing loudly. Write payloads against the [config schema][config-schema] so your editor catches those where they are cheap to catch, and use [`ocx config update --check`][cmd-config-update] to see what a host actually resolved.
+The trade is that a typo silently does nothing rather than failing loudly. Write payloads against the [config schema][config-schema] so your editor catches those where they are cheap to catch, use [`ocx config test`][cmd-config-test] to catch the rest before publishing, and [`ocx config update --check`][cmd-config-update] to see what a host actually resolved afterward.
 
 Tolerance handles *added* keys. A key whose meaning or value shape changes needs the other lever — a new tag family, with fleets moving over as they upgrade. See [rolling out an incompatible change][user-guide-managed-config-incompatible].
 
@@ -110,6 +110,7 @@ This means a machine that adopted the tier once, then goes fully offline — a l
 ::: tip Learn more
 [Managed-configuration walkthrough][user-guide-managed-config] — corporate onboarding, CI recipe, publisher recipe, staged rollout.
 [`[managed]` reference][config-managed] — every field, type, default, error condition.
+[`ocx config test` reference][cmd-config-test] — local validation and merge preview before publishing.
 [`ocx config update` reference][cmd-config-update] — exit codes, JSON shape, `--check`.
 :::
 
@@ -247,6 +248,7 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 [arg-config]: ../reference/command-line.md#arg-config
 [arg-offline]: ../reference/command-line.md#arg-offline
 [cmd-config-setup]: ../reference/command-line.md#config-setup
+[cmd-config-test]: ../reference/command-line.md#config-test
 [cmd-config-update]: ../reference/command-line.md#config-update
 [cmd-config-push]: ../reference/command-line.md#config-push
 [user-guide-managed-config]: ../user-guide.md#managed-config

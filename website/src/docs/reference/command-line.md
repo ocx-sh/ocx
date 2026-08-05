@@ -3831,6 +3831,7 @@ ocx config <SUBCOMMAND>
 | Sub-command | Purpose |
 |-------------|---------|
 | `setup` | Adopt (or clear) the `[managed]` tier — the configuration-only counterpart to [`ocx self setup --managed-config`][cmd-self-setup] (consumer side). |
+| `test` | Validate a candidate config file locally and preview the configuration it would produce, without publishing or adopting anything (operator side). |
 | `push` | Validate and publish a config file as a managed-config package (operator side). |
 | `update` | Fetch and persist the managed-config snapshot — optionally pinned to a VERSION — or pause/resume the background tick, or report status with `--check`. |
 
@@ -3893,6 +3894,74 @@ invocation on that machine resolves the managed tier with no further env plumbin
 ephemeral runners where persisting is pointless, the env-var pairing
 (`OCX_MANAGED_CONFIG=… ocx config update`) works without writing a seed — see
 [`OCX_MANAGED_CONFIG`][env-ocx-managed-config].
+:::
+
+#### `config test` {#config-test}
+
+Runs the same checks [`config push`](#config-push) enforces before publishing — parses as
+an ocx config, carries no `[managed]` section, stays within 64 KiB — against a candidate
+file already on disk, then reports the configuration this machine would resolve if the
+payload were adopted: the effective `[registry]` default, `[registries]`, `[mirrors]`, and
+`[patches]` tiers, plus the machine's own `[managed]` posture. It touches the network for
+nothing — validation and the merge preview are both local — and never publishes, adopts, or
+writes anything.
+
+The preview reproduces the adoption fold order exactly: the machine's discovered tiers
+(built-in defaults, system, user, `$OCX_HOME`) first, then the candidate payload, then any
+explicit [`--config`](#arg-config)/[`OCX_CONFIG`][env-config] overlay — never the machine's
+*current* managed snapshot, which the candidate stands in for. An explicit overlay therefore
+wins over the candidate in the report, exactly as it would once the payload is adopted, and
+only for the keys it actually sets — where the overlay is silent, the candidate's value still
+wins over the machine's own.
+
+Past parsing, the merged result is run through the same gates every ocx invocation applies to
+its own config: an invalid `[mirrors."<host>"]` entry — an unparseable URL, or a plain-HTTP
+scheme not covered by an insecure-registries allowlist — fails the command (any forwarded
+[`OCX_MIRRORS`][env-ocx-mirrors] entries are folded in first, same as ordinary resolution),
+and so does an empty `[patches] registry = ""`. A payload that parses cleanly can still be one
+no machine could actually start under; catching that is the point of previewing. `[patches]`
+in the report reflects the same precedence an ordinary command uses: the merged config's own
+`[patches]` when it declares one, otherwise the forwarded [`OCX_PATCHES`][env-ocx-patches]
+tier.
+
+Keys the config schema does not recognize are listed under `unknown_keys` as warnings, never
+a rejection — an unknown key is equally a typo (`registry.defalt`) and a setting a newer ocx
+understands, and the report cannot tell the two apart. Coverage is best-effort: a
+`[mirrors."<host>"]` table is parsed value-first from raw TOML, so a typo inside one mirror
+entry is not caught here — it is not a schema field, so it can never be "unrecognized" the
+way `registry.defalt` is.
+
+**Usage**
+
+```shell
+ocx config test <CONFIG>
+```
+
+**Arguments**
+
+| Argument | Description |
+|----------|-------------|
+| `CONFIG` | Path to the candidate config file to check. Required. |
+
+**Output** — plain: a `Field`/`Value` table; rows with no payload for this candidate (no
+`[patches]`, no configured `[managed]` tier, no unknown keys) are omitted. JSON: a fixed
+shape (`candidate`, `valid`, `registry_default`, `registries`, `mirrors`, `patches`,
+`managed`, `unknown_keys`) — every field is always present, with `null`/`[]` where a tier is
+unconfigured, so a consumer can key on `.valid`/`.unknown_keys` without probing for the
+field first.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Valid — report printed. Unknown keys are warnings and do not change this. |
+| 74 | Reading the candidate file failed for a reason other than not found or permission denied. |
+| 77 | The candidate file could not be read — permission denied. |
+| 78 | Payload rejected — not valid config TOML, contains a `[managed]` section, or exceeds 64 KiB (same rejection set as [`config push`](#config-push)); or the merged result fails a resolution gate — an invalid or plain-HTTP [`[mirrors]`][config-mirrors] entry, or `[patches] registry = ""`. |
+| 79 | The candidate file does not exist. |
+
+::: tip Learn more
+[Managed-configuration walkthrough][user-guide-managed-config] — where `config test` fits between authoring and publishing.
 :::
 
 #### `config push` {#config-push}
@@ -4091,6 +4160,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-ocx-patch-snapshot]: ./environment.md#ocx-patch-snapshot
 [env-no-config]: ./environment.md#ocx-no-config
 [env-config]: ./environment.md#ocx-config
+[env-ocx-mirrors]: ./environment.md#ocx-mirrors
+[env-ocx-patches]: ./environment.md#ocx-patches
 [env-project]: ./environment.md#ocx-project
 [env-no-project]: ./environment.md#ocx-no-project
 [env-ocx-quiet]: ./environment.md#ocx-quiet
@@ -4110,6 +4181,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 
 <!-- reference -->
 [config-ref]: ./configuration.md
+[config-mirrors]: ./configuration.md#keys-mirrors
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required

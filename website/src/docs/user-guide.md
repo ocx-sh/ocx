@@ -877,6 +877,18 @@ The operator publishes with [`ocx config push`][cmd-config-push]. It validates t
 
 Fleet operators relying on `refresh = "apply"` should plan for its scope: the background tick only runs on an interactive terminal outside CI, online, unpaused, and past the throttle window, so CI runners and other headless hosts never auto-converge — they need the explicit `ocx config update` step from the CI recipe above.
 
+### Testing a candidate before you publish {#managed-config-test}
+
+A candidate `config.toml` is just a file on disk until [`ocx config push`][cmd-config-push] turns it into a fleet-wide artifact. [`ocx config test`][cmd-config-test] answers the question you have right before that step: *if I push this, what would every host that adopts it actually see?*
+
+The gap it closes is the one described in [Unknown keys and sections][config-unknown-keys] — a typo like `registry.defalt` never fails the push. The payload publishes clean, and the mistake only shows up later, as a setting some host silently never got, not as an error at authoring time. `ocx config test` runs the exact validator [`ocx config push`][cmd-config-push] runs — same 64 KiB cap, same TOML parse, same `[managed]` rejection — against the file on disk, merges it onto your own machine's config, and reports what came out the other side, including everything the schema did not recognize:
+
+<Terminal src="/casts/user-guide/managed-config-test.cast" title="Preview a candidate config before publishing" collapsed />
+
+The merge is onto your **local** tiers — system, user, `$OCX_HOME` — never onto whatever managed snapshot is already synced on this machine; the candidate stands in for that snapshot, not on top of it. A value the candidate does not set falls back to your own config, the same as it would on a host that adopted the payload. Nothing is published, adopted, or written, and no registry is contacted — there is nothing to verify against a candidate that has not been pushed anywhere yet.
+
+Run it before every push: catch the typo locally, publish once you're sure, then use [staged rollout][managed-config-rollout] below to widen the blast radius gradually.
+
 ### Staged rollout, rollback, pause {#managed-config-rollout}
 
 Variant tags stage a rollout: publish to a `canary-…` version first, verify on a handful of machines tracking `:canary`, then publish the same payload under the `user-…` variant. Both are just cascade families in one repository — the same rolling-tag idiom OCX uses for [package cascades][in-depth-versioning-cascades].
@@ -1102,6 +1114,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-self-setup-managed-config]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
 [cmd-config-setup]: ./reference/command-line.md#config-setup
+[cmd-config-test]: ./reference/command-line.md#config-test
 [cmd-config-update]: ./reference/command-line.md#config-update
 [cmd-config-push]: ./reference/command-line.md#config-push
 [cmd-version]: ./reference/command-line.md#version
@@ -1180,6 +1193,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [getting-started]: ./getting-started.md
 [install-bare-binary]: #install-bare-binary
 [authentication-storing]: #authentication-storing
+[managed-config-rollout]: #managed-config-rollout
 [config-registries-index]: ./reference/configuration.md#keys-registries-index
 [config-schema]: https://ocx.sh/schemas/config/v1.json
 

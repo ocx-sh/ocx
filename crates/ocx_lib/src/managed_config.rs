@@ -14,6 +14,7 @@
 //! |--------|----------|
 //! | [`persistence`] | [`fetch_managed_config`], [`persist_managed_config`], their error taxonomies |
 //! | [`publish`] | [`validate_managed_config_payload`], [`publish_managed_config`] (`ocx config push`) |
+//! | [`preview`] | [`preview_managed_config`] (`ocx config test`) — validate + merge preview, writes nothing |
 //! | [`pause`] | [`read_pause`], [`write_pause`], [`clear_pause`] (`ocx config update --pause/--resume`) |
 //!
 //! ## Wire shape (v2 — config-as-package)
@@ -35,6 +36,7 @@
 
 pub mod pause;
 pub mod persistence;
+pub mod preview;
 pub mod publish;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -49,6 +51,7 @@ pub use persistence::{
     fetch_managed_config, persist_managed_config, probe_managed_config_digest, read_managed_config_snapshot,
     read_managed_config_snapshot_at,
 };
+pub use preview::{ManagedConfigPreview, preview_managed_config};
 pub use publish::{
     ManagedConfigPublishError, ManagedConfigPublishOptions, publish_managed_config, validate_managed_config_payload,
 };

@@ -157,12 +157,16 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
 ///    tolerated for forward compatibility, matching the loader's posture),
 /// 3. carries no `[managed]` section.
 ///
+/// Returns the payload as text so a caller that needs to look at it again
+/// ([`crate::managed_config::preview_managed_config`]) reuses this UTF-8
+/// decode instead of repeating its error mapping.
+///
 /// # Errors
 ///
 /// [`ManagedConfigPublishError::PayloadTooLarge`],
 /// [`ManagedConfigPublishError::InvalidToml`],
 /// [`ManagedConfigPublishError::ContainsManagedSection`].
-pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<(), ManagedConfigPublishError> {
+pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConfigPublishError> {
     use serde::de::Error as _;
 
     let actual = bytes.len() as u64;
@@ -180,7 +184,7 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<(), ManagedConfig
     if parsed.managed.is_some() {
         return Err(ManagedConfigPublishError::ContainsManagedSection);
     }
-    Ok(())
+    Ok(text)
 }
 
 // ── Publish orchestration ─────────────────────────────────────────────────────

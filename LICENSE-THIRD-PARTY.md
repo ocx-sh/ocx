@@ -11,7 +11,7 @@ OCX's own code is licensed separately — see `LICENSE`.
 
 | License | Crates |
 | --- | ---: |
-| Apache License 2.0 | 231 |
+| Apache License 2.0 | 232 |
 | MIT License | 74 |
 | Unicode License v3 | 19 |
 | ISC License | 5 |
@@ -6744,6 +6744,7 @@ Applies to:
 - serde_core
 - serde_derive
 - serde_derive_internals
+- serde_ignored
 - serde_json
 - serde_repr
 - serde_urlencoded

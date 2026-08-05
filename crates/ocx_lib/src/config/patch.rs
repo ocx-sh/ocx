@@ -144,6 +144,14 @@ pub enum PatchConfigError {
     MissingRegistryField,
 }
 
+/// Every variant is a malformed `[patches]` tier — a config fault whether it
+/// arrived from a config file or the forwarded `OCX_PATCHES` env value.
+impl crate::cli::ClassifyExitCode for PatchConfigError {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        Some(crate::cli::ExitCode::ConfigError)
+    }
+}
+
 impl PatchConfig {
     /// Default path template, applied by [`resolve_patch_config`] when
     /// `path` is absent.

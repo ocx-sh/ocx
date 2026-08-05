@@ -269,6 +269,16 @@ pub enum MirrorConfigError {
     },
 }
 
+/// Every variant is a malformed `[mirrors]` tier — a config fault whether it
+/// arrived from a config file or the forwarded `OCX_MIRRORS` env value. The
+/// plain-HTTP refusal included: the entry is well-formed but the operator has
+/// not allowed the transport it asks for, which is theirs to fix in config.
+impl crate::cli::ClassifyExitCode for MirrorConfigError {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        Some(crate::cli::ExitCode::ConfigError)
+    }
+}
+
 impl MirrorConfig {
     /// Mark this entry as system-locked — non-overridable by lower tiers for
     /// whichever role(s) it declares.

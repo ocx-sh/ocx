@@ -61,6 +61,8 @@ tar.workspace = true
 tempfile.workspace = true
 serde_repr.workspace = true
 serde_yaml_ng.workspace = true
+# `managed_config::preview` ONLY — see the workspace Cargo.toml comment.
+serde_ignored.workspace = true
 bytes.workspace = true
 futures.workspace = true
 fs4.workspace = true

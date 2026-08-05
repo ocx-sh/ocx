@@ -57,6 +57,13 @@ serde_json = "1.0.150"
 serde_json_canonicalizer = "0.3.2"
 serde_repr = "0.1.20"
 serde_yaml_ng = "0.10.0"
+# Deserializer wrapper reporting the path of every ignored field. Used by
+# `ocx config test` ALONE to surface typo'd keys in a candidate managed-config
+# payload. The ordinary config loader must never gain it: no `deny_unknown_fields`
+# anywhere in the `Config` tree is a deliberate fleet forward-compat posture
+# (see the `Config` doc comment), and a payload written for a newer ocx has to
+# load silently on an older binary.
+serde_ignored = "0.1.14"
 toml = "1.1.2"
 # Format-preserving TOML editing (`ocx.toml` mutations keep comments + order).
 toml_edit = "0.25"

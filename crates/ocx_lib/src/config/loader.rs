@@ -53,6 +53,18 @@ pub struct LoadedConfig {
     pub merged: Config,
     /// The merged config from local-only tiers.
     pub local_only: Config,
+    /// The discovered tiers alone — compiled-in defaults plus system, user and
+    /// `$OCX_HOME`, WITHOUT the explicit `OCX_CONFIG` / `--config` overlay.
+    /// This is what the managed tier folds onto.
+    pub base: Config,
+    /// The explicit `OCX_CONFIG` / `--config` overlay alone — the tier that
+    /// merges on top of the managed fold.
+    ///
+    /// `base` and `overlay` are exposed as the pair, not as the pre-merged
+    /// `local_only`, so a caller can reproduce the adoption fold order for a
+    /// payload of its own: `base` -> payload -> `overlay`. `ocx config test`
+    /// is that caller.
+    pub overlay: Config,
     /// The raw managed-config snapshot [`ConfigLoader::fold_managed_tier`]
     /// read from disk, if any — BEFORE the identity gate (present even when
     /// the snapshot's provenance does not match the effective source, so a
@@ -166,12 +178,14 @@ impl ConfigLoader {
         // payload folds onto `base`, and `overlay` is applied on top of that
         // afterward, so explicit tiers still beat payload values.
         let (mut merged, managed_config_snapshot, resolved_managed_config, managed_snapshot_state) =
-            Self::fold_managed_tier(base, &local_only).await?;
-        merged.merge(overlay);
+            Self::fold_managed_tier(base.clone(), &local_only).await?;
+        merged.merge(overlay.clone());
 
         Ok(LoadedConfig {
             merged,
             local_only,
+            base,
+            overlay,
             managed_config_snapshot,
             resolved_managed_config,
             managed_snapshot_state,
