@@ -23,9 +23,9 @@ Enforcing the manifest-pin rule by hand-editing digests does not scale, so OCX s
 
 The split keeps the published guarantee cheap to check. `push` never decides *which* manifest a dependency should resolve to; it confirms a pin already exists and that it actually resolves, in its registry, to a manifest rather than an index. Resolution — the part that needs index access, `--offline`/`--remote`/`--frozen` routing, and disambiguation between candidate manifests — happens once, at `create` time, where the publisher can inspect and commit the result before it ever reaches a registry.
 
-A package built with `--platform any` compounds this: it performs no platform-specific resolution of its own, so it can only depend on dependencies that themselves offer an `any` build — a dependency with no `any` manifest blocks `create` outright, naming the offending dependency, rather than narrowing an installable set. See [Multi-Platform Packages][authoring-multi-platform] for the publisher workflow and the [Per-Platform Pins reference][reference-per-platform-pins] for the pin-map shape and the compatibility rule that projects it.
+A package built with `--platform any` compounds this: it performs no platform-specific resolution of its own, so it can only depend on dependencies that themselves offer an `any` build — a dependency with no `any` manifest blocks `create` outright, naming the offending dependency, rather than narrowing an installable set. See [Multi-Platform Packages][authoring-multi-platform] for the publisher workflow and [Platforms][reference-platforms] for the compatibility rule `create` evaluates each candidate manifest against.
 
-A pin — direct digest or the `any`-keyed map entry — is a snapshot of the publisher's platform coverage at the moment `create` ran, not a live query. If a dependency's own publisher later adds an `any` build where none existed before, packages that depend on it do not retroactively gain it; re-running `create` and `push` is what picks it up. This mirrors [the project lock's pin-preservation guarantee][in-depth-project-lock-pin-preservation]: neither layer silently advances a pin nobody asked to re-resolve.
+A pin is a snapshot of the publisher's platform coverage at the moment `create` ran, not a live query. If a dependency's own publisher later adds an `any` build where none existed before, packages that depend on it do not retroactively gain it; re-running `create` and `push` is what picks it up. This mirrors [the project lock's pin-preservation guarantee][in-depth-project-lock-pin-preservation]: neither layer silently advances a pin nobody asked to re-resolve.
 
 ## Resolution {#resolution}
 
@@ -89,7 +89,7 @@ The result: the dependency surface is a strict subset of what a general-purpose 
 - [Entry Points][in-depth-entry-points] — generated launchers that embed the private surface
 - [Declaring dependencies][authoring-dependencies] — the publisher workflow: write tag-only, `create` resolves
 - [Building and pushing][authoring-building-pushing] — the `create`/`push` split, gate errors, exit codes
-- [Multi-Platform Packages][authoring-multi-platform] — per-platform pin maps, target-set intersection
+- [Multi-Platform Packages][authoring-multi-platform] — building and pushing per-platform, dependencies on multi-platform builds
 - [Dependencies reference][reference-dependencies] — sidecar field shapes, manifest-pin rule
 
 <!-- external -->
@@ -108,7 +108,7 @@ The result: the dependency surface is a strict subset of what a general-purpose 
 
 <!-- reference -->
 [reference-dependencies]: ../reference/metadata.md#dependencies
-[reference-per-platform-pins]: ../reference/metadata.md#dependencies-per-platform-pins
+[reference-platforms]: ../reference/platforms.md
 
 <!-- authoring -->
 [authoring-dependencies]: ../authoring/dependencies.md

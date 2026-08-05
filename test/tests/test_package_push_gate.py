@@ -21,7 +21,7 @@ import json
 import tarfile
 from pathlib import Path
 
-from src.helpers import make_package
+from src.helpers import make_package, resolved_metadata_path, resolved_receipt_path
 from src.registry import (
     fetch_manifest_from_registry,
     fetch_platform_manifest_digest,
@@ -84,7 +84,17 @@ def _push(ocx: OcxRunner, fq: str, bundle: Path, *args: str, check: bool = True)
 # ---------------------------------------------------------------------------
 
 
-def test_push_rejects_unpinned_dep(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+def test_push_rejects_digestless_dep(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """The published metadata parser refuses a digest-less dependency, and the
+    error points at `ocx package create`.
+
+    This never reaches the dependency gate: published `Dependency.identifier`
+    is a `PinnedIdentifier`, so a tag-only entry dies at deserialize. That is
+    the contract under test — `create` is the only thing that resolves a tag
+    to a digest, so push has nothing to fall back on.
+
+    The gate itself is covered by `test_push_rejects_index_pinned_dep` and
+    `test_push_rejects_missing_dep_manifest`."""
     leaf = make_package(ocx, f"{unique_repo}_leaf", "1.0.0", tmp_path)
     bundle = _bundle(ocx, tmp_path, "unpinned")
     metadata = _write_metadata(tmp_path, "unpinned", {
@@ -98,6 +108,11 @@ def test_push_rejects_unpinned_dep(ocx: OcxRunner, unique_repo: str, tmp_path: P
     )
     assert result.returncode == EXIT_DATA_ERR, result.stderr
     assert "ocx package create" in result.stderr, "error must point at create"
+    assert leaf.fq in result.stderr, (
+        "error must name the offending dependency — the confusable is the "
+        "receipt-or-platform gate, which exits 64 naming only --platform, so "
+        "the two assertions above alone would not tell the two apart"
+    )
 
 
 def test_push_rejects_index_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -111,7 +126,6 @@ def test_push_rejects_index_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_pat
     bundle = _bundle(ocx, tmp_path, "indexpin")
     metadata = _write_metadata(tmp_path, "indexpin", {
         "type": "bundle", "version": 1,
-        "platform": current_platform(),
         "dependencies": [{"identifier": f"{leaf.fq}@{index_digest}"}],
     })
 
@@ -128,7 +142,6 @@ def test_push_rejects_missing_dep_manifest(ocx: OcxRunner, unique_repo: str, tmp
     bundle = _bundle(ocx, tmp_path, "ghost")
     metadata = _write_metadata(tmp_path, "ghost", {
         "type": "bundle", "version": 1,
-        "platform": current_platform(),
         "dependencies": [{"identifier": f"{ocx.registry}/{unique_repo}_ghost:1.0.0@{ghost_digest}"}],
     })
 
@@ -145,7 +158,6 @@ def test_push_accepts_manifest_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_
     bundle = _bundle(ocx, tmp_path, "pinned")
     metadata = _write_metadata(tmp_path, "pinned", {
         "type": "bundle", "version": 1,
-        "platform": current_platform(),
         "dependencies": [{"identifier": f"{leaf.fq}@{manifest_digest}"}],
     })
 
@@ -188,9 +200,10 @@ def test_push_concrete_platform_flag_round_trip(ocx: OcxRunner, unique_repo: str
 
 
 def test_push_defaults_to_created_platform(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`push` with no `--platform` publishes under the platform `ocx package
-    create` recorded in the sidecar, not the host platform — the two must
-    stay bound even when the flag is never repeated on push."""
+    """`push` with no `--platform` publishes under the platform the build
+    receipt `ocx package create` wrote beside the bundle, not the host
+    platform — the two must stay bound even when the flag is never repeated
+    on push."""
     plat = current_platform()
     bundle = _created_app(ocx, tmp_path, "defaultplat", [], plat)
     app_repo = f"{unique_repo}_app"
@@ -204,14 +217,17 @@ def test_push_defaults_to_created_platform(ocx: OcxRunner, unique_repo: str, tmp
     )
 
 
-def test_push_platform_mismatch_rejected(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """An explicit `--platform` that disagrees with the platform `ocx package
-    create` recorded in the sidecar is rejected (exit 65), naming both."""
+def test_push_explicit_platform_overrides_receipt_with_warning(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """An explicit `--platform` that disagrees with the platform the build
+    receipt recorded is ACCEPTED — explicit wins — but push prints a warning
+    on stderr naming both platform strings."""
     bundle = _created_app(ocx, tmp_path, "mismatch", [], "linux/amd64")
     app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
 
     result = _push(ocx, app_fq, bundle, "-p", "darwin/arm64", check=False)
-    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert result.returncode == 0, result.stderr
     assert "linux/amd64" in result.stderr, result.stderr
     assert "darwin/arm64" in result.stderr, result.stderr
 
@@ -235,48 +251,22 @@ def test_push_any_target_with_any_offered_dep_succeeds(
     )
 
 
-def test_push_any_target_rejects_direct_digest_pin(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-):
-    """D5: push re-checks the digest-pin prohibition for an `any`-targeted
-    bundle — a hand-edited sidecar can carry a direct digest pin without ever
-    going through `ocx package create --platform any`."""
-    leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
-    manifest_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
-    bundle = _bundle(ocx, tmp_path, "anydigest")
-    metadata = _write_metadata(tmp_path, "anydigest", {
-        "type": "bundle", "version": 1,
-        "platform": "any",
-        "dependencies": [{"identifier": f"{leaf.fq}@{manifest_digest}"}],
-    })
-
-    result = _push(
-        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
-        "-m", str(metadata), "-p", "any", check=False,
-    )
-    assert result.returncode == EXIT_DATA_ERR, result.stderr
-    assert "direct digest pin" in result.stderr, result.stderr
-
-
 def test_push_any_target_rejects_forged_any_pin(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """D5 provenance check: a hand-edited sidecar can claim a dependency leaf
-    is `any`-offered via `platforms: {"any": <digest>}}` without ever going
-    through `ocx package create --platform any`. If that digest is only
-    published under a concrete platform, the claim is a forgery — push must
-    fetch the dependency's own image index and reject it, not just check the
-    leaf exists."""
+    """D5 any-provenance check — the single any-provenance guard now that the
+    structural digest-pin prohibition is gone (a bare `@digest` under an
+    `any` target is legitimate iff the dependency's own image index
+    advertises that digest as `any`): a leaf published under a concrete
+    platform only pins its digest bare on the identifier, no `platforms` map
+    involved. Push must fetch the dependency's own image index and reject
+    the pin as not `any`-advertised, not just check the leaf exists."""
     leaf = make_package(ocx, f"{unique_repo}_concreteleaf", "1.0.0", tmp_path)
     leaf_manifest_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
     bundle = _bundle(ocx, tmp_path, "forgedany")
     metadata = _write_metadata(tmp_path, "forgedany", {
         "type": "bundle", "version": 1,
-        "platform": "any",
-        "dependencies": [{
-            "identifier": leaf.fq,
-            "platforms": {"any": leaf_manifest_digest},
-        }],
+        "dependencies": [{"identifier": f"{leaf.fq}@{leaf_manifest_digest}"}],
     })
 
     result = _push(
@@ -285,6 +275,12 @@ def test_push_any_target_rejects_forged_any_pin(
     )
     assert result.returncode == EXIT_DATA_ERR, result.stderr
     assert leaf.repo in result.stderr, result.stderr
+    assert "direct digest pin" not in result.stderr, (
+        "a bare digest under `any` is a legitimate pin shape now (the "
+        "structural DirectDigestPinInAnyTarget check is deleted) — this must "
+        "be the any-provenance rejection (AnyPinNotAdvertisedAsAny), not the "
+        "old structural one"
+    )
 
 
 def test_push_repeated_platform_flag_rejected(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -303,6 +299,83 @@ def test_push_repeated_platform_flag_rejected(ocx: OcxRunner, unique_repo: str, 
         "-m", str(metadata), "-p", "linux/amd64", "-p", "darwin/arm64", check=False,
     )
     assert result.returncode == EXIT_USAGE, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Build receipt resolution (4-row table: receipt x explicit --platform)
+# ---------------------------------------------------------------------------
+
+
+def test_create_writes_receipt_beside_bundle(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`ocx package create -m -p` writes a build receipt sidecar beside the
+    bundle recording the resolved platform, and the metadata sidecar itself
+    carries no `platform` key (published wire shape)."""
+    plat = current_platform()
+    bundle = _created_app(ocx, tmp_path, "receipt", [], plat)
+
+    receipt_path = resolved_receipt_path(bundle)
+    assert receipt_path.exists(), f"expected build receipt at {receipt_path}"
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt == {"version": 1, "platform": plat}
+
+    sidecar = json.loads(resolved_metadata_path(bundle).read_text())
+    assert "platform" not in sidecar, sidecar
+
+
+def test_push_without_receipt_or_platform_is_usage_error(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """No build receipt beside the bundle and no explicit `--platform`: push
+    has nothing that determines the OCI platform slot — usage error (64),
+    naming `--platform`."""
+    bundle = _bundle(ocx, tmp_path, "noreceiptnoplat")
+    metadata = _write_metadata(tmp_path, "noreceiptnoplat", {"type": "bundle", "version": 1})
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), check=False,
+    )
+    assert result.returncode == EXIT_USAGE, result.stderr
+    assert "--platform" in result.stderr, result.stderr
+
+
+def test_push_without_receipt_with_platform_proceeds_with_notice(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """No build receipt beside the bundle, but an explicit `--platform` is
+    enough to proceed — push publishes, with an informational notice on
+    stderr that the receipt-backed validation was skipped."""
+    bundle = _bundle(ocx, tmp_path, "noreceiptplat")
+    metadata = _write_metadata(tmp_path, "noreceiptplat", {"type": "bundle", "version": 1})
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), "-p", current_platform(), check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "receipt" in result.stderr.lower(), (
+        f"expected a notice naming the skipped receipt-backed validation:\n{result.stderr}"
+    )
+
+
+def test_package_test_without_receipt_or_platform_is_usage_error(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """`ocx package test` shares push's receipt-or-platform contract: a
+    metadata-only artifact (zero layers, so no bundle to anchor a receipt to)
+    with no explicit `--platform` is a usage error (64), naming
+    `--platform`."""
+    metadata = _write_metadata(tmp_path, "packagetestnoreceipt", {"type": "bundle", "version": 1})
+
+    result = ocx.run(
+        "package", "test",
+        "-m", str(metadata),
+        "-i", f"{ocx.registry}/{unique_repo}_app:1.0.0",
+        "--", "true",
+        check=False,
+    )
+    assert result.returncode == EXIT_USAGE, result.stderr
+    assert "--platform" in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------

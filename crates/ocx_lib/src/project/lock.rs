@@ -369,8 +369,8 @@ impl ProjectLock {
         // Defense-in-depth (D3 write-site validation): every invariant
         // `Self::validate` checks must already hold for the document the
         // writer is about to emit. In practice this never fires — every
-        // producer (`build_lock`, `build_platforms_map`, authoring
-        // `pin_for`) already builds a compliant document — but a caller
+        // producer (`build_lock`, `build_platforms_map`) already builds a
+        // compliant document — but a caller
         // could in principle hand-assemble a `ProjectLock`/`LockedTool` that
         // violates one of these invariants (a tagged `repository`, a stale
         // `declaration_hash_version`, a noncanonical platform key), and the
@@ -1164,9 +1164,9 @@ repository = "ocx.sh/cmake"
     }
 
     /// (b) A tagged `repository` is unreachable via any producer in this
-    /// codebase (`build_lock`, authoring `pin_for`), but nothing at the type
-    /// level stops a library caller from hand-assembling a `LockedTool` with
-    /// one. Must reject at write, not just at load.
+    /// codebase (`build_lock`, `build_platforms_map`), but nothing at the
+    /// type level stops a library caller from hand-assembling a `LockedTool`
+    /// with one. Must reject at write, not just at load.
     #[test]
     fn write_rejects_tagged_repository() {
         let mut platforms = BTreeMap::new();

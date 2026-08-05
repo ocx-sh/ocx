@@ -179,31 +179,35 @@ An `any`-targeted package performs no platform-specific resolution of its own �
 { "dependencies": [{ "identifier": "ocx.sh/mytool:1.0" }] }
 ```
 
-`ocx package create --platform any` resolves this by writing a single `"any"`-keyed pin:
+`ocx package create --platform any` resolves this the same way it resolves a concrete platform: a single manifest digest, bare on the identifier:
 
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/mytool:1.0", "platforms": { "any": "sha256:aaaa..." } }
+    { "identifier": "ocx.sh/mytool:1.0@sha256:aaaa..." }
   ]
 }
 ```
 
 If `ocx.sh/mytool:1.0` ships only platform-specific manifests (`linux/amd64`, `darwin/arm64`, and so on) with no `any` build, `create` fails with exit 65, naming the dependency and listing what it does offer. There is no partial coverage to derive — a platform-agnostic package either can lean on a platform-agnostic dependency, or it cannot depend on that package at all under `--platform any`.
 
-### No Direct Digest Pins Under `--platform any` {#dependency-platforms-digest-pin-prohibition}
+### Digest Pins Under `--platform any` {#dependency-platforms-digest-pin-prohibition}
 
-A leaf manifest carries no platform descriptor of its own — the platform lives in the *image index entry* that points at it, one level up. That means a dependency pinned by a bare `@digest` cannot be verified as genuinely `any`-offered; the digest alone gives no way to check. Both `ocx package create --platform any` and `ocx package push` therefore reject a direct digest pin anywhere in an `any`-targeted bundle's dependency list (exit 65) — including a dependency that was already pinned by hand before `create` ran. Pin the dependency through `ocx package create --platform any` (which records the verifiable `"any"`-keyed map entry above) instead of hand-writing a digest.
+A leaf manifest carries no platform descriptor of its own — the platform lives in the *image index entry* that points at it, one level up. That means a dependency pinned by a bare `@digest` cannot be verified as genuinely `any`-offered from the digest alone; something else has to vouch for it.
 
-Concrete-targeted bundles are unaffected: a direct digest pin is fine there, because the platform being published is already known and the pin's provenance is not in question.
+`ocx package create --platform any` refuses that verification job outright: it resolves against an index, so a digest it did not resolve itself carries no evidence either way, and it rejects a direct digest pin anywhere in an `any`-targeted bundle's dependency list (exit 65) — including one already present before `create` ran. Pin the dependency through `ocx package create --platform any` (see [The `any`-Deps Rule](#dependency-platforms-any-deps) above) instead of hand-writing a digest.
+
+[`ocx package push`][cmd-package-push] has the registry in hand, so it checks the stronger claim directly: it re-fetches the dependency's own image index by its advisory tag and accepts the pin **iff** that index advertises the pinned digest as `any` — either a flat (non-index) manifest whose own digest matches the pin, or an image-index entry declaring platform `any` at that digest. A digest the index does not advertise as `any` fails the push (exit 65), naming the dependency and the digest.
+
+:::warning A tag-less pin loses its own evidence
+The provenance check re-fetches the dependency by its **advisory tag** — the one `ocx package create` leaves on the identifier alongside the digest. A dependency pinned with no tag at all is fetched at `latest` instead, which usually fails closed: the tag is what names the index stream the digest was resolved against, and without it there is nothing to re-derive provenance from. Keep the advisory tag on every dependency identifier your sidecar pins.
+:::
+
+Concrete-targeted bundles are unaffected by either check: a direct digest pin is fine there, since the platform being published is already known and an `any` claim was never in question.
 
 ### Snapshot Semantics {#dependency-platforms-snapshot}
 
-A pin map is a snapshot of the dependency's platform coverage at `create` time, not a live query. If `ocx.sh/mytool:1.0`'s publisher later adds an `any` manifest where none existed before, your already-published package does not retroactively pick it up — the pin map still reflects what existed when you ran `create`. Re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
-
-### libc-Tagged Dependencies {#dependency-platforms-libc}
-
-Projecting a pin map onto the platform being published or run against uses the same [compatibility relation and scoring][reference-platforms-compatibility] as every other platform decision in OCX: a plain `linux/amd64` dependency pin covers a libc-tagged package platform like `linux/amd64+libc.glibc` (the pin declares no feature requirement, so it is a subset of anything), but not the reverse — a dependency pinned only at a `libc.glibc`-tagged key does not cover the plain `linux/amd64` platform. A consumer that only advertises the bare platform should not silently receive a build resolved against a libc it never declared.
+A pin is a snapshot of the dependency's platform coverage at the moment `create` (or `push`, for the provenance check above) ran, not a live query. If `ocx.sh/mytool:1.0`'s publisher later adds an `any` manifest where none existed before, your already-published package does not retroactively pick it up — re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
 
 ## See Also {#see-also}
 
@@ -214,7 +218,8 @@ Projecting a pin map onto the platform being published or run against uses the s
 - [Building & pushing][authoring-building-pushing] — cascade, layer reuse, BYO archives, dependency pin resolution
 - [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
 - [Platforms reference][reference-platforms] — the canonical grammar and the compatibility relation this page builds on
-- [Per-Platform Pins reference][reference-per-platform-pins] — pin map shape and the `any`-deps rule
+- [Dependencies reference][reference-dependencies] — sidecar field shapes, manifest-pin rule
+- [`ocx package create` build receipt][cmd-package-create-receipt] — where the platform lives between `create` and `push`/`test`
 - [Migration patterns][authoring-migration] — `ocx_mirror` per-platform spec
 
 <!-- external -->
@@ -243,13 +248,14 @@ Projecting a pin map onto the platform being published or run against uses the s
 [exit-codes]: ../reference/command-line.md#exit-codes
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-create-libc-check]: ../reference/command-line.md#package-create-libc-check
+[cmd-package-create-receipt]: ../reference/command-line.md#package-create-receipt
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-index-update]: ../reference/command-line.md#index-update
 [cmd-install]: ../reference/command-line.md#package-install
 [cmd-about]: ../reference/command-line.md#about
 
 <!-- reference -->
-[reference-per-platform-pins]: ../reference/metadata.md#dependencies-per-platform-pins
+[reference-dependencies]: ../reference/metadata.md#dependencies
 [reference-platforms]: ../reference/platforms.md
 [reference-platforms-compatibility]: ../reference/platforms.md#compatibility
 

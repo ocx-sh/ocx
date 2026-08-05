@@ -24,39 +24,31 @@
 //! restricted to `any`-offered candidates: [`is_compatible`](crate::oci::is_compatible)
 //! rule 2 says an `Any` requirement is satisfied only by an `Any` offer.
 
-use std::collections::BTreeMap;
-
 use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::oci::{
     self, Platform, Selection,
     index::{Index, IndexOperation},
     select_best,
 };
-use crate::package::metadata::authoring::{AuthoringBundle, AuthoringDependency, AuthoringMetadata};
+use crate::package::metadata::authoring::{AuthoringDependency, AuthoringMetadata};
 use crate::{log, package::metadata::authoring::AuthoringDependencies};
 
 /// Resolve every unpinned dependency of `metadata` against `index` for the
 /// single `declared_platform` (the create `--platform` value).
 ///
 /// Each unpinned dependency must advertise exactly one candidate compatible
-/// with `declared_platform` under [`select_best`]:
+/// with `declared_platform` under [`select_best`]; the winning leaf's digest
+/// is attached to the dependency's identifier. An `any`-targeted bundle takes
+/// the same path — its winner can only be the dependency's own `any`-typed
+/// offer ([`is_compatible`](crate::oci::is_compatible) rule 2), so the digest
+/// this writes is one `fetch_candidates` just confirmed to be `any`-offered.
 ///
-/// - **Specific** `declared_platform`: the winning leaf is pinned directly on
-///   the dependency's identifier (a bare `@digest`) — unchanged from before.
-/// - **`any`**: the winning leaf (which can only be the dependency's own
-///   `any`-typed offer — [`is_compatible`](crate::oci::is_compatible) rule 2)
-///   is recorded as a single `"any"`-keyed entry in the dependency's
-///   `platforms` map, never a bare digest pin. This keeps the pin's
-///   provenance verifiable (D5): a bare digest carries no platform
-///   descriptor, so it cannot be checked to be genuinely `any`-offered,
-///   while a freshly-written `"any"` map key is exactly what this function
-///   just confirmed via `fetch_candidates`.
-///
-/// Before any resolution, every dependency — pinned or not — is checked
-/// against the D5 any-target invariant: an `any`-targeted bundle prohibits a
-/// direct digest pin on any dependency (its provenance is unverifiable). This
-/// pass inspects already-pinned dependencies too, not just the ones this call
-/// freshly resolves.
+/// Before any resolution, an `any`-targeted bundle is checked for
+/// **pre-existing** digest pins: create resolves against an index, so a
+/// digest it did not write itself carries no evidence of being `any`-offered
+/// and create has no way to acquire that evidence. See
+/// [`reject_digest_pins_in_any_target`] for why push is not held to the same
+/// rule.
 ///
 /// # Errors
 ///
@@ -89,21 +81,31 @@ pub async fn pin_dependencies(
 
     let dependencies =
         AuthoringDependencies::new(resolved).expect("re-validated entries mirror an already-validated dependency list");
-    Ok(AuthoringMetadata::Bundle(AuthoringBundle { dependencies, ..bundle }))
+    // Mutated rather than rebuilt with `..bundle`: the retired-key rejection
+    // sentinels are private to the metadata module, and functional update
+    // syntax would need to name them.
+    let mut bundle = bundle;
+    bundle.dependencies = dependencies;
+    Ok(AuthoringMetadata::Bundle(bundle))
 }
 
-/// D5: find a direct digest pin among an `any`-targeted bundle's
+/// D5: find a pre-existing digest pin among an `any`-targeted bundle's
 /// dependencies, if any — a leaf manifest carries no platform descriptor, so
-/// a bare `@digest` pin cannot be verified to be `any`-offered. Runs as its
-/// own pass over every declared dependency — including already-pinned ones —
-/// rather than being folded into the fresh-resolution loop, which only ever
-/// sees unpinned entries.
+/// a bare `@digest` cannot be read off the sidecar as `any`-offered. Runs as
+/// its own pass over every declared dependency, including already-pinned
+/// ones, rather than being folded into the fresh-resolution loop, which only
+/// ever sees unpinned entries.
 ///
-/// Shared by [`pin_dependencies`] (create time) and
-/// [`crate::publisher::publish_gate::verify_dependency_pins`] (push time) —
-/// both must reject the same condition (`adr_platform_model_unification.md`
-/// D5).
-pub(crate) fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Option<Box<oci::Identifier>> {
+/// **Create-only, deliberately asymmetric with push.** Create's whole job is
+/// to resolve against an index, so a digest it did not write itself is
+/// unverifiable to it and it fails closed. Push has the registry in hand and
+/// checks the stronger property directly
+/// ([`verify_any_pin_provenance`](crate::publisher::publish_gate)): is this
+/// digest advertised as `any` in the dependency's own image index? That
+/// subsumes the structural rule, so push accepts a bare digest the registry
+/// vouches for and rejects one it does not — which is the question this check
+/// can only approximate.
+fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Option<Box<oci::Identifier>> {
     dependencies
         .iter()
         .find(|dep| dep.identifier.digest().is_some())
@@ -142,8 +144,7 @@ fn resolve_one(
     let available: Vec<String> = candidates.iter().map(|(_, platform)| platform.to_string()).collect();
 
     match select_best(declared_platform, &candidates) {
-        Selection::Found(leaf) if declared_platform.is_any() => any_pin(dep, &leaf),
-        Selection::Found(leaf) => direct_pin(dep, &leaf),
+        Selection::Found(leaf) => pin(dep, &leaf),
         Selection::None => Err(DependencyPinningError::NoCompatiblePlatform {
             identifier: Box::new(dep.identifier.clone()),
             platform: declared_platform.to_string(),
@@ -173,39 +174,18 @@ fn winning_platforms(winners: &[oci::Identifier], candidates: &[(oci::Identifier
         .collect()
 }
 
-/// Collapse `dep` to a single direct manifest pin on `leaf`'s digest: attach
-/// the leaf digest to the identifier and clear any `platforms` map.
+/// Collapse `dep` to a single manifest pin on `leaf`'s digest: attach the
+/// leaf digest to the identifier, preserving the advisory tag.
 ///
-/// Used for a **Specific** `declared_platform` — D5 keeps direct digest pins
-/// unchanged for concrete-targeted bundles (their target platform is known,
-/// so the pin's provenance is not in question).
-fn direct_pin(
-    dep: &AuthoringDependency,
-    leaf: &oci::Identifier,
-) -> Result<AuthoringDependency, DependencyPinningError> {
+/// The one pin shape, for every `declared_platform` including `any`. The
+/// digest's provenance is not left to the sidecar to assert: an `any`-target
+/// winner is `any`-offered by [`select_best`]'s construction here, and push
+/// re-derives the same fact from the dependency's own image index rather than
+/// trusting anything this wrote.
+fn pin(dep: &AuthoringDependency, leaf: &oci::Identifier) -> Result<AuthoringDependency, DependencyPinningError> {
     let digest = require_leaf_digest(dep, leaf)?;
     let mut pinned = dep.clone();
     pinned.identifier = dep.identifier.clone_with_digest(digest);
-    pinned.platforms = None;
-    Ok(pinned)
-}
-
-/// Record `leaf`'s digest as the single `"any"`-keyed entry in `dep`'s
-/// `platforms` map, leaving the identifier's own digest unset.
-///
-/// Used for an **`any`** `declared_platform` — D5 prohibits a bare `@digest`
-/// pin on an `any`-targeted dependency (unverifiable provenance), so the pin
-/// lives in the map instead, under the canonical `Platform::Any` key.
-/// `resolve_one` only calls this for a `select_best` winner scored against an
-/// `any` requirement, which by [`is_compatible`](crate::oci::is_compatible)
-/// rule 2 is always itself an `any`-typed offer — the key is always literally
-/// `"any"`.
-fn any_pin(dep: &AuthoringDependency, leaf: &oci::Identifier) -> Result<AuthoringDependency, DependencyPinningError> {
-    let digest = require_leaf_digest(dep, leaf)?;
-    let mut pinned = dep.clone();
-    let mut map: BTreeMap<String, oci::Digest> = BTreeMap::new();
-    map.insert(Platform::any().to_string(), digest);
-    pinned.platforms = Some(map);
     Ok(pinned)
 }
 
@@ -501,7 +481,6 @@ mod tests {
             Some(digest('a')),
             "must NOT pin the index digest"
         );
-        assert!(java.platforms.is_none(), "concrete pin carries no map");
         assert_eq!(java.identifier.tag(), Some("21"), "advisory tag preserved");
     }
 
@@ -521,7 +500,6 @@ mod tests {
             .await
             .expect("pinning succeeds");
         assert_eq!(dep(&pinned, 0).identifier.digest(), Some(tool_digest));
-        assert!(dep(&pinned, 0).platforms.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -631,7 +609,13 @@ mod tests {
     // ── --platform any ────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn any_platform_with_agnostic_dep_pins_into_map() {
+    async fn any_platform_with_agnostic_dep_pins_the_any_manifest_digest() {
+        // An `any` target takes the same pin shape as a concrete one: the
+        // winning leaf's digest, bare on the identifier. `select_best` already
+        // established the winner is `any`-offered, and push re-derives that
+        // from the dependency's own image index rather than trusting the
+        // sidecar's word for it.
+        //
         // A leaf platform manifest is never locally cached (A3); a live fake
         // source under `ChainMode::Default` recovers it.
         let dir = TempDir::new().unwrap();
@@ -643,13 +627,8 @@ mod tests {
             .await
             .expect("pinning succeeds");
         let tool = dep(&pinned, 0);
-        assert!(
-            tool.identifier.digest().is_none(),
-            "an any-targeted pin must NOT be a bare digest (D5: unverifiable provenance)"
-        );
-        let map = tool.platforms.as_ref().expect("any pin recorded in the platforms map");
-        assert_eq!(map.get("any"), Some(&tool_digest));
-        assert_eq!(map.len(), 1);
+        assert_eq!(tool.identifier.digest(), Some(tool_digest));
+        assert_eq!(tool.identifier.tag(), Some("1.0"), "advisory tag preserved");
     }
 
     /// D5: a dependency offering only Specific leaves (no `any` manifest)

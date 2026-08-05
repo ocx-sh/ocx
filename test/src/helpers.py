@@ -82,9 +82,10 @@ def resolved_metadata_path(bundle: Path) -> Path:
 
     `ocx package create` never writes back to its `-m` input file — it always
     writes next to `-o` (see `conventions::infer_metadata_file`). Fields
-    `create` resolves and records (dependency pins, the recorded `platform` —
-    D5) only exist in *this* file; `push`/`package test` must read metadata
-    from here, not from the pre-`create` input.
+    `create` resolves and records (dependency pins) only exist in *this*
+    file; `push`/`package test` must read metadata from here, not from the
+    pre-`create` input. The platform `create` resolved against is recorded
+    separately, in the sibling build receipt — see `resolved_receipt_path`.
     """
     stem = bundle.stem
     for ext in _KNOWN_ARCHIVE_EXTENSIONS:
@@ -92,6 +93,24 @@ def resolved_metadata_path(bundle: Path) -> Path:
             stem = stem[: -len(ext)]
             break
     return bundle.parent / f"{stem}-metadata.json"
+
+
+def resolved_receipt_path(bundle: Path) -> Path:
+    """Path `ocx package create -o <bundle>` writes the build receipt to.
+
+    Same stem-stripping as `resolved_metadata_path`, `-receipt.json` suffix
+    instead of `-metadata.json`. The receipt is the *only* place the platform
+    `create` resolved dependencies against is recorded (`{"version": 1,
+    "platform": "<canonical>"}`) — the metadata sidecar itself carries no
+    `platform` key (published wire shape). `push`/`package test` read it,
+    when present, to supply the platform `--platform` was not given.
+    """
+    stem = bundle.stem
+    for ext in _KNOWN_ARCHIVE_EXTENSIONS:
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return bundle.parent / f"{stem}-receipt.json"
 
 
 def _build_trap_script(outputs: dict[str, str], marker: str) -> str:
@@ -365,7 +384,7 @@ def make_package(
     # Push — pass all layer bundles as positional args to `ocx package push`.
     # `-m` points at the sidecar `create` actually wrote (next to bundle_l0),
     # not the pre-`create` input — that's the file carrying `create`'s
-    # resolved pins and recorded platform.
+    # resolved dependency pins.
     fq = f"{ocx.registry}/{repo}:{tag}"
     push_args = ["package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle_l0))]
     if new:

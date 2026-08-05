@@ -11,9 +11,13 @@ use ocx_lib::{
     shell::Shell,
 };
 
-/// Infers a metadata file path based on the archive file path.
-/// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
-pub fn infer_metadata_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
+/// Derives a `<stem>-<suffix>.json` sidecar path beside an archive file.
+///
+/// For example `/path/to/package.tar.gz` with suffix `metadata` yields
+/// `/path/to/package-metadata.json`. Shared by [`infer_metadata_file`] and
+/// [`infer_receipt_file`] so the two sidecars a build produces are always
+/// derived the same way and land next to each other.
+fn sidecar_path(content: &std::path::Path, suffix: &str) -> Result<std::path::PathBuf, MetadataResolutionError> {
     let content_parent = content
         .parent()
         .ok_or_else(|| MetadataResolutionError::InvalidLayerPath {
@@ -35,7 +39,22 @@ pub fn infer_metadata_file(content: &std::path::Path) -> Result<std::path::PathB
             break;
         }
     }
-    Ok(content_parent.join(format!("{}-metadata.json", content_name)))
+    Ok(content_parent.join(format!("{content_name}-{suffix}.json")))
+}
+
+/// Infers a metadata file path based on the archive file path.
+/// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
+pub fn infer_metadata_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
+    sidecar_path(content, "metadata")
+}
+
+/// Infers the build-receipt path beside the archive file — the metadata path's
+/// twin (`/path/to/package.tar.gz` -> `/path/to/package-receipt.json`).
+///
+/// Written by `ocx package create --metadata`, read by `ocx package push` and
+/// `ocx package test`.
+pub fn infer_receipt_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
+    sidecar_path(content, "receipt")
 }
 
 /// Resolves the metadata path used by `ocx package push` and `ocx package
@@ -66,6 +85,57 @@ pub fn resolve_metadata_path(
         1 => Ok(candidates.into_iter().next().unwrap()),
         _ => Err(MetadataResolutionError::Ambiguous { candidates }),
     }
+}
+
+/// Resolves the build-receipt path `ocx package push` and `ocx package test`
+/// read their default target platform from.
+///
+/// Mirrors [`resolve_metadata_path`]'s layer walk, but the receipt anchors to
+/// the **bundle** alone — there is no `--receipt` flag and `--metadata` never
+/// redirects it, because the receipt describes how the layer was built rather
+/// than what the package declares. Zero file layers (a config-only push) or
+/// several disagreeing candidates yield `None` rather than an error: no
+/// receipt is a supported state that simply makes `--platform` required.
+pub fn resolve_receipt_path(layers: &[LayerRef]) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for layer in layers {
+        // Fail-closed on an underivable path: no receipt means `--platform`
+        // becomes required, which is the safe answer. The metadata sibling
+        // propagates instead because there the file is mandatory input.
+        if let LayerRef::File { path: file, .. } = layer
+            && let Ok(candidate) = infer_receipt_file(file)
+            && !candidates.contains(&candidate)
+        {
+            candidates.push(candidate);
+        }
+    }
+    match candidates.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Reads the published metadata sidecar `ocx package push` and `ocx package
+/// test` consume.
+///
+/// The file is the wire form `ocx package create --metadata` compiled — every
+/// dependency pinned to a manifest digest — so a parse failure most often
+/// means the sidecar was hand-authored or edited rather than compiled. The
+/// context line says so; the underlying serialization failure classifies to
+/// `DataError` (65).
+pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<ocx_lib::package::metadata::Metadata> {
+    use anyhow::Context as _;
+    use ocx_lib::prelude::*;
+
+    ocx_lib::package::metadata::Metadata::read_json(path)
+        .await
+        .with_context(|| {
+            format!(
+                "reading package metadata from {}; `ocx package create -m <FILE> -p <PLATFORM>` \
+                 compiles an authoring sidecar into this form",
+                path.display()
+            )
+        })
 }
 
 /// Resolves an explicit `--platform` value, falling back to the current host
@@ -307,11 +377,69 @@ pub fn cascade_repair_exit_code(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_ci, merge_tags_file, parse_tags_file, resolve_ci_arg, resolve_shell_arg};
+    use super::{
+        export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, parse_tags_file, resolve_ci_arg,
+        resolve_receipt_path, resolve_shell_arg,
+    };
     use ocx_lib::ci::CiFlavor;
     use ocx_lib::cli::UsageError;
     use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+    use ocx_lib::publisher::LayerRef;
     use ocx_lib::shell::Shell;
+
+    // ── sidecar derivation: the receipt is the metadata path's twin ────────
+
+    fn layer(path: &str) -> LayerRef {
+        path.parse().expect("layer ref parses")
+    }
+
+    #[test]
+    fn the_receipt_path_is_the_metadata_paths_twin() {
+        let bundle = std::path::Path::new("/build/pkg.tar.xz");
+        assert_eq!(
+            infer_metadata_file(bundle).expect("metadata path"),
+            std::path::Path::new("/build/pkg-metadata.json")
+        );
+        assert_eq!(
+            infer_receipt_file(bundle).expect("receipt path"),
+            std::path::Path::new("/build/pkg-receipt.json"),
+            "both sidecars must derive from the same stem so they land side by side"
+        );
+    }
+
+    #[test]
+    fn a_single_file_layer_resolves_its_receipt() {
+        let layers = [layer("./out/cmake.tar.gz")];
+        assert_eq!(
+            resolve_receipt_path(&layers),
+            Some(std::path::PathBuf::from("./out/cmake-receipt.json"))
+        );
+    }
+
+    #[test]
+    fn zero_file_layers_resolve_no_receipt() {
+        // A config-only push carries no bundle, so there is nothing for a
+        // receipt to sit beside — `--platform` becomes required instead.
+        assert_eq!(resolve_receipt_path(&[]), None);
+    }
+
+    #[test]
+    fn ambiguous_file_layers_resolve_no_receipt() {
+        // Never an error: two bundles disagree about which receipt describes
+        // the build, so the caller falls through to the explicit-platform row.
+        let layers = [layer("./out/base.tar.gz"), layer("./out/tool.tar.gz")];
+        assert_eq!(resolve_receipt_path(&layers), None);
+    }
+
+    #[test]
+    fn repeated_layers_of_one_bundle_still_resolve_one_receipt() {
+        let layers = [layer("./out/cmake.tar.gz"), layer("./out/cmake.tar.gz")];
+        assert_eq!(
+            resolve_receipt_path(&layers),
+            Some(std::path::PathBuf::from("./out/cmake-receipt.json")),
+            "deduping matches resolve_metadata_path — one bundle, one receipt"
+        );
+    }
 
     #[test]
     fn shell_arg_absent_is_default_format() {

@@ -40,9 +40,12 @@ pub fn schema_for(kind: &str) -> Option<String> {
         // (`sh.ocx.layer.*`), not on `Bundle` — do not add a `layers` field here.
         //
         // The metadata schema describes the AUTHORING form (the sidecar a
-        // publisher edits): a superset of the published wire form — dependency
-        // digests optional, sidecar-only `platforms` fields allowed. Published
-        // blobs remain a valid subset, so the same v1 URL keeps covering both.
+        // publisher edits): the published wire form with one relaxation —
+        // dependency digests are optional, because `ocx package create`
+        // resolves them. Published blobs are therefore a valid subset and the
+        // same v1 URL keeps covering both. The platform a bundle was built for
+        // is not in either form: it lives in the OCI image index, and between
+        // create and push in an unschema'd build receipt.
         // ADR: adr_dependency_manifest_pinning.md.
         "metadata" => Some(generate_schema::<AuthoringMetadata>(
             "https://ocx.sh/schemas/metadata/v1.json",
@@ -93,20 +96,26 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>) -> 
 mod tests {
     use super::*;
 
-    /// The metadata schema describes the authoring superset: dependency
-    /// identifiers are digest-optional (plain `Identifier`, not
-    /// `PinnedIdentifier`) and the sidecar-only `platforms` fields exist on
-    /// both the bundle and each dependency.
+    /// The metadata schema is the published wire form plus exactly one
+    /// relaxation: dependency identifiers are digest-optional (plain
+    /// `Identifier`, not `PinnedIdentifier`). Nothing build-time appears —
+    /// notably no bundle `platform`, which lives in the build receipt.
     #[test]
-    fn metadata_schema_is_the_authoring_superset() {
+    fn metadata_schema_is_published_plus_optional_digest() {
         let schema = schema_for("metadata").expect("metadata schema exists");
         let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
         let defs = value.get("$defs").expect("schema has $defs");
 
+        let bundle = defs.get("AuthoringBundle").expect("authoring bundle def");
+        assert!(
+            bundle.pointer("/properties/platform").is_none(),
+            "the bundle must declare no platform — it is a build fact, not metadata"
+        );
+
         let dependency = defs.get("AuthoringDependency").expect("authoring dependency def");
         assert!(
-            dependency.pointer("/properties/platforms").is_some(),
-            "dependency must document the per-platform pin map"
+            dependency.pointer("/properties/platforms").is_none(),
+            "the per-platform pin map is gone; a dependency carries one digest"
         );
         // Digest-optional identifier: the plain Identifier type, and required
         // fields do not force a digest-bearing PinnedIdentifier.

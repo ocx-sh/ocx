@@ -49,7 +49,7 @@ The full identifier rules — required registry component, identifier syntax, th
 
 ### When a Dependency Ships Multiple Platforms {#pinning-per-platform}
 
-A package built with [`ocx package create --platform any`][cmd-package-create] — platform-agnostic content, like a script — can still depend on a package that ships different manifests per platform (the native binary the script wraps, for example). `create` resolves that case into a per-dependency `platforms` pin map instead of a single digest: the `any`-targeted package performs no platform-specific resolution of its own, so it can only depend on dependencies that themselves offer an `any` build. The map shape and the any-deps rule are covered in [Multi-Platform Packages][authoring-multi-platform] and the [Per-Platform Pins reference][reference-per-platform-pins].
+A package built with [`ocx package create --platform any`][cmd-package-create] — platform-agnostic content, like a script — can still depend on a package that ships different manifests per platform (the native binary the script wraps, for example), as long as that dependency also offers an `any` manifest of its own. `create` resolves the pin the same way it resolves a concrete `--platform` target: a single manifest digest, bare on the identifier. The `any`-targeted package performs no platform-specific resolution of its own, so a dependency offering only platform-specific manifests fails `create` outright (exit 65), naming the dependency. The any-deps rule and the compatibility relation `create` evaluates each candidate against are covered in [Multi-Platform Packages][authoring-multi-platform] and [Platforms][reference-platforms].
 
 ## When You Need a `name` Override {#name-field}
 
@@ -100,7 +100,7 @@ When composing a non-trivial graph, put dependencies whose env should "win" clos
 - [Dependencies reference][reference-dependencies] — every field, every constraint
 - [Dependencies in depth][in-depth-dependencies] — resolution, diamond dedup, garbage collection
 - [Building and pushing][authoring-building-pushing] — the `create` resolves / `push` gates split, gate errors
-- [Multi-platform packages][authoring-multi-platform] — per-platform pin maps, target-set intersection
+- [Multi-platform packages][authoring-multi-platform] — building and pushing per-platform, dependencies on multi-platform builds
 - [Env surface][authoring-env-surface] — entry visibility (distinct from edge visibility)
 - [Migration patterns][authoring-migration] — when wrapping upstream tools introduces dep declarations
 
@@ -118,7 +118,7 @@ When composing a non-trivial graph, put dependencies whose env should "win" clos
 [reference-dependencies]: ../reference/metadata.md#dependencies
 [reference-deps-ordering]: ../reference/metadata.md#dependencies-ordering
 [reference-manifest-pins]: ../reference/metadata.md#dependencies-manifest-pins
-[reference-per-platform-pins]: ../reference/metadata.md#dependencies-per-platform-pins
+[reference-platforms]: ../reference/platforms.md
 
 <!-- in-depth -->
 [in-depth-dependencies]: ../in-depth/dependencies.md

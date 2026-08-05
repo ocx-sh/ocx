@@ -83,7 +83,7 @@ def _push_multi_layer(
     if metadata_path is None:
         metadata_path = tmp_path / f"meta-{repo}-{tag}.json"
         metadata_path.write_text(json.dumps({
-            "type": "bundle", "version": 1, "platform": plat, "env": [
+            "type": "bundle", "version": 1, "env": [
                 {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
             ],
         }))
@@ -137,7 +137,7 @@ def test_push_zero_layers_succeeds_with_metadata(
     plat = current_platform()
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "platform": plat,
+        "type": "bundle", "version": 1,
         "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
@@ -186,7 +186,7 @@ def test_round_trip_zero_layers(
     plat = current_platform()
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1, "platform": plat,
+        "type": "bundle", "version": 1,
         "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     short = f"{unique_repo}:1.0.0"
@@ -435,7 +435,7 @@ def test_push_bare_digest_is_rejected(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1, "platform": current_platform(),
+        "type": "bundle", "version": 1,
         "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     bare_digest = "sha256:" + "0" * 64
@@ -465,7 +465,7 @@ def test_push_digest_layer_not_found(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1, "platform": current_platform(),
+        "type": "bundle", "version": 1,
         "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     result = ocx.run(
