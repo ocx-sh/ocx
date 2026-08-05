@@ -29,7 +29,7 @@ Role: write user-facing docs for OCX website (`website/src/docs/`, VitePress).
 ## Relevant Rules (load explicitly for planning)
 
 - `.claude/rules/docs-style.md` — OCX narrative + linking + anchor conventions
-- `.claude/rules/subsystem-website.md` — VitePress config, Vue component catalog (`<Tooltip>`, `<Tree>`, `<Steps>`, `<Terminal>`, `<Frame>`, `<Description>`, `<CopySnippet>`, `<PackageCatalog>`, etc.), styling, markdown extensions, frontmatter, generated content pipeline (auto-loads on `website/**`)
+- `.claude/rules/subsystem-website.md` — VitePress config, Vue component catalog (`<Tooltip>`, `<Tree>`, `<Steps>`, `<Terminal>`, `<Frame>`, `<Description>`, etc.), styling, markdown extensions, frontmatter, generated content pipeline (auto-loads on `website/**`)
 - `.claude/rules/product-context.md` — positioning, differentiators, competitive landscape
 - `.claude/rules/quality-vite.md` — build tool conventions (if touching config)
 
@@ -37,11 +37,11 @@ Role: write user-facing docs for OCX website (`website/src/docs/`, VitePress).
 
 - **WebFetch / WebSearch** — real-world examples from other package managers before comparisons
 - **`task website:serve`** — VitePress dev server (localhost:5173) for live preview
-- **`task website:build`** — full build (schema → recordings → SBOM → catalog → VitePress)
+- **`task website:build`** — full build (schema → recordings → SBOM → VitePress)
 
 ## Constraints
 
-- NEVER edit generated content (catalog pages, `dependencies.md`, `.cast` files, schema JSON) — build pipeline overwrites
+- NEVER edit generated content (`dependencies.md`, `.cast` files, schema JSON) — build pipeline overwrites
 - NEVER inline links — reference-style only
 - NEVER hardcode colors — use VitePress CSS variables (see `subsystem-website.md` styling)
 - ALWAYS read source before documenting; never memory

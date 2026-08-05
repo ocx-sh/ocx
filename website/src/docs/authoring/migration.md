@@ -141,13 +141,11 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 [apt-repos]: https://wiki.debian.org/DebianRepository/Format
 [oci-image-spec]: https://github.com/opencontainers/image-spec
 [in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[catalog]: https://index.ocx.sh
 
 <!-- commands -->
 [cmd-package-describe]: ../reference/command-line.md#package-describe
 [cmd-package-info]: ../reference/command-line.md#package-info
-
-<!-- internal -->
-[catalog]: ../../catalog.md
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md

@@ -149,7 +149,6 @@ All components globally registered — use directly in `.md` files without impor
 - `<Tree>` / `<Node>` / `<Description>` — collapsible filesystem trees with annotations
 - `<Steps>` / `<Step>` / `<Description>` — vertical progress indicator with detail panels
 - `<Terminal>` / `<Frame>` — animated terminal sessions (inline frames or `.cast` files)
-- `<PackageCatalog>` / `<PackageDetail>` — rendered from generated catalog data
 - `<DependencyExplorer>` — SBOM viewer (rendered from generated dependency data)
 - VitePress `::: code-group` — tabbed code blocks for side-by-side alternatives
 - VitePress `::: info | tip | warning | details` — callout boxes

@@ -26,10 +26,9 @@ paths:
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
-| `website/taskfile.yml` | website | `website:` (includes schema, sbom, catalog, recordings internally) |
+| `website/taskfile.yml` | website | `website:` (includes schema, sbom, recordings internally) |
 | `website/schema.taskfile.yml` | website | `website:schema:` -- JSON schema generation |
 | `website/sbom.taskfile.yml` | website | `website:sbom:` -- SBOM generation |
-| `website/catalog.taskfile.yml` | website | `website:catalog:` -- catalog generation |
 | `website/recordings.taskfile.yml` | website | `website:recordings:` -- terminal recordings |
 
 ## Two-Phase Verify
@@ -157,7 +156,7 @@ Set `dir:` on include block when all tasks should run relative to sub-taskfile's
 
 ## OCX-Specific Task Contracts
 
-- **Generation tasks** (`schema:generate`, `recordings:*`, `catalog:generate`) should depend on compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source deps — duplicating in Taskfile = maintenance overhead.
+- **Generation tasks** (`schema:generate`, `recordings:*`) should depend on compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source deps — duplicating in Taskfile = maintenance overhead.
 
 ## Sources
 

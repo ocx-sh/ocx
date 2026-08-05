@@ -9,9 +9,6 @@ includes:
   sbom:
     taskfile: ./sbom.taskfile.yml
     internal: true
-  catalog:
-    taskfile: ./catalog.taskfile.yml
-    internal: true
   recordings:
     taskfile: ./recordings.taskfile.yml
     internal: true
@@ -46,7 +43,6 @@ tasks:
       - task: scripts:publish
       - task: recordings:parallel
       - task: sbom:generate:page
-      - task: catalog:generate
       - bunx vitepress build
 
   # Site deploys ride CI: deploy-website.yml builds + pushes to Cloudflare

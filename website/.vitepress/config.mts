@@ -37,14 +37,13 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Roadmap', link: '/docs/roadmap' },
-      { text: 'Catalog', link: '/catalog' },
+      { text: 'Catalog', link: 'https://index.ocx.sh', target: '_self', noIcon: true },
       { text: 'Docs', link: '/docs/user-guide' },
       { text: 'Team', link: '/team' },
     ],
 
     sidebar: {
       "/docs/roadmap": [],
-      "/catalog": [],
       "/team": [],
       "/": [
         {

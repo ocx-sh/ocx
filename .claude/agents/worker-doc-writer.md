@@ -76,7 +76,6 @@ Use directly in `.md` files (globally registered):
 - `<Tree>` / `<Node>` / `<Description>` — file structure trees
 - `<Steps>` / `<Step>` / `<Description>` — progress steppers
 - `<Terminal src="/casts/file.cast" />` — terminal recordings
-- `<CopySnippet code="..." />` — copy button
 - `::: code-group` — tabbed code blocks (ocx vs other tools)
 - `::: info | tip | warning | details` — callout boxes
 
@@ -91,7 +90,7 @@ Use directly in `.md` files (globally registered):
 - [ ] Short paragraphs, one idea each
 - [ ] Headers short and TOC-readable
 - [ ] Internal links resolve to sections with prose
-- [ ] No generated files modified (catalog pages, dependencies.md, .cast files, schema JSON)
+- [ ] No generated files modified (dependencies.md, .cast files, schema JSON)
 
 ## Task Runner
 
@@ -104,7 +103,7 @@ Use `task` commands — run `task --list` to discover tasks:
 - Stay within assigned doc scope
 - Read source code before writing (always)
 - Follow existing page structure and style
-- NO editing generated files (catalog, dependencies, schemas, recordings)
+- NO editing generated files (dependencies, schemas, recordings)
 - NO creating new pages without explicit instruction — extend existing pages
 - Use `task` commands over ad-hoc ops
 

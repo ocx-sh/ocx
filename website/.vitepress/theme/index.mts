@@ -16,12 +16,7 @@ import Description from './components/Description.vue'
 import Terminal from './components/Terminal.vue'
 import Frame from './components/Frame.vue'
 import DependencyExplorer from './components/DependencyExplorer.vue'
-import CopySnippet from './components/CopySnippet.vue'
-import PackageCatalog from './components/PackageCatalog.vue'
-import PackageDetail from './components/PackageDetail.vue'
 import PlatformIcons from './components/PlatformIcons.vue'
-import TagBadge from './components/TagBadge.vue'
-import VersionTree from './components/VersionTree.vue'
 import RoadmapTimeline from './components/RoadmapTimeline.vue'
 import RoadmapItem from './components/RoadmapItem.vue'
 import RoadmapPage from './components/RoadmapPage.vue'
@@ -47,12 +42,7 @@ export default {
     app.component('Terminal', Terminal)
     app.component('Frame', Frame)
     app.component('DependencyExplorer', DependencyExplorer)
-    app.component('CopySnippet', CopySnippet)
-    app.component('PackageCatalog', PackageCatalog)
-    app.component('PackageDetail', PackageDetail)
     app.component('PlatformIcons', PlatformIcons)
-    app.component('TagBadge', TagBadge)
-    app.component('VersionTree', VersionTree)
     app.component('RoadmapTimeline', RoadmapTimeline)
     app.component('RoadmapItem', RoadmapItem)
     app.component('RoadmapPage', RoadmapPage)

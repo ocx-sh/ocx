@@ -161,6 +161,7 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 [ripgrep]: https://github.com/BurntSushi/ripgrep
 [mold]: https://github.com/rui314/mold
 [mise]: https://mise.jdx.dev/
+[catalog]: https://index.ocx.sh
 
 <!-- reference -->
 [reference-entry-points]: ../reference/metadata.md#entry-points
@@ -175,9 +176,6 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 <!-- in-depth -->
 [in-depth-entry-points]: ../in-depth/entry-points.md
 [in-depth-environments]: ../in-depth/environments.md
-
-<!-- internal -->
-[catalog]: ../../catalog.md
 
 <!-- authoring -->
 [authoring-env-surface]: ./env-surface.md

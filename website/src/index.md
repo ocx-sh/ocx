@@ -178,7 +178,7 @@ The local index snapshot plus the content-addressed object store is everything `
       <span>See what we're building and what's coming next.</span>
     </div>
   </a>
-  <a href="/catalog/" class="cta-card">
+  <a href="https://index.ocx.sh" class="cta-card">
     <img src="/licensed/icons/cta-catalog.svg" alt="" class="cta-card-icon cta-icon-catalog" />
     <div class="cta-card-text">
       <strong>Package Catalog</strong>

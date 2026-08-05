@@ -5,11 +5,11 @@ paths:
 
 # Website Subsystem
 
-VitePress 2.0 docs site at `website/`. Bun runtime, 15 custom Vue components, auto-gen content from CI.
+VitePress 2.0 docs site at `website/`. Bun runtime, 21 custom Vue components, auto-gen content from CI.
 
 ## Design Rationale
 
-VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast static site. Custom Vue components = interactive docs (trees, tooltips, tabs) without heavy JS frameworks. Generated pipeline (schema, recordings, SBOM, catalog) = single source of truth. Docs derived from code, not hand-maintained.
+VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast static site. Custom Vue components = interactive docs (trees, tooltips, tabs) without heavy JS frameworks. Generated pipeline (schema, recordings, SBOM) = single source of truth. Docs derived from code, not hand-maintained.
 
 ## File Structure
 
@@ -17,15 +17,13 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 |------|---------|
 | `.vitepress/config.mts` | VitePress config (nav, sidebar, plugins, head) |
 | `.vitepress/theme/index.mts` | Theme extension — registers all custom components globally |
-| `.vitepress/theme/components/*.vue` | 15 custom Vue components (see below) |
+| `.vitepress/theme/components/*.vue` | 21 custom Vue components (see below) |
 | `src/index.md` | Homepage (`layout: home` with hero + features) |
 | `src/docs/*.md` | Documentation pages |
 | `src/docs/reference/*.md` | Reference pages (command-line, environment, metadata) |
-| `src/catalog/*.md` | **Generated** — per-package pages |
 | `src/docs/reference/dependencies.md` | **Generated** — SBOM dependency list |
 | `src/public/casts/*.cast` | **Generated** — asciinema recordings |
 | `src/public/schemas/{metadata,config,project,project-lock,patch}/v*.json` | **Generated** — JSON schemas from `ocx_schema` crate (`patch` = `ocx patch publish --descriptor` format) |
-| `src/public/data/catalog/` | **Generated** — catalog JSON + per-package info/logos |
 | `src/public/data/dependencies.json` | **Generated** — SBOM data |
 | `taskfile.yml` | Website tasks (install, serve, build, deploy) |
 
@@ -33,7 +31,7 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 
 ```bash
 task website:serve              # Dev server (localhost:5173)
-task website:build              # Full build (generates schema, recordings, sbom, catalog, then VitePress)
+task website:build              # Full build (generates schema, recordings, sbom, then VitePress)
 task website:deploy:licensed    # Push licensed assets to the R2 bucket (canonical store)
 ```
 
@@ -41,7 +39,7 @@ Site deploys ride CI (`deploy-website.yml` → Cloudflare Pages project `ocx-web
 the hetzner nginx reverse-proxies `ocx.sh`/`dev.ocx.sh` to the Pages deployment and
 keeps `/v2` (Artifactory) on the same hostnames until the package migration retires it.
 
-Build chain: `schema:generate` → `recordings:build` → `sbom:generate:page` → `catalog:generate` → `vitepress build`.
+Build chain: `schema:generate` → `recordings:build` → `sbom:generate:page` → `vitepress build`.
 
 **Never edit generated files** — build pipeline overwrites.
 
@@ -69,16 +67,13 @@ All registered globally in `theme/index.mts` — use in `.md` files, no imports.
 | `<Description>` | *(none — marker)* | default = description text | Marker for parent VNode introspection |
 | `<Terminal>` | `src?: string`, `title?: string`, `cols?: number`, `rows?: number`, `autoPlay?: boolean`, `speed?: number` (1), `idleTimeLimit?: number` (2), `loop?: boolean`, `fit?: string` ('width'), `collapsed?: boolean` | default = `<Frame>` elements (if no `src`) | Asciinema player with macOS chrome |
 | `<Frame>` | `at: string \| number` (required) | default = terminal line text | Single frame in inline Terminal |
-| `<CopySnippet>` | `code: string`, `label?: string` | *(none)* | Copy-to-clipboard button |
 
 ### Data Components (render generated content)
 
 | Component | Data Source | Purpose |
 |-----------|-----------|---------|
-| `<PackageCatalog>` | `/data/catalog/catalog.json` | Searchable package grid with OS platform icons (per-card, OS only) |
-| `<PackageDetail>` | `/data/catalog/packages/{name}/info.json` | Individual package view with tag selector + OS/arch platform breakdown |
 | `<DependencyExplorer>` | `/data/dependencies.json` | SBOM viewer with license breakdown |
-| `<PlatformIcons>` | *(props: `platforms: string[]`, `mode: 'os' \| 'os-arch'`)* | Renders `os/arch` lists as OS glyphs (`os`) or glyph + name + arch chips (`os-arch`); used by the two catalog components |
+| `<PlatformIcons>` | *(props: `platforms: string[]`, `mode: 'os' \| 'os-arch'`)* | Renders `os/arch` lists as OS glyphs (`os`) or glyph + name + arch chips (`os-arch`); used directly by `src/docs/installation.md` |
 
 `<PlatformIcons>` glyphs are **inline single-colour SVG** (Linux/Tux + Apple from [Simple Icons](https://simpleicons.org/), CC0-1.0; Windows a trademark-neutral four-pane window), filled with `currentColor` so tint + light/dark follow the surrounding text colour. They are **not** part of the licensed Icons8 pipeline below — unknown OS strings fall back to a small text badge.
 
@@ -146,7 +141,6 @@ All registered globally in `theme/index.mts` — use in `.md` files, no imports.
 
 - **Homepage**: `layout: home` + `hero` (name, text, tagline, actions) + `features` array
 - **Content pages**: `outline: deep` for full heading outline
-- **Catalog pages**: `title`, `description`, `head` meta, `prev`/`next` nav (generated)
 
 ## Icons (Licensed Assets)
 
@@ -230,7 +224,6 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 | JSON schema | `ocx_schema` crate | `task schema:generate` |
 | Terminal recordings | pytest + registry:2 | `task recordings:build` |
 | SBOM / dependencies | cargo-cyclonedx + Python | `task sbom:generate:page` |
-| Package catalog | Python + ocx.sh registry | `task catalog:generate` |
 
 ## Quality Gate
 
