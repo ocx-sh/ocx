@@ -35,7 +35,7 @@ import pytest
 
 from src.helpers import make_package, make_package_with_entrypoints, push_managed_config
 from src.registry import fetch_platform_manifest_digest
-from src.runner import OcxRunner, PackageInfo, registry_dir
+from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 # The global descriptor lives at a FIXED, registry-wide repository
 # (`<patch-registry>/global:__ocx.patch`). Several tests here publish to it,
@@ -1583,8 +1583,14 @@ def test_patch_publish_without_config_errors(
 def test_patch_test_without_config_errors(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """ADR behaviour: `ocx patch test` without [patches] config must fail
-    with a non-zero exit and a clear error.
+    """ADR behaviour: `ocx patch test` with no [patches] tier and no
+    `--registry` must exit 64 (UsageError), naming the three ways to supply a
+    patch registry.
+
+    The tier is resolved as step 0 of the command, before the descriptor file
+    is read, so 64 here is the tier gate and nothing else. Control for
+    `test_patch_test_registry_flag_composes_without_config`, which composes
+    from this same tier-less state once `--registry` supplies one.
     """
     base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
     descriptor_path = tmp_path / "desc.json"
@@ -1598,8 +1604,10 @@ def test_patch_test_without_config_errors(
         format=None,
         check=False,
     )
-    assert result.returncode != 0, (
-        "`ocx patch test` without [patches] config must fail; got exit 0"
+    assert result.returncode == 64, (
+        "`ocx patch test` without a [patches] tier and without --registry must exit 64 "
+        f"(UsageError — 'no patch registry configured'); got {result.returncode}\n"
+        f"stderr: {result.stderr}"
     )
 
 
@@ -3076,3 +3084,413 @@ def test_patch_test_optional_tier_with_path_prefixed_registry_composes(
         f"got entries: {[e['key'] for e in entries]}"
     )
     assert optional_var["value"] == "optional-value"
+
+
+# ---------------------------------------------------------------------------
+# `ocx patch test` — the published contract, one test per documented line
+#
+# Sources: website/src/docs/user-guide/patches.md "Test locally without
+# publishing" + the bootstrap tip, and the `patch test` exit-code table in
+# website/src/docs/reference/command-line.md.
+#
+# Every assertion names the ONE exit code the contract names. A `!= 0` band
+# cannot tell "the binary rejected my input" from "the flag was never
+# implemented", so it is never used here.
+# ---------------------------------------------------------------------------
+
+
+def test_patch_test_registry_flag_composes_without_config(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--registry` stands in for a missing `[patches]` tier (bootstrap path).
+
+    The documented bootstrap tip: a maintainer seeding a brand-new patch
+    registry has no `[patches]` config block yet, and `--registry <HOST/PATH>`
+    must be enough on its own to preview a descriptor. No config file is
+    written here at all.
+
+    Discriminating against the same run without the flag:
+    `test_patch_test_without_config_errors` above is the control — the very
+    same tier-less state exits 64. So a green here can only come from
+    `--registry` actually constructing the tier, and the pair shows both
+    outcomes of the same gate.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("bootstrap_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "BOOTSTRAP_VAR", "bootstrap-value")
+
+    descriptor_path = tmp_path / "bootstrap_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    # Deliberately no `_write_config`: the [patches] tier does not exist.
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--registry", f"{registry}/ocx-patches",
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "`ocx patch test --registry` must compose with no [patches] config block at all; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    assert entries, "the composed report must carry entries, not an empty env"
+    bootstrap_var = _entry_by_key(entries, "BOOTSTRAP_VAR")
+    assert bootstrap_var is not None, (
+        f"BOOTSTRAP_VAR must appear in patch test entries under the ad-hoc --registry tier; "
+        f"got: {[e['key'] for e in entries]}"
+    )
+    assert bootstrap_var["value"] == "bootstrap-value"
+    assert len(report["companions"]) >= 1, "patch test report must list the matched companion"
+
+
+def test_patch_test_registry_flag_wins_over_configured_tier(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--registry` retargets the tier when a `[patches]` block is ALSO present.
+
+    What this pins is the seed/read key agreement on the override path. The
+    local descriptor is seeded into the scratch CAS under a key derived from
+    the effective patch registry, and compose reads it back under the key its
+    own view of that tier produces. The two prefixes here differ
+    (`configured_prefix` vs `override_prefix`), so an override honoured by one
+    half and not the other writes and reads two different CAS directories and
+    composes zero companions — the exact failure shape github issue #286 had
+    for a path-prefixed configured registry, on the ad-hoc override path.
+
+    Note what it cannot see: a `patch test` that ignored `--registry`
+    *entirely* would use the configured tier consistently on both halves and
+    still compose, because nothing in this command contacts the patch registry
+    over the network (the descriptor is local, and `build_site_patch_set` is a
+    local read). The tier's `required` posture is preserved by the override, so
+    it cannot serve as a second discriminator either.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("override_registry_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "OVERRIDE_REGISTRY_VAR", "override-value")
+
+    descriptor_path = tmp_path / "override_registry_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    # A configured tier the override must displace — nothing is ever published
+    # under this prefix, and no run may key its seed by it.
+    _write_config(ocx, f"{registry}/configured_prefix")
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--registry", f"{registry}/override_prefix",
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "`ocx patch test --registry` must compose when a [patches] tier is also configured; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    assert entries, "the composed report must carry entries, not an empty env"
+    override_var = _entry_by_key(entries, "OVERRIDE_REGISTRY_VAR")
+    assert override_var is not None, (
+        "OVERRIDE_REGISTRY_VAR must appear once --registry retargets the configured tier — "
+        "a zero-companion exit 0 is the seed/read key mismatch this pins; "
+        f"got: {[e['key'] for e in entries]}"
+    )
+    assert override_var["value"] == "override-value"
+    assert len(report["companions"]) >= 1, "patch test report must list the matched companion"
+
+
+def test_patch_test_platform_flag_composes_for_named_platform(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`-p` selects the platform the base and its companion are composed for.
+
+    Both packages are published for exactly ONE platform, chosen to be foreign
+    to whatever host runs this (the fixture picks `linux/arm64` unless that IS
+    the host, in which case `linux/amd64`) — the same host-agnostic trick
+    `test_cross_platform_materialize.py` uses. That makes `-p` load-bearing on
+    both hops: with the flag dropped, `patch test` resolves the host platform
+    and neither the base pull nor the required-companion pull finds a leaf, so
+    the run cannot reach a composed env at all.
+    """
+    # Foreign by construction, on every CI host (linux/amd64, linux/arm64,
+    # darwin/*, windows/amd64).
+    foreign_platform = "linux/arm64" if current_platform() != "linux/arm64" else "linux/amd64"
+
+    base_pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True, platform=foreign_platform
+    )
+
+    companion_repo = _unique_repo("platform_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    # Not `_make_companion`: that publishes `platform="any"`, which satisfies
+    # every request and so would prove nothing about `-p` on the companion hop.
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.0",
+        tmp_path,
+        bins=[],
+        env=[
+            {
+                "key": "PLATFORM_COMPANION_VAR",
+                "type": "constant",
+                "value": "foreign-value",
+                "visibility": "interface",
+            }
+        ],
+        new=True,
+        cascade=True,
+        platform=foreign_platform,
+    )
+
+    descriptor_path = tmp_path / "platform_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "-p", foreign_platform,
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"`ocx patch test -p {foreign_platform}` must compose for the named platform; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    assert entries, "the composed report must carry entries, not an empty env"
+    companion_var = _entry_by_key(entries, "PLATFORM_COMPANION_VAR")
+    assert companion_var is not None, (
+        f"PLATFORM_COMPANION_VAR must appear when both packages ship only {foreign_platform}; "
+        f"got: {[e['key'] for e in entries]}"
+    )
+    assert companion_var["value"] == "foreign-value"
+
+
+def test_patch_test_invalid_descriptor_json_exits_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Bytes that are not JSON at all exit 65 (DataError), naming the file.
+
+    `PatchError::InvalidDescriptorJson` classifies as `DataError`, which the
+    documented `patch test` exit-code table spells "descriptor JSON is
+    malformed or the version is unsupported".
+
+    The base is published even though descriptor validation runs before the
+    base is pulled: with a valid descriptor this exact fixture composes (see
+    `test_patch_test_composes_env_locally_without_publishing`), so a 65 here is
+    attributable to the descriptor and not to an unrelated missing package.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    descriptor_path = tmp_path / "invalid_descriptor.json"
+    descriptor_path.write_text("not json {{{")
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format=None,
+        check=False,
+    )
+
+    assert result.returncode == 65, (
+        "a descriptor file that is not JSON must exit 65 (DataError); "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert str(descriptor_path) in result.stderr, (
+        "the error must name the descriptor file being validated, so the exit code is "
+        f"attributable to it; got stderr:\n{result.stderr}"
+    )
+
+
+def test_patch_test_unsupported_descriptor_version_exits_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A structurally valid descriptor at an unknown `version` exits 65.
+
+    Sibling of `test_patch_test_invalid_descriptor_json_exits_65`: the bytes
+    parse as JSON and carry the right shape, so only the version check can
+    reject them (`PatchError::UnsupportedVersion` -> DataError). Forward
+    compatibility is deliberately fail-closed — a descriptor a newer ocx
+    published is refused, never silently composed as v1.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    descriptor_path = tmp_path / "future_version_descriptor.json"
+    # Not `_write_descriptor`, which always writes `"version": 1`.
+    descriptor_path.write_text(json.dumps({"version": 2, "rules": []}))
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format=None,
+        check=False,
+    )
+
+    assert result.returncode == 65, (
+        "a descriptor declaring an unsupported version must exit 65 (DataError); "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert str(descriptor_path) in result.stderr, (
+        "the error must name the descriptor file being validated, so the exit code is "
+        f"attributable to it; got stderr:\n{result.stderr}"
+    )
+
+
+def test_patch_test_forwards_child_exit_code(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A trailing command's exit code is forwarded verbatim.
+
+    The documented row: "with a trailing command, the child's exit code is
+    forwarded unchanged — a command that exits 7 makes `patch test` exit 7".
+    7 is chosen because no ocx exit code is 7, so a forwarded code cannot be
+    confused with one ocx produced itself.
+
+    A zero-rule descriptor keeps the run to the child hop — the same isolation
+    `test_patch_test_runs_generated_entrypoint` uses, which is also the exit-0
+    half of this contract (that test asserts a successful trailing command
+    exits 0, this one that a failing one does not collapse to 0 or 1).
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    descriptor_path = tmp_path / "exit_code_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+    _write_config(ocx, registry)
+
+    result = ocx.plain(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        "--",
+        "sh", "-c", "exit 7",
+        check=False,
+    )
+
+    assert result.returncode == 7, (
+        "the trailing command's exit code must be forwarded verbatim; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
+def test_patch_test_optional_missing_companion_warns_and_skips(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """An unresolvable OPTIONAL companion is warned-and-skipped, exit 0.
+
+    The documented fail-open half: "an optional companion that cannot be
+    resolved is warned-and-skipped, matching the production fail-open path".
+    The companion here is named by a repository that was never pushed, so the
+    registry 404s it.
+
+    Two assertions, because exit 0 alone cannot tell a fail-open from a run
+    that quietly composed nothing: the base's own env must still be present in
+    the report, and stderr must name the companion that was skipped. A silent
+    skip is the failure mode — the maintainer has to be able to see which
+    companion the preview did without.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    # Never published: `_unique_repo` mints a name nothing pushed to.
+    missing_companion_fq = f"{registry}/{_unique_repo('unpublished_companion')}:1.0.0"
+
+    descriptor_path = tmp_path / "optional_missing_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [missing_companion_fq]}])
+    _write_config(ocx, registry, required=False)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        "an unresolvable OPTIONAL companion must fail open (exit 0), not abort the preview; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    assert entries, (
+        "the base's own env must still be composed after the optional companion is skipped; "
+        "an empty report is the silent-failure shape this pins"
+    )
+    path_entry = _entry_by_key(entries, "PATH")
+    assert path_entry is not None, (
+        f"the base's own PATH entry must survive the skip; got: {[e['key'] for e in entries]}"
+    )
+    assert missing_companion_fq in result.stderr, (
+        f"stderr must name the skipped companion ({missing_companion_fq!r}) — a skip the "
+        f"maintainer cannot see is indistinguishable from a descriptor that matched "
+        f"nothing; got stderr:\n{result.stderr}"
+    )
+
+
+def test_patch_test_script_failing_assertion_exits_1(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--script` with a failing `expect` assertion exits 1.
+
+    Per the scripted-tests contract an assertion failure is `Failure` (1),
+    distinct from a script-level fault (64/65/74). The companion IS published
+    and the composition succeeds, so the only thing that can fail is the
+    assertion — which is what makes 1 the right code rather than a resolution
+    error's.
+
+    Red/green pair with `test_patch_test_script_asserts_composed_env` above:
+    same fixture shape, same script shape, only the expected value differs, and
+    that one exits 0.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("scriptfail_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "SCRIPT_FAIL_VAR", "composed-value")
+
+    descriptor_path = tmp_path / "scriptfail_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    # The var IS composed, and carries "composed-value"; the script demands a
+    # different one, so the assertion is the only thing that can fail.
+    script_path = tmp_path / "failing_assert_env.star"
+    script_path.write_text(
+        'val = ocx.env("SCRIPT_FAIL_VAR")\n'
+        'expect.eq(val, "not-the-composed-value", msg="deliberate mismatch: pins the '
+        'assertion-failure exit code")\n'
+    )
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--script", str(script_path),
+        base_pkg.short,
+        format=None,
+        check=False,
+    )
+
+    assert result.returncode == 1, (
+        "`ocx patch test --script` with a failing expect.eq must exit 1 (assertion failure), "
+        "not a resolution or script-level code; "
+        f"got {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
