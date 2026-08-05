@@ -92,10 +92,17 @@ def _assert_no_diagnostics(stderr: str) -> None:
 
     Asserted on the diagnostic *level*, not the word "receipt": the temp paths
     and UUID repo names carry the test function's own name, so a substring
-    check for "receipt" matches in every state."""
+    check for "receipt" matches in every state.
+
+    Both routings of the same call must be caught. Under pytest stderr is
+    captured, so `UserInterface` is non-interactive and `status("note", msg)`
+    /`warn(msg)` route to `log::info!("note: {msg}")` / `log::warn!` — a
+    tracing line that starts with a timestamp, not with the prefix. Matching
+    only the interactive prefixes would let every advisory this suite exists
+    to forbid through."""
     offenders = [
         line for line in stderr.splitlines()
-        if " WARN " in line or line.lower().startswith(("note:", "warning:"))
+        if " WARN " in line or "note:" in line.lower() or "warning:" in line.lower()
     ]
     assert not offenders, f"expected silence, got:\n" + "\n".join(offenders)
 
@@ -404,7 +411,13 @@ def test_push_without_receipt_or_identifier_is_usage_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """The identifier follows the same table: no `-i` and no recorded one is a
-    usage error (64) naming `--identifier`, not a guess."""
+    usage error (64) naming `--identifier`, not a guess.
+
+    Asserted on ocx's own resolver wording, not just on `--identifier` + 64:
+    while `-i` was a clap-required argument, this exact invocation produced
+    clap's "the following required arguments were not provided" and the same
+    exit code, so the flag name alone cannot tell the resolver's refusal from
+    clap's."""
     bundle = _bundle(ocx, tmp_path, "noreceiptnoid")
     metadata = _write_metadata(tmp_path, "noreceiptnoid", {"type": "bundle", "version": 1})
 
@@ -414,6 +427,42 @@ def test_push_without_receipt_or_identifier_is_usage_error(
     )
     assert result.returncode == EXIT_USAGE, result.stderr
     assert "--identifier" in result.stderr, result.stderr
+    assert "records no identifier" in result.stderr, (
+        f"the refusal must be the receipt resolver's, not clap's:\n{result.stderr}"
+    )
+
+
+def test_rebuild_declaring_nothing_removes_the_stale_receipt(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A second `create --force` at the same output path that declares neither
+    `-i` nor `-p` has nothing to record — and must not leave the first build's
+    receipt beside the new bundle, which would hand `push` an identifier and a
+    platform this bundle was never built for."""
+    bundle = _created_app(
+        ocx, tmp_path, "restale", [], current_platform(),
+        identifier=f"{ocx.registry}/{unique_repo}_stale:1.0.0",
+    )
+    receipt = resolved_receipt_path(bundle)
+    assert receipt.exists(), "the first build declares both values, so it records both"
+
+    second = tmp_path / "content-restale-second"
+    (second / "bin").mkdir(parents=True)
+    (second / "bin" / "app").write_text("#!/bin/sh\necho other\n")
+    ocx.plain("package", "create", "--force", "-o", str(bundle), str(second))
+
+    assert not receipt.exists(), (
+        "a build that declares nothing must not leave a receipt describing an earlier one"
+    )
+    metadata = _write_metadata(tmp_path, "restale-push", {"type": "bundle", "version": 1})
+    result = ocx.run(
+        "package", "push", "-n", "-m", str(metadata), "-p", current_platform(),
+        str(bundle), check=False,
+    )
+    assert result.returncode == EXIT_USAGE, result.stderr
+    assert "records no identifier" in result.stderr, (
+        f"the stale identifier must be gone, not resolved:\n{result.stderr}"
+    )
 
 
 def test_push_without_receipt_with_platform_is_silent(

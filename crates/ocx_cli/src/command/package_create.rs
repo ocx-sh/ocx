@@ -206,10 +206,19 @@ impl PackageCreate {
         // do not have to be told it again — with or without `--metadata`.
         // Written last: the bundle and its sidecar are the artifacts, the
         // receipt only describes how they were asked for. Nothing declared
-        // means nothing to record, so no file.
-        if let Some(receipt) = crate::build_receipt::BuildReceipt::new(self.platform.clone(), identifier) {
-            let receipt_target = crate::conventions::infer_receipt_file(&output)?;
-            receipt.write_json(&receipt_target).await?;
+        // means nothing to record, so no file — and any receipt an earlier
+        // build left at this path is removed rather than kept, because it
+        // describes a build that no longer exists here and would silently
+        // supply push with an identifier and platform this invocation never
+        // named. A removal that fails is fatal for the same reason.
+        let receipt_target = crate::conventions::infer_receipt_file(&output)?;
+        match crate::build_receipt::BuildReceipt::new(self.platform.clone(), identifier) {
+            Some(receipt) => receipt.write_json(&receipt_target).await?,
+            None => match tokio::fs::remove_file(&receipt_target).await {
+                Ok(()) => log::info!("Removed the stale build receipt at {}", receipt_target.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(ocx_lib::error::file_error(&receipt_target, error).into()),
+            },
         }
 
         Ok(ExitCode::SUCCESS)
