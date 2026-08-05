@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::task::JoinSet;
 
@@ -133,8 +136,12 @@ mod patch_overlay_tests {
     }
 }
 
-/// Map from each admitted identifier to its companion INTERFACE env entries,
-/// each paired with the [`PatchProvenance`] that admitted it.
+/// Map from an admitted identifier to the companion INTERFACE env entries
+/// emitted under it, each paired with the [`PatchProvenance`] that admitted it.
+///
+/// A companion matching multiple admitted bases is emitted under the FIRST
+/// matching base only; a base whose companions were all emitted under an
+/// earlier base has no entry in this map at all.
 ///
 /// Built offline from local `PatchTagMap` + `BlobStore` state (no network).
 /// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
@@ -677,6 +684,10 @@ impl PackageManager {
     /// | `[patch_start .. patch_start + provenance.len())` | patch companion projections |
     /// | the remainder | `scope`'s project / group `[env]` (+ `ocx run --env`) |
     ///
+    /// A companion admitted for more than one base contributes its projection
+    /// **exactly once** to the middle region — the first matching admitted
+    /// identifier wins and its rule glob is the one recorded in the provenance.
+    ///
     /// The returned `Vec<PatchProvenance>` is aligned one-to-one with the middle
     /// region, so `provenance[i]` names the rule glob + companion for
     /// `entries[patch_start + i]`. Native and project entries have no provenance by
@@ -790,6 +801,12 @@ impl PackageManager {
     /// companion's **interface** surface via `composer::compose`, and
     /// returns a map from admitted identifier to its companion env entries.
     ///
+    /// A companion matched for several admitted identifiers is projected once and
+    /// **emitted once**: it appears under the first matching admitted identifier
+    /// only, so the flattened overlay carries no duplicates. Dedup is keyed by the
+    /// full companion identifier (`registry/repository:tag`) — the same repository
+    /// at two different tags stays two companions.
+    ///
     /// ## Scope note (Phase 5)
     ///
     /// Phase 3 discovery persists descriptors for the user-requested base and
@@ -876,6 +893,21 @@ impl PackageManager {
         // or lookup-error) to avoid repeated failed lookups. The required-fail-closed
         // path re-checks on every cache hit for `None`, so it cannot be bypassed.
         let mut companion_projection_cache: HashMap<oci::Identifier, Option<Vec<Entry>>> = HashMap::new();
+
+        // Cross-base emission dedup. The projection cache above dedups the *compute*;
+        // this set dedups the *emission*. A rule matching N admitted bases (a global
+        // `match: "*"` over a multi-package `ocx package env`, a project `ocx env`, or a
+        // base plus its admitted transitive deps) would otherwise land the same companion
+        // N times in the overlay — N duplicate JSON entries, N shell exports, N PATH
+        // prepends. First matching admitted base wins and carries the provenance.
+        //
+        // Keyed by the full identifier (registry/repo:tag), so the same repository at two
+        // different tags stays two entries.
+        //
+        // Deliberately does NOT gate the fail-closed paths: a required companion that is
+        // missing must still fail on every base, whether or not an earlier base already
+        // emitted (or failed to emit) it.
+        let mut emitted_companions: HashSet<oci::Identifier> = HashSet::new();
 
         // ── Step 3: Iterate admitted identifiers, collect companions per identifier. ──
         //
@@ -1086,7 +1118,11 @@ impl PackageManager {
                         }
                         Some(entries) => {
                             // Present (projection may be empty for all-private companions).
-                            companion_entries.extend(entries.iter().cloned().map(|entry| (entry, make_provenance())));
+                            // Emit only for the FIRST admitted base that matched it.
+                            if emitted_companions.insert(companion_id.clone()) {
+                                companion_entries
+                                    .extend(entries.iter().cloned().map(|entry| (entry, make_provenance())));
+                            }
                         }
                     }
                     continue;
@@ -1163,7 +1199,10 @@ impl PackageManager {
                         // vars, which is fine — private-only companions produce an empty vec).
                         // Cache Some(empty) is distinct from None (missing).
                         companion_projection_cache.insert(companion_id.clone(), Some(out.entries.clone()));
-                        companion_entries.extend(out.entries.into_iter().map(|entry| (entry, make_provenance())));
+                        // Emit only for the FIRST admitted base that matched it.
+                        if emitted_companions.insert(companion_id.clone()) {
+                            companion_entries.extend(out.entries.into_iter().map(|entry| (entry, make_provenance())));
+                        }
                     }
                     Err(error) => {
                         if companion_entry.required {
@@ -3031,8 +3070,8 @@ mod phase4_spec_tests {
             .unwrap();
 
         // Verify global-last invariant: the "*" rule matches EVERY admitted
-        // identifier (dep + root), so the companion is appended once per admitted
-        // identifier. What matters for C1 is that:
+        // identifier (dep + root), but the companion is emitted once, under the
+        // first match. What matters for C1 is that:
         //   1. root's MY_VAR (from compose) comes FIRST in the Vec.
         //   2. All companion MY_VAR entries are appended AFTER compose output
         //      (global-last).
@@ -3062,6 +3101,139 @@ mod phase4_spec_tests {
         assert!(
             first_idx < last_idx,
             "C1 live: root's MY_VAR index ({first_idx}) must be less than companion's index ({last_idx})"
+        );
+    }
+
+    /// A companion matched for MORE THAN ONE admitted base contributes its
+    /// projection exactly once — not once per matched base.
+    ///
+    /// Setup: two roots (`alpha`, `beta`), one global descriptor whose `"*"` rule
+    /// names a single locally-installed companion carrying an INTERFACE var. Both
+    /// roots are admitted, so the rule matches twice; the overlay must still carry
+    /// one `COMPANION_VAR` entry.
+    ///
+    /// Also asserts the provenance vector stays aligned one-to-one with the overlay
+    /// region (`patch_start + provenance.len()` brackets it exactly).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn companion_matching_multiple_bases_projects_once() {
+        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
+        use crate::oci::Algorithm;
+
+        let dir = TempDir::new().unwrap();
+        let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
+        let store = manager.file_structure().packages.clone();
+        let blob_store = manager.file_structure().blobs.clone();
+        let tag_store = manager.file_structure().clone();
+
+        // ── Companion: INTERFACE var COMPANION_VAR=once ────────────────────────
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "COMPANION_VAR",
+            "once",
+            Visibility::INTERFACE,
+        );
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+
+        // ── Global descriptor: catch-all rule → the one companion ──────────────
+        let descriptor_json = serde_json::json!({
+            "version": 1,
+            "rules": [{
+                "match": "*",
+                "packages": [companion_tag_id.to_string()],
+            }]
+        })
+        .to_string();
+        let layer_bytes = descriptor_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+        let global_id = global_descriptor_id(&test_patch_config());
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // ── Two independent admitted bases ─────────────────────────────────────
+        let load_root = |repo: &str, hex: char, var_key: &str| {
+            let id = pinned(repo, hex);
+            seed_package_with_constant_var(
+                &store,
+                &id,
+                &ResolvedPackage::new(),
+                var_key,
+                "base_value",
+                Visibility::INTERFACE,
+            );
+            let pkg_path = store.path(&id);
+            Arc::new(InstallInfo::new(
+                id,
+                serde_json::from_str::<metadata::Metadata>(
+                    &std::fs::read_to_string(pkg_path.join("metadata.json")).unwrap(),
+                )
+                .unwrap(),
+                ResolvedPackage::new(),
+                crate::file_structure::PackageDir { dir: pkg_path },
+            ))
+        };
+        let alpha = load_root("alpha", 'a', "ALPHA_VAR");
+        let beta = load_root("beta", 'b', "BETA_VAR");
+
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[alpha, beta], false, super::EnvScope::package_tier())
+            .await
+            .unwrap();
+
+        // Premise of the dedup assert: BOTH roots composed and were admitted, so the
+        // `"*"` rule was evaluated against two bases. Without this the count assert
+        // below stays green when only one base is ever matched.
+        for marker in ["ALPHA_VAR", "BETA_VAR"] {
+            assert!(
+                entries.iter().any(|e| e.key == marker),
+                "premise: both roots must be admitted (missing {marker}); entries: {entries:?}"
+            );
+        }
+
+        let companion_count = entries.iter().filter(|e| e.key == "COMPANION_VAR").count();
+        assert_eq!(
+            companion_count, 1,
+            "a companion matched for both admitted bases must be projected exactly once; entries: {entries:?}"
+        );
+
+        assert_eq!(
+            entries.len(),
+            patch_start + provenance.len(),
+            "provenance must be aligned one-to-one with the overlay region; entries: {entries:?}, patch_start: {patch_start}, provenance: {provenance:?}"
+        );
+        assert_eq!(
+            provenance.len(),
+            1,
+            "exactly one overlay entry means exactly one provenance record; provenance: {provenance:?}"
         );
     }
 
