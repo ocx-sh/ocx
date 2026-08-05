@@ -113,6 +113,9 @@ impl LauncherExec {
                     no_patches,
                     env: project_env.clone(),
                 },
+                // The launcher runs on the host, for the package materialized
+                // there — there is no target-platform question to carry.
+                &ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any),
             )
             .await?;
         // Same per-key list-separator agreement `ocx run` and `ocx package

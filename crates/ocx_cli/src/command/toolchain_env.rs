@@ -336,8 +336,9 @@ impl ToolchainEnv {
                 no_patches: ctx.config.no_patches_repositories(),
                 env: project_env,
             };
-            let (entries, patch_start, provenance, attribution) =
-                manager.resolve_env_with_attribution(&infos, false, scope).await?;
+            let (entries, patch_start, provenance, attribution) = manager
+                .resolve_env_with_attribution(&infos, false, scope, &target)
+                .await?;
             (
                 entries,
                 patch_start,
@@ -590,8 +591,9 @@ pub(crate) async fn resolve_global_pinned_env(
         no_patches,
         env: project_env,
     };
-    let (entries, patch_start, provenance, attribution) =
-        manager.resolve_env_with_attribution(&infos, false, scope).await?;
+    let (entries, patch_start, provenance, attribution) = manager
+        .resolve_env_with_attribution(&infos, false, scope, target)
+        .await?;
     Ok(Some((
         entries,
         patch_start,

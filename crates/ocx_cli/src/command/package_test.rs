@@ -246,6 +246,7 @@ impl PackageTest {
                 ocx_lib::package_manager::EnvScope::Package {
                     env: env_overrides.clone(),
                 },
+                &platform,
             )
             .await?;
         // W-11: `entries` and `env_overrides` are disjoint `Vec`s holding

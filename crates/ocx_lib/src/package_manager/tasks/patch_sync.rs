@@ -1819,6 +1819,7 @@ mod tests {
                 &[root],
                 false,
                 crate::package_manager::tasks::resolve::EnvScope::package_tier(),
+                &crate::oci::Platform::current().unwrap_or_else(crate::oci::Platform::any),
             )
             .await;
         assert!(
@@ -2186,6 +2187,7 @@ mod tests {
                 &[root],
                 false,
                 crate::package_manager::tasks::resolve::EnvScope::package_tier(),
+                &crate::oci::Platform::current().unwrap_or_else(crate::oci::Platform::any),
             )
             .await;
         assert!(

@@ -114,6 +114,12 @@ impl PackageManager {
     /// validates the tier before calling, so this method cannot reach a
     /// no-tier state (DIP: depend on the resolved value, not a config lookup).
     ///
+    /// `platform` is the platform the preview composes for — the CLI's `-p`,
+    /// already used to materialize the base and the companions. It selects the
+    /// leaf of a multi-platform companion's image index; the host platform
+    /// would resolve a companion that ships no host leaf as absent, failing a
+    /// required one closed.
+    ///
     /// # Errors
     ///
     /// - [`PackageErrorKind::PatchDiscovery`] — the descriptor bytes are not a
@@ -127,6 +133,7 @@ impl PackageManager {
         descriptor_bytes: &[u8],
         patches: &ResolvedPatchConfig,
         env_overrides: Vec<Entry>,
+        platform: &oci::Platform,
     ) -> Result<PatchTestComposition, PackageErrorKind> {
         // Validate the descriptor up front so a malformed file fails before any
         // store mutation.
@@ -199,6 +206,7 @@ impl PackageManager {
                 std::slice::from_ref(base),
                 false,
                 crate::package_manager::EnvScope::Package { env: env_overrides },
+                platform,
             )
             .await
             .map_err(unwrap_resolve_env_error)?;
@@ -441,6 +449,11 @@ mod tests {
         }
     }
 
+    /// The host platform — what the CLI resolves when `-p` is absent.
+    fn host_platform() -> oci::Platform {
+        oci::Platform::current().unwrap_or_else(oci::Platform::any)
+    }
+
     /// A 64-hex digest seeded from a single fill character.
     fn sha256(fill: char) -> Digest {
         Digest::Sha256(fill.to_string().repeat(64))
@@ -583,7 +596,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let composition = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
             .await
             .expect("seed-and-compose must succeed when the required companion is present");
 
@@ -696,7 +709,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let composition = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
             .await
             .expect("seed-and-compose must succeed with a path-prefixed patch registry");
 
@@ -748,7 +761,7 @@ mod tests {
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
             .await
             .expect("an optional companion that is absent must still seed and compose");
 
@@ -801,7 +814,7 @@ mod tests {
         std::fs::write(&poisoned, b"not the manifest these bytes are addressed by").unwrap();
 
         let result = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
             .await;
 
         assert!(
@@ -837,7 +850,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let result = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
             .await;
 
         assert!(

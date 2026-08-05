@@ -68,7 +68,7 @@ impl Exec {
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         let infos = manager
-            .find_or_install_all(identifiers, platform, context.concurrency())
+            .find_or_install_all(identifiers, platform.clone(), context.concurrency())
             .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
@@ -83,6 +83,7 @@ impl Exec {
                 ocx_lib::package_manager::EnvScope::Package {
                     env: env_overrides.clone(),
                 },
+                &platform,
             )
             .await?;
         // W-11: `entries` (composed, applied to this process) and

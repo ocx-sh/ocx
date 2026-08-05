@@ -663,13 +663,19 @@ impl PackageManager {
     /// [`EnvScope`]. This wrapper forwards it unchanged to
     /// [`Self::resolve_env_with_patch_boundary`] and drops the overlay index
     /// and per-entry provenance.
+    ///
+    /// `platform` selects the companion leaf on a multi-platform companion —
+    /// see [`Self::resolve_env_with_attribution`].
     pub async fn resolve_env(
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
         scope: EnvScope,
+        platform: &oci::Platform,
     ) -> crate::Result<Vec<Entry>> {
-        let (entries, _, _) = self.resolve_env_with_patch_boundary(packages, self_view, scope).await?;
+        let (entries, _, _) = self
+            .resolve_env_with_patch_boundary(packages, self_view, scope, platform)
+            .await?;
         Ok(entries)
     }
 
@@ -715,9 +721,11 @@ impl PackageManager {
         packages: &[Arc<InstallInfo>],
         self_view: bool,
         scope: EnvScope,
+        platform: &oci::Platform,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>)> {
-        let (entries, compose_count, provenance, _attribution) =
-            self.resolve_env_with_attribution(packages, self_view, scope).await?;
+        let (entries, compose_count, provenance, _attribution) = self
+            .resolve_env_with_attribution(packages, self_view, scope, platform)
+            .await?;
         Ok((entries, compose_count, provenance))
     }
 
@@ -729,11 +737,20 @@ impl PackageManager {
     /// Every other caller of `resolve_env` / `resolve_env_with_patch_boundary`
     /// is unaffected — those signatures are unchanged and this is a new,
     /// additive accessor, not a replacement.
+    ///
+    /// `platform` is the platform the companion overlay is composed FOR: it
+    /// selects the leaf of a multi-platform companion's image index. It is the
+    /// host platform on every ambient path, and the `-p` value on a command
+    /// that composes for a named platform (`ocx patch test`, `ocx patch why`,
+    /// `ocx package test`, `ocx package exec`). Passing the host where the base
+    /// was materialized for another platform composes zero companions, or fails
+    /// closed on a required one.
     pub async fn resolve_env_with_attribution(
         &self,
         packages: &[Arc<InstallInfo>],
         self_view: bool,
         scope: EnvScope,
+        platform: &oci::Platform,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedBinaries)> {
         // Convert the scope to its opt-out set exactly once; the overlay logic
         // below (and `build_site_patch_set`) keeps consuming a plain reference.
@@ -754,7 +771,7 @@ impl PackageManager {
         //
         // When `self.patches` is `None` this block is a no-op and
         // `entries` is byte-identical to the pre-Phase-4 output.
-        if let Some(mut patch_set) = self.build_site_patch_set(&out.admitted, no_patches).await? {
+        if let Some(mut patch_set) = self.build_site_patch_set(&out.admitted, no_patches, platform).await? {
             for admitted_id in &out.admitted {
                 // `remove` instead of `get`: patch_set is consumed here and not used
                 // afterwards, so moving entries out eliminates the per-entry String clone.
@@ -820,6 +837,7 @@ impl PackageManager {
         &self,
         admitted: &[oci::PinnedIdentifier],
         no_patches: &std::collections::BTreeSet<String>,
+        platform: &oci::Platform,
     ) -> crate::Result<Option<SitePatchSet>> {
         // No patch tier configured → no overlay; output is byte-identical to pre-Phase-4.
         let Some(patches) = self.patches() else {
@@ -1139,7 +1157,7 @@ impl PackageManager {
                 // Phase 5B ADR C8). The snapshot pin is policy, not truth: if the locally
                 // installed package at the snapshot digest is absent the lookup returns None,
                 // and the required-fail-closed gate fires as normal.
-                let companion_install_info = match self.find_companion_with_snapshot(companion_id).await {
+                let companion_install_info = match self.find_companion_with_snapshot(companion_id, platform).await {
                     Ok(Some(info)) => info,
                     Ok(None) => {
                         // Cache None = genuinely missing, so the required-fail-closed check
@@ -1260,8 +1278,8 @@ impl PackageManager {
     ///    multi-platform companions, single-platform image manifest otherwise).
     /// 2. If the manifest blob at that digest is locally cached, read it and perform
     ///    platform selection:
-    ///    - `Manifest::ImageIndex` → select the child manifest matching the host
-    ///      platform, returning its digest as the pinned identifier.
+    ///    - `Manifest::ImageIndex` → select the child manifest matching `platform`,
+    ///      returning its digest as the pinned identifier.
     ///    - `Manifest::Image` → the tag-store digest already IS the platform digest;
     ///      use it directly.
     /// 3. If the manifest blob is absent from the local cache (no pull has occurred
@@ -1276,7 +1294,11 @@ impl PackageManager {
     /// manager that writes its own tag pointers into a private overlay (the
     /// `ocx patch test` scratch store) resolves both those companions and the
     /// ones recorded in the shared home.
-    async fn find_companion_local(&self, companion_id: &oci::Identifier) -> crate::Result<Option<InstallInfo>> {
+    async fn find_companion_local(
+        &self,
+        companion_id: &oci::Identifier,
+        platform: &oci::Platform,
+    ) -> crate::Result<Option<InstallInfo>> {
         for index_store in self.local_lookup_index_stores() {
             // Build a guaranteed-local index (empty sources → strictly local,
             // never walks the chain, never contacts the network).
@@ -1296,7 +1318,7 @@ impl PackageManager {
                 oci::index::ChainMode::Offline,
             );
             if let Some(info) =
-                find_companion_in_index(&local_index, &self.file_structure().packages, companion_id).await?
+                find_companion_in_index(&local_index, &self.file_structure().packages, companion_id, platform).await?
             {
                 return Ok(Some(info));
             }
@@ -1313,12 +1335,18 @@ impl PackageManager {
     /// no tag resolution. This is the Phase 5B opt-in determinism mechanism.
     ///
     /// Falls back to [`Self::find_companion_local`] when no snapshot is active or
-    /// the snapshot does not contain a pin for this companion.
+    /// the snapshot does not contain a pin for this companion. `platform` is
+    /// consumed only on that fallback: a snapshot pin names the platform
+    /// manifest digest outright, so there is no image index left to select from.
     ///
     /// # Errors
     ///
     /// Propagates errors from the underlying store reads.
-    async fn find_companion_with_snapshot(&self, companion_id: &oci::Identifier) -> crate::Result<Option<InstallInfo>> {
+    async fn find_companion_with_snapshot(
+        &self,
+        companion_id: &oci::Identifier,
+        platform: &oci::Platform,
+    ) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
 
         // Check the snapshot for a pinned digest for this companion.
@@ -1341,7 +1369,7 @@ impl PackageManager {
                             "site-patch-set: snapshot pin for '{}' has invalid digest format; falling back to live lookup",
                             snapshot_key
                         );
-                        return self.find_companion_local(companion_id).await;
+                        return self.find_companion_local(companion_id, platform).await;
                     }
                 };
                 let result = find_in_store(&self.file_structure().packages, &pinned_id)
@@ -1352,7 +1380,7 @@ impl PackageManager {
         }
 
         // No snapshot pin for this companion — fall back to the live tag lookup.
-        self.find_companion_local(companion_id).await
+        self.find_companion_local(companion_id, platform).await
     }
 
     /// Resolve GC roots from the site-patch tier (strictly offline, no network).
@@ -1369,16 +1397,15 @@ impl PackageManager {
     ///
     /// # Parameters
     ///
-    /// - `platform` — reserved for future per-platform companion filtering (a
-    ///   later sub-phase will use this to restrict companion resolution to the
-    ///   platform relevant to the current host).  Currently unused; callers
-    ///   should pass `&oci::Platform::current().unwrap_or_else(oci::Platform::any)`
-    ///   so the value is meaningful when the filter is implemented.
+    /// - `platform` — selects the child manifest of a multi-platform companion's
+    ///   image index, so the pinned identifier matches the path the package was
+    ///   actually installed at. Both callers (GC root derivation, `ocx patch
+    ///   freeze`) pass the host platform.
     ///
     /// # Errors
     ///
     /// Returns an error if the local filesystem state cannot be read.
-    pub async fn resolve_site_patch_roots(&self, _platform: &oci::Platform) -> crate::Result<SitePatchRoots> {
+    pub async fn resolve_site_patch_roots(&self, platform: &oci::Platform) -> crate::Result<SitePatchRoots> {
         // Short-circuit: no patch tier configured → empty roots.
         let Some(patches) = self.patches() else {
             return Ok(SitePatchRoots::default());
@@ -1510,8 +1537,6 @@ impl PackageManager {
         companion_set.sort_by_key(|id| id.to_string());
         companion_set.dedup_by_key(|id| id.to_string());
 
-        let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-
         'companion: for companion_id in &companion_set {
             // Step a: read the tag-store digest.
             let top_digest = match local_index
@@ -1558,9 +1583,9 @@ impl PackageManager {
                     }
                 }
                 Ok(Some((_, oci::Manifest::ImageIndex(_)))) => {
-                    // Multi-platform: select the host-platform child manifest.
+                    // Multi-platform: select the child manifest for `platform`.
                     let selected_id = match local_index
-                        .select(&top_id, &host_platform, oci::index::IndexOperation::Query)
+                        .select(&top_id, platform, oci::index::IndexOperation::Query)
                         .await
                     {
                         Ok(SelectResult::Found(id)) => id,
@@ -1783,6 +1808,7 @@ async fn find_companion_in_index(
     local_index: &oci::index::Index,
     packages: &crate::file_structure::PackageStore,
     companion_id: &oci::Identifier,
+    platform: &oci::Platform,
 ) -> crate::Result<Option<InstallInfo>> {
     use super::common::find_in_store;
 
@@ -1810,15 +1836,13 @@ async fn find_companion_in_index(
                     Err(_) => return Ok(None),
                 }
             }
-            // Multi-platform image index: select the host-platform child manifest
-            // and use ITS digest for the package-store lookup.  The image index
-            // blob was cached by Phase 3 `pull`, so `select` reads it locally.
+            // Multi-platform image index: select the child manifest for the
+            // platform being composed FOR — the caller's `-p`, not the host, or a
+            // companion that ships no host leaf resolves as absent and a required
+            // one fails closed.  The image index blob was cached by Phase 3
+            // `pull`, so `select` reads it locally.
             (_, oci::Manifest::ImageIndex(_)) => {
-                let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-                let selected_id = match local_index
-                    .select(&top_id, &host_platform, IndexOperation::Query)
-                    .await?
-                {
+                let selected_id = match local_index.select(&top_id, platform, IndexOperation::Query).await? {
                     SelectResult::Found(id) => id,
                     SelectResult::NotFound => return Ok(None),
                     SelectResult::Ambiguous(_) => return Ok(None),
@@ -1855,6 +1879,15 @@ async fn find_companion_in_index(
     // others structurally (no `.to_string()` erasure).
     let result = find_in_store(packages, &pinned_id).await.map_err(crate::Error::from)?;
     Ok(result)
+}
+
+/// The host platform, the way every ambient (no `-p`) compose path resolves it.
+///
+/// Test call sites pass this to `resolve_env` so the companion selection they
+/// exercise is the one production performs on the same host.
+#[cfg(test)]
+fn host_platform() -> oci::Platform {
+    oci::Platform::current().unwrap_or_else(oci::Platform::any)
 }
 
 async fn load_descriptor_frozen_or_live(
@@ -2872,7 +2905,7 @@ mod phase4_spec_tests {
         // Manager with patches=None.
         let manager = make_manager(&dir); // patches=None by default
         let resolved = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -2941,7 +2974,7 @@ mod phase4_spec_tests {
         // With patches=Some but no descriptor persisted (NeverLooked → offline → no
         // fetch), resolve_env must succeed and produce exactly the compose output.
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -3086,7 +3119,7 @@ mod phase4_spec_tests {
         ));
 
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -3226,7 +3259,12 @@ mod phase4_spec_tests {
         let beta = load_root("beta", 'b', "BETA_VAR");
 
         let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(&[alpha, beta], false, super::EnvScope::package_tier())
+            .resolve_env_with_patch_boundary(
+                &[alpha, beta],
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .unwrap();
 
@@ -3393,7 +3431,12 @@ mod phase4_spec_tests {
         let beta = load_root("beta", 'b', "BETA_VAR");
 
         let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(&[alpha, beta], false, super::EnvScope::package_tier())
+            .resolve_env_with_patch_boundary(
+                &[alpha, beta],
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .unwrap();
 
@@ -3525,7 +3568,12 @@ mod phase4_spec_tests {
 
         // Consumer view: private dep NOT admitted → rule never matches → var ABSENT.
         let consumer = manager
-            .resolve_env(std::slice::from_ref(&root), false, super::EnvScope::package_tier())
+            .resolve_env(
+                std::slice::from_ref(&root),
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .unwrap();
         assert!(
@@ -3535,7 +3583,12 @@ mod phase4_spec_tests {
 
         // Self view: private dep admitted → rule matches dep → var PRESENT.
         let self_view = manager
-            .resolve_env(std::slice::from_ref(&root), true, super::EnvScope::package_tier())
+            .resolve_env(
+                std::slice::from_ref(&root),
+                true,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .unwrap();
         assert!(
@@ -3669,7 +3722,7 @@ mod phase4_spec_tests {
         // With no descriptor persisted (NeverLooked → offline → no fetch), resolve_env
         // succeeds and the companion's PRIVATE var is absent from the output.
         let entries = manager
-            .resolve_env(&[root], true, super::EnvScope::package_tier())
+            .resolve_env(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -3782,7 +3835,7 @@ mod phase4_spec_tests {
         // companion overlay is attempted. But `compose([companion], store, false)`
         // (interface projection) must exclude the companion's PRIVATE var.
         let entries = manager
-            .resolve_env(&[root], true, super::EnvScope::package_tier())
+            .resolve_env(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -3826,7 +3879,7 @@ mod phase4_spec_tests {
         // (NeverLooked → no fetch), build_site_patch_set reads local state only
         // and succeeds without contacting the network.
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_ok(),
@@ -3870,7 +3923,7 @@ mod phase4_spec_tests {
         // With no descriptor persisted (NeverLooked → offline → no fetch), the
         // merge algorithm finds no companions for either source and succeeds.
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_ok(),
@@ -3980,7 +4033,7 @@ mod phase4_spec_tests {
         // Companion is NOT installed locally: no tag-store entry, no package dir.
         // `find_companion_local` → `Ok(None)` → required=true → must return Err.
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -4135,7 +4188,7 @@ mod phase4_spec_tests {
         let mut baseline: Option<(Vec<String>, Vec<String>)> = None;
         for run in 0..12 {
             let entries = manager
-                .resolve_env(&roots, false, super::EnvScope::package_tier())
+                .resolve_env(&roots, false, super::EnvScope::package_tier(), &super::host_platform())
                 .await
                 .unwrap();
             let base_order = suffixes(&entries, "BASE_");
@@ -4296,7 +4349,7 @@ mod phase4_spec_tests {
         // Merged required flag: pkg-specific (true) overrides global (false).
         // C7 fail-closed: must return Err because merged required=true.
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -4478,7 +4531,7 @@ mod phase4_spec_tests {
 
         // ── Resolve and assert ─────────────────────────────────────────────────
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -4662,7 +4715,7 @@ mod phase4_spec_tests {
         ));
 
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -4818,7 +4871,7 @@ mod phase4_spec_tests {
         ));
 
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -4916,7 +4969,7 @@ mod phase4_spec_tests {
         // Non-required tier with all-optional companions over cap: must succeed
         // (warn + truncate, not Err).
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_ok(),
@@ -5037,7 +5090,7 @@ mod phase4_spec_tests {
         // also that if a later iteration reaches the cache hit for None, it
         // still fails closed (no silent bypass).
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -5158,7 +5211,7 @@ mod phase4_spec_tests {
         // as a package → fail closed).  Before the fix this returned Ok(()) because
         // the schema mismatch in `read_tag_digest` produced a silent Err → warn+skip.
         let result = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -5273,7 +5326,7 @@ mod phase4_spec_tests {
 
         // Must succeed and include the companion's CA_BUNDLE env var in the output.
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap();
 
@@ -5495,7 +5548,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap_or_else(|e| {
                 panic!("remote-mode overlay must resolve the locally-installed companion, got Err: {e:?}")
@@ -5540,7 +5593,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&offline.file_structure().packages.clone(), "rootpkg", 'r');
         let entries = offline
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .unwrap_or_else(|e| {
                 panic!("offline_view must apply the already-installed companion overlay, got Err: {e:?}")
@@ -5582,7 +5635,7 @@ mod phase4_spec_tests {
 
         let root = seed_root_arc(&offline.file_structure().packages.clone(), "rootpkg", 'r');
         let result = offline
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await;
         assert!(
             result.is_err(),
@@ -6317,7 +6370,7 @@ mod phase5b_spec_tests {
 
         // This FAILS until Phase 5B implements snapshot preference in build_site_patch_set.
         let entries = manager_with_snapshot
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .expect("resolve_env with snapshot must succeed");
 
@@ -6374,7 +6427,7 @@ mod phase5b_spec_tests {
         // No snapshot — live tag must win.
         let root = seed_root_arc(&store, "root", 'r');
         let entries = manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .expect("resolve_env without snapshot must succeed");
 
@@ -6477,7 +6530,7 @@ mod phase5b_spec_tests {
             .with_patch_snapshot(Some(snapshot));
         let root = seed_root_arc(&frozen_manager.file_structure().packages.clone(), "root", 'r');
         let entries = frozen_manager
-            .resolve_env(&[root], false, super::EnvScope::package_tier())
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .expect("frozen resolve_env");
         let snap_var = entries.iter().find(|e| e.key == "SNAP_VAR");
@@ -6492,7 +6545,12 @@ mod phase5b_spec_tests {
         let floating_manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
         let root2 = seed_root_arc(&floating_manager.file_structure().packages.clone(), "root", 'r');
         let live_entries = floating_manager
-            .resolve_env(&[root2], false, super::EnvScope::package_tier())
+            .resolve_env(
+                &[root2],
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .expect("floating resolve_env");
         let live_var = live_entries.iter().find(|e| e.key == "SNAP_VAR");
@@ -6648,6 +6706,7 @@ mod phase5d_spec_tests {
                     no_patches,
                     env: Vec::new(),
                 },
+                &super::host_platform(),
             )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
@@ -6686,6 +6745,7 @@ mod phase5d_spec_tests {
                     no_patches,
                     env: Vec::new(),
                 },
+                &super::host_platform(),
             )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
@@ -6725,6 +6785,7 @@ mod phase5d_spec_tests {
                     no_patches,
                     env: Vec::new(),
                 },
+                &super::host_platform(),
             )
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
@@ -6765,11 +6826,17 @@ mod phase5d_spec_tests {
                     no_patches: BTreeSet::new(),
                     env: Vec::new(),
                 },
+                &super::host_platform(),
             )
             .await
             .expect("Project(empty) resolve must succeed");
         let (no_project_entries, no_project_start, _no_project_provenance) = manager
-            .resolve_env_with_patch_boundary(&[root_no_project], false, super::EnvScope::package_tier())
+            .resolve_env_with_patch_boundary(
+                &[root_no_project],
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .expect("package-tier resolve must succeed");
 
@@ -6819,7 +6886,7 @@ mod phase5d_spec_tests {
         let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'r');
 
         let (entries, _patch_start, _provenance) = manager
-            .resolve_env_with_patch_boundary(&[root], false, super::EnvScope::package_tier())
+            .resolve_env_with_patch_boundary(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
             .await
             .expect("resolve_env_with_patch_boundary must succeed");
 

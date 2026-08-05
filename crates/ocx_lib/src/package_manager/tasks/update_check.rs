@@ -495,7 +495,12 @@ async fn query_installed_version(manager: &PackageManager, identifier: &oci::Ide
     // 2. Resolve the composed env (interface view — matches default exec semantics).
     let infos = vec![Arc::new(info)];
     let entries = manager
-        .resolve_env(&infos, false, crate::package_manager::EnvScope::package_tier())
+        .resolve_env(
+            &infos,
+            false,
+            crate::package_manager::EnvScope::package_tier(),
+            &oci::Platform::current().unwrap_or_else(oci::Platform::any),
+        )
         .await
         .ok()?;
 

@@ -218,7 +218,7 @@ impl Run {
         // self view would compose a strictly worse toolchain. The flag belongs
         // on `ocx package exec` / `ocx package env`, and only there.
         let mut entries = manager
-            .resolve_env_with_patch_boundary(&install_infos, false, scope)
+            .resolve_env_with_patch_boundary(&install_infos, false, scope, &host)
             .await?
             .0;
 

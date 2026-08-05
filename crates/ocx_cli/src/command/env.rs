@@ -118,7 +118,7 @@ impl Env {
             manager.find_symlink_all(identifiers, kind).await?
         } else {
             manager
-                .find_or_install_all(identifiers, platform, context.concurrency())
+                .find_or_install_all(identifiers, platform.clone(), context.concurrency())
                 .await?
         };
 
@@ -141,6 +141,7 @@ impl Env {
                 &info,
                 self.self_view,
                 ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
+                &platform,
             )
             .await?;
         // W-11: settle each `list` entry's separator before any of the three

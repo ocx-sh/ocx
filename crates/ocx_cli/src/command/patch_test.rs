@@ -207,7 +207,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // slice in step 6, and a handful of entries is cheaper than the machinery to
     // hand them back out of the composition.
     let mut composition = manager
-        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone())
+        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone(), &platform)
         .await
         .map_err(|kind| ocx_lib::Error::package(base_id.clone(), kind))?;
 

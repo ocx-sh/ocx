@@ -42,14 +42,18 @@ impl PatchWhyArgs {
         let manager = context.manager();
 
         let info = manager
-            .find_or_install_all(vec![base_id.clone()], platform, context.concurrency())
+            .find_or_install_all(vec![base_id.clone()], platform.clone(), context.concurrency())
             .await?;
         let info: Vec<Arc<InstallInfo>> = info.into_iter().map(Arc::new).collect();
 
         // ── Step 2: Reuse the existing provenance resolution — no new
         // resolution path. ──
+        //
+        // Composed for the SAME platform the base was resolved for: a companion
+        // that ships no host leaf must still be traced when `-p` names its
+        // platform.
         let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(&info, false, EnvScope::package_tier())
+            .resolve_env_with_patch_boundary(&info, false, EnvScope::package_tier(), &platform)
             .await?;
 
         // ── Step 3: Zip the overlay slice with its aligned provenance. ──

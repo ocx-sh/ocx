@@ -169,7 +169,7 @@ impl DirenvExport {
             env: project_env,
         };
         let (mut entries, _, _) = offline
-            .resolve_env_with_patch_boundary(&applied.infos, false, scope)
+            .resolve_env_with_patch_boundary(&applied.infos, false, scope, &platform)
             .await?;
 
         // W-11: settle each `list` entry's separator before emitting — a

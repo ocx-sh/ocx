@@ -34,13 +34,23 @@ mod resolve_env_package_root_tests {
         )
     }
 
+    /// The host platform — what a launcher hop composes for.
+    fn host_platform() -> crate::oci::Platform {
+        crate::oci::Platform::current().unwrap_or_else(crate::oci::Platform::any)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_env_from_missing_package_root_errors() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
         // Non-existent package root — PackageStore cannot read metadata.json.
         let result = manager
-            .resolve_env_from_package_root(Path::new("/nonexistent/pkg"), false, super::EnvScope::package_tier())
+            .resolve_env_from_package_root(
+                Path::new("/nonexistent/pkg"),
+                false,
+                super::EnvScope::package_tier(),
+                &host_platform(),
+            )
             .await;
         assert!(result.is_err(), "missing package root must return Err");
     }
@@ -54,7 +64,7 @@ mod resolve_env_package_root_tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let manager = make_test_manager(tmp.path());
         let result = manager
-            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier())
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier(), &host_platform())
             .await;
         assert!(result.is_err(), "missing metadata.json must return Err");
     }
@@ -75,7 +85,7 @@ mod resolve_env_package_root_tests {
             .unwrap();
         let manager = make_test_manager(tmp.path());
         let result = manager
-            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier())
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier(), &host_platform())
             .await;
         assert!(result.is_err(), "missing resolve.json must return Err");
     }
@@ -597,9 +607,11 @@ impl PackageManager {
         pkg_root: &std::path::Path,
         self_view: bool,
         scope: crate::package_manager::tasks::resolve::EnvScope,
+        platform: &crate::oci::Platform,
     ) -> crate::Result<Vec<crate::package::metadata::env::entry::Entry>> {
         let info = self.install_info_from_package_root(pkg_root).await?;
-        self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope).await
+        self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope, platform)
+            .await
     }
 
     /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
