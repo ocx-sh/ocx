@@ -116,9 +116,11 @@ The enum exists because the trait used to conflate query and update — a cache 
 |--------|-------------|------------------------|----------------------|----------------------|
 | `Full` | `new` / `from_chained*` | write | grow | write |
 | `NoTag` | `new_lock_scoped` (update family) | write | skip | write |
-| `ReadOnly` | `read_only_view` (inspect) | **skip** (`fetch_dispatch_only`, no stage) | skip | skip |
+| `ReadOnly` | `read_only_view` (inspect) / `remote_view` (update check) | **skip** (`fetch_dispatch_only`, no stage) | skip | skip |
 
 `ReadOnly` is the only policy that persists **nothing** into the permanent index — a read-only `ocx package inspect` resolves content-addressed (index → blobs → source) and warms the GC-able blob cache (`stage_leaf_manifest`, `stage_chain_blobs`, config-blob `fetch_blob` all still write `$OCX_HOME/blobs`), but never grows the committed index. Threaded as `IndexImpl::read_only_view` (default = `box_clone`; `ChainedIndex` flips the policy) → `Index::read_only_view` → `PackageManager::read_only_index` / `read_only_view`. The write policy survives `box_clone`. Acceptance: `test/tests/test_inspect_no_index_growth.py`; unit: `chain_refs_tests::read_only_view_resolves_but_writes_no_dispatch_object_or_tag_pointer`. Rationale: the index is deployment-managed and outside GC (`adr_index_indirection.md` B1), so an inspect-time write would be permanent pollution; the blob cache self-cleans on `ocx clean`.
+
+**`remote_view` — the second `ReadOnly` view.** `IndexImpl::remote_view` (default = `box_clone`; `ChainedIndex` returns `read_only()` with `mode` flipped) → `Index::remote_view`: `ChainMode::Remote` **and** `LocalWritePolicy::ReadOnly` in one view. Consumer: the update-check probe (`TagProbe::Remote` in `package_manager/tasks/update_check.rs`), which must see the freshest *published* release regardless of the ambient ChainMode — `ocx.sh/ocx/cli` is a logical name the published index routes to a physical repository, so listing it through the chain rather than a registry's tags API is what makes the newest release visible at all. `ReadOnly` is stronger than the listing needs (a listing writes under no policy) and deliberately so: a look for an update must be incapable of moving a pin. Unit: `chain_refs_tests::remote_view_lists_from_source_under_default_mode_and_writes_nothing`.
 
 ### Identifier
 
@@ -259,6 +261,14 @@ roots it through its own `refs/blobs/`, and an evicted copy refetches by digest,
 returns that error immediately rather than falling through to a "not found" result — a broken or
 misconfigured `[registries."<ns>"] index` endpoint fails loud, never silently resolves as absent.
 Its clean miss is equally terminal.
+
+Every source loop honours it, not just the resolve walk: `fetch_and_persist_chain`,
+`query_sources_manifest{,_digest}`, and the Remote-mode `list_tags` loop all pair each source with
+the `candidate_sources` authority flag and stop on it. Tag listing is not exempt — a fall-through
+there answers for the LITERAL name off the registry catch-all, which for an indirected package is a
+stale, capped tag list that reads as a confident answer (the v0.5.0 self-update always-up-to-date
+bug). An authoritative listing failure propagates instead, and the update-check caller maps it to
+`Skipped(RegistryProbeFailed)` → exit 75.
 
 *Scope of the yank half.* The published yank gate lives on the **tag** path
 (`OcxIndex::fetch_manifest_raw_bytes` → `surface_status`); a digest-addressed fetch skips it by

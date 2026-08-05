@@ -17,11 +17,14 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// version exists. With `--check`, only reports whether an update is
 /// available — no installation.
 ///
-/// Version discovery queries the registry directly (`TagProbe::Remote`): the
-/// newest published tag is resolved live, the same source the background
-/// auto-check uses — self-update exists to reach the freshest upstream release,
-/// so it does not read the (possibly stale) local index. `--offline` still
-/// refuses (no client → skipped). (User-facing copy of this lives on the
+/// Version discovery lists tags live through the configured index chain
+/// (`TagProbe::Remote`): the newest published tag is resolved from the source,
+/// the same one the background auto-check uses — self-update exists to reach the
+/// freshest upstream release, so it does not read the (possibly stale) local
+/// index. Routing through the chain rather than a registry's tags API is what
+/// makes the logical `ocx.sh/ocx/cli` name resolve to wherever the published
+/// index currently points it. `--offline` still refuses (no client → skipped).
+/// (User-facing copy of this lives on the
 /// `SelfGroup::Update` variant, which is the surface clap renders; this struct
 /// doc is rustdoc-only.)
 ///
@@ -43,8 +46,8 @@ pub struct SelfUpdate {
     ///
     /// Behaviour:
     ///
-    /// * Queries the registry directly for the latest published version. Under
-    ///   `--offline` the check is skipped (exit 75).
+    /// * Looks up the latest published version live rather than from your local
+    ///   index. Under `--offline` the check is skipped (exit 75).
     /// * Always bypasses the 24h auto-check throttle (explicit user intent).
     /// * Exit status: 0 if the lookup succeeded (whether or not a newer
     ///   version was found); 75 (`EX_TEMPFAIL`) if the check was skipped.
@@ -61,9 +64,9 @@ pub struct SelfUpdate {
 impl SelfUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         if self.check {
-            // Self-update discovers the newest published ocx, so it queries the
-            // registry directly (`TagProbe::Remote`) — the same source the
-            // background auto-check uses, not the local index a stale
+            // Self-update discovers the newest published ocx, so it lists live
+            // through the configured index chain (`TagProbe::Remote`) — the same
+            // source the background auto-check uses, not the local index a stale
             // `ocx index update` snapshot would echo. `--offline` still refuses
             // (no client → skipped).
             let result = context

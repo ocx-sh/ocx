@@ -943,7 +943,7 @@ OCX is itself an OCX-managed package. The binary lives at `$OCX_HOME/symlinks/oc
 
 Run [`ocx self update`][cmd-self-update] to update OCX to the latest released version, or [`ocx self update --check`][cmd-self-update] to query for a newer version without installing it.
 
-Both commands bypass the background update-check throttle — they always query the registry. If a new version is available, `ocx self update` installs it and updates the `current` symlink. The `$OCX_HOME/symlinks/…/current/content/bin` PATH entry that `ocx self activate` exports picks up the new binary automatically on the next shell invocation.
+Both commands bypass the background update-check throttle — they always query the published index and registry live. If a new version is available, `ocx self update` installs it and updates the `current` symlink. The `$OCX_HOME/symlinks/…/current/content/bin` PATH entry that `ocx self activate` exports picks up the new binary automatically on the next shell invocation.
 
 When `ocx self update` runs, OCX queries for the latest `major.minor.patch` release tag. Rolling tags (`1`, `1.2`), pre-releases (`1.2.3-rc1`), and build-tagged versions (`1.2.3+build`) are filtered out — the command recommends only stable releases.
 

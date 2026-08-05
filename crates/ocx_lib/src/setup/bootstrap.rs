@@ -5,7 +5,9 @@
 //!
 //! Populates the local CAS with the **latest published** `ocx.sh/ocx/cli`
 //! release so the env shims have a `current` symlink to point at. The target
-//! version is resolved live via [`PackageManager::check_update`] — never the
+//! version is resolved live — through the configured index chain, so a logical
+//! name the published index routes elsewhere still resolves — via
+//! [`PackageManager::check_update`], never the
 //! running binary's own [`crate::app::version`], which would be the forbidden
 //! build-timestamp pin (dev builds carry `0.x-dev+<timestamp>` tags that are
 //! not published). This mirrors the install scripts, which resolve the latest
@@ -119,7 +121,9 @@ pub async fn ensure_self_installed(
     let identifier = oci::ocx_cli_identifier();
 
     // `Some(Duration::ZERO)` bypasses the throttle and performs a live tag
-    // probe ([`TagProbe::Remote`]). Bootstrap deliberately stays remote-only:
+    // listing through the configured index chain ([`TagProbe::Remote`]) — the
+    // chain understands the logical `ocx.sh/ocx/cli` name the published index
+    // routes elsewhere. Bootstrap deliberately stays live-only:
     // its offline-tolerance contract (`map_skipped`) keys on `Skipped(Offline)`
     // so a re-run on an already-installed machine works offline and an empty
     // CAS surfaces as exit 81. The offline case surfaces as `Skipped(Offline)`

@@ -2098,7 +2098,7 @@ Check for a newer version of OCX and, if found, install it.
 
 Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always runs the lookup regardless of when the last automatic check ran.
 
-Version discovery queries the registry directly for the newest published release — self update exists to reach the freshest upstream ocx, so it does not read the (possibly stale) [local index][fs-index]. This matches [`ocx self setup`](#self-setup) and the background update notice ocx prints on other commands. Under [`--offline`][arg-offline] the check is skipped and the running binary is left unchanged; [`--remote`][arg-remote] is redundant (already the default) but still accepted.
+Version discovery queries the published index and registry live for the newest release — self update exists to reach the freshest upstream ocx, so it does not read the (possibly stale) [local index][fs-index]. This matches [`ocx self setup`](#self-setup) and the background update notice ocx prints on other commands. Under [`--offline`][arg-offline] the check is skipped and the running binary is left unchanged; [`--remote`][arg-remote] is redundant (already the default) but still accepted.
 
 **Usage**
 

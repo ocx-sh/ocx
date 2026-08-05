@@ -217,4 +217,28 @@ pub trait IndexImpl: Send + Sync {
     fn read_only_view(&self) -> Box<dyn IndexImpl> {
         self.box_clone()
     }
+
+    /// A view that lists and reads **live from the sources** regardless of the
+    /// ambient [`ChainMode`](super::ChainMode), and writes nothing into the
+    /// local index.
+    ///
+    /// Used by the update-check probe, whose whole job is to surface the
+    /// freshest *upstream* release: an ambient-mode listing would echo the local
+    /// index instead. Routing through the chain (rather than asking a registry's
+    /// tags API directly) is what makes a **logical** name resolvable — the
+    /// published index routes `ocx.sh/<ns>/<pkg>` to whatever physical
+    /// repository currently holds it, which a bare tags-API probe cannot see.
+    ///
+    /// Writing nothing is deliberate and stronger than the listing needs:
+    /// listing never writes anyway, but an update-check view must never be able
+    /// to move a pin — the local index is the package-tier lock
+    /// (`adr_index_indirection.md`), so the view is made safe by construction
+    /// for any future caller that resolves through it.
+    ///
+    /// Default: [`Self::box_clone`] — a bare remote source already reads live
+    /// and has no local index to protect. Only
+    /// [`super::chained_index::ChainedIndex`] overrides it.
+    fn remote_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
 }

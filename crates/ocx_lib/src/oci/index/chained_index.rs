@@ -923,10 +923,28 @@ impl index_impl::IndexImpl for ChainedIndex {
         // from callers and break retry policy.
         if self.mode == ChainMode::Remote {
             let mut last_error: Option<crate::Error> = None;
-            for (source, _) in self.candidate_sources(identifier).await {
+            for (source, authoritative) in self.candidate_sources(identifier).await {
                 match source.list_tags(identifier).await {
                     Ok(Some(tags)) => return Ok(Some(tags)),
+                    // Same authoritative-stop as `query_sources_manifest`: a clean
+                    // miss from the namespace's one authoritative source is
+                    // terminal, never a fall-through to the `OciIndex` catch-all.
+                    Ok(None) if authoritative => {
+                        log::debug!("Authoritative source lists no tags for '{}' — stopping.", identifier);
+                        return Ok(None);
+                    }
                     Ok(None) => {}
+                    // And the same stop on a refusal as `fetch_and_persist_chain`:
+                    // an authoritative source's error must never fall through to a
+                    // lower source that would answer the same name over a different
+                    // protocol. A published index outage would otherwise be served
+                    // by the registry catch-all listing the LITERAL name's tags —
+                    // for `ocx.sh/ocx/cli` a stale, capped release list that reads
+                    // as "no newer version" instead of "could not determine".
+                    Err(e) if authoritative => {
+                        log::warn!("Authoritative source refused a tag listing for '{}': {e}", identifier);
+                        return Err(e);
+                    }
                     Err(e) => {
                         log::warn!("Remote-mode list_tags failed for '{}': {e}", identifier);
                         last_error = Some(e);
@@ -1415,6 +1433,15 @@ impl index_impl::IndexImpl for ChainedIndex {
     fn read_only_view(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(self.read_only())
     }
+
+    fn remote_view(&self) -> Box<dyn index_impl::IndexImpl> {
+        // The read-only view with the mode flipped to `Remote` — including its
+        // fresh singleflight group, for the reason documented on `read_only`.
+        Box::new(Self {
+            mode: ChainMode::Remote,
+            ..self.read_only()
+        })
+    }
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md tests 22-32 ─────
@@ -1827,6 +1854,75 @@ mod chain_refs_tests {
         assert!(
             tag_pointer.is_none(),
             "read-only resolve must never commit a tag pointer; got a manifest for the tag"
+        );
+    }
+
+    // ── remote view: update-check lists live without moving a pin ────────────
+
+    /// A `remote_view` lists tags AND resolves from the SOURCE even though the
+    /// ambient mode is `Default` (which reads local-index-first), and writes
+    /// nothing into the local index while doing so.
+    ///
+    /// Backs the update-check probe: the freshest upstream release must be
+    /// found through the configured chain — which understands logical
+    /// `ocx.sh/<ns>/<pkg>` names — regardless of the ambient ChainMode, and
+    /// looking must never move a pin (the local index is the package-tier lock).
+    ///
+    /// The resolve is what makes the two write assertions falsifiable: a
+    /// listing never writes under any policy, so asserting on it alone would
+    /// hold even with the view's [`LocalWritePolicy`] flipped to `Full`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_view_lists_from_source_under_default_mode_and_writes_nothing() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let store = index_store(&cache_dir);
+
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+        let remote = chained.remote_view();
+
+        // Ambient Default lists the (empty) local index — the source is untouched.
+        let local_only = chained.list_tags(&tagged_id()).await.unwrap();
+        assert!(
+            local_only.is_none_or(|tags| tags.is_empty()),
+            "precondition: Default mode lists the empty local index"
+        );
+        assert_eq!(spy.calls(), 0, "precondition: Default mode must not consult the source");
+
+        let tags = remote
+            .list_tags(&tagged_id())
+            .await
+            .unwrap()
+            .expect("the remote view must reach the source");
+        assert_eq!(
+            tags,
+            vec![TAG.to_string()],
+            "the remote view must list the source's tags"
+        );
+        assert!(spy.calls() > 0, "the remote view must consult the source");
+
+        // A resolve through the SAME view — the path that persists under every
+        // other write policy — must still reach the source and still write
+        // nothing.
+        let resolved = remote
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(resolved.is_some(), "the remote view must resolve from the source");
+
+        // No dispatch object staged, no tag pointer committed.
+        assert!(
+            !store.dispatch_object_path(REGISTRY, REPO, &digest_a()).exists(),
+            "a remote-view resolve must not persist a dispatch object"
+        );
+        let probe = Index::from_chained(make_local_index(&cache_dir), Vec::new(), ChainMode::Offline);
+        assert!(
+            probe
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Query)
+                .await
+                .unwrap()
+                .is_none(),
+            "a remote-view resolve must not commit a tag pointer"
         );
     }
 
@@ -3994,6 +4090,96 @@ mod chain_refs_tests {
             registry_spy.calls(),
             0,
             "the registry source must never be queried once the authoritative source reported a clean miss"
+        );
+    }
+
+    /// A fake source authoritative over `REGISTRY` whose **tag listing fails**
+    /// the way a published index does when its site is unreachable or serving a
+    /// 5xx — the outage case, not the clean miss above.
+    #[derive(Clone)]
+    struct AuthoritativeListErrorSource;
+
+    #[async_trait]
+    impl index_impl::IndexImpl for AuthoritativeListErrorSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Err(super::super::error::Error::RemoteManifestNotFound("index outage".to_string()).into())
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Regression: an authoritative source's tag-listing **failure** stops the
+    /// Remote-mode `list_tags` walk — it must never fall through to the
+    /// registry catch-all, which answers for the LITERAL name.
+    ///
+    /// The self-update blind spot in its outage shape: `ocx.sh/ocx/cli` is a
+    /// logical name the published index routes elsewhere, so a catch-all answer
+    /// is the stale pre-indirection repository's capped tag list. The propagated
+    /// error becomes `Skipped(RegistryProbeFailed)` (exit 75, "could not
+    /// determine") at the update-check caller; a fall-through would instead
+    /// report a confident "up to date".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authoritative_list_tags_error_does_not_fall_through_to_registry() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let authoritative_idx = Index::from_impl(AuthoritativeListErrorSource);
+        let (registry_spy, registry_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![authoritative_idx, registry_idx], ChainMode::Remote);
+
+        let result = chained.list_tags(&tagged_id()).await;
+        assert!(
+            result.is_err(),
+            "an authoritative source's listing failure must propagate, not be masked by a later source"
+        );
+        assert_eq!(
+            registry_spy.calls(),
+            0,
+            "the registry catch-all must never be listed once the authoritative source failed"
+        );
+    }
+
+    /// The clean-miss half of the same stop on the `list_tags` loop: an
+    /// authoritative source that lists nothing is a terminal `Ok(None)`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authoritative_list_tags_clean_miss_does_not_fall_through_to_registry() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let authoritative_idx = Index::from_impl(AuthoritativeMissSource);
+        let (registry_spy, registry_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![authoritative_idx, registry_idx], ChainMode::Remote);
+
+        let tags = chained.list_tags(&tagged_id()).await.unwrap();
+        assert!(
+            tags.is_none(),
+            "an authoritative source's empty listing must be a terminal None; got {tags:?}"
+        );
+        assert_eq!(
+            registry_spy.calls(),
+            0,
+            "the registry catch-all must never be listed once the authoritative source reported a clean miss"
         );
     }
 

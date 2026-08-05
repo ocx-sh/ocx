@@ -133,10 +133,17 @@ pub enum SelfUpdateResult {
 ///
 /// The self-flavored commands (`ocx self update`, `ocx self setup`) and the
 /// background auto-check all exist to surface the freshest *upstream* release,
-/// so they force a live remote listing ([`TagProbe::Remote`]) regardless of the
+/// so they force a live source listing ([`TagProbe::Remote`]) regardless of the
 /// ambient ChainMode — a default-mode local read would only ever echo a stale
 /// local index. `--offline` (no client) still short-circuits to
 /// [`SkippedReason::Offline`].
+///
+/// [`TagProbe::Remote`] routes that live listing through the **configured index
+/// chain** ([`Index::remote_view`](crate::oci::index::Index::remote_view)), not
+/// a registry's tags API directly: `ocx.sh/ocx/cli` is a logical name the
+/// published index routes to a physical repository, and a bare tags-API probe
+/// answers for the literal name instead — capping the release list at whatever
+/// that repository last held.
 ///
 /// [`TagProbe::Index`] remains for generic callers of [`check_update`] that want
 /// version discovery routed through the configured index + ChainMode (honouring
@@ -147,8 +154,10 @@ pub enum TagProbe {
     /// Resolve through the manager's configured index + ChainMode. Honours
     /// `--offline` / `--frozen` / `--remote` and the `OCX_INDEX` local index.
     Index,
-    /// Force a live remote tag listing regardless of ChainMode. An offline
-    /// manager (no client) short-circuits to [`SkippedReason::Offline`].
+    /// Force a live source listing through the configured index chain,
+    /// regardless of the ambient ChainMode, writing nothing into the local
+    /// index. An offline manager (no client) short-circuits to
+    /// [`SkippedReason::Offline`].
     Remote,
 }
 
@@ -162,7 +171,8 @@ impl PackageManager {
     /// The `probe` parameter selects where candidate tags are listed from:
     /// [`TagProbe::Index`] resolves through the manager's configured index +
     /// ChainMode (honours `--offline` / `--frozen` / `--remote` and `OCX_INDEX`),
-    /// [`TagProbe::Remote`] forces a live registry listing.
+    /// [`TagProbe::Remote`] forces a live source listing through that same
+    /// configured chain, ignoring the ambient ChainMode and writing nothing.
     ///
     /// Returns [`UpdateCheckResult::Skipped`] when throttle short-circuits
     /// (without touching the state file). Returns [`UpdateCheckResult::UpdateAvailable`]
@@ -195,23 +205,26 @@ impl PackageManager {
             return Ok(UpdateCheckResult::Skipped(SkippedReason::Throttled));
         }
 
-        // Acquire the candidate tag list. `Remote` forces a live registry
-        // listing (auto-check freshness); `Index` resolves through the
-        // manager's configured index + ChainMode so an explicit `ocx self
-        // update` honours `--offline` / `--frozen` / `--remote` and the
-        // `OCX_INDEX` local index, like every other tag-resolving command.
+        // Acquire the candidate tag list. `Remote` forces a live source listing
+        // through the configured index chain (auto-check freshness); `Index`
+        // resolves through the manager's configured index + ChainMode so an
+        // explicit `ocx self update` honours `--offline` / `--frozen` /
+        // `--remote` and the `OCX_INDEX` local index, like every other
+        // tag-resolving command.
         let probe_result = match probe {
             TagProbe::Remote => {
                 // No client → offline. Touch the state file to avoid hammering
                 // on every invocation, then return Skipped.
-                let Some(client) = self.client() else {
+                if self.client().is_none() {
                     crate::file_structure::StateStore::touch(state_path.clone()).await;
                     return Ok(UpdateCheckResult::Skipped(SkippedReason::Offline));
-                };
-                let oci_index = oci::index::Index::from_remote(oci::index::OciIndex::new(oci::index::OciIndexConfig {
-                    client: client.clone(),
-                }));
-                oci_index.list_tags(identifier).await
+                }
+                // Through the chain, not the bare client: `ocx.sh/ocx/cli` is a
+                // LOGICAL name the published index routes to a physical
+                // repository. A raw registry tags-API probe would answer from
+                // whatever repository the logical name literally spells and cap
+                // the release list there.
+                self.index().remote_view().list_tags(identifier).await
             }
             // ChainMode decides where this reads (local index in
             // Default/Offline/Frozen, sources under `--remote`); an empty local
@@ -260,8 +273,9 @@ impl PackageManager {
     /// `Some(Duration::ZERO)` (always query).
     ///
     /// `probe` selects the tag source: `ocx self update[ --check]` and the
-    /// background auto-check both pass [`TagProbe::Remote`] (live registry) so
-    /// the freshest upstream release is found regardless of the local index.
+    /// background auto-check both pass [`TagProbe::Remote`] (live listing
+    /// through the configured index chain) so the freshest upstream release is
+    /// found regardless of the local index.
     ///
     /// # Errors
     ///
@@ -336,10 +350,11 @@ impl PackageManager {
     /// Self-flavored install: check for update (always bypasses throttle,
     /// explicit user intent) and install the new version if one is available.
     ///
-    /// Version discovery uses [`TagProbe::Remote`] — the latest tag is resolved
-    /// live from the registry so the freshest published release is always found,
-    /// matching the sibling `ocx self setup` bootstrap and the background
-    /// auto-check. `--offline` (no client) short-circuits to `Skipped(Offline)`.
+    /// Version discovery uses [`TagProbe::Remote`] — the latest tag is listed
+    /// live through the configured index chain so the freshest published release
+    /// is always found, matching the sibling `ocx self setup` bootstrap and the
+    /// background auto-check. `--offline` (no client) short-circuits to
+    /// `Skipped(Offline)`.
     ///
     /// The current version is queried via subprocess (`ocx --format json version`)
     /// on the binary resolved through the composed env's PATH
@@ -848,6 +863,60 @@ mod tests {
             ),
             "Index probe must consult the empty local index (→ NotFound), not the absent client; got: {index:?}"
         );
+    }
+
+    /// Regression guard for the v0.5.0 self-update blind spot: the `Remote`
+    /// probe must list tags through the **configured index chain**, never
+    /// through a throwaway index over the bare client.
+    ///
+    /// `ocx.sh/ocx/cli` is a LOGICAL name; the published index routes it to a
+    /// different physical repository. A raw registry tags-API probe answers from
+    /// the stale pre-indirection repository and caps the visible releases, so
+    /// every newer release is invisible and `ocx self update` reports
+    /// up-to-date forever.
+    ///
+    /// The two stubs disagree on purpose: the chain source knows `9.9.9`, the
+    /// manager's own client knows only `0.0.1`. The ambient ChainMode is
+    /// `Default` — a probe that honoured it would read the (empty) local index
+    /// instead — so the assertion also pins that the view forces a live source
+    /// listing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_probe_lists_through_the_configured_chain_not_the_bare_client() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+        use crate::oci::index::{OciIndex, OciIndexConfig};
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let source_data = StubTransportData::new();
+        source_data.write().tags = vec![vec!["9.9.9".to_string()]];
+        let source = Index::from_remote(OciIndex::new(OciIndexConfig {
+            client: oci::Client::with_transport(Box::new(StubTransport::new(source_data))),
+        }));
+
+        let client_data = StubTransportData::new();
+        client_data.write().tags = vec![vec!["0.0.1".to_string()]];
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(client_data)));
+
+        let fs = FileStructure::with_root(tmp.path().to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: IndexStore::new(tmp.path().join("index")),
+        });
+        let index = Index::from_chained(local_index, vec![source], ChainMode::Default);
+        let manager = PackageManager::new(fs, index, Some(client), "ocx.sh");
+
+        let identifier = oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY);
+        let result = manager
+            .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Remote)
+            .await;
+
+        match result {
+            Ok(super::UpdateCheckResult::UpdateAvailable(latest)) => assert_eq!(
+                latest.tag(),
+                Some("9.9.9"),
+                "the Remote probe must list through the configured chain (9.9.9), not the bare client (0.0.1)"
+            ),
+            other => panic!("expected UpdateAvailable from the chain source; got: {other:?}"),
+        }
     }
 
     // ── SkippedReason Display tests ──────────────────────────────────────────

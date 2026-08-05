@@ -32,9 +32,10 @@ pub enum SelfGroup {
     /// installs the new binary if one is available. With `--check`, reports the
     /// result without installing.
     ///
-    /// The latest version is queried live from the registry so the freshest
-    /// published release is always found; `--offline` skips the check. Both
-    /// forms always bypass the auto-check throttle.
+    /// The latest version is looked up live from the published index rather
+    /// than your local index, so the freshest release is always found;
+    /// `--offline` skips the check. Both forms always bypass the auto-check
+    /// throttle.
     Update(update::SelfUpdate),
 }
 

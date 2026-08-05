@@ -56,9 +56,10 @@ pub async fn check_for_update(ctx: &Context) {
     };
 
     // The background auto-check exists to surface fresh *upstream* releases, so
-    // it forces a live remote probe regardless of the ambient ChainMode (a
-    // default-mode local read would only echo a stale local index). Explicit
-    // `ocx self update` is the ChainMode-aware path (honours OCX_INDEX).
+    // it forces a live probe regardless of the ambient ChainMode (a default-mode
+    // local read would only echo a stale local index). Explicit `ocx self
+    // update` passes the same `TagProbe::Remote`: both list live through the
+    // configured index chain's remote view, never a bare registry tags API.
     match ctx.manager().self_check_update(throttle, TagProbe::Remote).await {
         Ok(UpdateCheckResult::AlreadyUpToDate) => {
             log::debug!("Already up to date.");

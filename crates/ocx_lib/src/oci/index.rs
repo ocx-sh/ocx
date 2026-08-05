@@ -253,6 +253,17 @@ impl Index {
         }
     }
 
+    /// A view of this index that lists and reads live from the sources
+    /// regardless of the ambient [`ChainMode`], and writes nothing into the
+    /// local index — see [`index_impl::IndexImpl::remote_view`]. Used by the
+    /// update-check probe, which must see the freshest published release and
+    /// must never move a pin.
+    pub fn remote_view(&self) -> Self {
+        Self {
+            inner: self.inner.remote_view(),
+        }
+    }
+
     /// List all repositories available in the given registry.
     pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         log::debug!("Listing repositories for registry '{}'.", registry);
