@@ -7,7 +7,7 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 
 ## The First Push {#first-push}
 
-[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and writes it to a build receipt beside the bundle — never into the metadata sidecar itself, which carries no platform field; `push` reads the receipt back and publishes under it by default, so the platform a package is published under always matches what its dependency pins were resolved against. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
+[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and writes it to a build receipt beside the bundle — never into the metadata sidecar itself, which carries no platform field. `push` reads that receipt for anything its own flags did not state, so a `push` with no `--platform` publishes under exactly what the dependency pins were resolved against, and a `push` with no `--identifier` publishes under the identifier `create` was given. Flags you do pass are used as given; the receipt is not consulted for them. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
 
 ```sh
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
@@ -46,7 +46,8 @@ ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 
 | Failure | Exit code | Meaning |
 |---|---|---|
-| No build receipt beside the bundle, and no explicit `--platform` | 64 | Run `ocx package create --metadata <FILE> --platform <PLATFORM>` to write a receipt, or pass `--platform` explicitly. |
+| No `--platform`, and no platform in the build receipt beside the bundle | 64 | Pass `--platform`, or run `ocx package create --platform <PLATFORM>` so the build records one. |
+| No `--identifier`, and no identifier in the build receipt | 64 | Pass `--identifier`, or run `ocx package create --identifier <IDENTIFIER>` so the build records one. |
 | Dependency is not digest-pinned | 65 | Re-run `ocx package create --platform` to pin it. |
 | Pin resolves to an image index | 65 | The dependency was pinned by hand against an index digest — re-run `create`. |
 | A dependency of an `any`-targeted push pins a digest its own image index does not advertise as `any` | 65 | Re-run `ocx package create --platform any` against a refreshed index, or confirm the registry actually advertises that digest as `any`. |

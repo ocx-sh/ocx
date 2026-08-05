@@ -12,7 +12,11 @@ use crate::options;
 pub struct PackageCreate {
     /// Path to the package to bundle
     path: std::path::PathBuf,
-    /// Optional identifier for the package, used to infer the output filename if not specified
+    /// Identifier the bundle will be published under (e.g. `repo:2.0.0`)
+    ///
+    /// Used to infer the output filename when `--output` names no file, and
+    /// recorded in the build receipt beside the bundle, which `ocx package
+    /// push` falls back to when it is given no `--identifier` of its own.
     #[clap(short, long)]
     identifier: Option<options::Identifier>,
     /// Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)
@@ -24,10 +28,10 @@ pub struct PackageCreate {
     /// the content tree is scanned under this platform's executable
     /// convention. Resolution honors `--remote`, `--offline`, and `--frozen`.
     ///
-    /// The value is written to a build receipt beside the bundle, which
-    /// `ocx package push` and `ocx package test` read as their default
-    /// target. Passing `--platform` to either of those overrides the receipt
-    /// and warns.
+    /// The value is written to a build receipt beside the bundle, which `ocx
+    /// package push` and `ocx package test` fall back to when they are given
+    /// no `--platform` of their own. Passing `--platform` to either of those
+    /// simply wins; the receipt is not consulted for it.
     ///
     /// Also used to infer the output filename.
     ///
@@ -51,7 +55,8 @@ pub struct PackageCreate {
     /// Requires `--platform`. Dependencies without a digest are pinned to
     /// that platform's manifest digests, and the compiled result (the same
     /// form `ocx package push` publishes) is written next to the output
-    /// bundle, along with a build receipt naming the platform.
+    /// bundle. The build receipt is written whether or not this flag is
+    /// given - it records the invocation, not the sidecar.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -159,8 +164,7 @@ impl PackageCreate {
                 // env/entrypoint checks over it. This projection is what gets
                 // written beside the bundle: push and test read the compiled
                 // wire shape, never the authoring input.
-                let published = package::metadata::ValidMetadata::try_from(metadata.to_published()?)?;
-                Some((published, platform))
+                Some(package::metadata::ValidMetadata::try_from(metadata.to_published()?)?)
             }
             None => None,
         };
@@ -188,7 +192,7 @@ impl PackageCreate {
             output.display()
         );
 
-        if let Some((metadata, platform)) = resolved_metadata {
+        if let Some(metadata) = resolved_metadata {
             // Always rewrite the sidecar canonically (never a byte copy): the
             // file next to the bundle is the compiled, pin-resolved published
             // form.
@@ -196,19 +200,16 @@ impl PackageCreate {
             package::metadata::Metadata::from(metadata)
                 .write_json(&metadata_target)
                 .await?;
-            // The receipt records what everything above was resolved against,
-            // so push and test bind to the same target without the publisher
-            // restating it. Written after the metadata: the metadata is the
-            // artifact, the receipt only describes how it was built.
-            //
-            // ponytail: no receipt without `-m`. Nothing is resolved or
-            // validated on that path, so there is nothing for a receipt to
-            // attest — push then takes the no-receipt rows and requires an
-            // explicit --platform.
+        }
+
+        // The receipt records what this invocation was told, so push and test
+        // do not have to be told it again — with or without `--metadata`.
+        // Written last: the bundle and its sidecar are the artifacts, the
+        // receipt only describes how they were asked for. Nothing declared
+        // means nothing to record, so no file.
+        if let Some(receipt) = crate::build_receipt::BuildReceipt::new(self.platform.clone(), identifier) {
             let receipt_target = crate::conventions::infer_receipt_file(&output)?;
-            crate::build_receipt::BuildReceipt::new(platform)
-                .write_json(&receipt_target)
-                .await?;
+            receipt.write_json(&receipt_target).await?;
         }
 
         Ok(ExitCode::SUCCESS)
@@ -230,10 +231,10 @@ impl PackageCreate {
     }
 
     /// The platform `--metadata` is compiled for: dependency pins resolve
-    /// against it, the binaries scan applies its executable convention, and
-    /// it is written to the build receipt for `ocx package push` / `ocx
-    /// package test` to read back. `None` when no sidecar was supplied —
-    /// `--platform` then only shapes the inferred output filename.
+    /// against it and the binaries scan applies its executable convention.
+    /// `None` when no sidecar was supplied — `--platform` then only shapes the
+    /// inferred output filename and the build receipt (which records the flag
+    /// itself, sidecar or not).
     ///
     /// There is no default. The host platform describes what the build
     /// machine *supplies*; the recorded platform describes what the packaged

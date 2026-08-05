@@ -13,9 +13,11 @@ target-platform *set*. Both a concrete `--platform P` resolve and an
 deleted (WP-2: `direct_pin` is the single pin path). An `any`-targeted
 resolve still requires every dependency to offer an `any`-typed manifest;
 it just pins that manifest's digest bare on the identifier rather than
-recording it under an `"any"`-keyed map entry. The platform `create`
-resolved against is recorded in a build receipt sidecar beside the bundle
-(`<stem>-receipt.json`), never in the metadata sidecar itself.
+recording it under an `"any"`-keyed map entry. The platform `create` was
+given is recorded in a build receipt sidecar beside the bundle
+(`<stem>-receipt.json`) — never in the metadata sidecar itself — alongside
+the identifier, if one was given. `push`/`test` read that receipt only for
+what their own flags left unsaid.
 """
 
 from __future__ import annotations

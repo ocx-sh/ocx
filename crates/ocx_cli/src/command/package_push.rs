@@ -60,9 +60,9 @@ pub struct PackagePush {
     ///
     /// This must be the compiled form `ocx package create --metadata` writes,
     /// with every dependency pinned to a digest; an authoring sidecar with
-    /// tag-only dependencies is rejected. The build receipt is always looked
-    /// for beside the bundle, so pointing this flag elsewhere does not move
-    /// where the target platform is read from.
+    /// tag-only dependencies is rejected. The build receipt is anchored to the
+    /// bundle, so pointing this flag elsewhere does not move where an omitted
+    /// `--platform` or `--identifier` is read from.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
 
@@ -95,16 +95,20 @@ pub struct PackagePush {
 
     /// Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
-    /// The pushed manifest is scoped to this platform. Defaults to the
-    /// platform recorded in the build receipt `ocx package create` wrote
-    /// beside the bundle. An explicit value overrides it and warns. Required
-    /// (exit 64) when there is no receipt.
+    /// The pushed manifest is scoped to this platform. An explicit value is
+    /// used as given. Omit it to take the platform the build receipt beside
+    /// the bundle recorded; a usage error (exit 64) when neither names one.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
 
-    /// Identifier under which the package is published (e.g. `repo:2.0.0`).
-    #[clap(short = 'i', long = "identifier", required = true)]
-    identifier: options::Identifier,
+    /// Identifier under which the package is published (e.g. `repo:2.0.0`)
+    ///
+    /// An explicit value is used as given. Omit it to take the identifier the
+    /// build receipt beside the bundle recorded, which is what `ocx package
+    /// create --identifier` wrote there; a usage error (exit 64) when neither
+    /// names one.
+    #[clap(short = 'i', long = "identifier")]
+    identifier: Option<options::Identifier>,
 
     /// Layers to push, in order (base layer first, top layer last).
     ///
@@ -148,7 +152,25 @@ pub struct PackagePush {
 
 impl PackagePush {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifier = self.identifier.with_domain(context.default_registry())?;
+        // Read the build receipt only for what the command line left open: a
+        // fully explicit push must not be able to fail on a file it never
+        // needed. Resolved before `Publisher::new` and auth, so a push missing
+        // both a flag and a recorded value fails on its own arguments without
+        // a network round-trip first.
+        let explicit_identifier = self
+            .identifier
+            .as_ref()
+            .map(|identifier| identifier.with_domain(context.default_registry()))
+            .transpose()?;
+        let receipt = match (&explicit_identifier, &self.platform) {
+            (Some(_), Some(_)) => None,
+            _ => crate::build_receipt::read_beside_bundle(&self.layers).await?,
+        };
+        let identifier = crate::build_receipt::resolve_target_identifier(explicit_identifier, receipt.as_ref())?;
+        // The published index entry's platform label must not decouple from
+        // what the dependency pins were resolved against, which is why the
+        // receipt is the fallback rather than the host platform.
+        let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
 
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
@@ -158,26 +180,6 @@ impl PackagePush {
             metadata_path.display()
         );
         let metadata = conventions::read_published_metadata(&metadata_path).await?;
-
-        // Default the publish platform to what `ocx package create` recorded
-        // in the build receipt beside the bundle, so the published index
-        // entry's platform label does not decouple from what the dependency
-        // pins were resolved against. Resolved before `Publisher::new` and
-        // auth: a push with neither receipt nor `--platform` must fail on its
-        // own arguments, without a network round-trip first.
-        let receipt_path = conventions::resolve_receipt_path(&self.layers);
-        let recorded = match &receipt_path {
-            Some(path) => crate::build_receipt::read(path).await?,
-            None => None,
-        };
-        let (platform, advisory) = crate::build_receipt::resolve_target_platform(
-            recorded.map(|receipt| receipt.platform),
-            self.platform.clone(),
-            receipt_path.as_deref(),
-        )?;
-        if let Some(advisory) = advisory {
-            advisory.emit(context.ui());
-        }
 
         let valid = package::metadata::ValidMetadata::try_from(metadata)?;
 

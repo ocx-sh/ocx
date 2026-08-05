@@ -99,11 +99,12 @@ def resolved_receipt_path(bundle: Path) -> Path:
     """Path `ocx package create -o <bundle>` writes the build receipt to.
 
     Same stem-stripping as `resolved_metadata_path`, `-receipt.json` suffix
-    instead of `-metadata.json`. The receipt is the *only* place the platform
-    `create` resolved dependencies against is recorded (`{"version": 1,
-    "platform": "<canonical>"}`) — the metadata sidecar itself carries no
-    `platform` key (published wire shape). `push`/`package test` read it,
-    when present, to supply the platform `--platform` was not given.
+    instead of `-metadata.json`. `create` writes it whenever it was told
+    anything worth recording — `-p`, `-i`, or both, with or without `-m`:
+    `{"version": 1, "platform": "<canonical>", "identifier": "<canonical>"}`,
+    each of the two optional. The metadata sidecar itself carries no
+    `platform` key (published wire shape). `push`/`package test` read it only
+    for what their own flags did not supply.
     """
     stem = bundle.stem
     for ext in _KNOWN_ARCHIVE_EXTENSIONS:

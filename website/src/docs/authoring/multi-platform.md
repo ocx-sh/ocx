@@ -219,7 +219,7 @@ A pin is a snapshot of the dependency's platform coverage at the moment `create`
 - [Declaring dependencies][authoring-dependencies] — when to depend, visibility, `name` overrides
 - [Platforms reference][reference-platforms] — the canonical grammar and the compatibility relation this page builds on
 - [Dependencies reference][reference-dependencies] — sidecar field shapes, manifest-pin rule
-- [`ocx package create` build receipt][cmd-package-create-receipt] — where the platform lives between `create` and `push`/`test`
+- [`ocx package create` build receipt][cmd-package-create-receipt] — the fallback `push`/`test` read for a platform their own flags did not state
 - [Migration patterns][authoring-migration] — `ocx_mirror` per-platform spec
 
 <!-- external -->

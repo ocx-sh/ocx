@@ -29,16 +29,16 @@ pub struct PackageTest {
     ///
     /// This must be the compiled form `ocx package create --metadata` writes,
     /// with every dependency pinned to a digest; an authoring sidecar with
-    /// tag-only dependencies is rejected. The build receipt is always looked
-    /// for beside the bundle, so pointing this flag elsewhere does not move
-    /// where the target platform is read from.
+    /// tag-only dependencies is rejected. The build receipt is anchored to the
+    /// bundle, so pointing this flag elsewhere does not move where an omitted
+    /// `--platform` is read from.
     #[clap(short, long)]
     metadata: Option<PathBuf>,
 
-    /// Target platform (e.g. `linux/amd64`). Defaults to the platform
-    /// recorded in the build receipt `ocx package create` wrote beside the
-    /// bundle. An explicit value overrides it and warns. Required (exit 64)
-    /// when there is no receipt. Parity with `package push`.
+    /// Target platform (e.g. `linux/amd64`). An explicit value is used as
+    /// given. Omit it to take the platform the build receipt beside the bundle
+    /// recorded; a usage error (exit 64) when neither names one. Parity with
+    /// `package push`.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
 
@@ -125,23 +125,16 @@ impl PackageTest {
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
         // Read the published sidecar `ocx package create` compiled — the same
-        // bytes `ocx package push` would publish — and take the tested
-        // platform from the build receipt beside the bundle, on exactly the
-        // contract `ocx package push` uses.
+        // bytes `ocx package push` would publish. The tested platform falls
+        // back to the build receipt beside the bundle on exactly the contract
+        // `ocx package push` uses, and the receipt is only opened when
+        // `--platform` left the question open.
         let metadata = conventions::read_published_metadata(&metadata_path).await?;
-        let receipt_path = conventions::resolve_receipt_path(&self.layers);
-        let recorded = match &receipt_path {
-            Some(path) => crate::build_receipt::read(path).await?,
-            None => None,
+        let receipt = match self.platform {
+            Some(_) => None,
+            None => crate::build_receipt::read_beside_bundle(&self.layers).await?,
         };
-        let (platform, advisory) = crate::build_receipt::resolve_target_platform(
-            recorded.map(|receipt| receipt.platform),
-            self.platform.clone(),
-            receipt_path.as_deref(),
-        )?;
-        if let Some(advisory) = advisory {
-            advisory.emit(context.ui());
-        }
+        let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
         let metadata = package::metadata::ValidMetadata::try_from(metadata)?;
         let info = package::info::Info {
             identifier: identifier.clone(),

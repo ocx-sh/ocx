@@ -88,14 +88,14 @@ pub fn resolve_metadata_path(
 }
 
 /// Resolves the build-receipt path `ocx package push` and `ocx package test`
-/// read their default target platform from.
+/// fall back to for whatever their flags did not supply.
 ///
 /// Mirrors [`resolve_metadata_path`]'s layer walk, but the receipt anchors to
 /// the **bundle** alone — there is no `--receipt` flag and `--metadata` never
 /// redirects it, because the receipt describes how the layer was built rather
 /// than what the package declares. Zero file layers (a config-only push) or
 /// several disagreeing candidates yield `None` rather than an error: no
-/// receipt is a supported state that simply makes `--platform` required.
+/// receipt is a supported state that simply makes the flags required.
 pub fn resolve_receipt_path(layers: &[LayerRef]) -> Option<std::path::PathBuf> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for layer in layers {

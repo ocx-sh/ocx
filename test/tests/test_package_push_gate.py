@@ -56,10 +56,16 @@ def _write_metadata(tmp_path: Path, name: str, obj: dict) -> Path:
 
 
 def _created_app(
-    ocx: OcxRunner, tmp_path: Path, name: str, deps: list[dict], platform: str
+    ocx: OcxRunner,
+    tmp_path: Path,
+    name: str,
+    deps: list[dict],
+    platform: str,
+    identifier: str | None = None,
 ) -> Path:
     """Run `ocx package create -p` so the OUTPUT sidecar carries resolved pins
-    for `platform`; push infers that sidecar from the bundle."""
+    for `platform`; push infers that sidecar from the bundle. `identifier` is
+    additionally recorded in the build receipt for push to fall back to."""
     pkg_dir = tmp_path / f"content-{name}"
     (pkg_dir / "bin").mkdir(parents=True)
     (pkg_dir / "bin" / "app").write_text("#!/bin/sh\necho app\n")
@@ -69,14 +75,29 @@ def _created_app(
         "dependencies": deps,
     })
     out = tmp_path / f"{name}.tar.xz"
+    identifier_args = ["-i", identifier] if identifier else []
     ocx.plain(
-        "package", "create", "-m", str(metadata), "-o", str(out), "-p", platform, str(pkg_dir)
+        "package", "create", "-m", str(metadata), "-o", str(out), "-p", platform,
+        *identifier_args, str(pkg_dir),
     )
     return out
 
 
 def _push(ocx: OcxRunner, fq: str, bundle: Path, *args: str, check: bool = True):
     return ocx.run("package", "push", "-n", *args, "-i", fq, str(bundle), check=check)
+
+
+def _assert_no_diagnostics(stderr: str) -> None:
+    """No warning or note line on stderr.
+
+    Asserted on the diagnostic *level*, not the word "receipt": the temp paths
+    and UUID repo names carry the test function's own name, so a substring
+    check for "receipt" matches in every state."""
+    offenders = [
+        line for line in stderr.splitlines()
+        if " WARN " in line or line.lower().startswith(("note:", "warning:"))
+    ]
+    assert not offenders, f"expected silence, got:\n" + "\n".join(offenders)
 
 
 # ---------------------------------------------------------------------------
@@ -217,19 +238,22 @@ def test_push_defaults_to_created_platform(ocx: OcxRunner, unique_repo: str, tmp
     )
 
 
-def test_push_explicit_platform_overrides_receipt_with_warning(
+def test_push_explicit_platform_overrides_receipt_silently(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """An explicit `--platform` that disagrees with the platform the build
-    receipt recorded is ACCEPTED — explicit wins — but push prints a warning
-    on stderr naming both platform strings."""
+    receipt recorded wins, and says nothing: the receipt is a fallback for a
+    flag that was not given, so it is never even compared against one that
+    was."""
     bundle = _created_app(ocx, tmp_path, "mismatch", [], "linux/amd64")
     app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
 
     result = _push(ocx, app_fq, bundle, "-p", "darwin/arm64", check=False)
     assert result.returncode == 0, result.stderr
-    assert "linux/amd64" in result.stderr, result.stderr
-    assert "darwin/arm64" in result.stderr, result.stderr
+    _assert_no_diagnostics(result.stderr)
+    assert "linux/amd64" not in result.stderr, (
+        f"the recorded platform must not be mentioned at all:\n{result.stderr}"
+    )
 
 
 def test_push_any_target_with_any_offered_dep_succeeds(
@@ -302,14 +326,15 @@ def test_push_repeated_platform_flag_rejected(ocx: OcxRunner, unique_repo: str, 
 
 
 # ---------------------------------------------------------------------------
-# Build receipt resolution (4-row table: receipt x explicit --platform)
+# Build receipt: an optional fallback for what the flags did not supply
 # ---------------------------------------------------------------------------
 
 
 def test_create_writes_receipt_beside_bundle(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """`ocx package create -m -p` writes a build receipt sidecar beside the
-    bundle recording the resolved platform, and the metadata sidecar itself
-    carries no `platform` key (published wire shape)."""
+    bundle recording the declared platform, and the metadata sidecar itself
+    carries no `platform` key (published wire shape). No `-i` was given, so
+    the receipt records no identifier."""
     plat = current_platform()
     bundle = _created_app(ocx, tmp_path, "receipt", [], plat)
 
@@ -320,6 +345,42 @@ def test_create_writes_receipt_beside_bundle(ocx: OcxRunner, unique_repo: str, t
 
     sidecar = json.loads(resolved_metadata_path(bundle).read_text())
     assert "platform" not in sidecar, sidecar
+
+
+def test_bare_create_writes_receipt_with_both_recorded_values(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """`create` records what it was invoked with regardless of `--metadata`:
+    a bare bundling run given `-p` and `-i` writes a receipt carrying both."""
+    plat = current_platform()
+    app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
+    pkg_dir = tmp_path / "content-bare"
+    (pkg_dir / "bin").mkdir(parents=True)
+    (pkg_dir / "bin" / "app").write_text("#!/bin/sh\necho app\n")
+    bundle = tmp_path / "bare.tar.xz"
+
+    ocx.plain("package", "create", "-o", str(bundle), "-p", plat, "-i", app_fq, str(pkg_dir))
+
+    receipt = json.loads(resolved_receipt_path(bundle).read_text())
+    assert receipt == {"version": 1, "platform": plat, "identifier": app_fq}
+
+
+def test_push_falls_back_to_both_recorded_values(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Push with neither `-i` nor `-p` publishes under exactly what the build
+    receipt recorded — the whole point of recording them at create time."""
+    plat = current_platform()
+    app_repo = f"{unique_repo}_app"
+    app_fq = f"{ocx.registry}/{app_repo}:1.0.0"
+    bundle = _created_app(ocx, tmp_path, "recorded", [], plat, identifier=app_fq)
+
+    ocx.run("package", "push", "-n", str(bundle))
+
+    manifest = fetch_manifest_from_registry(ocx.registry, app_repo, "1.0.0")
+    assert plat in index_platforms(manifest), (
+        f"published index must carry the recorded platform {plat!r}, got {manifest}"
+    )
 
 
 def test_push_without_receipt_or_platform_is_usage_error(
@@ -339,12 +400,28 @@ def test_push_without_receipt_or_platform_is_usage_error(
     assert "--platform" in result.stderr, result.stderr
 
 
-def test_push_without_receipt_with_platform_proceeds_with_notice(
+def test_push_without_receipt_or_identifier_is_usage_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """No build receipt beside the bundle, but an explicit `--platform` is
-    enough to proceed — push publishes, with an informational notice on
-    stderr that the receipt-backed validation was skipped."""
+    """The identifier follows the same table: no `-i` and no recorded one is a
+    usage error (64) naming `--identifier`, not a guess."""
+    bundle = _bundle(ocx, tmp_path, "noreceiptnoid")
+    metadata = _write_metadata(tmp_path, "noreceiptnoid", {"type": "bundle", "version": 1})
+
+    result = ocx.run(
+        "package", "push", "-n", "-m", str(metadata), "-p", current_platform(),
+        str(bundle), check=False,
+    )
+    assert result.returncode == EXIT_USAGE, result.stderr
+    assert "--identifier" in result.stderr, result.stderr
+
+
+def test_push_without_receipt_with_platform_is_silent(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """No build receipt beside the bundle, but every value stated on the
+    command line: push publishes and says nothing about the receipt it never
+    needed."""
     bundle = _bundle(ocx, tmp_path, "noreceiptplat")
     metadata = _write_metadata(tmp_path, "noreceiptplat", {"type": "bundle", "version": 1})
 
@@ -353,9 +430,20 @@ def test_push_without_receipt_with_platform_proceeds_with_notice(
         "-m", str(metadata), "-p", current_platform(), check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "receipt" in result.stderr.lower(), (
-        f"expected a notice naming the skipped receipt-backed validation:\n{result.stderr}"
-    )
+    _assert_no_diagnostics(result.stderr)
+
+
+def test_push_with_both_flags_never_opens_a_corrupt_receipt(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """The read is lazy: with `-i` and `-p` both given there is nothing left
+    for the receipt to supply, so an unparseable one beside the bundle cannot
+    fail the push (a non-lazy read would exit 65 here)."""
+    plat = current_platform()
+    bundle = _created_app(ocx, tmp_path, "corrupt", [], plat)
+    resolved_receipt_path(bundle).write_text("{not json")
+
+    _push(ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle, "-p", plat)
 
 
 def test_package_test_without_receipt_or_platform_is_usage_error(
