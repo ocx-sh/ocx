@@ -491,6 +491,9 @@ def test_push_without_receipt_with_platform_is_silent(
     command line: push publishes and says nothing about the receipt it never
     needed."""
     bundle = _bundle(ocx, tmp_path, "noreceiptplat")
+    assert not resolved_receipt_path(bundle).exists(), (
+        "a create given neither --platform nor --identifier has nothing to record"
+    )
     metadata = _write_metadata(tmp_path, "noreceiptplat", {"type": "bundle", "version": 1})
 
     result = _push(

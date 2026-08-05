@@ -10,8 +10,8 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 [`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and writes it to a build receipt beside the bundle — never into the metadata sidecar itself, which carries no platform field. `push` reads that receipt for anything its own flags did not state, so a `push` with no `--platform` publishes under exactly what the dependency pins were resolved against, and a `push` with no `--identifier` publishes under the identifier `create` was given. Flags you do pass are used as given; the receipt is not consulted for them. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
 
 ```sh
-ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
-ocx package push -i mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64 -i mytool:1.0.0
+ocx package push mytool-1.0.0.tar.xz
 ```
 
 `--new` (`-n`) is a `--cascade` modifier: it tells the cascade resolver to skip the existing-tag lookup on the first publish of a repository. Outside `--cascade` the flag is a no-op. Reach for it once you adopt rolling tags.
