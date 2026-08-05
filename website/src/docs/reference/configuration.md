@@ -74,7 +74,7 @@ The cost is that a typo silently does nothing. `[registries."ocx.sh"] indx = "..
 - A typo never *becomes* the field it resembles, and never widens anything: an unknown key cannot populate [`trusted_hosts`](#keys-registries-trusted-hosts) or any other setting.
 - The [config schema][schema-config] lists every key OCX knows. Point your editor at it and a typo is flagged as you write, which is where you want to catch it.
 
-For a managed payload, [`ocx config update --check`][cmd-config-update] shows what the tier actually resolved to.
+For a managed payload, [`ocx config update --check`][cmd-config-update] shows what the tier actually resolved to. Before publishing, [`ocx config test`][cmd-config-test] runs the same lookup against a candidate file that has not been pushed yet.
 
 **When ignoring is not enough.** Tolerance covers *added* keys. It cannot cover a change in what an existing key means or what shape its value takes — an older binary would read the new value with the old meaning. Those changes travel by tag instead: the tier's `source` is an ordinary OCI reference, so publish the incompatible payload under a new tag (`:user-2`) and leave `:user` serving the old one. Fleets move over as they upgrade; nothing has to happen in lockstep. See [Rolling out an incompatible change][user-guide-managed-config-incompatible].
 
@@ -420,8 +420,9 @@ operator-published OCX package whose content is a plain `config.toml` — typica
 `[mirrors]`, a `[patches]` pointer, and a default `[registry]` — synced into local state
 and merged above the user config on every invocation. Where `[mirrors]` and `[patches]`
 are configured by hand on every machine, `[managed]` lets an operator publish one
-package (via [`ocx config push`][cmd-config-push]) and have every workstation and CI
-runner converge on it.
+package (via [`ocx config push`][cmd-config-push], previewed locally first with
+[`ocx config test`][cmd-config-test]) and have every workstation and CI runner converge
+on it.
 
 Unknown fields inside `[managed]` are ignored, and so is everything unrecognized in the
 payload it points at — see [Unknown keys and sections](#unknown-keys), which exists
@@ -682,6 +683,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-package-exec]: ./command-line.md#package-exec
 [cmd-package-env]: ./command-line.md#package-env
 [cmd-config-setup]: ./command-line.md#config-setup
+[cmd-config-test]: ./command-line.md#config-test
 [cmd-self-setup]: ./command-line.md#self-setup
 [cmd-self-update]: ./command-line.md#self-update
 [cmd-config-update]: ./command-line.md#config-update

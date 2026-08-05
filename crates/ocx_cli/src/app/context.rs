@@ -50,6 +50,14 @@ pub struct Context {
     /// themselves via `resolve_managed_target` (which never enforces the
     /// required-snapshot gate `try_init` itself applies below).
     config: ocx_lib::Config,
+    /// The two tiers a managed payload folds BETWEEN: `config_base` (built-in
+    /// defaults, system, user, `$OCX_HOME`) and the explicit `OCX_CONFIG` /
+    /// `--config` `config_overlay`. Kept from the one `load_with_local_view`
+    /// call rather than re-loaded on demand — a second load would re-emit the
+    /// loader's discovery warnings. `ocx config test` folds a candidate payload
+    /// between them, reproducing the adoption order exactly.
+    config_base: ocx_lib::Config,
+    config_overlay: ocx_lib::Config,
     /// The effective `OCX_MANAGED_CONFIG` override, already hermetic-gated by
     /// `OCX_NO_CONFIG` and empty-string-is-unset — resolved once here so every
     /// consumer (the required-gate below, `config update`, the refresh hook)
@@ -141,6 +149,10 @@ impl Context {
         .await?;
         let config = loaded_config.merged;
         let local_only_config = loaded_config.local_only;
+        // The unmerged halves of `local_only_config`, kept for `ocx config test`
+        // (see the field docs) — one load, no second discovery pass.
+        let config_base = loaded_config.base;
+        let config_overlay = loaded_config.overlay;
         // The loader's own raw read of snapshot.json (pre-identity-gate) —
         // reused below instead of a second read of the same file.
         let managed_config_snapshot = loaded_config.managed_config_snapshot;
@@ -459,6 +471,8 @@ impl Context {
             concurrency,
             progress,
             config,
+            config_base,
+            config_overlay,
             managed_config_env_override,
             managed_config_snapshot,
         })
@@ -795,6 +809,20 @@ impl Context {
     /// enforces for ordinary commands.
     pub fn config(&self) -> &ocx_lib::Config {
         &self.config
+    }
+
+    /// The discovered tiers alone (built-in defaults, system, user,
+    /// `$OCX_HOME`) — what a managed payload folds ONTO. Paired with
+    /// [`Self::config_overlay`] so `ocx config test` can reproduce the adoption
+    /// order for a candidate payload.
+    pub fn config_base(&self) -> &ocx_lib::Config {
+        &self.config_base
+    }
+
+    /// The explicit `OCX_CONFIG` / `--config` tier alone — what merges ON TOP
+    /// of a managed payload, and therefore on top of a previewed candidate.
+    pub fn config_overlay(&self) -> &ocx_lib::Config {
+        &self.config_overlay
     }
 
     /// The effective `OCX_MANAGED_CONFIG` override — already hermetic-gated

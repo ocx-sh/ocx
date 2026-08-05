@@ -192,7 +192,10 @@ impl App {
     }
 }
 
-/// Skip the update check for commands that only print static info.
+/// Skip the update check for commands that only print static info, plus the
+/// `ocx config` group — fleet tooling whose members carry their own network
+/// contract (`config test` promises no network and no state writes at all),
+/// matching [`should_check_managed_config_refresh`]'s exclusion.
 fn should_check_for_update(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
@@ -201,6 +204,7 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
                 | command::Command::About(_)
                 | command::Command::Shell(command::shell::Shell::Completion(_))
                 | command::Command::Self_(_)
+                | command::Command::Config(_)
         )
     )
 }
@@ -499,6 +503,21 @@ mod tests {
         assert!(
             !should_check_for_update(&cmd),
             "Version must not trigger update check (static-info command)"
+        );
+    }
+
+    /// `Command::Config(_)` must NOT trigger the background update check.
+    /// The group is fleet tooling, and `config test` promises no network and
+    /// no state writes at all — an auto-check would break that contract on a
+    /// command whose whole point is validating a payload offline.
+    #[test]
+    fn should_check_for_update_skips_config_group() {
+        use clap::Parser as _;
+        let args = command::config_test::ConfigTestArgs::parse_from(["config-test", "candidate.toml"]);
+        let cmd = Some(command::Command::Config(command::config::ConfigGroup::Test(args)));
+        assert!(
+            !should_check_for_update(&cmd),
+            "Config group must not trigger update check (config test promises no network)"
         );
     }
 
