@@ -489,12 +489,18 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
 
 
 def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
-    """Provision the maintainer cast: author → test → preview → publish → freeze.
+    """Provision the shared maintainer state for two casts: ``patches-maintainer``
+    (author -> test -> publish -> install -> freeze) and ``patches-test``
+    (local preview only, including an unpublished-companion preview via
+    ``--companion-archive``).
 
     Publishes a base tool ``mytool`` and an env-only ``corp-ca`` companion
     (INTERFACE ``SSL_CERT_FILE``), configures the ``[patches]`` tier, and writes
-    the ``descriptor.json`` the cast previews with ``ocx patch test``, publishes
-    with ``ocx patch publish``, and pins with ``ocx --global patch freeze``.
+    the ``descriptor.json`` both casts preview with ``ocx patch test``;
+    ``patches-maintainer`` additionally publishes it with ``ocx patch publish``,
+    installs the base with ``ocx package install`` (the descriptor is already
+    published by then, so lazy discovery pulls in ``corp-ca`` on screen), and
+    pins both with ``ocx --global patch freeze``.
 
     The descriptor lives in the work dir (``$SCENARIO_TMP``) so the recorded
     ``--descriptor descriptor.json`` resolves it; its companion reference
@@ -502,8 +508,8 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
 
     Also builds an UNPUBLISHED ``corp-ca:2.0.0`` bundle (via ``ocx package
     create``, never pushed) plus its own ``descriptor-preview.json`` naming it,
-    so the cast can demonstrate ``ocx patch test --companion-archive`` before
-    the companion exists on the registry. The resolved metadata sidecar
+    so ``patches-test`` can demonstrate ``ocx patch test --companion-archive``
+    before the companion exists on the registry. The resolved metadata sidecar
     ``ocx package create`` writes carries no ``identifier`` field of its own
     (see ``conventions::metadata_identifier_or_error``), so it is injected
     here the same way a maintainer would hand-edit the generated

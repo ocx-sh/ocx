@@ -190,6 +190,8 @@ where running without the companion is acceptable.
 without touching the live registry or the real `$OCX_HOME`, so you can verify it before
 publishing:
 
+<Terminal src="/casts/user-guide/patches-test.cast" title="Testing a patch descriptor locally" collapsed />
+
 ```sh
 ocx patch test \
   --descriptor ./my-descriptor.json \
