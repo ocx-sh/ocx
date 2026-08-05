@@ -2069,14 +2069,23 @@ mod tests {
             ),
         });
 
-        let display = error.to_string();
+        // Render the way a user sees it: the kind reaches them inside a
+        // `PackageError` batch, whose formatter walks `kind.source()` and
+        // appends each cause. The variant's own message carries no source text
+        // of its own — that would print the `PatchError` twice.
+        let display = format!("{:#}", anyhow::Error::from(crate::Error::from(error)));
         assert!(
             display.contains("patch discovery error"),
             "PatchDiscovery variant Display must mention 'patch discovery error'; got: {display}"
         );
         assert!(
             display.contains("exceeds maximum"),
-            "PatchDiscovery(DescriptorTooLarge) Display must mention 'exceeds maximum'; got: {display}"
+            "PatchDiscovery(DescriptorTooLarge) rendering must reach the cap detail; got: {display}"
+        );
+        assert_eq!(
+            display.matches("exceeds maximum").count(),
+            1,
+            "the cap detail must appear exactly once, not once per rendering layer; got: {display}"
         );
     }
 

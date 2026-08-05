@@ -56,7 +56,7 @@ pub enum Error {
     /// check to abort, boxed to break the recursive-type cycle
     /// (`crate::Error` → `package_manager::Error` → `PackageError` →
     /// `PackageErrorKind::Internal` → `crate::Error`).
-    #[error("self-update check failed: {0}")]
+    #[error("self-update check failed: {}", render_entry(_0))]
     SelfCheckFailed(Box<PackageError>),
 }
 
@@ -71,7 +71,7 @@ pub enum Error {
 /// duplicate the kind into both the `Display` chain and the `source()`
 /// chain without improving diagnosability.
 #[derive(Debug, thiserror::Error)]
-#[error("{identifier} — {kind}")]
+#[error("{}{kind}", identifier_prefix(identifier))]
 #[non_exhaustive]
 pub struct PackageError {
     pub identifier: oci::Identifier,
@@ -81,6 +81,18 @@ pub struct PackageError {
 impl PackageError {
     pub fn new(identifier: oci::Identifier, kind: PackageErrorKind) -> Self {
         Self { identifier, kind }
+    }
+}
+
+/// The `"<identifier> — "` lead-in of a [`PackageError`] message, empty for the
+/// empty identifier [`crate::Error::from`] fabricates when a
+/// [`PackageErrorKind`] arrives with no package in scope. Rendering that one
+/// would print a bare `/` — a package name the user never supplied.
+fn identifier_prefix(identifier: &oci::Identifier) -> String {
+    if identifier.registry().is_empty() && identifier.repository().is_empty() {
+        String::new()
+    } else {
+        format!("{identifier} — ")
     }
 }
 
@@ -156,7 +168,7 @@ pub enum PackageErrorKind {
     /// is considered failed so the caller does not run with an incomplete
     /// environment overlay. Optional companions (required = false) are logged
     /// as warnings and do not produce this variant.
-    #[error("required companion install failed for '{companion}': {source}")]
+    #[error("required companion install failed for '{companion}'")]
     RequiredCompanionFailed {
         /// Identifier of the companion package that failed to install.
         companion: crate::oci::Identifier,
@@ -172,7 +184,7 @@ pub enum PackageErrorKind {
     /// the error chain is preserved for exit-code classification and diagnostics.
     /// This replaces the former `Internal(io::Error::other(patch_error.to_string()))`
     /// workaround that erased the structured source chain.
-    #[error("patch discovery error: {0}")]
+    #[error("patch discovery error")]
     PatchDiscovery(#[source] crate::patch::PatchError),
 
     /// No index entry satisfies the host's detected `os.features` requirements.
@@ -225,14 +237,43 @@ impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
 fn format_batch(verb: &str, errors: &[PackageError]) -> String {
     use std::fmt::Write as _;
     if errors.len() == 1 {
-        format!("failed to {verb} package: {}", errors[0])
+        format!("failed to {verb} package: {}", render_entry(&errors[0]))
     } else {
         let mut s = format!("failed to {verb} {} packages:", errors.len());
         for e in errors {
-            let _ = write!(s, "\n  {e}");
+            let _ = write!(s, "\n  {}", render_entry(e));
         }
         s
     }
+}
+
+/// Render one batch entry with its cause chain appended, `": {source}"` per link.
+///
+/// A batch carries N failures, so it can expose none of them as a single
+/// `source()`; the chain walk that `{err:#}` performs at the CLI boundary stops
+/// at the batch. Without this, every cause below a `PackageErrorKind` — the io
+/// error under `Internal`, the `PatchError` under `PatchDiscovery` — is dropped
+/// from the only message the user sees. Walks `kind.source()`, not
+/// `entry.source()`: `PackageError` deliberately omits `#[source]` on `kind`
+/// (see the type's doc comment), so the entry itself reports no source.
+fn render_entry(entry: &PackageError) -> String {
+    use std::error::Error as _;
+    use std::fmt::Write as _;
+
+    let mut out = entry.to_string();
+    let mut cause = entry.kind.source();
+    while let Some(source) = cause {
+        // Leaf subsystem errors (archive, oci/client, package/env, ci) still
+        // interpolate their own source; normalizing them is a deferred sweep,
+        // and skipping a link the text already ends with keeps the walk
+        // duplicate-free either way.
+        let text = source.to_string();
+        if !out.ends_with(&text) {
+            let _ = write!(out, ": {text}");
+        }
+        cause = source.source();
+    }
+    out
 }
 
 /// Errors from dependency resolution operations.
@@ -249,7 +290,10 @@ pub enum DependencyError {
         identifiers: Vec<oci::PinnedIdentifier>,
     },
     /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
-    #[error("dependency setup failed: {0}")]
+    ///
+    /// The singleflight cause is carried by `#[from]` (which implies
+    /// `#[source]`); interpolating it here too would print it twice.
+    #[error("dependency setup failed")]
     SetupFailed(#[from] crate::utility::singleflight::Error),
 }
 
@@ -369,5 +413,113 @@ mod tests {
             PackageErrorKind::SelectionAmbiguous(vec![]),
         )];
         assert_eq!(Error::SelectFailed(errors).classify(), Some(ExitCode::DataError));
+    }
+
+    /// A batch is the only channel its entries have: it carries N failures, so
+    /// it exposes none of them as a `source()` and `{err:#}` stops at the batch.
+    /// The io cause under `PackageErrorKind::Internal` must therefore be
+    /// rendered by the batch itself — exactly once, not dropped and not doubled.
+    #[test]
+    fn batch_renders_the_io_cause_of_an_internal_entry_exactly_once() {
+        let io_error = std::io::Error::other("permission denied by fixture");
+        let entry = PackageError::new(
+            oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28"),
+            PackageErrorKind::Internal(crate::error::file_error("/tmp/example/data", io_error)),
+        );
+        let rendered = format!("{:#}", anyhow::Error::from(Error::InstallFailed(vec![entry])));
+        assert_eq!(
+            rendered.matches("permission denied by fixture").count(),
+            1,
+            "the io cause must appear exactly once in the batch message; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("cmake"),
+            "the batch message must still name the failing package; got: {rendered}"
+        );
+    }
+
+    /// The multi-entry arm renders every entry's own cause, each once.
+    #[test]
+    fn multi_entry_batch_renders_each_entrys_cause_once() {
+        let entries = vec![
+            PackageError::new(
+                oci::Identifier::new_registry("cmake", "example.com"),
+                PackageErrorKind::Internal(crate::error::file_error(
+                    "/tmp/a",
+                    std::io::Error::other("first cause fixture"),
+                )),
+            ),
+            PackageError::new(
+                oci::Identifier::new_registry("ninja", "example.com"),
+                PackageErrorKind::Internal(crate::error::file_error(
+                    "/tmp/b",
+                    std::io::Error::other("second cause fixture"),
+                )),
+            ),
+        ];
+        let rendered = format!("{:#}", anyhow::Error::from(Error::InstallFailed(entries)));
+        assert_eq!(rendered.matches("first cause fixture").count(), 1, "got: {rendered}");
+        assert_eq!(rendered.matches("second cause fixture").count(), 1, "got: {rendered}");
+    }
+
+    /// `SelfCheckFailed` carries a single entry rather than a batch, and takes
+    /// the same `render_entry` route.
+    #[test]
+    fn self_check_failed_renders_its_entrys_cause_exactly_once() {
+        let entry = PackageError::new(
+            oci::Identifier::new_registry("ocx/cli", "ocx.sh"),
+            PackageErrorKind::Internal(crate::error::file_error(
+                "/tmp/self-check",
+                std::io::Error::other("self-check cause fixture"),
+            )),
+        );
+        let rendered = format!("{:#}", anyhow::Error::from(Error::SelfCheckFailed(Box::new(entry))));
+        assert_eq!(
+            rendered.matches("self-check cause fixture").count(),
+            1,
+            "got: {rendered}"
+        );
+    }
+
+    /// A leaf subsystem error that still interpolates its own `#[source]`
+    /// (`archive::Error::Tar` renders `"tar error: <io>"`) must not have that
+    /// text appended a second time by the chain walk.
+    #[test]
+    fn batch_does_not_double_a_leaf_error_that_inlines_its_own_source() {
+        let entry = PackageError::new(
+            oci::Identifier::new_registry("cmake", "example.com"),
+            PackageErrorKind::Internal(crate::Error::Archive(crate::archive::Error::Tar(
+                std::io::Error::other("unexpected end of archive fixture"),
+            ))),
+        );
+        let rendered = format!("{:#}", anyhow::Error::from(Error::InstallFailed(vec![entry])));
+        assert_eq!(
+            rendered.matches("unexpected end of archive fixture").count(),
+            1,
+            "a leaf that inlines its own source must not be doubled by the walk; got: {rendered}"
+        );
+    }
+
+    /// Same contract one layer deeper: `RequiredCompanionFailed` carries its
+    /// cause as `#[source]` only, so the batch walk is what surfaces it.
+    #[test]
+    fn batch_renders_a_required_companion_cause_exactly_once() {
+        let entry = PackageError::new(
+            oci::Identifier::new_registry("java", "example.com"),
+            PackageErrorKind::RequiredCompanionFailed {
+                companion: oci::Identifier::new_registry("license-server", "patches.corp.com"),
+                source: Box::new(PackageErrorKind::NotFound),
+            },
+        );
+        let rendered = format!("{:#}", anyhow::Error::from(Error::ResolveFailed(vec![entry])));
+        assert_eq!(
+            rendered.matches("package not found").count(),
+            1,
+            "the companion's cause must appear exactly once; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("license-server"),
+            "the message must name the companion; got: {rendered}"
+        );
     }
 }

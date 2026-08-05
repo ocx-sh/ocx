@@ -33,7 +33,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package, make_package_with_entrypoints
+from src.helpers import make_package, make_package_with_entrypoints, push_managed_config
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
@@ -2677,3 +2677,356 @@ def test_patch_test_report_lists_env_override_alongside_companion(
         f"an `--env` override is nobody's companion contribution — it must be "
         f"reported unattributed; got: {override}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for github issue #286 ("issues testing patches")
+#
+# The real-world session in the issue chains four distinct bugs. Each test
+# below pins one:
+#   - test_patch_test_with_path_prefixed_registry_composes:
+#       a path-prefixed `[patches]` registry (the common corporate shape,
+#       e.g. `registry.corp.example/ocx-patches`) makes the seeded local
+#       descriptor unreadable back ("manifest blob not found in CAS").
+#   - test_patch_test_companion_archive_composes_unpublished_companion /
+#     test_patch_test_companion_archive_tag_mismatch_is_loud:
+#       first-ever e2e coverage for `--companion-archive`.
+#   - test_patch_test_resolves_registry_from_managed_config:
+#       the exact managed-config flow the issue's session used.
+#   - test_patch_test_optional_tier_with_path_prefixed_registry_composes:
+#       `required = false` must not turn an unreadable seed into a silent,
+#       zero-companion success.
+# ---------------------------------------------------------------------------
+
+
+def test_patch_test_with_path_prefixed_registry_composes(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A `[patches]` registry carrying a path prefix after the host authority
+    (the common corporate-registry shape, e.g.
+    `registry.corp.example/ocx-patches`) must compose exactly like a bare-host
+    registry.
+
+    Same shape as `test_patch_test_composes_env_locally_without_publishing`,
+    but `_write_config` is given a path-prefixed registry value. The
+    descriptor is a LOCAL, unpublished file — `ocx patch test` seeds it into
+    a scratch store and must read the very same bytes back to compose the
+    companion overlay.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("prefixed_registry_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PREFIXED_REGISTRY_VAR", "prefixed-value")
+
+    descriptor_path = tmp_path / "prefixed_registry_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    # The path-prefixed form: a host authority followed by a `/`-separated
+    # path component under it, distinct from the bare host every other test
+    # in this module uses.
+    _write_config(ocx, f"{registry}/extra/prefix")
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"ocx patch test with a path-prefixed [patches] registry must succeed; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    prefixed_var = _entry_by_key(entries, "PREFIXED_REGISTRY_VAR")
+    assert prefixed_var is not None, (
+        f"PREFIXED_REGISTRY_VAR must appear in patch test entries under a "
+        f"path-prefixed [patches] registry; got: {[e['key'] for e in entries]}"
+    )
+    assert prefixed_var["value"] == "prefixed-value"
+    assert len(report["companions"]) >= 1, "patch test report must list at least one companion"
+
+
+def test_patch_test_companion_archive_composes_unpublished_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """First-ever e2e coverage for `--companion-archive`: a companion built
+    and bundled locally, never pushed to the registry, materializes via
+    `--companion-archive` and its INTERFACE var composes onto the base.
+
+    The sidecar convention (`conventions::infer_metadata_file` /
+    `resolved_metadata_path`) names the metadata file `<archive-stem>-metadata.json`
+    next to the archive; `ocx patch test` additionally requires an
+    `"identifier"` key in that sidecar (`patch_test.rs::metadata_identifier_or_error`)
+    naming the companion — there is no `-i` flag on `patch test`.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    # Build the companion archive locally via `ocx package create` — never
+    # pushed to the registry, proving `--companion-archive` needs no
+    # registry round-trip for it.
+    companion_repo = _unique_repo("archive_companion")
+    companion_tag = "1.0.0"
+    companion_identifier = f"{registry}/{companion_repo}:{companion_tag}"
+    companion_dir = tmp_path / "archive_companion_content"
+    companion_dir.mkdir()
+    (companion_dir / "README.txt").write_text("archive companion fixture\n")
+    companion_metadata_path = tmp_path / "archive_companion_metadata.json"
+    companion_metadata_path.write_text(
+        json.dumps(
+            {
+                "type": "bundle",
+                "version": 1,
+                "env": [
+                    {
+                        "key": "ARCHIVE_COMPANION_VAR",
+                        "type": "constant",
+                        "value": "archive-value",
+                        "visibility": "interface",
+                    }
+                ],
+            }
+        )
+    )
+    companion_bundle = tmp_path / "archive_companion_bundle.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(companion_metadata_path),
+        "-o", str(companion_bundle),
+        "-p", "any",
+        str(companion_dir),
+    )
+    # `create` writes the resolved sidecar next to `-o`, not back to `-m`
+    # (see `resolved_metadata_path` doc). `patch test --companion-archive`
+    # reads THAT sidecar and additionally requires an `"identifier"` key —
+    # inject it here, matching the descriptor's companion entry exactly.
+    resolved_metadata_path = companion_bundle.parent / "archive_companion_bundle-metadata.json"
+    assert resolved_metadata_path.exists(), (
+        f"ocx package create must write the resolved sidecar next to -o; "
+        f"expected {resolved_metadata_path}, found: {sorted(p.name for p in companion_bundle.parent.iterdir())}"
+    )
+    resolved_metadata = json.loads(resolved_metadata_path.read_text())
+    resolved_metadata["identifier"] = companion_identifier
+    resolved_metadata_path.write_text(json.dumps(resolved_metadata))
+
+    descriptor_path = tmp_path / "archive_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_identifier]}])
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--companion-archive", str(companion_bundle),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"ocx patch test --companion-archive with a matching sidecar identifier "
+        f"must succeed; got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    archive_var = _entry_by_key(entries, "ARCHIVE_COMPANION_VAR")
+    assert archive_var is not None, (
+        f"ARCHIVE_COMPANION_VAR must appear in patch test entries after "
+        f"--companion-archive materialization; got: {[e['key'] for e in entries]}"
+    )
+    assert archive_var["value"] == "archive-value"
+
+
+def test_patch_test_companion_archive_tag_mismatch_is_loud(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A `--companion-archive` whose sidecar `"identifier"` differs from the
+    descriptor's companion entry ONLY in tag must fail loudly, naming the
+    supplied archive so a maintainer can see the near-miss — not a generic
+    "companion not found" that never mentions what was actually supplied.
+
+    The CLI dedup keys the archive against descriptor entries on
+    registry+repo only, but compose-time resolution needs registry+repo+tag:
+    an archive tagged `2.0.0` is skipped as "already materialized" for a
+    descriptor entry naming `1.0.0`, so the supplied archive is silently
+    discarded and never actually satisfies the required companion.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("tag_mismatch_companion")
+    descriptor_tag = "1.0.0"
+    archive_tag = "2.0.0"
+    descriptor_identifier = f"{registry}/{companion_repo}:{descriptor_tag}"
+    archive_identifier = f"{registry}/{companion_repo}:{archive_tag}"
+
+    companion_dir = tmp_path / "mismatch_companion_content"
+    companion_dir.mkdir()
+    (companion_dir / "README.txt").write_text("mismatch companion fixture\n")
+    companion_metadata_path = tmp_path / "mismatch_companion_metadata.json"
+    companion_metadata_path.write_text(
+        json.dumps(
+            {
+                "type": "bundle",
+                "version": 1,
+                "env": [
+                    {
+                        "key": "TAG_MISMATCH_VAR",
+                        "type": "constant",
+                        "value": "mismatch-value",
+                        "visibility": "interface",
+                    }
+                ],
+            }
+        )
+    )
+    companion_bundle = tmp_path / "mismatch_companion_bundle.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(companion_metadata_path),
+        "-o", str(companion_bundle),
+        "-p", "any",
+        str(companion_dir),
+    )
+    resolved_metadata_path = companion_bundle.parent / "mismatch_companion_bundle-metadata.json"
+    assert resolved_metadata_path.exists(), (
+        f"ocx package create must write the resolved sidecar next to -o; "
+        f"expected {resolved_metadata_path}, found: {sorted(p.name for p in companion_bundle.parent.iterdir())}"
+    )
+    resolved_metadata = json.loads(resolved_metadata_path.read_text())
+    # The archive's own identifier — deliberately a DIFFERENT tag than what
+    # the descriptor below names.
+    resolved_metadata["identifier"] = archive_identifier
+    resolved_metadata_path.write_text(json.dumps(resolved_metadata))
+
+    descriptor_path = tmp_path / "tag_mismatch_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [descriptor_identifier]}])
+    _write_config(ocx, registry, required=True)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--companion-archive", str(companion_bundle),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"a --companion-archive whose tag differs from the descriptor's companion "
+        f"entry must not silently succeed; got exit 0, stdout: {result.stdout}"
+    )
+    assert archive_identifier in result.stderr, (
+        f"the error must name the SUPPLIED archive identifier ({archive_identifier!r}) "
+        f"so the maintainer sees the near-miss against the descriptor's expected "
+        f"{descriptor_identifier!r}; got stderr:\n{result.stderr}"
+    )
+
+
+def test_patch_test_resolves_registry_from_managed_config(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """The exact flow from github issue #286: a fleet-managed `[patches]`
+    section, adopted via `ocx config setup --managed-config <ref>`, must be
+    honoured by `ocx patch test` run WITHOUT `--registry` — the command reads
+    the merged config, not just `$OCX_HOME/config.toml` written directly.
+
+    The managed payload's `[patches].registry` is path-prefixed (the real
+    session's registry was `pes-dcp-oci-ocx-patch.example.corp/managed/user`),
+    so this also exercises the path-prefix seed/read mismatch end to end
+    through the managed-config resolution path.
+    """
+    managed_repo = _unique_repo("managed_patches_config")
+    managed_patch_registry = f"{registry}/extra/managed_prefix"
+    config_toml = f'[patches]\nregistry = "{managed_patch_registry}"\nrequired = true\n'
+    ref = f"{registry}/{managed_repo}:v1"
+    push_managed_config(ocx, managed_repo, "v1", config_toml, tmp_path)
+
+    setup_result = ocx.run(
+        "config", "setup",
+        "--managed-config", ref,
+        format="json",
+        check=False,
+    )
+    assert setup_result.returncode == 0, (
+        f"ocx config setup --managed-config must adopt the pushed payload; "
+        f"got {setup_result.returncode}\nstderr: {setup_result.stderr}"
+    )
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("managed_config_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "MANAGED_CONFIG_VAR", "managed-value")
+
+    descriptor_path = tmp_path / "managed_config_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    # No _write_config call and no --registry flag — the [patches] tier must
+    # come from the adopted managed config alone.
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"ocx patch test without --registry must resolve [patches] from the "
+        f"adopted managed config; got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    managed_var = _entry_by_key(entries, "MANAGED_CONFIG_VAR")
+    assert managed_var is not None, (
+        f"MANAGED_CONFIG_VAR must appear in patch test entries when the [patches] "
+        f"tier comes from managed config; got: {[e['key'] for e in entries]}"
+    )
+    assert managed_var["value"] == "managed-value"
+
+
+def test_patch_test_optional_tier_with_path_prefixed_registry_composes(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """An optional (`required = false`) patch tier on a path-prefixed
+    `[patches]` registry composes the descriptor's companion, exactly like the
+    required tier does.
+
+    `required = false` is the posture that used to hide the seed/read
+    registry-key mismatch: the compose step downgrades an unreadable global
+    descriptor to a warning, so `ocx patch test` exited 0 with none of the
+    descriptor's companions applied — indistinguishable from a genuinely empty
+    descriptor. Now the key agrees and the seed is read back before compose, so
+    the only honest outcome is a successful compose carrying the companion var.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("optional_prefixed_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "OPTIONAL_PREFIXED_VAR", "optional-value")
+
+    descriptor_path = tmp_path / "optional_prefixed_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, f"{registry}/extra/optional_prefix", required=False)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"an optional patch tier on a path-prefixed registry must compose; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    report = json.loads(result.stdout)
+    entries = report["entries"]
+    optional_var = _entry_by_key(entries, "OPTIONAL_PREFIXED_VAR")
+    assert optional_var is not None, (
+        "the seeded descriptor names a companion, so its var must be composed — "
+        "a zero-companion exit 0 is the silent failure this pins; "
+        f"got entries: {[e['key'] for e in entries]}"
+    )
+    assert optional_var["value"] == "optional-value"

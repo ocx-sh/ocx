@@ -353,19 +353,21 @@ directory and renames it into `layers/{registry}/{digest}/`. It then expects
 **Workaround**: add a placeholder file (e.g. `.keep`) inside the package's
 content directory so the tar layer includes at least one file.
 
-### Bug 3 — Error identifier displays as `/`
+### Bug 3 — Error identifier displays as `/` (FIXED)
 
-**Symptom**: error messages for companion lookup failures show
+**Symptom**: error messages for companion lookup failures showed
 `"failed to resolve package: / — required companion install failed..."`.
-The `/` is not a real identifier.
+The `/` was not a real identifier.
 
 **Root cause**: `From<PackageErrorKind> for crate::Error` at
 `crates/ocx_lib/src/error.rs` wraps non-`Internal` error kinds in a
 `PackageError::new(Identifier::new_registry("", ""), ...)`. An empty
 registry + empty repository displays as `"/"`.
 
-**Impact**: diagnostic quality only. The actual companion identifier appears
-after the dash (`— required companion install failed for '<id>':`).
+**Fix**: call sites that know the package now build the error through
+`Error::package(identifier, kind)`, and `PackageError`'s `Display` omits the
+`"<identifier> — "` lead-in entirely for the empty identifier the blanket
+conversion still fabricates for callers that have none.
 
 ### Bug 4 — `ocx clean` removes descriptor manifest blobs
 

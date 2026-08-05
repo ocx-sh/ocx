@@ -489,7 +489,7 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
 
 
 def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
-    """Provision the maintainer cast: author → test → publish → freeze.
+    """Provision the maintainer cast: author → test → preview → publish → freeze.
 
     Publishes a base tool ``mytool`` and an env-only ``corp-ca`` companion
     (INTERFACE ``SSL_CERT_FILE``), configures the ``[patches]`` tier, and writes
@@ -499,6 +499,15 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
     The descriptor lives in the work dir (``$SCENARIO_TMP``) so the recorded
     ``--descriptor descriptor.json`` resolves it; its companion reference
     is the prefixed fq, which the cast sanitiser rewrites back to ``corp-ca``.
+
+    Also builds an UNPUBLISHED ``corp-ca:2.0.0`` bundle (via ``ocx package
+    create``, never pushed) plus its own ``descriptor-preview.json`` naming it,
+    so the cast can demonstrate ``ocx patch test --companion-archive`` before
+    the companion exists on the registry. The resolved metadata sidecar
+    ``ocx package create`` writes carries no ``identifier`` field of its own
+    (see ``conventions::metadata_identifier_or_error``), so it is injected
+    here the same way a maintainer would hand-edit the generated
+    ``<archive-stem>-metadata.json``.
     """
     base_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
@@ -534,6 +543,52 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
     descriptor.write_text(json.dumps({
         "version": 1,
         "rules": [{"match": "*", "packages": [companion.fq], "required": True}],
+    }, indent=2))
+
+    # An unpublished corp-ca 2.0.0 the maintainer is developing but has not
+    # pushed yet. Built via `ocx package create` (never `ocx package push`),
+    # matching the doc's "supply a local archive" advice. `-p any` mirrors the
+    # env-only, binary-free companion convention `patches_consumer` uses above.
+    #
+    # File names deliberately avoid the substrings "mytool"/"corp-ca":
+    # `rewrite_command` (cast_layer.py) rewrites a display name to its
+    # prefixed actual repo ANYWHERE it appears in the command text, including
+    # inside an unrelated filename literal — a bundle named e.g.
+    # "corp-ca-2.0.0.tar.xz" gets mangled into a path that was never written.
+    preview_content = tmp_path / "preview-companion-content"
+    preview_content.mkdir()
+    (preview_content / "NOTES.txt").write_text("unpublished corp-ca v2 fixture\n")
+    preview_source_metadata = tmp_path / "preview-companion-source-metadata.json"
+    preview_source_metadata.write_text(json.dumps({
+        "type": "bundle",
+        "version": 1,
+        "env": [
+            {"key": "SSL_CERT_FILE", "type": "constant",
+             "value": "/etc/ssl/certs/corp-ca-v2.pem", "visibility": "interface"},
+        ],
+    }))
+    preview_bundle = tmp_path / "preview-companion.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(preview_source_metadata),
+        "-o", str(preview_bundle),
+        "-p", "any",
+        str(preview_content),
+    )
+    # `create` writes the resolved sidecar next to `-o`, not back to `-m`.
+    # `--companion-archive` additionally requires an "identifier" key naming
+    # the companion exactly (registry, repository, and tag) — inject it here,
+    # matching `descriptor-preview.json`'s companion entry below.
+    preview_identifier = f"{ocx.registry}/{companion.repo}:2.0.0"
+    preview_metadata_path = tmp_path / "preview-companion-metadata.json"
+    preview_metadata = json.loads(preview_metadata_path.read_text())
+    preview_metadata["identifier"] = preview_identifier
+    preview_metadata_path.write_text(json.dumps(preview_metadata, indent=2))
+
+    preview_descriptor = tmp_path / "descriptor-preview.json"
+    preview_descriptor.write_text(json.dumps({
+        "version": 1,
+        "rules": [{"match": "*", "packages": [preview_identifier], "required": True}],
     }, indent=2))
 
     return {"mytool": [mytool], "corp-ca": [companion]}

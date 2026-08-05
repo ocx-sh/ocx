@@ -1231,104 +1231,38 @@ impl PackageManager {
     ///    where the tag-store digest and platform-manifest digest are the same.
     ///
     /// Returns `Ok(None)` when the companion is not installed locally.
+    ///
+    /// Each of the manager's local index stores
+    /// ([`PackageManager::local_lookup_index_stores`]) is tried in order, so a
+    /// manager that writes its own tag pointers into a private overlay (the
+    /// `ocx patch test` scratch store) resolves both those companions and the
+    /// ones recorded in the shared home.
     async fn find_companion_local(&self, companion_id: &oci::Identifier) -> crate::Result<Option<InstallInfo>> {
-        use super::common::find_in_store;
-
-        // Build a guaranteed-local index (empty sources → strictly local,
-        // never walks the chain, never contacts the network).
-        //
-        // The companion overlay operates on already-installed state: Phase 3
-        // installed the companion and committed its tag to the local index. The
-        // resolution must be cache-only in EVERY `ChainMode` — in particular it
-        // must NOT use the manager's own `index()`, because under
-        // `ChainMode::Remote` (`--remote`) a tag-addressed `Op::Query` bypasses the
-        // local read and routes to the registry (`ChainedIndex::fetch_manifest_digest`):
-        // that would contact the network from the offline-safe overlay path and
-        // ignore the locally-installed companion tag. Build a fresh `Offline`
-        // index over the effective (--index / OCX_INDEX redirected) snapshot
-        // home so the lookup reads the SAME store the main index resolves
-        // through, and is network-free.
-        let local_index = oci::index::Index::from_chained(
-            oci::index::LocalIndex::new(oci::index::LocalConfig {
-                index_store: self.effective_index_store(),
-            }),
-            Vec::new(),
-            oci::index::ChainMode::Offline,
-        );
-
-        // Step 1: resolve the tag → top-level digest via the local index.
-        // `fetch_manifest_digest` reads only the root document — no blob store access.
-        // On miss → companion not in the local index → not installed.
-        let Some(top_digest) = local_index
-            .fetch_manifest_digest(companion_id, IndexOperation::Query)
-            .await?
-        else {
-            return Ok(None);
-        };
-
-        // Step 2: attempt to read the top-level manifest blob and perform platform
-        // selection for image-index companions. If the blob is not cached (returns
-        // None — no pull has happened since the last `index update`), fall through
-        // to Step 3 which uses the tag-store digest directly.
-        let top_id = companion_id.clone_with_digest(top_digest.clone());
-        if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
-            let pinned_id = match top_manifest {
-                // Single-platform image: tag-store digest IS the platform manifest digest.
-                (digest, oci::Manifest::Image(_)) => {
-                    match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
-                        Ok(id) => id,
-                        Err(_) => return Ok(None),
-                    }
-                }
-                // Multi-platform image index: select the host-platform child manifest
-                // and use ITS digest for the package-store lookup.  The image index
-                // blob was cached by Phase 3 `pull`, so `select` reads it locally.
-                (_, oci::Manifest::ImageIndex(_)) => {
-                    let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-                    let selected_id = match local_index
-                        .select(&top_id, &host_platform, IndexOperation::Query)
-                        .await?
-                    {
-                        SelectResult::Found(id) => id,
-                        SelectResult::NotFound => return Ok(None),
-                        SelectResult::Ambiguous(_) => return Ok(None),
-                        SelectResult::FeatureMismatch { .. } => return Ok(None),
-                    };
-                    match oci::PinnedIdentifier::try_from(selected_id) {
-                        Ok(id) => id,
-                        Err(_) => return Ok(None),
-                    }
-                }
-            };
-            let result = find_in_store(&self.file_structure().packages, &pinned_id)
-                .await
-                .map_err(crate::Error::from)?;
-            return Ok(result);
+        for index_store in self.local_lookup_index_stores() {
+            // Build a guaranteed-local index (empty sources → strictly local,
+            // never walks the chain, never contacts the network).
+            //
+            // The companion overlay operates on already-installed state: Phase 3
+            // installed the companion and committed its tag to the local index. The
+            // resolution must be cache-only in EVERY `ChainMode` — in particular it
+            // must NOT use the manager's own `index()`, because under
+            // `ChainMode::Remote` (`--remote`) a tag-addressed `Op::Query` bypasses the
+            // local read and routes to the registry (`ChainedIndex::fetch_manifest_digest`):
+            // that would contact the network from the offline-safe overlay path and
+            // ignore the locally-installed companion tag. Build a fresh `Offline`
+            // index over the store so the lookup is network-free.
+            let local_index = oci::index::Index::from_chained(
+                oci::index::LocalIndex::new(oci::index::LocalConfig { index_store }),
+                Vec::new(),
+                oci::index::ChainMode::Offline,
+            );
+            if let Some(info) =
+                find_companion_in_index(&local_index, &self.file_structure().packages, companion_id).await?
+            {
+                return Ok(Some(info));
+            }
         }
-
-        // Step 3 (fallback): manifest blob absent from local cache.
-        //
-        // This happens when the tag was indexed (`index update`) but the full
-        // manifest chain was never pulled (no install since the index update).
-        // In this case the tag-store digest and the platform-manifest digest
-        // may differ (for multi-platform companions after `index update` alone).
-        // However, for single-platform companions the tag-store digest IS the
-        // platform manifest digest. Try `find_in_store` with the tag-store digest:
-        // if the package is there it was a single-platform install; if not, the
-        // companion is genuinely not installed locally and `find_in_store` returns
-        // `None` → caller treats as missing.
-        let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
-            Ok(id) => id,
-            Err(_) => return Ok(None),
-        };
-        // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
-        // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
-        // impl already extracts the inner error for the `Internal` arm and wraps
-        // others structurally (no `.to_string()` erasure).
-        let result = find_in_store(&self.file_structure().packages, &pinned_id)
-            .await
-            .map_err(crate::Error::from)?;
-        Ok(result)
+        Ok(None)
     }
 
     /// Look up a companion's installed `InstallInfo`, preferring a pinned digest
@@ -1418,7 +1352,10 @@ impl PackageManager {
         // Build a guaranteed-local index (same pattern as find_companion_local)
         // over the effective (--index / OCX_INDEX redirected) snapshot home so
         // companion tag → digest resolution reads the same store the main index
-        // uses and is network-free in every ChainMode.
+        // uses and is network-free in every ChainMode. The private index overlay
+        // is deliberately not consulted: this feeds GC roots and `patch freeze`
+        // for the real home, and no caller that declares an overlay (only
+        // `ocx patch test`, over a tempdir) ever reaches this path.
         let local_index = oci::index::Index::from_chained(
             oci::index::LocalIndex::new(oci::index::LocalConfig {
                 index_store: self.effective_index_store(),
@@ -1797,6 +1734,90 @@ async fn load_descriptor_for_id(
 /// sync` that publishes a new descriptor cannot change which companions a frozen
 /// build composes. When `snapshot` is `None`, the live tag-store load applies
 /// (the tier floats), via [`load_descriptor_for_id`].
+/// Resolve a companion through one guaranteed-local index, per the algorithm
+/// documented on [`PackageManager::find_companion_local`] — the caller owns the
+/// store order, this owns the tag → platform-manifest → package-store walk.
+///
+/// Returns `Ok(None)` when this index does not resolve the companion's tag, or
+/// resolves it to a package that is not in `packages`.
+async fn find_companion_in_index(
+    local_index: &oci::index::Index,
+    packages: &crate::file_structure::PackageStore,
+    companion_id: &oci::Identifier,
+) -> crate::Result<Option<InstallInfo>> {
+    use super::common::find_in_store;
+
+    // Step 1: resolve the tag → top-level digest via the local index.
+    // `fetch_manifest_digest` reads only the root document — no blob store access.
+    // On miss → companion not in this local index → not installed.
+    let Some(top_digest) = local_index
+        .fetch_manifest_digest(companion_id, IndexOperation::Query)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    // Step 2: attempt to read the top-level manifest blob and perform platform
+    // selection for image-index companions. If the blob is not cached (returns
+    // None — no pull has happened since the last `index update`), fall through
+    // to Step 3 which uses the tag-store digest directly.
+    let top_id = companion_id.clone_with_digest(top_digest.clone());
+    if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
+        let pinned_id = match top_manifest {
+            // Single-platform image: tag-store digest IS the platform manifest digest.
+            (digest, oci::Manifest::Image(_)) => {
+                match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(None),
+                }
+            }
+            // Multi-platform image index: select the host-platform child manifest
+            // and use ITS digest for the package-store lookup.  The image index
+            // blob was cached by Phase 3 `pull`, so `select` reads it locally.
+            (_, oci::Manifest::ImageIndex(_)) => {
+                let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+                let selected_id = match local_index
+                    .select(&top_id, &host_platform, IndexOperation::Query)
+                    .await?
+                {
+                    SelectResult::Found(id) => id,
+                    SelectResult::NotFound => return Ok(None),
+                    SelectResult::Ambiguous(_) => return Ok(None),
+                    SelectResult::FeatureMismatch { .. } => return Ok(None),
+                };
+                match oci::PinnedIdentifier::try_from(selected_id) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(None),
+                }
+            }
+        };
+        let result = find_in_store(packages, &pinned_id).await.map_err(crate::Error::from)?;
+        return Ok(result);
+    }
+
+    // Step 3 (fallback): manifest blob absent from local cache.
+    //
+    // This happens when the tag was indexed (`index update`) but the full
+    // manifest chain was never pulled (no install since the index update).
+    // In this case the tag-store digest and the platform-manifest digest
+    // may differ (for multi-platform companions after `index update` alone).
+    // However, for single-platform companions the tag-store digest IS the
+    // platform manifest digest. Try `find_in_store` with the tag-store digest:
+    // if the package is there it was a single-platform install; if not, the
+    // companion is genuinely not installed locally and `find_in_store` returns
+    // `None` → caller treats as missing.
+    let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
+        Ok(id) => id,
+        Err(_) => return Ok(None),
+    };
+    // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
+    // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
+    // impl already extracts the inner error for the `Internal` arm and wraps
+    // others structurally (no `.to_string()` erasure).
+    let result = find_in_store(packages, &pinned_id).await.map_err(crate::Error::from)?;
+    Ok(result)
+}
+
 async fn load_descriptor_frozen_or_live(
     blob_store: &crate::file_structure::BlobStore,
     registry: &str,

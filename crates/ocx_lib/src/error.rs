@@ -12,7 +12,10 @@ pub enum Error {
     OfflineMode,
 
     /// A file I/O error with path context.
-    #[error("internal file error for '{path}': {source}", path = .0.display(), source = .1)]
+    ///
+    /// The io cause is carried by `#[source]` alone — interpolating it into the
+    /// message too would print it twice in a `{err:#}` chain.
+    #[error("internal file error for '{path}'", path = .0.display())]
     InternalFile(std::path::PathBuf, #[source] std::io::Error),
 
     /// A per-layer layout annotation read from a manifest layer descriptor could
@@ -25,7 +28,7 @@ pub enum Error {
     /// would force. `io::Error::source` skips a boxed inner error, so the layout
     /// cause must be carried as a first-class `#[source]` field here, not
     /// smuggled through `io::Error::other`.
-    #[error("layer layout resolution failed: {0}")]
+    #[error("layer layout resolution failed")]
     LayerLayout(#[source] crate::oci::layer_layout::LayerLayoutError),
 
     /// A destination-path symlink-safety check failed while assembling package
@@ -42,7 +45,7 @@ pub enum Error {
     InternalPathInvalid(std::path::PathBuf),
 
     /// JSON serialization or deserialization failed.
-    #[error("JSON serialization error: {0}")]
+    #[error("JSON serialization error")]
     SerializationFailure(#[from] serde_json::Error),
 
     /// An unsupported OCI media type was encountered.
@@ -116,7 +119,7 @@ pub enum Error {
 
     /// A singleflight coordination error (leader failure, abandonment, timeout,
     /// or capacity exceeded).
-    #[error("singleflight: {0}")]
+    #[error("singleflight coordination failed")]
     Singleflight(#[from] crate::utility::singleflight::Error),
 
     /// A string baked into an install-time launcher contains a character that
@@ -145,23 +148,36 @@ impl From<crate::package::error::Error> for Error {
     }
 }
 
-impl From<crate::package_manager::error::PackageErrorKind> for Error {
-    fn from(kind: crate::package_manager::error::PackageErrorKind) -> Self {
+impl Error {
+    /// Attach the package `identifier` a failure is about to a single-package
+    /// [`PackageErrorKind`](crate::package_manager::error::PackageErrorKind).
+    ///
+    /// Call this wherever the identifier is in scope. The blanket
+    /// `From<PackageErrorKind>` impl below serves callers that have none and
+    /// has to fabricate an empty identifier, which then names no package.
+    pub fn package(identifier: crate::oci::Identifier, kind: crate::package_manager::error::PackageErrorKind) -> Self {
         use crate::package_manager::error::PackageErrorKind;
         match kind {
+            // An internal kind already carries a full `Error`; re-wrapping it in
+            // a batch would only nest this type inside itself.
             PackageErrorKind::Internal(e) => e,
             other => {
                 // Wrap non-internal kinds in a single-entry ResolveFailed batch.
                 // The error message is preserved via `PackageError::Display`.
                 let batch_err = crate::package_manager::error::Error::ResolveFailed(vec![
-                    crate::package_manager::error::PackageError::new(
-                        crate::oci::Identifier::new_registry("", ""),
-                        other,
-                    ),
+                    crate::package_manager::error::PackageError::new(identifier, other),
                 ]);
                 Error::PackageManager(batch_err)
             }
         }
+    }
+}
+
+impl From<crate::package_manager::error::PackageErrorKind> for Error {
+    fn from(kind: crate::package_manager::error::PackageErrorKind) -> Self {
+        // No identifier in scope: the empty one is rendered as no prefix at all
+        // by `PackageError::Display`.
+        Error::package(crate::oci::Identifier::new_registry("", ""), kind)
     }
 }
 
@@ -252,5 +268,59 @@ impl ClassifyExitCode for Error {
             Self::Singleflight(e) => e.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the doubled-source-text bug observed in github issue
+    /// #286: `Error::InternalFile` both interpolates its `#[source]` io error
+    /// into the `#[error("...: {source}")]` message AND marks the same field
+    /// `#[source]`. Rendering through `anyhow`'s alternate format (`{:#}`,
+    /// the convention this codebase uses to print full error chains —
+    /// `quality-rust-errors.md`) walks `source()` on top of the already-
+    /// interpolated top-level message, so the io error's text is printed
+    /// twice: `"internal file error for '<path>': <text>: <text>"`.
+    ///
+    /// Guards against that doubling returning: the io cause must be carried by
+    /// `#[source]` alone, never also interpolated into the message.
+    #[test]
+    fn internal_file_display_does_not_duplicate_source_text() {
+        let io_error = std::io::Error::other("manifest blob not found in CAS");
+        let error = Error::InternalFile(std::path::PathBuf::from("/tmp/example/data"), io_error);
+        let wrapped: anyhow::Error = error.into();
+        let rendered = format!("{wrapped:#}");
+        let occurrences = rendered.matches("manifest blob not found in CAS").count();
+        assert_eq!(
+            occurrences, 1,
+            "the io source text must appear exactly once in the alternate-format chain; got: {rendered}"
+        );
+    }
+
+    /// Regression for github issue #286: converting a
+    /// [`crate::package_manager::error::PackageErrorKind`] that has no natural
+    /// package identifier (e.g. a `patch test` compose failure, which is not
+    /// about any one package) fabricates `Identifier::new_registry("", "")`
+    /// and renders it via `PackageError`'s `"{identifier} — {kind}"` — the
+    /// bare identifier's `Display` is just `/`, so the message reads
+    /// `"failed to resolve package: / — package not found"`, leaking an empty
+    /// placeholder the user never supplied.
+    ///
+    /// Guards against that placeholder returning — and against the obvious
+    /// wrong fix of dropping the whole message with it.
+    #[test]
+    fn package_error_kind_conversion_does_not_leak_bare_identifier_prefix() {
+        let error: Error = crate::package_manager::error::PackageErrorKind::NotFound.into();
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains("/ —"),
+            "converted PackageErrorKind must not render a bare empty-identifier prefix; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("package not found"),
+            "the kind's own message must survive dropping the identifier prefix; got: {rendered}"
+        );
     }
 }
