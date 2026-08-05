@@ -289,6 +289,52 @@ def test_global_descriptor_applies_to_multiple_bases(
     assert ca_entry2["value"] == "corp-ca"
 
 
+def test_global_companion_appears_once_when_it_matches_several_bases(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """A companion matched for several admitted bases is emitted ONCE.
+
+    Regression guard: the projection cache deduped the compute but not the
+    emission, so a `match: "*"` global rule over a multi-package
+    `ocx package env a b` appended the companion's entries once per matched
+    base — duplicate JSON entries, duplicate shell exports, N PATH prepends.
+
+    Counted, not first-matched: `_entry_by_key` returns the first hit and would
+    stay green against duplicates.
+    """
+    companion_repo = _unique_repo("dedup_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DEDUP_CA", "one-copy")
+
+    descriptor_path = tmp_path / "dedup_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": "*", "packages": [companion_fq], "required": True}],
+    )
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "publish",
+        "--descriptor", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert result.returncode == 0, f"--global publish failed:\n{result.stderr}"
+
+    base1 = make_package(ocx, _unique_repo("dedup_base1"), "1.0.0", tmp_path, new=True, cascade=True)
+    base2 = make_package(ocx, _unique_repo("dedup_base2"), "1.0.0", tmp_path, new=True, cascade=True)
+    ocx.plain("package", "install", base1.short)
+    ocx.plain("package", "install", base2.short)
+
+    entries = ocx.json("package", "env", base1.short, base2.short)["entries"]
+    dedup_count = sum(1 for e in entries if e["key"] == "DEDUP_CA")
+    assert dedup_count == 1, (
+        f"a companion matching both bases must contribute exactly one DEDUP_CA entry; "
+        f"got {dedup_count}. entries: {entries}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scenario 2: Per-base descriptor scoped — does NOT compose on different base
 # ---------------------------------------------------------------------------
