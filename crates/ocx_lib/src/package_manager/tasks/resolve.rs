@@ -3237,6 +3237,183 @@ mod phase4_spec_tests {
         );
     }
 
+    /// The SAME companion repository listed at TWO different tags is two distinct
+    /// companions — each projected and emitted once, not deduped against each
+    /// other. Cross-base dedup (`companion_matching_multiple_bases_projects_once`)
+    /// is keyed by the FULL identifier (`registry/repo:tag`), so a repository at
+    /// two tags stays two entries even though both admitted bases match the same
+    /// `"*"` rule and both list the same repository.
+    ///
+    /// Setup: two roots (`alpha`, `beta`), one global descriptor whose `"*"` rule
+    /// names `dedup_companion:1.0.0` THEN `dedup_companion:2.0.0` (same repository,
+    /// distinct tags/digests/installs). Both roots are admitted, so each companion
+    /// tag is matched against both bases — the per-tag dedup must still let both
+    /// versions through exactly once apiece.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_companion_repo_at_two_tags_projects_both_versions() {
+        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
+        use crate::oci::Algorithm;
+
+        let dir = TempDir::new().unwrap();
+        let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
+        let store = manager.file_structure().packages.clone();
+        let blob_store = manager.file_structure().blobs.clone();
+        let tag_store = manager.file_structure().clone();
+
+        // ── Companion repo "dedup_companion" at two tags, each a distinct install
+        //    carrying the SAME interface key with a DISTINCT constant value, so
+        //    version identity is observable in the overlay entries. ────────────
+        let companion_digest_v1 = sha256('c');
+        let companion_digest_v2 = sha256('d');
+        let companion_tag_id_v1 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
+        let companion_tag_id_v2 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
+        let companion_pinned_v1 = PinnedIdentifier::try_from(
+            Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v1.clone()),
+        )
+        .unwrap();
+        let companion_pinned_v2 = PinnedIdentifier::try_from(
+            Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v2.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned_v1,
+            &ResolvedPackage::new(),
+            "COMPANION_VER",
+            "one",
+            Visibility::INTERFACE,
+        );
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned_v2,
+            &ResolvedPackage::new(),
+            "COMPANION_VER",
+            "two",
+            Visibility::INTERFACE,
+        );
+
+        // Both tags share one repository, so the root document must carry BOTH
+        // tag → digest entries at once — `write_companion_root_document` writes a
+        // single-tag document and a second call would overwrite the first tag's
+        // entry, since the root-document path is keyed by repository only.
+        let registry = companion_tag_id_v1.registry();
+        let repository = companion_tag_id_v1.repository();
+        let root_path = tag_store.index.root_document_path(registry, repository);
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        let root_doc = serde_json::json!({
+            "repository": format!("oci://{registry}/{repository}"),
+            "tags": {
+                "1.0.0": { "content": companion_digest_v1.to_string(), "observed": "2026-07-18T00:00:00Z" },
+                "2.0.0": { "content": companion_digest_v2.to_string(), "observed": "2026-07-18T00:00:00Z" },
+            }
+        });
+        std::fs::write(&root_path, serde_json::to_vec(&root_doc).unwrap()).unwrap();
+
+        // ── Global descriptor: catch-all rule → both companion tags, in order ──
+        let descriptor_json = serde_json::json!({
+            "version": 1,
+            "rules": [{
+                "match": "*",
+                "packages": [companion_tag_id_v1.to_string(), companion_tag_id_v2.to_string()],
+            }]
+        })
+        .to_string();
+        let layer_bytes = descriptor_json.as_bytes();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes);
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string();
+        let manifest_bytes = manifest_json.as_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes);
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes)
+            .await
+            .unwrap();
+        let global_id = global_descriptor_id(&test_patch_config());
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // ── Two independent admitted bases ─────────────────────────────────────
+        let load_root = |repo: &str, hex: char, var_key: &str| {
+            let id = pinned(repo, hex);
+            seed_package_with_constant_var(
+                &store,
+                &id,
+                &ResolvedPackage::new(),
+                var_key,
+                "base_value",
+                Visibility::INTERFACE,
+            );
+            let pkg_path = store.path(&id);
+            Arc::new(InstallInfo::new(
+                id,
+                serde_json::from_str::<metadata::Metadata>(
+                    &std::fs::read_to_string(pkg_path.join("metadata.json")).unwrap(),
+                )
+                .unwrap(),
+                ResolvedPackage::new(),
+                crate::file_structure::PackageDir { dir: pkg_path },
+            ))
+        };
+        let alpha = load_root("alpha", 'a', "ALPHA_VAR");
+        let beta = load_root("beta", 'b', "BETA_VAR");
+
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[alpha, beta], false, super::EnvScope::package_tier())
+            .await
+            .unwrap();
+
+        // Premise: BOTH roots composed and were admitted, so the `"*"` rule was
+        // evaluated against two bases — without this, the two-entries assert below
+        // would stay green even if only one base were ever matched.
+        for marker in ["ALPHA_VAR", "BETA_VAR"] {
+            assert!(
+                entries.iter().any(|e| e.key == marker),
+                "premise: both roots must be admitted (missing {marker}); entries: {entries:?}"
+            );
+        }
+
+        // Exactly two COMPANION_VER entries — one per tag — despite both admitted
+        // bases matching the wildcard rule for both tags. Order follows the
+        // package-list order within the rule (v1 before v2), which pins
+        // determinism.
+        let companion_versions: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.key == "COMPANION_VER")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(
+            companion_versions,
+            vec!["one", "two"],
+            "the same companion repository at two tags must project both versions, each exactly once, in package-list order; entries: {entries:?}"
+        );
+
+        assert_eq!(
+            entries.len(),
+            patch_start + provenance.len(),
+            "provenance must be aligned one-to-one with the overlay region; entries: {entries:?}, patch_start: {patch_start}, provenance: {provenance:?}"
+        );
+        let provenance_companions: Vec<String> = provenance.iter().map(|p| p.companion.to_string()).collect();
+        assert_eq!(
+            provenance_companions,
+            vec![companion_tag_id_v1.to_string(), companion_tag_id_v2.to_string()],
+            "the two overlay provenance records must name the two distinct companion identifiers; provenance: {provenance:?}"
+        );
+    }
+
     /// Live overlay × visibility: a companion whose INTERFACE var is overlaid on
     /// a PRIVATE dependency is ABSENT from the consumer view and PRESENT under
     /// `--self`. The global rule targets ONLY the dep (not the root), so the
