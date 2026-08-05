@@ -20,7 +20,7 @@ use crate::package_manager::error::PackageErrorKind;
 /// **Caller contract**: `temp_path` must already contain the layer's `content/` tree
 /// and a `digest` file (see [`file_structure::write_digest_file`]).
 ///
-/// **Race semantics**: when `tokio::fs::rename` fails AND `layer_content` exists,
+/// **Race semantics**: when the rename fails AND `layer_content` exists,
 /// another task already extracted the same layer; the helper logs at debug, removes
 /// `temp_path` best-effort, and returns `Ok(())`. Stale temps that survive the
 /// best-effort cleanup are reclaimed by `TempStore::try_acquire` on subsequent runs.
@@ -32,12 +32,21 @@ pub(super) async fn finalize_layer_dir(
 ) -> Result<(), PackageErrorKind> {
     let layer_path = fs.layers.path(registry, digest);
     let layer_content = fs.layers.content(registry, digest);
+    // Fast path for the concurrent-winner race: on Windows a rename onto an
+    // existing directory reports ERROR_ACCESS_DENIED — the same code the
+    // transient retry targets — so without this probe a lost race would burn
+    // the full backoff schedule before the post-rename guard below catches it.
+    if crate::utility::fs::path_exists_lossy(&layer_content).await {
+        crate::log::debug!("Layer {} already exists (race), cleaning up temp.", digest);
+        let _ = tokio::fs::remove_dir_all(temp_path).await;
+        return Ok(());
+    }
     if let Some(parent) = layer_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(parent.to_path_buf(), e)))?;
     }
-    match tokio::fs::rename(temp_path, &layer_path).await {
+    match crate::utility::fs::rename_with_windows_retry(temp_path, &layer_path).await {
         Ok(()) => {
             crate::log::debug!("Extracted layer {} to {}", digest, layer_path.display());
             Ok(())

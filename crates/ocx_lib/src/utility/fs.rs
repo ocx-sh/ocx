@@ -57,8 +57,10 @@ pub async fn path_exists_lossy(path: &std::path::Path) -> bool {
 /// Creates parent directories of `dst` if needed. If `dst` already exists
 /// (e.g., from a crashed previous attempt), it is removed first.
 ///
-/// Uses `tokio::fs::rename` which requires `src` and `dst` to reside on
-/// the same filesystem. Cross-device moves return an OS error.
+/// Renames via [`rename_with_windows_retry`] — `src` and `dst` must reside
+/// on the same filesystem (cross-device moves return an OS error), and on
+/// Windows a transiently locked tree is retried for up to ~1.6 s before the
+/// access-denied error surfaces.
 pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), crate::Error> {
     if let Some(parent) = dst.parent() {
         tokio::fs::create_dir_all(parent)
@@ -70,10 +72,99 @@ pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()
             .await
             .map_err(|e| crate::error::file_error(dst, e))?;
     }
-    tokio::fs::rename(src, dst)
+    rename_with_windows_retry(src, dst)
         .await
         .map_err(|e| crate::error::file_error(src, e))?;
     Ok(())
+}
+
+/// Backoff schedule for a Windows transient sharing/access retry loop, shared by
+/// [`persist_temp_file`] and [`rename_with_windows_retry`] (rattler
+/// `rename_with_retry` precedent).
+#[cfg(windows)]
+const WINDOWS_TRANSIENT_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(400),
+    std::time::Duration::from_millis(800),
+];
+
+/// Scales `backoff` by ±25% jitter so concurrent retriers do not re-collide on
+/// the same handle in lockstep. Derived from `SystemTime` subsecond nanos to
+/// keep the retry path free of a `rand` dependency.
+#[cfg(windows)]
+fn jittered_backoff(backoff: std::time::Duration) -> std::time::Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
+    std::time::Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale)
+}
+
+/// Whether `error` is the Windows transient class worth retrying:
+/// `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) — another handle
+/// on the path, typically released within milliseconds.
+#[cfg(windows)]
+fn is_transient_windows_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5) | Some(32))
+}
+
+/// Renames `src` to `dst`, retrying on Windows transient lock/access errors.
+///
+/// The directory sibling of [`persist_temp_file`]. A Windows directory rename
+/// fails with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) while
+/// **any** file anywhere inside the tree is still held open — and Windows
+/// Defender real-time scanning opens exactly the files that were just written,
+/// milliseconds after they land. A freshly populated temp directory renamed into
+/// its final store location therefore sits squarely in that hazard window; the
+/// motivating report is issue #285 (`ocx install` failing with
+/// "Access is denied. (os error 5)" on the temp-to-store rename).
+///
+/// The first attempt runs with no delay; up to three retries follow
+/// (100/400/800 ms ±25% jitter). Any other error returns immediately, and after
+/// retry exhaustion the last transient error is returned. On non-Windows this is
+/// a single [`tokio::fs::rename`].
+///
+/// Makes **no idempotency assumption** — an already-present `dst` is NOT treated
+/// as success. What an existing destination means is the caller's call: a
+/// content-addressed destination may read it as a concurrent winner, a mutable
+/// one as stale content that must not be silently kept.
+pub async fn rename_with_windows_retry(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        retry_windows_transient(|| tokio::fs::rename(src, dst)).await
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::fs::rename(src, dst).await
+    }
+}
+
+/// Drives `attempt` through the Windows transient-retry schedule: first call
+/// with no delay, then up to three retries after the jittered backoff, retrying
+/// only the transient class. Parameterized over the operation so the test can
+/// count attempts and release its blocking handle deterministically between
+/// them — a wall-clock release cannot prove the retry path ran.
+#[cfg(windows)]
+async fn retry_windows_transient<Attempt, AttemptFuture>(mut attempt: Attempt) -> std::io::Result<()>
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: std::future::Future<Output = std::io::Result<()>>,
+{
+    let mut last_error: Option<std::io::Error> = None;
+    for backoff in std::iter::once(std::time::Duration::ZERO).chain(WINDOWS_TRANSIENT_BACKOFF) {
+        if !backoff.is_zero() {
+            tokio::time::sleep(jittered_backoff(backoff)).await;
+        }
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(attempt_error) if is_transient_windows_error(&attempt_error) => {
+                last_error = Some(attempt_error);
+            }
+            Err(attempt_error) => return Err(attempt_error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("rename retries exhausted")))
 }
 
 /// Atomically publish a written [`tempfile::NamedTempFile`] to `target` via
@@ -105,33 +196,18 @@ pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        use std::time::Duration;
-
-        const BACKOFF: [Duration; 3] = [
-            Duration::from_millis(100),
-            Duration::from_millis(400),
-            Duration::from_millis(800),
-        ];
-
         let mut tmp_opt = Some(tmp);
         let mut last_err: Option<std::io::Error> = None;
         // First attempt with no backoff, then up to 3 retries with jitter.
-        for backoff in std::iter::once(Duration::ZERO).chain(BACKOFF) {
+        for backoff in std::iter::once(std::time::Duration::ZERO).chain(WINDOWS_TRANSIENT_BACKOFF) {
             if !backoff.is_zero() {
-                // ±25% jitter from SystemTime subsecond nanos (no `rand` dep).
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos();
-                let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
-                std::thread::sleep(Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale));
+                std::thread::sleep(jittered_backoff(backoff));
             }
             let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
             match temp_file.persist(target) {
                 Ok(_) => return Ok(()),
                 Err(persist_err) => {
-                    // ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) — transient.
-                    if matches!(persist_err.error.raw_os_error(), Some(5) | Some(32)) {
+                    if is_transient_windows_error(&persist_err.error) {
                         tmp_opt = Some(persist_err.file);
                         last_err = Some(persist_err.error);
                         continue;
@@ -156,7 +232,7 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
 mod tests {
     use std::io::Write as _;
 
-    use super::persist_temp_file;
+    use super::{persist_temp_file, rename_with_windows_retry};
 
     /// Baseline (all platforms): a written tempfile is published to the target.
     #[test]
@@ -200,5 +276,83 @@ mod tests {
 
         handle.join().unwrap().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-content");
+    }
+
+    /// Baseline (all platforms): a populated directory tree lands at an absent
+    /// destination and the source is consumed.
+    #[tokio::test]
+    async fn rename_with_windows_retry_moves_populated_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested").join("payload"), b"content").unwrap();
+        let destination = dir.path().join("destination");
+
+        rename_with_windows_retry(&source, &destination).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("nested").join("payload")).unwrap(),
+            b"content"
+        );
+        assert!(!source.exists(), "source dir should be consumed by rename");
+    }
+
+    /// Windows regression for issue #285: a handle on a file *inside* the source
+    /// tree makes the parent-directory rename fail with `ERROR_ACCESS_DENIED` —
+    /// the same hazard Defender's real-time scan creates against a just-written
+    /// store directory. The retry loop must succeed once the handle is released.
+    ///
+    /// Deterministic by construction: the blocking handle is released *inside*
+    /// the second attempt closure, so the first attempt provably ran against the
+    /// held handle and the attempt count discriminates every failure mode — a
+    /// bare single-attempt rename reds on the unwrap, and a blocker that failed
+    /// to block reds on the count. No wall-clock coupling.
+    /// Linux/macOS skip it: rename has no sharing-violation semantics there.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rename_with_windows_retry_succeeds_after_blocking_reader_released() {
+        use std::cell::{Cell, RefCell};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let child = source.join("held.bin");
+        std::fs::write(&child, b"payload").unwrap();
+        let destination = dir.path().join("destination");
+
+        // Rust std's default share mode grants FILE_SHARE_DELETE, which would
+        // let the parent-directory rename through. Narrow to FILE_SHARE_READ so
+        // the handle denies the rename — the same restrictive mode an AV scan
+        // handle holds.
+        let blocker = RefCell::new(Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&child)
+                .unwrap(),
+        ));
+        let attempts = Cell::new(0usize);
+
+        super::retry_windows_transient(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 2 {
+                // First attempt ran against the held handle; release before
+                // the retry so it wins.
+                drop(blocker.borrow_mut().take());
+            }
+            tokio::fs::rename(&source, &destination)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            attempts.get(),
+            2,
+            "first attempt must fail against the held handle, second must win"
+        );
+        assert_eq!(std::fs::read(destination.join("held.bin")).unwrap(), b"payload");
     }
 }
