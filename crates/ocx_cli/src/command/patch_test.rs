@@ -35,6 +35,11 @@ pub struct PatchTestArgs {
 
     /// Path to a local archive for a companion package, allowing the companion
     /// to be materialized without a registry round-trip. Repeatable.
+    ///
+    /// The archive's sidecar metadata file, `<archive-stem>-metadata.json`,
+    /// must carry an "identifier" field naming a companion the descriptor lists
+    /// for this base, matching on registry, repository and tag. Anything else is
+    /// a usage error.
     #[clap(long = "companion-archive", value_name = "PATH")]
     companion_archives: Vec<PathBuf>,
 
@@ -79,9 +84,14 @@ impl PatchTestArgs {
 /// real `$OCX_HOME`'s package/blob store is never mutated by `ocx patch test`.
 /// The local index is a separate, self-contained store outside `FileStructure`
 /// (`adr_index_indirection.md` Decision A) and is deliberately NOT
-/// scratch-isolated: it reuses `context.local_index()`, so a companion pull
-/// benefits from (and grows) the same resolved index home every other
-/// command shares.
+/// scratch-isolated for RESOLUTION: it reuses `context.local_index()`, so a
+/// companion pull benefits from (and grows) the same resolved index home every
+/// other command shares.
+///
+/// A `--companion-archive` companion is the exception — it is unpublished, so
+/// its tag pointer must not reach the shared home. Those writes go to the
+/// scratch store, registered as the manager's index overlay, which
+/// guaranteed-local companion lookups read before the shared home.
 fn build_scratch_manager(
     context: &crate::app::Context,
     scratch_root: &std::path::Path,
@@ -110,15 +120,21 @@ fn build_scratch_manager(
     let client: Option<oci::Client> = context.remote_client().ok().cloned();
     let index = Index::from_chained_with_content_store(local_index, sources, mode, file_structure.blobs.clone());
 
+    // The scratch store is the manager's OWN index home: `--companion-archive`
+    // tag pointers are written there and read back from there first. They name
+    // unpublished packages that exist only in this tempdir, so writing them into
+    // the shared home would leave it claiming tags nothing can resolve.
+    let scratch_index_store = file_structure.index.clone();
+
     ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
         .with_patches(Some(patches.clone()))
-        // Route the guaranteed-local companion / site-patch lookups
-        // (`effective_index_store`) through the SAME index home the reused
-        // `local_index` (and thus `pull`) writes tag pointers to. Without this the
-        // manager falls back to the scratch root's empty `index/`, so a
-        // registry-pulled companion's tag pointer — committed to the context's
-        // real home — is invisible to `find_companion_local`, which then reports
-        // the required companion as not found (exit 79).
+        .with_index_overlay(scratch_index_store)
+        // The second leg of those lookups: the SAME index home the reused
+        // `local_index` (and thus `pull`) writes tag pointers to. Without it the
+        // manager would only read the scratch `index/`, so a registry-pulled
+        // companion's tag pointer — committed to the context's real home — is
+        // invisible to `find_companion_local`, which then reports the required
+        // companion as not found (exit 79). Overlay first, this second.
         .with_index(context.local_index().index_store().clone())
 }
 
@@ -174,7 +190,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     let base_info = manager
         .pull(&base_id, platform.clone())
         .await
-        .map_err(ocx_lib::Error::from)
+        .map_err(|kind| ocx_lib::Error::package(base_id.clone(), kind))
         .with_context(|| format!("materializing base '{base_id}' into the scratch store"))?;
     let base_arc = Arc::new(base_info);
 
@@ -193,7 +209,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     let mut composition = manager
         .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone())
         .await
-        .map_err(ocx_lib::Error::from)?;
+        .map_err(|kind| ocx_lib::Error::package(base_id.clone(), kind))?;
 
     // W-11: `composition.entries` and `env_overrides` are disjoint `Vec`s
     // holding independent copies of the `--env` overrides (mirrors exec.rs /
@@ -343,15 +359,19 @@ async fn materialize_companions(
             manager.default_registry(),
         )
         .with_context(|| format!("parsing companion identifier from {}", metadata_path.display()))?;
+        // An archive the descriptor does not name — or names under a different
+        // tag — can never satisfy a companion, and the skip below would hide
+        // that. Refuse before touching the store.
+        cross_check_companion_archive(archive, &identifier, companions)?;
         let info = package::info::Info {
-            identifier,
+            identifier: identifier.clone(),
             metadata: metadata.into(),
             platform: platform.clone(),
         };
         let key = manager
             .materialize_test_companion(info, std::slice::from_ref(&layer))
             .await
-            .map_err(ocx_lib::Error::from)
+            .map_err(|kind| ocx_lib::Error::package(identifier.clone(), kind))
             .with_context(|| format!("materializing companion archive {}", archive.display()))?;
         local_companion_keys.insert(key);
     }
@@ -374,7 +394,7 @@ async fn materialize_companions(
         let pull_result = manager
             .pull(&companion.identifier, platform.clone())
             .await
-            .map_err(ocx_lib::Error::from);
+            .map_err(|kind| ocx_lib::Error::package(companion.identifier.clone(), kind));
         match pull_result {
             Ok(_) => {}
             Err(error) if !companion.required => {
@@ -391,6 +411,77 @@ async fn materialize_companions(
         }
     }
     Ok(())
+}
+
+/// Refuse a `--companion-archive` whose sidecar identifier is not exactly one
+/// the descriptor names for this base.
+///
+/// The registry-pull skip above keys on `registry/repository`, but compose-time
+/// companion resolution matches the TAG too. Without this check an archive
+/// tagged `2.0.0` supplied against a descriptor entry naming `1.0.0` is
+/// materialized, suppresses the pull for that repository, and then satisfies
+/// nothing — the maintainer sees an unresolvable companion for a package they
+/// just handed over, with no mention of the archive.
+fn cross_check_companion_archive(
+    archive: &std::path::Path,
+    identifier: &oci::Identifier,
+    companions: &[ocx_lib::patch::CompanionEntry],
+) -> anyhow::Result<()> {
+    let exact_match = companions.iter().any(|entry| {
+        entry.identifier.registry() == identifier.registry()
+            && entry.identifier.repository() == identifier.repository()
+            && entry.identifier.tag_or_latest() == identifier.tag_or_latest()
+    });
+    if exact_match {
+        return Ok(());
+    }
+    Err(anyhow::Error::from(UsageError::new(format!(
+        "companion archive {} declares identifier '{identifier}', which is not a companion the descriptor names for this base; {}",
+        archive.display(),
+        nearest_companion_hint(identifier, companions)
+    ))))
+}
+
+/// Name the descriptor companion closest to `identifier` and the component that
+/// differs, so a near-miss reads as a near-miss instead of a flat rejection.
+fn nearest_companion_hint(identifier: &oci::Identifier, companions: &[ocx_lib::patch::CompanionEntry]) -> String {
+    let same_repository = companions.iter().find(|entry| {
+        entry.identifier.registry() == identifier.registry() && entry.identifier.repository() == identifier.repository()
+    });
+    if let Some(entry) = same_repository {
+        return format!("the descriptor names '{}', differing in tag", entry.identifier);
+    }
+    if let Some(entry) = companions
+        .iter()
+        .find(|entry| entry.identifier.registry() == identifier.registry())
+    {
+        return format!("the descriptor names '{}', differing in repository", entry.identifier);
+    }
+    match companions.first() {
+        Some(entry) => format!(
+            "the descriptor names '{}', differing in registry (all entries for this base: {})",
+            entry.identifier,
+            listed_companions(companions)
+        ),
+        None => "the descriptor names no companion for this base".to_string(),
+    }
+}
+
+/// The descriptor's companion identifiers as one line, capped so a descriptor
+/// with a long rule set does not bury its own error message.
+fn listed_companions(companions: &[ocx_lib::patch::CompanionEntry]) -> String {
+    const MAX_LISTED: usize = 5;
+
+    let listed = companions
+        .iter()
+        .take(MAX_LISTED)
+        .map(|entry| entry.identifier.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match companions.len().checked_sub(MAX_LISTED) {
+        Some(remaining) if remaining > 0 => format!("{listed}, and {remaining} more"),
+        _ => listed,
+    }
 }
 
 /// Extract the `identifier` field a maintainer set in a companion metadata file.

@@ -788,7 +788,10 @@ mod tests {
         let result = super::load_object_data(&store, &content_dir).await;
         assert!(result.is_err(), "expected validation failure, got Ok");
         let err = result.unwrap_err();
-        let chain = format!("{err:#}");
+        // Render the way `main.rs` does: wrapped in `anyhow`, whose `{:#}` walks
+        // the `source()` chain. A bare `crate::Error` would print only its top
+        // message, which no longer restates its own source.
+        let chain = format!("{:#}", anyhow::Error::from(err));
         assert!(
             chain.contains("missing"),
             "error chain must mention undeclared dep name 'missing': {chain}"

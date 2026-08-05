@@ -186,9 +186,9 @@ where running without the companion is acceptable.
 
 ### 2. Test locally without publishing {#patches-maintainer-test}
 
-`ocx patch test` composes the descriptor onto a base package in a scratch environment
-without touching the live registry or the real `$OCX_HOME`. This lets you verify the
-descriptor before publishing:
+`ocx patch test` composes the descriptor onto a base package in a scratch environment,
+without touching the live registry or the real `$OCX_HOME`, so you can verify it before
+publishing:
 
 ```sh
 ocx patch test \
@@ -196,10 +196,9 @@ ocx patch test \
   java:21
 ```
 
-Without a trailing command, `patch test` prints the composed environment so you can
-inspect which entries the companion contributes.
-
-To run a command in the composed environment:
+Without a trailing command, `patch test` prints the composed environment so you can inspect
+which entries the companion contributes; add `-- java -version` (or any command) to run it
+in that environment instead:
 
 ```sh
 ocx patch test \
@@ -207,7 +206,8 @@ ocx patch test \
   java:21 -- java -version
 ```
 
-If the companion package is not yet published, supply a local archive:
+If the companion package is not yet published, supply a local archive instead of pulling it
+from the registry:
 
 ```sh
 ocx patch test \
@@ -215,6 +215,20 @@ ocx patch test \
   --companion-archive ./ca-bundle-1.0.tar.xz \
   java:21 -- java -version
 ```
+
+`--companion-archive` reads the archive's metadata sidecar (`<archive-stem>-metadata.json`,
+the same naming [`ocx package test`][cmd-package-test]'s `--metadata` flag defaults to) and
+requires an `identifier` field inside it — there is no `-i` flag on `patch test` itself to
+supply one instead. That identifier must match one of the descriptor's companion entries
+exactly: registry, repository, and tag. Spell it out in full — a bare identifier with no
+registry qualifies against your configured default registry, not the `[patches]` registry,
+so `ca-bundle:1.0` can silently resolve somewhere the descriptor never pointed. A mismatch
+fails loud (exit 64), naming the nearest descriptor entry it found instead of a generic
+"not found".
+
+The base package has no such affordance: it must always be published and pullable.
+`--companion-archive` only lets you preview a companion before it exists on the registry,
+not the package you are patching.
 
 ### 3. Publish the companion, then the descriptor {#patches-maintainer-publish}
 
@@ -465,4 +479,5 @@ For the full field reference, see the [`[patches]` configuration section][config
 [cmd-env-root]: ../reference/command-line.md#env-root
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-package-exec]: ../reference/command-line.md#package-exec
+[cmd-package-test]: ../reference/command-line.md#package-test
 [cmd-lock]: ../reference/command-line.md#lock

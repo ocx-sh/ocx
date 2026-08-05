@@ -137,12 +137,18 @@ impl PackageManager {
         //
         // Synthesize the minimal single-layer manifest shape that
         // `load_descriptor_frozen_or_live` / `load_descriptor_from_cas` expect,
-        // then write both blobs keyed by the patch registry host.
+        // then write both blobs under the descriptor id's BARE-HOST registry —
+        // the exact key the compose-time read (`build_site_patch_set`) uses.
+        // The configured `patches.registry` may carry a path prefix
+        // (`registry.corp.example/ocx-patches`), which `global_descriptor_id`
+        // folds in front of the repository; keying the CAS by the raw string
+        // would write to a directory nothing ever reads back.
+        let global_id = super::patch_discovery::global_descriptor_id(patches);
         let (manifest_bytes, manifest_digest, layer_digest) = synthesize_descriptor_manifest(descriptor_bytes);
         let blob_store = &self.file_structure().blobs;
         crate::patch::persist_patch_descriptor(
             blob_store,
-            patches.registry.as_str(),
+            global_id.registry(),
             manifest_digest.clone(),
             &manifest_bytes,
             layer_digest,
@@ -157,9 +163,21 @@ impl PackageManager {
         // mirroring how Phase 3 discovery records a found descriptor. The
         // unchanged `build_site_patch_set` reads this tag + the CAS blob to
         // reconstruct the descriptor — no compose-time descriptor override.
-        let global_id = super::patch_discovery::global_descriptor_id(patches);
         let global_tags_path = self.file_structure().patch_descriptor_path(&global_id);
         super::patch_discovery::PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+
+        // ── Step 2b: Prove the seed is readable back, through the loader compose
+        // will use. ──
+        //
+        // `build_site_patch_set` downgrades a `Corrupt` descriptor read to a
+        // warning whenever the tier is `required = false`, so a seed that landed
+        // where nothing reads it composes zero companions and exits 0 — the
+        // maintainer cannot tell "the descriptor matches nothing" from "the
+        // preview never loaded the descriptor at all". Reading it back here makes
+        // a broken seed fail loudly, regardless of the tier's fail posture.
+        super::patch_discovery::load_descriptor_from_cas(blob_store, global_id.registry(), &manifest_digest)
             .await
             .map_err(PackageErrorKind::Internal)?;
 
@@ -227,7 +245,11 @@ impl PackageManager {
         let companion_tag_id = info.identifier.clone();
         let installed = self.pull_local(info, layers, None).await?;
         let digest = installed.identifier().digest();
-        register_local_companion_tag(&self.file_structure().index, &companion_tag_id, &digest)
+        // `local_tag_store` is this manager's OWN index store — the scratch
+        // overlay for `ocx patch test`. An unpublished companion's tag pointer
+        // must never land in the shared `$OCX_HOME` index, and compose-time
+        // companion resolution reads the same store back first.
+        register_local_companion_tag(self.local_tag_store(), &companion_tag_id, &digest)
             .await
             .map_err(PackageErrorKind::Internal)?;
         Ok(format!(
@@ -613,6 +635,178 @@ mod tests {
             "ca-bundle",
             "overlay entry traces to the ca-bundle companion; got {}",
             prov.companion
+        );
+    }
+
+    // ── Target 4b: path-prefixed patch registry (github issue #286 / B1) ──────────
+
+    /// A path-prefixed patch registry: a host authority followed by a `/`-separated
+    /// path component, e.g. `registry.corp.example/ocx-patches`. Pins the CAS key
+    /// both sides of the seed must agree on — the BARE HOST from
+    /// [`super::patch_discovery::global_descriptor_id`]`(patches).registry()`, via
+    /// `patch_registry_identifier`'s host/prefix split. With the bare-host
+    /// [`PATCH_REGISTRY`] constant used elsewhere in this module the raw config
+    /// string and the bare host coincide, so only a path-prefixed registry can
+    /// tell a correct key from the raw one.
+    const PATCH_REGISTRY_PATH_PREFIXED: &str = "patches.corp.com/ocx-patches";
+
+    /// Traces: regression for github issue #286 — a maintainer's `[patches]`
+    /// registry carrying a path prefix (the common shape for a corporate OCI
+    /// registry, e.g. `registry.corp.example/ocx-patches`) made `ocx patch test`
+    /// fail with "manifest blob not found in CAS" even though the seeded
+    /// descriptor was just persisted by the very same call. Same setup as
+    /// [`seeded_descriptor_with_present_companion_yields_companion_interface_var`]
+    /// above, but `patches.registry` carries a path prefix.
+    ///
+    /// Guards the write/read key agreement: seeding once keyed the blobs by the
+    /// raw config string while compose read them back under the bare host — two
+    /// different CAS directories, so the (required) global descriptor read back
+    /// as `Corrupt` and the call failed closed instead of composing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seeded_descriptor_with_path_prefixed_registry_and_present_companion_yields_companion_interface_var() {
+        let dir = TempDir::new().unwrap();
+        let patches = ResolvedPatchConfig {
+            registry: PATCH_REGISTRY_PATH_PREFIXED.to_string(),
+            ..patch_config(true)
+        };
+        let manager = make_scratch_manager(dir.path(), patches.clone());
+        let store = manager.file_structure().packages.clone();
+        let tag_store = manager.file_structure().clone();
+
+        // Companion: fully installed with an INTERFACE var. Its OWN registry is
+        // independent of the (path-prefixed) patch registry — only the
+        // descriptor's own storage location is affected by the prefix.
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            "SSL_CERT_FILE",
+            "/etc/ssl/certs/ca-bundle.crt",
+            Visibility::INTERFACE,
+        );
+        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+
+        // Base: no deps, no env of its own.
+        let base = make_base(dir.path(), &store, "cmake", 'r');
+
+        let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
+        let composition = manager
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .await
+            .expect("seed-and-compose must succeed with a path-prefixed patch registry");
+
+        // The companion matched the catch-all rule for the base.
+        assert!(
+            composition
+                .matched_companions
+                .iter()
+                .any(|c| c.repository() == "ca-bundle"),
+            "matched_companions must include the ca-bundle companion; got: {:?}",
+            composition.matched_companions
+        );
+
+        // The composed env must carry the companion's INTERFACE var.
+        let entry = composition.entries.iter().find(|e| e.key == "SSL_CERT_FILE");
+        assert!(
+            entry.is_some(),
+            "composed env must contain the companion's SSL_CERT_FILE var under a \
+             path-prefixed patch registry; entries: {:?}",
+            composition.entries
+        );
+        assert_eq!(
+            entry.map(|e| e.value.as_str()),
+            Some("/etc/ssl/certs/ca-bundle.crt"),
+            "companion var value must be the descriptor companion's value"
+        );
+    }
+
+    /// The seed is read back before compose (Step 2b), and the loader that
+    /// guard relies on genuinely discriminates: it loads the freshly seeded
+    /// descriptor, and errors once the persisted manifest blob is removed.
+    ///
+    /// `required = false` is the posture that hides an unreadable seed —
+    /// `build_site_patch_set` downgrades a corrupt descriptor to a warning
+    /// there, so without the guard a broken seed exits 0 with no companions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seeded_descriptor_read_back_discriminates_a_missing_manifest_blob() {
+        use super::super::patch_discovery::{global_descriptor_id, load_descriptor_from_cas};
+
+        let dir = TempDir::new().unwrap();
+        let patches = patch_config(false);
+        let manager = make_scratch_manager(dir.path(), patches.clone());
+        let store = manager.file_structure().packages.clone();
+        let base = make_base(dir.path(), &store, "cmake", 'r');
+
+        // The companion is deliberately absent: with an optional tier that is a
+        // successful, zero-companion compose — exactly the case the guard has to
+        // tell apart from an unreadable seed.
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
+        manager
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .await
+            .expect("an optional companion that is absent must still seed and compose");
+
+        let global_id = global_descriptor_id(&patches);
+        let (_, manifest_digest, _) = synthesize_descriptor_manifest(&descriptor_bytes);
+        let blob_store = &manager.file_structure().blobs;
+
+        load_descriptor_from_cas(blob_store, global_id.registry(), &manifest_digest)
+            .await
+            .expect("the seeded descriptor must read back from the CAS");
+
+        std::fs::remove_file(blob_store.data(global_id.registry(), &manifest_digest))
+            .expect("the persisted manifest blob must exist before removal");
+        assert!(
+            load_descriptor_from_cas(blob_store, global_id.registry(), &manifest_digest)
+                .await
+                .is_err(),
+            "the read-back must fail once the manifest blob is gone — otherwise the guard proves nothing"
+        );
+    }
+
+    /// A seed that cannot be read back fails the call, even under an optional
+    /// tier — the posture where compose warn-skips a corrupt descriptor and
+    /// would otherwise return a zero-companion `Ok`.
+    ///
+    /// Poisons the CAS before seeding: `BlobStore::write_blob` short-circuits
+    /// on an existing non-empty file, so the seed's own write lands on the
+    /// garbage and `persist_patch_descriptor` never re-reads it. Only Step 2b's
+    /// read-back notices, so this test reds exactly on that guard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreadable_seed_fails_the_call_under_an_optional_tier() {
+        use super::super::patch_discovery::global_descriptor_id;
+
+        let dir = TempDir::new().unwrap();
+        let patches = patch_config(false);
+        let manager = make_scratch_manager(dir.path(), patches.clone());
+        let store = manager.file_structure().packages.clone();
+        let base = make_base(dir.path(), &store, "cmake", 'r');
+
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
+
+        let global_id = global_descriptor_id(&patches);
+        let (_, manifest_digest, _) = synthesize_descriptor_manifest(&descriptor_bytes);
+        let poisoned = manager
+            .file_structure()
+            .blobs
+            .data(global_id.registry(), &manifest_digest);
+        std::fs::create_dir_all(poisoned.parent().unwrap()).unwrap();
+        std::fs::write(&poisoned, b"not the manifest these bytes are addressed by").unwrap();
+
+        let result = manager
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new())
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an unreadable seed must fail loudly, not compose zero companions and exit 0; got: {result:?}"
         );
     }
 

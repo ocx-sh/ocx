@@ -3730,7 +3730,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
-| `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. |
+| `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. There is no `-i` flag to name the companion — the archive's metadata sidecar (`<archive-stem>-metadata.json`, the same naming [`ocx package test`][cmd-package-test]'s `--metadata` flag defaults to) must carry an `identifier` field matching one of the descriptor's companion entries exactly: registry, repository, and tag. A bare identifier (no registry) qualifies against your configured default registry, not the `[patches]` registry. |
 | `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
 | `--registry <HOST/PATH>` | | Patch registry to compose against, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can preview a descriptor against a new patch registry without a config block. Defaults to the configured registry. |
 | `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
@@ -3743,7 +3743,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 |------|---------|
 | 0 | Environment printed, or the trailing command/script exited 0. |
 | *(child's exit code)* | With a trailing command, the child's exit code is forwarded unchanged — a command that exits 7 makes `patch test` exit 7. |
-| 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before testing. |
+| 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before testing; a `--companion-archive` metadata sidecar has no `identifier` field; or its `identifier` does not match a companion the descriptor names for the base (naming the nearest entry it found). |
 | 65 | Descriptor JSON is malformed or the version is unsupported; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]). |
 | 81 | `--offline` blocked resolving the base or a required companion. |
 | *other* | A required companion could not be resolved; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
