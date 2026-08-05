@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-08-05
+
+### Added
+
+- Surface cross-repo blob mount through transport and publisher *(oci)*
+- From= layer-ref source and layer push counters *(cli)*
+- Explicit binding names via ocx add NAME=IDENTIFIER *(cli)*
+- Add cascade check and repair for the rolling-tag graph *(package)*
+- Replace the generated catalog with a link to index.ocx.sh *(website)*
+
+### Fixed
+
+- Resolve the physical reference from the local index before the sources *(oci)*
+- Gate the same_file test helper to unix like its callers *(lib)*
+- Allow the package-test scratch roots as shim package roots *(shim)*
+- Retry an unsupported extended spawn without handle/job scoping *(shim)*
+- Read the keyed package-info JSON in the catalog generator *(website)*
+- The local index is the package-tier lock — nothing moves a pin implicitly *(index)* **BREAKING**
+- Retry temp-directory renames that Windows blocks with access denied *(install)*
+
 ## [0.5.3] - 2026-08-03
 
 ### Added
@@ -17,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exit 75 when a lock resolve gives up on a transient registry fault *(project)* **BREAKING**
 - Bound the registry connect phase at 30 seconds *(oci)*
 - Resolve commands against the package before the host PATH *(cli)* **BREAKING**
+
+### Release
+
+- V0.5.3
 
 ## [0.5.2] - 2026-08-02
 
@@ -790,6 +814,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.5.4]: https://github.com/ocx-sh/ocx/compare/v0.5.3..v0.5.4
 [0.5.3]: https://github.com/ocx-sh/ocx/compare/v0.5.2..v0.5.3
 [0.5.2]: https://github.com/ocx-sh/ocx/compare/v0.5.1..v0.5.2
 [0.5.1]: https://github.com/ocx-sh/ocx/compare/v0.5.0..v0.5.1
