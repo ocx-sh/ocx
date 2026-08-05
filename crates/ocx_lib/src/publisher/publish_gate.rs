@@ -4,19 +4,16 @@
 //! Pre-push dependency-pin gate for `ocx package push`.
 //!
 //! Push makes no resolution decisions (`adr_dependency_manifest_pinning.md`):
-//! it verifies that every dependency projects to a platform **manifest**
-//! digest for the single target platform (`adr_platform_model_unification.md`
-//! D5), and that each projected pin actually exists in its registry as an
-//! image manifest — an image INDEX digest is rejected because a tag's index
-//! is rewritten (and its old digest garbage-collected) on every platform
-//! push.
+//! it reads the already-pinned published metadata and verifies each pin
+//! against the registry it names. A dependency with no digest cannot reach
+//! here — the published metadata type has no digest-less form, so an
+//! unresolved dependency fails at parse.
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::oci::{self, Platform, client::error::ClientError};
-use crate::package::dependency_pinning::reject_digest_pins_in_any_target;
-use crate::package::metadata::authoring::{AuthoringError, AuthoringMetadata};
+use crate::package::metadata::Metadata;
 use crate::{log, oci::Client};
 
 /// Maximum number of dependency-pin registry verifications to run
@@ -26,41 +23,34 @@ use crate::{log, oci::Client};
 /// bulk transfer) — the same shape as `TagManager::refresh`'s per-tag digest
 /// fetch, which uses the same bounded-`buffer_unordered` idiom. Dependency
 /// count is itself capped at
-/// [`AuthoringDependencies::MAX_DEPENDENCIES`](crate::package::metadata::authoring::AuthoringDependencies::MAX_DEPENDENCIES)
+/// [`Dependencies::MAX_DEPENDENCIES`](crate::package::metadata::dependency::Dependencies::MAX_DEPENDENCIES)
 /// (256), so this only needs to bound simultaneous in-flight requests per
 /// push, not overall fan-out; 16 keeps a polite per-registry burst while
 /// still parallelizing the common case of a handful of cross-registry deps.
 const DEPENDENCY_PIN_VERIFY_CONCURRENCY: usize = 16;
 
-/// Verify every dependency pin of `metadata` for the single target
-/// `platform`.
+/// Verify every dependency pin of the published `metadata` for the single
+/// target `platform`.
 ///
-/// Five checks, in order:
+/// Three checks:
 ///
-/// 1. D5: an `any`-targeted bundle carries no direct digest pin on any
-///    dependency ([`PublishGateError::DirectDigestPinInAnyTarget`]) — a leaf
-///    manifest carries no platform descriptor, so a bare `@digest` pin cannot
-///    be verified to be `any`-offered;
-/// 2. every dependency carries a digest or a non-empty pin map
-///    ([`PublishGateError::DependencyUnpinned`]);
-/// 3. every dependency projects to a pin for `platform`
-///    ([`PublishGateError::MissingPlatformCoverage`]);
-/// 4. for an `any`-targeted bundle, every pin (necessarily projected from a
-///    `platforms` map — check 1 already rejected direct digest pins) is a
-///    *genuine* `any` offer in the dependency's own image index, not merely
-///    an `"any"`-keyed sidecar claim ([`verify_any_pin_provenance`]) — this
-///    is what check 1 alone cannot catch: a hand-edited sidecar could carry
-///    `platforms: {"any": "<a platform-specific leaf digest>"}` and
-///    [`AuthoringDependency::pin_for`](crate::package::metadata::authoring::AuthoringDependency::pin_for)
-///    has no way to tell (leaf manifests carry no platform descriptor);
-/// 5. every projected pin resolves in its registry to an image manifest —
-///    verified via [`Client::pull_manifest`], which also authenticates per
-///    registry (cross-registry dependencies covered).
+/// 1. for an `any`-targeted bundle, every pin is a *genuine* `any` offer in
+///    the dependency's own image index ([`verify_any_pin_provenance`]) — a
+///    leaf manifest carries no platform descriptor, so nothing about the pin
+///    itself says whether the dependency runs everywhere or only on one
+///    platform, and a sidecar cannot be taken at its word for it;
+/// 2. every pin resolves in its registry to an image **manifest** — an image
+///    INDEX digest is rejected because a tag's index is rewritten (and its
+///    old digest garbage-collected) on every platform push, so such a pin is
+///    guaranteed to break;
+/// 3. that resolution succeeds at all — verified via
+///    [`Client::pull_manifest`], which also authenticates per registry, so
+///    cross-registry dependencies are covered.
 ///
-/// Checks 4 and 5 run concurrently per dependency (bounded by
-/// [`DEPENDENCY_PIN_VERIFY_CONCURRENCY`]); the first verification failure
-/// short-circuits the rest. Check 4 is skipped entirely for a concrete-target
-/// bundle — no extra network beyond the existing check 5 fetch.
+/// All three run concurrently per dependency (bounded by
+/// [`DEPENDENCY_PIN_VERIFY_CONCURRENCY`]); the first failure short-circuits
+/// the rest. Check 1 is skipped entirely for a concrete-target bundle — no
+/// extra network beyond the fetch checks 2 and 3 already make.
 ///
 /// # Errors
 ///
@@ -68,40 +58,20 @@ const DEPENDENCY_PIN_VERIFY_CONCURRENCY: usize = 16;
 /// classify to their own exit code.
 pub async fn verify_dependency_pins(
     client: &Client,
-    metadata: &AuthoringMetadata,
+    metadata: &Metadata,
     platform: &Platform,
 ) -> Result<(), PublishGateError> {
-    if platform.is_any()
-        && let Some(identifier) = reject_digest_pins_in_any_target(metadata.dependencies())
-    {
-        return Err(PublishGateError::DirectDigestPinInAnyTarget { identifier });
-    }
-
-    // `AuthoringDependencies` enforces a unique (registry, repository) per
-    // entry, so distinct dependencies can never project to the same pin —
-    // no dedup pass is needed before verifying. `dependency_identifier` is
-    // carried alongside each pin so an `any`-target provenance check
+    // `Dependencies` enforces a unique (registry, repository) per entry, so
+    // distinct dependencies can never carry the same pin — no dedup pass is
+    // needed before verifying. The un-digested identifier is derived
+    // alongside each pin so an `any`-target provenance check
     // (`verify_any_pin_provenance`) can re-fetch the dependency's own
     // manifest by its advisory tag.
-    let mut pins: Vec<(oci::Identifier, oci::PinnedIdentifier)> = Vec::new();
-    for dep in metadata.dependencies() {
-        if !dep.is_pinned() {
-            return Err(PublishGateError::DependencyUnpinned {
-                identifier: Box::new(dep.identifier.clone()),
-            });
-        }
-        let pin = dep.pin_for(platform).map_err(|error| match error {
-            AuthoringError::MissingPlatformPin { identifier, platform } => {
-                PublishGateError::MissingPlatformCoverage { identifier, platform }
-            }
-            // `is_pinned` was checked above; any other projection error is
-            // an unpinned dependency in disguise.
-            _ => PublishGateError::DependencyUnpinned {
-                identifier: Box::new(dep.identifier.clone()),
-            },
-        })?;
-        pins.push((dep.identifier.clone(), pin));
-    }
+    let pins: Vec<(oci::Identifier, oci::PinnedIdentifier)> = metadata
+        .dependencies()
+        .iter()
+        .map(|dep| (dep.identifier.without_digest(), dep.identifier.clone()))
+        .collect();
 
     let is_any_target = platform.is_any();
 
@@ -135,13 +105,11 @@ pub async fn verify_dependency_pins(
 }
 
 /// D5 fail-closed provenance check for an `any`-targeted bundle
-/// (`adr_platform_model_unification.md` D5): a dependency's `platforms` map
-/// key is a sidecar-authored claim, not registry evidence. Because a leaf
-/// manifest carries no platform descriptor, a hand-edited sidecar could pin a
-/// platform-specific leaf under the `"any"` key and
-/// [`AuthoringDependency::pin_for`](crate::package::metadata::authoring::AuthoringDependency::pin_for)
-/// has no way to detect the forgery — publishing a platform-specific
-/// dependency as if it were universal.
+/// (`adr_platform_model_unification.md` D5): a dependency pin is a
+/// sidecar-authored claim, not registry evidence. Because a leaf manifest
+/// carries no platform descriptor, a hand-edited sidecar could pin a
+/// platform-specific leaf in a bundle published as universal, and nothing in
+/// the metadata itself could detect the forgery.
 ///
 /// This re-derives the fact from the dependency's own image index: fetch
 /// `dependency_identifier`'s current manifest by its advisory tag and require
@@ -151,6 +119,15 @@ pub async fn verify_dependency_pins(
 /// [`Index::fetch_candidates`](crate::oci::Index::fetch_candidates) uses for
 /// `Manifest::Image` — so it passes only when its own digest equals `pin`'s
 /// (there is no other leaf it could be).
+///
+/// A dependency pinned without an advisory tag is fetched at `latest`
+/// ([`Identifier::tag_or_latest`](crate::oci::Identifier::tag_or_latest)), so
+/// it passes exactly when the registry currently advertises the pinned digest
+/// as `any` under `latest` — a moving tag deciding a fixed pin. Otherwise it
+/// is [`AnyPinNotAdvertisedAsAny`](PublishGateError::AnyPinNotAdvertisedAsAny)
+/// when `latest` resolves but does not carry the digest as `any`, and
+/// [`AnyPinProvenanceUnavailable`](PublishGateError::AnyPinProvenanceUnavailable)
+/// when there is no `latest` to fetch at all.
 async fn verify_any_pin_provenance(
     client: &Client,
     dependency_identifier: &oci::Identifier,
@@ -185,32 +162,13 @@ async fn verify_any_pin_provenance(
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PublishGateError {
-    /// A dependency has neither a digest nor a platforms pin map.
-    #[error("dependency '{identifier}' is not pinned to a manifest digest; re-run `ocx package create` to resolve it")]
-    DependencyUnpinned { identifier: Box<oci::Identifier> },
-    /// A dependency's pin map has no key covering a fan-out platform.
-    #[error(
-        "dependency '{identifier}' has no manifest pin covering target platform '{platform}'; re-run `ocx package create`"
-    )]
-    MissingPlatformCoverage {
-        identifier: Box<oci::Identifier>,
-        platform: String,
-    },
     /// The pinned digest resolves to an image INDEX, not a manifest.
     #[error(
         "dependency '{identifier}' pins an image INDEX digest; a tag's index is rewritten on every platform push and its old digest is garbage-collected, so this pin will break — re-run `ocx package create` to pin platform manifest digests"
     )]
     DependencyPinnedToIndex { identifier: Box<oci::PinnedIdentifier> },
-    /// D5: an `any`-targeted bundle carries a direct digest pin on a
-    /// dependency. A leaf manifest carries no platform descriptor, so a bare
-    /// `@digest` pin cannot be verified to be `any`-offered.
-    #[error(
-        "dependency '{identifier}' carries a direct digest pin in an `any`-targeted bundle; run `ocx package create --platform any` to resolve it"
-    )]
-    DirectDigestPinInAnyTarget { identifier: Box<oci::Identifier> },
-    /// D5 provenance check: a dependency pinned via its `platforms` map for
-    /// an `any`-targeted bundle is not advertised as `any` in the
-    /// dependency's own image index — the sidecar's `"any"` key is a
+    /// D5 provenance check: a dependency of an `any`-targeted bundle is not
+    /// advertised as `any` in the dependency's own image index — the pin is a
     /// publisher claim, not registry evidence, so it cannot forge a
     /// platform-specific dependency into a universal one.
     #[error(
@@ -245,11 +203,9 @@ pub enum PublishGateError {
 impl ClassifyExitCode for PublishGateError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            PublishGateError::DependencyUnpinned { .. }
-            | PublishGateError::MissingPlatformCoverage { .. }
-            | PublishGateError::DependencyPinnedToIndex { .. }
-            | PublishGateError::DirectDigestPinInAnyTarget { .. }
-            | PublishGateError::AnyPinNotAdvertisedAsAny { .. } => Some(ExitCode::DataError),
+            PublishGateError::DependencyPinnedToIndex { .. } | PublishGateError::AnyPinNotAdvertisedAsAny { .. } => {
+                Some(ExitCode::DataError)
+            }
             PublishGateError::DependencyManifestNotFound { .. } => Some(ExitCode::NotFound),
             // Delegate to the inner cause (auth → 80, network → 69, a missing
             // dependency tag → 79 via the wrapped `crate::Error`).
@@ -273,7 +229,7 @@ mod tests {
         Client::with_transport(Box::new(StubTransport::new(data)))
     }
 
-    fn metadata(deps_json: &str) -> AuthoringMetadata {
+    fn metadata(deps_json: &str) -> Metadata {
         serde_json::from_str(&format!(
             r#"{{"type":"bundle","version":1,"dependencies":[{deps_json}]}}"#
         ))
@@ -298,10 +254,10 @@ mod tests {
 
     // ── D5 any-provenance check fixtures ────────────────────────────────
     //
-    // A `platforms`-map dependency keeps its advisory tag on `identifier`
-    // (`pin_for` only attaches the digest), so `verify_any_pin_provenance`
-    // fetches by TAG (`example.com/dep:1.0`) to read the dependency's own
-    // image index, then verifies the leaf via the pin's tag+digest reference
+    // A pinned dependency keeps its advisory tag on `identifier` (create only
+    // attaches the digest), so `verify_any_pin_provenance` fetches by TAG
+    // (`example.com/dep:1.0`) to read the dependency's own image index, then
+    // verifies the leaf via the pin's tag+digest reference
     // (`example.com/dep:1.0@sha256:<hex>`), matching `pull_manifest`'s
     // reference-building. Both keys must be seeded independently.
 
@@ -327,8 +283,8 @@ mod tests {
         );
     }
 
-    /// Seed the stub so `example.com/dep:1.0@sha256:<hex>` (the reference
-    /// `pin_for` projects for a `platforms`-map dependency) resolves to `body`.
+    /// Seed the stub so `example.com/dep:1.0@sha256:<hex>` (the reference a
+    /// tag-bearing pinned dependency resolves to) resolves to `body`.
     fn seed_manifest_by_tag_and_digest(data: &StubTransportData, digest_hex: &str, body: &str) {
         data.write().manifests.insert(
             format!("example.com/dep:1.0@sha256:{digest_hex}"),
@@ -336,70 +292,20 @@ mod tests {
         );
     }
 
-    /// A `platforms`-map dependency pinning `digest_hex` under the `"any"`
-    /// key — the shape `ocx package create --platform any` writes, and the
-    /// shape a hand-edited sidecar could forge.
-    fn metadata_with_any_pin(digest_hex: &str) -> AuthoringMetadata {
+    /// A dependency pinned to `digest_hex` with its advisory tag intact — the
+    /// shape `ocx package create` writes, and the shape a hand-edited sidecar
+    /// could forge by substituting a platform-specific leaf digest.
+    fn metadata_with_any_pin(digest_hex: &str) -> Metadata {
         metadata(&format!(
-            r#"{{"identifier":"example.com/dep:1.0","platforms":{{"any":"sha256:{digest_hex}"}}}}"#
+            r#"{{"identifier":"example.com/dep:1.0@sha256:{digest_hex}"}}"#
         ))
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn unpinned_dependency_rejected() {
-        let client = stub_client(StubTransportData::new());
-        let metadata = metadata(r#"{"identifier":"example.com/dep:1.0"}"#);
-
-        let err = verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
-            .await
-            .expect_err("unpinned dep must be rejected");
-        assert!(matches!(err, PublishGateError::DependencyUnpinned { .. }), "got: {err}");
-        assert_eq!(classify_error(&err), ExitCode::DataError);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn map_gap_rejected() {
-        let client = stub_client(StubTransportData::new());
-        let metadata = metadata(&format!(
-            r#"{{"identifier":"example.com/dep","platforms":{{"linux/amd64":"sha256:{}"}}}}"#,
-            hex('a')
-        ));
-
-        let err = verify_dependency_pins(&client, &metadata, &platform("darwin/arm64"))
-            .await
-            .expect_err("map gap must be rejected");
-        assert!(
-            matches!(err, PublishGateError::MissingPlatformCoverage { ref platform, .. } if platform == "darwin/arm64"),
-            "got: {err}"
-        );
-        assert_eq!(classify_error(&err), ExitCode::DataError);
-    }
-
-    /// D5: an `any`-targeted bundle rejects a direct digest pin — the push
-    /// gate re-checks the same invariant `pin_dependencies` enforces at
-    /// create time, since a hand-edited sidecar can carry one without ever
-    /// going through `ocx package create --platform any`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn any_target_rejects_direct_digest_pin() {
-        let client = stub_client(StubTransportData::new());
-        let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
-
-        let err = verify_dependency_pins(&client, &metadata, &Platform::any())
-            .await
-            .expect_err("a direct digest pin in an any-targeted bundle must be rejected");
-        assert!(
-            matches!(err, PublishGateError::DirectDigestPinInAnyTarget { .. }),
-            "got: {err}"
-        );
-        assert_eq!(classify_error(&err), ExitCode::DataError);
-    }
-
-    /// D5 provenance check (the terra-gate finding this fix closes): a
-    /// hand-edited sidecar claims a leaf is `"any"`-offered via the
-    /// `platforms` map, but the dependency's own image index advertises that
-    /// leaf under `linux/amd64` only — a forged any-provenance claim must be
-    /// rejected, not merely "does the manifest exist" (which `pull_manifest`
-    /// alone cannot distinguish from a genuine `any` offer).
+    /// D5 provenance check: a hand-edited sidecar pins a leaf in a bundle
+    /// published as `any`, but the dependency's own image index advertises
+    /// that leaf under `linux/amd64` only — a forged any-provenance claim must
+    /// be rejected, not merely "does the manifest exist" (which
+    /// `pull_manifest` alone cannot distinguish from a genuine `any` offer).
     #[tokio::test(flavor = "multi_thread")]
     async fn any_target_rejects_pin_not_advertised_as_any() {
         let data = StubTransportData::new();
@@ -418,11 +324,17 @@ mod tests {
         assert_eq!(classify_error(&err), ExitCode::DataError);
     }
 
-    /// The honest counterpart: a `platforms`-map pin whose leaf genuinely IS
-    /// advertised as `any` in the dependency's own index passes the
-    /// provenance check (and the rest of the gate).
+    /// The honest counterpart, and the sanctioned loosening: push used to
+    /// refuse a bare `@digest` in an `any`-targeted bundle outright, because
+    /// the pin alone could not be shown to be `any`-offered. That structural
+    /// pre-filter is subsumed by the registry-verified provenance check above
+    /// — a digest the dependency's own index advertises as `any` IS
+    /// `any`-offered, whatever shape it was written in — so the gate now
+    /// accepts it. Create still refuses one it did not resolve itself
+    /// (`dependency_pinning::reject_digest_pins_in_any_target`): it has no
+    /// registry evidence to substitute.
     #[tokio::test(flavor = "multi_thread")]
-    async fn any_target_accepts_pin_advertised_as_any() {
+    async fn any_target_accepts_a_bare_digest_the_index_advertises_as_any() {
         let data = StubTransportData::new();
         seed_manifest_by_tag(&data, &image_index_with_entry(&hex('a'), ANY_ENTRY));
         seed_manifest_by_tag_and_digest(&data, &hex('a'), IMAGE_MANIFEST_JSON);

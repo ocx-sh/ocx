@@ -9,6 +9,7 @@ use crate::app::classify_error;
 
 mod api;
 mod app;
+mod build_receipt;
 mod command;
 mod conventions;
 mod options;

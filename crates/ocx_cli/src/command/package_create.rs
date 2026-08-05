@@ -12,7 +12,11 @@ use crate::options;
 pub struct PackageCreate {
     /// Path to the package to bundle
     path: std::path::PathBuf,
-    /// Optional identifier for the package, used to infer the output filename if not specified
+    /// Identifier the bundle will be published under (e.g. `repo:2.0.0`)
+    ///
+    /// Used to infer the output filename when `--output` names no file, and
+    /// recorded in the build receipt beside the bundle, which `ocx package
+    /// push` falls back to when it is given no `--identifier` of its own.
     #[clap(short, long)]
     identifier: Option<options::Identifier>,
     /// Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)
@@ -20,12 +24,16 @@ pub struct PackageCreate {
     /// Required whenever `--metadata` is given: it declares the platform the
     /// packaged content runs on, which cannot be read off the machine doing
     /// the build. Dependencies carrying no digest are resolved against the
-    /// selected index to a platform manifest digest for this platform, the
-    /// content tree is scanned under this platform's executable convention,
-    /// and the value is recorded in the metadata sidecar; `ocx package push`
-    /// and `ocx package test` default to the recorded value and reject a
-    /// `--platform` that disagrees. Resolution honors `--remote`,
-    /// `--offline`, and `--frozen`. Also used to infer the output filename.
+    /// selected index to a platform manifest digest for this platform, and
+    /// the content tree is scanned under this platform's executable
+    /// convention. Resolution honors `--remote`, `--offline`, and `--frozen`.
+    ///
+    /// The value is written to a build receipt beside the bundle, which `ocx
+    /// package push` and `ocx package test` fall back to when they are given
+    /// no `--platform` of their own. Passing `--platform` to either of those
+    /// simply wins; the receipt is not consulted for it.
+    ///
+    /// Also used to infer the output filename.
     ///
     /// With `--metadata`, a Linux target or `any` also has its declared
     /// `os.features` checked against what the packaged binaries actually
@@ -45,8 +53,10 @@ pub struct PackageCreate {
     /// Path to a `metadata.json` file to validate, resolve, and write alongside the output bundle
     ///
     /// Requires `--platform`. Dependencies without a digest are pinned to
-    /// that platform's manifest digests; the resolved sidecar is written next
-    /// to the output bundle in canonical form.
+    /// that platform's manifest digests, and the compiled result (the same
+    /// form `ocx package push` publishes) is written next to the output
+    /// bundle. The build receipt is written whether or not this flag is
+    /// given - it records the invocation, not the sidecar.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -150,26 +160,11 @@ impl PackageCreate {
                 } else {
                     package::libc_lint::check_declared_libc(&self.path, &metadata, &platform).await?;
                 }
-                // Validate the projection the publisher will actually push:
-                // run the publish-time env/entrypoint checks against the
-                // declared platform.
-                package::metadata::ValidMetadata::try_from(metadata.to_published(&platform)?)?;
-                // Record the platform dependency pins were resolved against
-                // so `ocx package push`/`ocx package test` bind to it.
-                //
-                // This overwrites a `platform` already present in the input
-                // sidecar rather than asserting agreement with it, which is
-                // the opposite of what `push`/`test` do with a disagreeing
-                // `--platform` (`PlatformMismatch`, exit 65). Intended: the
-                // asymmetry is declare-vs-assert. `create` DECLARES the
-                // target — `--platform` is this invocation's statement of
-                // what the content runs on, and everything below it (pins,
-                // binaries scan, projection) is resolved for that value, so
-                // the field it writes is an output. `push`/`test` ASSERT
-                // against that output. Re-creating an existing sidecar for a
-                // different target is the ordinary cross-compile case, not
-                // an error to be caught here.
-                Some(metadata.with_platform(platform))
+                // Project to the published form and run the publish-time
+                // env/entrypoint checks over it. This projection is what gets
+                // written beside the bundle: push and test read the compiled
+                // wire shape, never the authoring input.
+                Some(package::metadata::ValidMetadata::try_from(metadata.to_published()?)?)
             }
             None => None,
         };
@@ -199,9 +194,31 @@ impl PackageCreate {
 
         if let Some(metadata) = resolved_metadata {
             // Always rewrite the sidecar canonically (never a byte copy): the
-            // file next to the bundle is the compiled, pin-resolved form.
+            // file next to the bundle is the compiled, pin-resolved published
+            // form.
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
-            metadata.write_json(&metadata_target).await?;
+            package::metadata::Metadata::from(metadata)
+                .write_json(&metadata_target)
+                .await?;
+        }
+
+        // The receipt records what this invocation was told, so push and test
+        // do not have to be told it again — with or without `--metadata`.
+        // Written last: the bundle and its sidecar are the artifacts, the
+        // receipt only describes how they were asked for. Nothing declared
+        // means nothing to record, so no file — and any receipt an earlier
+        // build left at this path is removed rather than kept, because it
+        // describes a build that no longer exists here and would silently
+        // supply push with an identifier and platform this invocation never
+        // named. A removal that fails is fatal for the same reason.
+        let receipt_target = crate::conventions::infer_receipt_file(&output)?;
+        match crate::build_receipt::BuildReceipt::new(self.platform.clone(), identifier) {
+            Some(receipt) => receipt.write_json(&receipt_target).await?,
+            None => match tokio::fs::remove_file(&receipt_target).await {
+                Ok(()) => log::info!("Removed the stale build receipt at {}", receipt_target.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(ocx_lib::error::file_error(&receipt_target, error).into()),
+            },
         }
 
         Ok(ExitCode::SUCCESS)
@@ -223,10 +240,10 @@ impl PackageCreate {
     }
 
     /// The platform `--metadata` is compiled for: dependency pins resolve
-    /// against it, the binaries scan applies its executable convention, and
-    /// it is recorded in the sidecar for `ocx package push` / `ocx package
-    /// test` to read back. `None` when no sidecar was supplied — `--platform`
-    /// then only shapes the inferred output filename.
+    /// against it and the binaries scan applies its executable convention.
+    /// `None` when no sidecar was supplied — `--platform` then only shapes the
+    /// inferred output filename and the build receipt (which records the flag
+    /// itself, sidecar or not).
     ///
     /// There is no default. The host platform describes what the build
     /// machine *supplies*; the recorded platform describes what the packaged
@@ -342,8 +359,9 @@ mod tests {
     /// platform. The host describes what the build machine supplies; the
     /// sidecar field describes what the artifact demands. A musl bundle
     /// cross-built on a glibc host would otherwise be recorded as demanding
-    /// `libc.glibc`, and `ocx package push` / `ocx package test` bind to that
-    /// recorded value — so the corruption is unrecoverable downstream.
+    /// `libc.glibc` in the build receipt, and `ocx package push` / `ocx
+    /// package test` bind to that value — so the corruption is unrecoverable
+    /// downstream.
     #[test]
     fn metadata_without_platform_is_rejected_instead_of_defaulting_to_the_host() {
         let create = PackageCreate::try_parse_from(["package-create", "-m", "metadata.json", "."]).expect("parse");

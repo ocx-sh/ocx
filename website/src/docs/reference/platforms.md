@@ -7,9 +7,9 @@ outline: deep
 Every OCX package targets a platform — a specific OS/architecture pair, an OS/architecture pair
 refined by CPU variant, a set of required OS capabilities, or `any` for platform-agnostic content.
 OCX needs one string form for that value that works everywhere: the
-`--platform` flag, [`ocx.lock`][in-depth-project-lock-format]'s per-platform digest map, and
-dependency pin maps in [`metadata.json`][reference-metadata]. This page is the canonical
-reference for that string and for the compatibility relation OCX evaluates it against.
+`--platform` flag, [`ocx.lock`][in-depth-project-lock-format]'s per-platform digest map, and the
+build receipt [`ocx package create`][cmd-package-create] writes beside a bundle. This page is the
+canonical reference for that string and for the compatibility relation OCX evaluates it against.
 
 ## Grammar {#grammar}
 
@@ -48,9 +48,9 @@ requires an OCX release. `any` carries no fields — `any+libc.glibc` and `any/a
 rejected as malformed.
 
 This is the single grammar for every platform string surface in OCX: [`--platform`][cmd-platform-option],
-[`ocx.lock`][in-depth-project-lock-format]'s `[tool.platforms]` keys, and the per-dependency
-`platforms` pin map in the [authoring metadata sidecar][reference-per-platform-pins]. One publisher
-libc tag needs one encoding everywhere it appears, not a different spelling per file.
+[`ocx.lock`][in-depth-project-lock-format]'s `[tool.platforms]` keys, and the build receipt
+[`ocx package create`][cmd-package-create] writes beside a bundle. One publisher libc tag needs one
+encoding everywhere it appears, not a different spelling per file.
 
 ### Escaping {#grammar-escaping}
 
@@ -72,7 +72,7 @@ of the four two-character codes above is a parse error.
 This makes the platform string an injective, round-tripping encoding of the underlying value:
 parsing a platform string and re-rendering it always produces the identical string back. That
 property is what lets the same string double as both the CLI flag value and a `BTreeMap` key in
-`ocx.lock` and pin maps — no separate key-encoding format is needed.
+`ocx.lock` — no separate key-encoding format is needed.
 
 ## Compatibility {#compatibility}
 
@@ -89,8 +89,7 @@ reading a locked digest out of `ocx.lock`, and pinning a dependency during
 
 `is_compatible(required, offered)` reads "does `offered` satisfy the requirement `required`?".
 `required` is what the caller needs satisfied — the detected host, an explicit `--platform`
-value, or a lock lookup key. `offered` is a candidate — an image-index child platform, or a
-pin-map key.
+value, or a lock lookup key. `offered` is a candidate — an image-index child platform.
 
 The relation is not symmetric, and the asymmetry is deliberate:
 
@@ -171,8 +170,8 @@ this property.
   pushing, and libc differentiation
 - [`--platform` flag reference][cmd-platform-option] — the CLI surface for every command that
   resolves against a platform
-- [Per-Platform Pins][reference-per-platform-pins] — the dependency pin map that uses this same
-  grammar
+- [Dependencies][reference-dependencies] — how `ocx package create` resolves and pins a
+  dependency identifier's manifest digest against a declared platform
 - [Lock format][in-depth-project-lock-format] — the `ocx.lock` `[tool.platforms]` table
 
 <!-- external -->
@@ -182,11 +181,11 @@ this property.
 <!-- commands -->
 [cmd-platform-option]: ./command-line.md#package-install
 [cmd-package-create]: ./command-line.md#package-create
+[cmd-package-create-libc-check]: ./command-line.md#package-create-libc-check
 [cmd-exit-codes]: ./command-line.md#exit-codes
 
 <!-- reference -->
-[reference-metadata]: ./metadata.md
-[reference-per-platform-pins]: ./metadata.md#dependencies-per-platform-pins
+[reference-dependencies]: ./metadata.md#dependencies
 
 <!-- in-depth -->
 [in-depth-project-lock-format]: ../in-depth/project.md#lock-format

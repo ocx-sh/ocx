@@ -9,7 +9,6 @@ use clap::Parser;
 use ocx_lib::{
     log, oci, package,
     package::version::{BuildTimestampFormat, build_timestamp},
-    prelude::*,
     publisher::{self, LayerRef, Publisher},
 };
 
@@ -58,6 +57,12 @@ pub struct PackagePush {
     /// Path to the package metadata JSON file. Defaults to a sibling of the
     /// first file layer (e.g. `pkg.tar.gz` -> `pkg-metadata.json`). Required
     /// when no file layers are provided.
+    ///
+    /// This must be the compiled form `ocx package create --metadata` writes,
+    /// with every dependency pinned to a digest; an authoring sidecar with
+    /// tag-only dependencies is rejected. The build receipt is anchored to the
+    /// bundle, so pointing this flag elsewhere does not move where an omitted
+    /// `--platform` or `--identifier` is read from.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
 
@@ -90,17 +95,21 @@ pub struct PackagePush {
 
     /// Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
-    /// Every dependency is projected for this platform and the pushed
-    /// manifest is scoped to it. Defaults to the platform `ocx package
-    /// create` recorded in the metadata sidecar; an explicit value must
-    /// equal that recorded platform or the push is rejected. Passing this
-    /// flag is a checked assertion, not a way to override the sidecar.
+    /// The pushed manifest is scoped to this platform. An explicit value is
+    /// used as given. Omit it to take the platform the build receipt beside
+    /// the bundle recorded; a usage error (exit 64) when neither names one.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
 
-    /// Identifier under which the package is published (e.g. `repo:2.0.0`).
-    #[clap(short = 'i', long = "identifier", required = true)]
-    identifier: options::Identifier,
+    /// Identifier under which the package is published (e.g. `repo:2.0.0`)
+    ///
+    /// An explicit value is used as given. Omit it to take the identifier the
+    /// build receipt beside the bundle recorded, which is what `ocx package
+    /// create --identifier` wrote there; a usage error (exit 64) when neither
+    /// names one. A value without a tag (`repo`) takes the version the
+    /// receipt recorded when it names the same repository.
+    #[clap(short = 'i', long = "identifier")]
+    identifier: Option<options::Identifier>,
 
     /// Layers to push, in order (base layer first, top layer last).
     ///
@@ -144,7 +153,31 @@ pub struct PackagePush {
 
 impl PackagePush {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifier = self.identifier.with_domain(context.default_registry())?;
+        // Read the build receipt only for what the command line left open: a
+        // fully explicit push must not be able to fail on a file it never
+        // needed. Resolved before `Publisher::new` and auth, so a push missing
+        // both a flag and a recorded value fails on its own arguments without
+        // a network round-trip first.
+        let explicit_identifier = self
+            .identifier
+            .as_ref()
+            .map(|identifier| identifier.with_domain(context.default_registry()))
+            .transpose()?;
+        // A tagless -i is not a complete answer: the receipt may still supply
+        // the version, so it counts as a gap for the lazy read below.
+        let identifier_answers = explicit_identifier
+            .as_ref()
+            .is_some_and(|identifier| identifier.tag().is_some() || identifier.digest().is_some());
+        let receipt = if identifier_answers && self.platform.is_some() {
+            None
+        } else {
+            crate::build_receipt::read_beside_bundle(&self.layers).await?
+        };
+        let identifier = crate::build_receipt::resolve_target_identifier(explicit_identifier, receipt.as_ref())?;
+        // The published index entry's platform label must not decouple from
+        // what the dependency pins were resolved against, which is why the
+        // receipt is the fallback rather than the host platform.
+        let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
 
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
@@ -153,27 +186,21 @@ impl PackagePush {
             self.layers.len(),
             metadata_path.display()
         );
-        let metadata = package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path).await?;
-        // Bind the publish platform to the platform `ocx package create`
-        // recorded in the sidecar (D5): defaults to it, and rejects an
-        // explicit `--platform` that disagrees, so the published index
-        // entry's platform label can never decouple from what dependency
-        // pins were actually resolved against.
-        let platform = metadata.resolve_platform(self.platform.as_ref())?;
+        let metadata = conventions::read_published_metadata(&metadata_path).await?;
+
+        let valid = package::metadata::ValidMetadata::try_from(metadata)?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;
 
-        // Gate: every dependency must project to an existing platform
-        // MANIFEST digest for the target platform — push makes no resolution
-        // decisions (run `ocx package create` for that).
+        // Gate: every dependency pin must name an existing platform MANIFEST
+        // digest — push makes no resolution decisions (run `ocx package
+        // create` for that).
         {
             let _spin = context.progress().spinner("Verifying dependency pins");
-            publisher::verify_dependency_pins(publisher.client(), &metadata, &platform).await?;
+            publisher::verify_dependency_pins(publisher.client(), &valid, &platform).await?;
         }
 
-        let published = metadata.to_published(&platform)?;
-        let valid = package::metadata::ValidMetadata::try_from(published)?;
         let infos = vec![package::info::Info {
             identifier: identifier.clone(),
             metadata: valid.into(),

@@ -48,7 +48,6 @@ class MultiLayer(Scenario):
         metadata_path.write_text(json.dumps({
             "type": "bundle",
             "version": 1,
-            "platform": plat,
             "env": [
                 {
                     "key": "PATH", "type": "path", "required": True,

@@ -2591,12 +2591,16 @@ it validates the sidecar and always rewrites it, in canonical form, next to the 
 byte copy of the input file.
 
 `--platform` is **required** whenever `--metadata` is given (else usage error, exit 64). It declares the
-platform the packaged content runs on, and `create` records it in the sidecar for
-[`ocx package push`][cmd-package-push] and [`ocx package test`][cmd-package-test] to read back. That
-answer cannot come from the build host: the host describes what the build machine *supplies*, while the
-sidecar states what the artifact *demands* — a static musl binary cross-built on a glibc host demands
-neither the host's libc nor its architecture. Every dependency is pinned for the platform you name, and
-whatever you name is the label the package is published under.
+platform the packaged content runs on. That answer cannot come from the build host: the host describes
+what the build machine *supplies*, while `--platform` states what the artifact *demands* — a static musl
+binary cross-built on a glibc host demands neither the host's libc nor its architecture. Every dependency
+is pinned for the platform you name, and whatever you name is the label the package is published under.
+
+The platform never enters the metadata sidecar itself — `create` writes it instead to a build receipt
+(`<stem>-receipt.json`) next to the output bundle, a build artifact with no schema that is never pushed
+to a registry. [`ocx package push`][cmd-package-push] and [`ocx package test`][cmd-package-test] read the
+receipt back for a `--platform` you did not give them — see [Build receipt](#package-create-receipt)
+below.
 
 - `--platform <PLATFORM>` (a concrete platform): each dependency without a digest is resolved
   against the selected index to the one manifest [compatible][reference-platforms-compatibility]
@@ -2605,11 +2609,14 @@ whatever you name is the label the package is published under.
   directly on each dependency's identifier.
 - `--platform any`: every unpinned dependency must itself offer an `any` manifest — an `any`
   requirement is satisfied only by an `any` offer, so a dependency with no `any` build fails
-  `create` (exit 65), naming it. The resolved digest is recorded in the dependency's `platforms`
-  pin map under a single `"any"` key, never a bare digest pin (a leaf manifest carries no platform
-  descriptor, so an unmapped digest could never be verified as `any`-offered). `create` also
-  rejects a direct digest pin anywhere in an `any`-targeted bundle's dependency list, including one
-  already present before `create` ran (exit 65). See [Multi-Platform Packages][authoring-multi-platform].
+  `create` (exit 65), naming it. The resolved digest is pinned bare on the identifier — the same
+  single-pin shape a concrete platform gets. A leaf manifest carries no platform descriptor of its
+  own, so [`ocx package push`][cmd-package-push] later re-verifies the pin against the dependency's
+  own image index rather than trusting the sidecar's word for it (see [Multi-Platform
+  Packages][authoring-multi-platform]). `create` also rejects a direct digest pin anywhere in an
+  `any`-targeted bundle's dependency list, including one already present before `create` ran (exit
+  65) — it resolves against an index and has no registry evidence to verify a pin it did not
+  resolve itself.
 
 Resolution honors [`--remote`][arg-remote], [`--offline`][arg-offline], and [`--frozen`][arg-frozen]
 exactly like every other tag resolution: the default checks the local index first and fetches on a
@@ -2657,6 +2664,34 @@ a `path` value combined with a `${deps.*}` segment is out of scan scope entirely
 reused layer added later at `push` time was never part of the content tree `create` scanned; both
 cases need the publisher to hand-author `binaries` instead. See
 [Executables][reference-binaries] for the full field semantics.
+
+##### Build receipt {#package-create-receipt}
+
+`create` writes a second sidecar next to the bundle: `<stem>-receipt.json`, holding
+`{"version": 1, "platform": "...", "identifier": "..."}` — both fields optional, each present only
+if you gave `create` the matching flag. It is a build artifact, not package metadata: it has no
+JSON Schema, is never uploaded to a registry, and exists only to carry what one local build was
+told to the two commands that consume its output.
+
+`create` writes it whenever it has something to record — with or without `--metadata`. Give
+neither `--platform` nor `--identifier` and no receipt is written, because there is nothing to put
+in one.
+
+The receipt is a **fallback, never an authority**. Per value:
+
+| Flag on [`push`][cmd-package-push] / [`test`][cmd-package-test] | Receipt | Result |
+|---|---|---|
+| given | anything | the value you gave, in silence — the receipt is not consulted for it |
+| omitted | records the value | the recorded value |
+| omitted | records nothing (or no receipt at all) | usage error (exit 64) — nothing determines the value |
+
+`push` resolves both `--platform` and `--identifier` this way; `test` resolves `--platform` (its
+`--identifier` names the local test subject and stays required). One finer gap the receipt also
+fills: `push --identifier repo` **without a tag** takes the version the receipt recorded, when the
+receipt names the same repository — the flag picks where to publish, the recorded build says which
+version it was. A receipt about a different repository contributes nothing and the ordinary
+`latest` default applies. The file is opened only when something is missing, so an invocation that
+states everything never touches it.
 
 ##### Checking the declared libc {#package-create-libc-check}
 
@@ -2713,11 +2748,11 @@ ocx package create [OPTIONS] <PATH>
 
 **Options**
 
-- `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier the bundle will be published under. Used to infer the output filename when `--output` is a directory, and recorded in the [build receipt](#package-create-receipt) for [`ocx package push`][cmd-package-push] to fall back to.
 - `-p`, `--platform <PLATFORM>`: Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content) — see [Platforms][reference-platforms] for the grammar. Required whenever `--metadata` is given, with no host default (see above); optional otherwise, where it only shapes the inferred output filename. With `--metadata`, a Linux target or `any` also has its `os.features` checked against the packaged binaries — see [Checking the declared libc](#package-create-libc-check).
 - `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default), `.tar.gz` (Gzip), or `.tar.zst` (Zstandard).
 - `-f`, `--force`: Overwrite the output file if it already exists.
-- `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Requires `--platform` (see above); dependencies without a digest are pinned to that platform's manifest digests, and the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written.
+- `-m`, `--metadata <PATH>`: Path to a `metadata.json` sidecar to validate, resolve, and write alongside the output bundle. Requires `--platform` (see above); dependencies without a digest are pinned to that platform's manifest digests, and the resolved sidecar is written next to the output bundle in canonical form. If omitted, no metadata sidecar is written; the [build receipt](#package-create-receipt) is written either way, since it records the invocation rather than the sidecar.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Affects LZMA (`.tar.xz`) and Zstandard (`.tar.zst`) compression; Gzip is always single-threaded.
 - `--bin-scan`, `--no-bin-scan`: Scan the content tree for executables the package puts on `PATH` to fill or verify the [`binaries`][reference-binaries] metadata claim — see the mode table above. Paired, last-wins flags; neither given (the default) fills an absent claim and passes a declared one through untouched.
@@ -2761,22 +2796,22 @@ lockfile directly and ignores the index.
 
 Publishes a package to the registry as zero or more layers, all recorded in one image manifest for the single target platform this invocation publishes. Each layer is uploaded as an OCI blob, in the order given on the command line. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`. Publishing a package for more than one platform means running `push` once per platform under the same tag — see [Multi-Platform Packages][authoring-multi-platform] for the full pattern; OCX merges each push into the existing image index rather than replacing it.
 
-`push` makes no dependency-resolution decisions — it is a gate. If the metadata sidecar declares [dependencies][ug-dependencies], every one of them must already carry a manifest digest pin covering every platform this invocation publishes ([`ocx package create`][cmd-package-create] is what resolves them; see [Resolving Dependency Pins][authoring-building-pushing-dependency-pins]). `push` fails before uploading anything if:
+`push` makes no dependency-resolution decisions — it is a gate. If the metadata sidecar declares [dependencies][ug-dependencies], every one of them must already carry a manifest digest pin for the platform this invocation publishes ([`ocx package create`][cmd-package-create] is what resolves them; see [Resolving Dependency Pins][authoring-building-pushing-dependency-pins]). `push` fails before uploading anything if:
 
 | Condition | Exit code |
 |---|---|
-| The metadata sidecar has no recorded platform (predates `create`, or hand-authored) | 65 |
-| An explicit `--platform` disagrees with the sidecar's recorded platform | 65 |
-| A dependency has no digest and no pin map | 65 |
-| A dependency's pin map has no entry covering a platform being published | 65 |
+| No `--platform`, and no platform in the build receipt beside the bundle (see [Build receipt](#package-create-receipt)) | 64 |
+| No `--identifier`, and no identifier in the build receipt | 64 |
+| A dependency is not digest-pinned | 65 |
 | A dependency's pin resolves to an OCI Image Index instead of a manifest | 65 |
+| A dependency of an `any`-targeted push pins a digest the dependency's own image index does not advertise as `any` | 65 |
 | A dependency's pinned manifest does not exist in its registry | 79 |
 | Authentication to a dependency's registry fails | 80 |
 
 **Usage**
 
 ```shell
-ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
+ocx package push [OPTIONS] <LAYERS>...
 ```
 
 **Arguments**
@@ -2790,8 +2825,8 @@ ocx package push [OPTIONS] --identifier <IDENTIFIER> <LAYERS>...
 
 **Options**
 
-- `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000` (required).
-- `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; an explicit value must equal that recorded platform or the push is rejected (exit 65, naming both) — this flag is a checked assertion, not an override. Every dependency is projected for this platform (see the gate table above).
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`. Omit it to publish under the identifier the [build receipt](#package-create-receipt) beside the bundle recorded; with neither, exit 64.
+- `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Omit it to publish for the platform the [build receipt](#package-create-receipt) beside the bundle recorded; a value given here is used as given, and the receipt is not consulted for it. With neither, exit 64. Every dependency is projected for this platform (see the gate table above).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
@@ -2906,7 +2941,7 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... --script <PATH|
 | Name | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--identifier <IDENTIFIER>` | `-i` | Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers). | — |
-| `--platform <PLATFORM>` | `-p` | Target platform. Defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; an explicit value must equal that recorded platform or the command is rejected (exit 65, naming both). | recorded platform |
+| `--platform <PLATFORM>` | `-p` | Target platform. Omit it to take the platform the [build receipt](#package-create-receipt) beside the bundle recorded; a value given here is used as given, and the receipt is not consulted for it. With neither, exit 64. | build receipt |
 | `--script <PATH\|->` | — | Path to a [Starlark][starlark-lang] test script, or `-` to read the script source from stdin. Mutually exclusive with the trailing `-- CMD` form. | — |
 | `--metadata <PATH>` | `-m` | Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided. | auto-detected |
 | `--keep` | — | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`. | false |
@@ -4133,6 +4168,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [reference-manifest-pins]: ./metadata.md#dependencies-manifest-pins
 [reference-dependencies]: ./metadata.md#dependencies
 [reference-platforms]: ./platforms.md
+[reference-platforms-compatibility]: ./platforms.md#compatibility
 
 <!-- reference (package-create --bin-scan / env binaries+entrypoints attribution) -->
 [reference-binaries]: ./metadata.md#executables

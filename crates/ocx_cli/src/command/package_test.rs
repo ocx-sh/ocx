@@ -9,7 +9,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::utility::child_process;
 use ocx_lib::utility::fs as ocx_fs;
-use ocx_lib::{cli::UsageError, env, oci, package, prelude::*, publisher::LayerRef};
+use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
 
 use crate::{conventions, options};
 
@@ -26,13 +26,19 @@ pub struct PackageTest {
     /// Path to the package metadata JSON file. Defaults to a sibling of the
     /// first file layer (e.g. `pkg.tar.gz` -> `pkg-metadata.json`). Required
     /// when no file layers are provided.
+    ///
+    /// This must be the compiled form `ocx package create --metadata` writes,
+    /// with every dependency pinned to a digest; an authoring sidecar with
+    /// tag-only dependencies is rejected. The build receipt is anchored to the
+    /// bundle, so pointing this flag elsewhere does not move where an omitted
+    /// `--platform` is read from.
     #[clap(short, long)]
     metadata: Option<PathBuf>,
 
-    /// Target platform (e.g. `linux/amd64`). Defaults to the platform `ocx
-    /// package create` recorded in the metadata sidecar; an explicit value
-    /// must equal that recorded platform or the command is rejected.
-    /// Parity with `package push`.
+    /// Target platform (e.g. `linux/amd64`). An explicit value is used as
+    /// given. Omit it to take the platform the build receipt beside the bundle
+    /// recorded; a usage error (exit 64) when neither names one. Parity with
+    /// `package push`.
     #[clap(short, long)]
     platform: Option<oci::Platform>,
 
@@ -118,16 +124,18 @@ impl PackageTest {
         // Step 2: Load metadata.
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
-        // Read the authoring sidecar (superset: create may have written
-        // per-platform pin maps). Bind the tested platform to the platform
-        // `ocx package create` recorded in the sidecar — same contract as
-        // `ocx package push` — then project it for that platform, the same
-        // projection `ocx package push` publishes.
-        let authoring_metadata = package::metadata::authoring::AuthoringMetadata::read_json(&metadata_path)
-            .await
-            .with_context(|| format!("reading metadata from {}", metadata_path.display()))?;
-        let platform = authoring_metadata.resolve_platform(self.platform.as_ref())?;
-        let metadata = package::metadata::ValidMetadata::try_from(authoring_metadata.to_published(&platform)?)?;
+        // Read the published sidecar `ocx package create` compiled — the same
+        // bytes `ocx package push` would publish. The tested platform falls
+        // back to the build receipt beside the bundle on exactly the contract
+        // `ocx package push` uses, and the receipt is only opened when
+        // `--platform` left the question open.
+        let metadata = conventions::read_published_metadata(&metadata_path).await?;
+        let receipt = match self.platform {
+            Some(_) => None,
+            None => crate::build_receipt::read_beside_bundle(&self.layers).await?,
+        };
+        let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
+        let metadata = package::metadata::ValidMetadata::try_from(metadata)?;
         let info = package::info::Info {
             identifier: identifier.clone(),
             metadata: metadata.into(),

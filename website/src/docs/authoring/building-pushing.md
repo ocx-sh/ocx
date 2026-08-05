@@ -7,7 +7,7 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 
 ## The First Push {#first-push}
 
-[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and records it in the metadata sidecar; `push` reads it back and publishes under it by default, so the platform a package is published under always matches what its dependency pins were resolved against. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
+[`ocx package push`][cmd-package-push] uploads zero or more layers as OCI blobs and records them under one image manifest for the single platform this invocation publishes. [`ocx package create`][cmd-package-create]'s `--platform` picks that platform and writes it to a build receipt beside the bundle — never into the metadata sidecar itself, which carries no platform field. `push` reads that receipt for anything its own flags did not state, so a `push` with no `--platform` publishes under exactly what the dependency pins were resolved against, and a `push` with no `--identifier` publishes under the identifier `create` was given. Flags you do pass are used as given; the receipt is not consulted for them. Publishing more than one platform under the same tag means running `create`/`push` once per platform — see the [multi-platform guide][authoring-multi-platform] for how OCX assembles the resulting [OCI Image Index][oci-image-index] across those pushes.
 
 ```sh
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
@@ -46,17 +46,17 @@ ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 
 | Failure | Exit code | Meaning |
 |---|---|---|
-| Sidecar has no recorded platform | 65 | The sidecar predates `create`, or was hand-authored — run `ocx package create --platform` to establish one. |
-| An explicit `--platform` disagrees with the sidecar's recorded platform | 65 | Drop `--platform` to publish under the recorded platform, or re-run `create` for the one you passed. |
-| Dependency still tag-only | 65 | Re-run `ocx package create --platform` to pin it. |
-| Pin map has no entry covering the platform being published | 65 | The dependency has no pin compatible with this push's platform. |
+| No `--platform`, and no platform in the build receipt beside the bundle | 64 | Pass `--platform`, or run `ocx package create --platform <PLATFORM>` so the build records one. |
+| No `--identifier`, and no identifier in the build receipt | 64 | Pass `--identifier`, or run `ocx package create --identifier <IDENTIFIER>` so the build records one. |
+| Dependency is not digest-pinned | 65 | Re-run `ocx package create --platform` to pin it. |
 | Pin resolves to an image index | 65 | The dependency was pinned by hand against an index digest — re-run `create`. |
+| A dependency of an `any`-targeted push pins a digest its own image index does not advertise as `any` | 65 | Re-run `ocx package create --platform any` against a refreshed index, or confirm the registry actually advertises that digest as `any`. |
 | Pinned manifest not found in the registry | 79 | The dependency's manifest was deleted, or the digest is wrong. |
 | Registry authentication failed | 80 | Refresh credentials for the dependency's registry. |
 
 A package with no dependencies, or one whose sidecar is already fully pinned, skips all of this — `create` does not touch the network when `--platform` is omitted and every dependency already carries a digest.
 
-Building with `--platform any` is the one case where `create` writes a per-dependency pin map instead of a single digest: an `any`-targeted package performs no platform-specific resolution, so it can only depend on dependencies that themselves offer an `any` build — a dependency with no `any` manifest fails `create` outright, naming it. See [Multi-Platform Packages][authoring-multi-platform].
+Building with `--platform any` pins the same way as a concrete platform — a single manifest digest, bare on the identifier — but over a narrower candidate set: an `any`-targeted package performs no platform-specific resolution of its own, so it can only depend on dependencies that themselves offer an `any` build. A dependency with no `any` manifest fails `create` outright, naming it. A leaf manifest carries no platform descriptor of its own, so `push` later re-verifies the pin against the dependency's own image index rather than trusting the sidecar's word for it. See [Multi-Platform Packages][authoring-multi-platform].
 
 ## Cascading Rolling Tags {#cascade}
 

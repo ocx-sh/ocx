@@ -212,14 +212,15 @@ def test_a_refused_create_leaves_no_bundle_on_disk(ocx: OcxRunner, tmp_path: Pat
 
 
 def test_declaring_the_requirement_admits_the_package(ocx: OcxRunner, tmp_path: Path):
-    """The fix the error message names actually works, and is recorded."""
+    """The fix the error message names actually works, and is recorded in
+    the build receipt beside the bundle."""
     _glibc_binary(_write_tree(tmp_path, "declared") / "bazel")
 
     result = _create(ocx, tmp_path, "declared", "linux/amd64+libc.glibc")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    sidecar = json.loads((tmp_path / "declared-metadata.json").read_text())
-    assert sidecar["platform"] == "linux/amd64+libc.glibc"
+    receipt = json.loads((tmp_path / "declared-receipt.json").read_text())
+    assert receipt["platform"] == "linux/amd64+libc.glibc"
 
 
 def test_musl_binary_under_a_glibc_only_declaration_is_refused(ocx: OcxRunner, tmp_path: Path):
@@ -461,11 +462,13 @@ def test_no_libc_lint_is_silent_on_a_platform_the_check_never_inspects(
 
 
 def test_no_libc_lint_changes_nothing_about_what_is_published(ocx: OcxRunner, tmp_path: Path):
-    """Same sidecar bytes either way, on a tile that passes the check regardless.
+    """Same sidecar and receipt bytes either way, on a tile that passes the
+    check regardless.
 
     The flag suppresses a check; it is not an authoring switch. A static
     binary needs no libc, so both runs are clean publishes and any byte
-    difference between their sidecars would be the flag leaking into output.
+    difference between their sidecars (or receipts) would be the flag
+    leaking into output.
     """
     tree = tmp_path / "pkg-same"
     _static_binary(_write_tree(tmp_path, "same") / "tool")
@@ -481,9 +484,15 @@ def test_no_libc_lint_changes_nothing_about_what_is_published(ocx: OcxRunner, tm
 
     checked_sidecar = (tmp_path / "checked-metadata.json").read_bytes()
     bypassed_sidecar = (tmp_path / "bypassed-metadata.json").read_bytes()
-    assert b'"platform"' in checked_sidecar, (
+    assert b'"bundle"' in checked_sidecar, (
         "guard against comparing two sidecars that both failed to be written"
     )
     assert checked_sidecar == bypassed_sidecar, (
         "--no-libc-lint must skip a check, never change the published metadata"
+    )
+
+    checked_receipt = (tmp_path / "checked-receipt.json").read_bytes()
+    bypassed_receipt = (tmp_path / "bypassed-receipt.json").read_bytes()
+    assert checked_receipt == bypassed_receipt, (
+        "--no-libc-lint must skip a check, never change the recorded build receipt"
     )

@@ -7,12 +7,17 @@ index digest) and the sidecar is rewritten canonically with the pins.
 
 A bundle targets exactly one platform per `create` invocation
 (adr_platform_model_unification.md D5) — there is no bundle-level
-target-platform *set* in the sidecar. A concrete `--platform P` resolve pins
-each dependency's identifier directly (`@digest`); an `--platform any`
-resolve requires every dependency to offer an `any`-typed manifest and
-records the pin as a single `"any"`-keyed entry in the dependency's
-`platforms` map (never a bare digest — a leaf carries no platform
-descriptor, so only a map key can record a verified `any`-ness).
+target-platform *set*. Both a concrete `--platform P` resolve and an
+`--platform any` resolve pin each dependency's identifier directly
+(`@digest`) — the sidecar-only per-dependency `platforms` pin map is
+deleted (WP-2: `direct_pin` is the single pin path). An `any`-targeted
+resolve still requires every dependency to offer an `any`-typed manifest;
+it just pins that manifest's digest bare on the identifier rather than
+recording it under an `"any"`-keyed map entry. The platform `create` was
+given is recorded in a build receipt sidecar beside the bundle
+(`<stem>-receipt.json`) — never in the metadata sidecar itself — alongside
+the identifier, if one was given. `push`/`test` read that receipt only for
+what their own flags left unsaid.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.helpers import make_package
+from src.helpers import make_package, resolved_receipt_path
 from src.registry import fetch_manifest_digest, fetch_manifest_from_registry
 from src.runner import OcxRunner, current_platform
 
@@ -169,10 +174,11 @@ def test_create_ambiguous_platform_lists_candidates(
     assert "linux/amd64+libc.musl" in result.stderr, result.stderr
 
 
-def test_create_any_with_agnostic_dep_pins_into_map(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """`-p any` + a platform-agnostic dep records the pin as a single
-    `"any"`-keyed map entry — never a bare digest (D5: a leaf carries no
-    platform descriptor, so only a map key can record a verified `any`-ness)."""
+def test_create_any_pins_the_any_manifest_digest(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
+    """`-p any` + a platform-agnostic dep pins the dependency's any-manifest
+    digest bare on the identifier — the single pin path post-WP-2, no
+    sidecar-only `platforms` map. The build receipt beside the bundle
+    records the resolved platform as `"any"`."""
     leaf = make_package(ocx, f"{unique_repo}_anyleaf", "1.0.0", tmp_path, platform="any")
     pkg_dir, metadata = _write_app(tmp_path, "anyany", [{"identifier": leaf.fq}])
     out = tmp_path / "app-anyany.tar.xz"
@@ -181,9 +187,14 @@ def test_create_any_with_agnostic_dep_pins_into_map(ocx: OcxRunner, unique_repo:
 
     sidecar = _sidecar(out)
     dep = sidecar["dependencies"][0]
-    assert "@sha256:" not in dep["identifier"], "an any-targeted pin must not be a bare digest"
+    assert "@sha256:" in dep["identifier"], f"an any-targeted pin must be a bare digest: {dep['identifier']}"
+
+    pinned_digest = dep["identifier"].split("@", 1)[1]
     manifest_digest = _child_manifest_digest(ocx, leaf.repo, leaf.tag)
-    assert dep["platforms"] == {"any": manifest_digest}
+    assert pinned_digest == manifest_digest, "must pin the dependency's any-manifest digest"
+
+    receipt = json.loads(resolved_receipt_path(out).read_text())
+    assert receipt["platform"] == "any"
 
 
 def test_create_any_with_specific_only_dep_fails(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -307,3 +318,66 @@ def test_create_dep_tag_not_found(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
     result = _create(ocx, pkg_dir, metadata, out, "-p", current_platform(), check=False)
     assert result.returncode == EXIT_NOT_FOUND, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Retired sidecar keys are refused, not silently ignored
+# ---------------------------------------------------------------------------
+#
+# Serde drops unknown keys by design, which is right for a key nobody has
+# written yet and wrong for one that used to carry meaning. Both tests below
+# point the dependency at a tag that does NOT exist, so a resolve would exit
+# 79 (`test_create_dep_tag_not_found` above is that control). Exit 65 naming
+# the retired key therefore proves the parse refused before create resolved
+# anything — which is the whole point: silently dropping a `platforms` map
+# would re-resolve a mutable tag and swap out the digest the publisher locked.
+
+
+def _splice(metadata: Path, *, top: dict | None = None, dep: dict | None = None) -> None:
+    """Add keys to a sidecar `_write_app` already wrote."""
+    doc = json.loads(metadata.read_text())
+    doc.update(top or {})
+    if dep:
+        doc["dependencies"][0].update(dep)
+    metadata.write_text(json.dumps(doc))
+
+
+def test_create_rejects_retired_dependency_platforms_map(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A pre-receipt sidecar's per-dependency `platforms` pin map is refused."""
+    ghost = f"{ocx.registry}/{unique_repo}_ghost:9.9.9"
+    pkg_dir, metadata = _write_app(tmp_path, "retiredmap", [{"identifier": ghost}])
+    _splice(metadata, dep={"platforms": {"any": "sha256:" + "a" * 64}})
+    out = tmp_path / "app-retiredmap.tar.xz"
+
+    result = _create(ocx, pkg_dir, metadata, out, "-p", current_platform(), check=False)
+
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "platforms" in result.stderr, f"error must name the key: {result.stderr}"
+    assert "not found" not in result.stderr.lower(), (
+        "the ghost dependency must never have been resolved — a not-found "
+        f"error means the map was dropped and the tag re-resolved: {result.stderr}"
+    )
+    assert not out.exists(), "a refused sidecar must leave no bundle"
+    assert not _sidecar_path(out).exists(), "a refused sidecar must write nothing"
+
+
+def test_create_rejects_retired_top_level_platform_key(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A pre-receipt sidecar's top-level `platform` key is refused."""
+    ghost = f"{ocx.registry}/{unique_repo}_ghost:9.9.9"
+    pkg_dir, metadata = _write_app(tmp_path, "retiredplat", [{"identifier": ghost}])
+    _splice(metadata, top={"platform": current_platform()})
+    out = tmp_path / "app-retiredplat.tar.xz"
+
+    result = _create(ocx, pkg_dir, metadata, out, "-p", current_platform(), check=False)
+
+    assert result.returncode == EXIT_DATA_ERR, result.stderr
+    assert "platform" in result.stderr, f"error must name the key: {result.stderr}"
+    assert "build receipt" in result.stderr, (
+        f"error must say where the platform lives now: {result.stderr}"
+    )
+    assert not out.exists(), "a refused sidecar must leave no bundle"
+    assert not _sidecar_path(out).exists(), "a refused sidecar must write nothing"

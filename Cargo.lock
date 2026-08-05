@@ -3041,6 +3041,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_repr",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

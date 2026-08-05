@@ -171,7 +171,28 @@ pub struct Dependencies {
 }
 
 impl Dependencies {
+    /// Maximum number of dependencies permitted in one package's metadata.
+    ///
+    /// `ocx package push`'s pre-push gate (`verify_dependency_pins`) issues
+    /// one authenticated registry GET per dependency pin, driven by a
+    /// sidecar file anyone with write access can edit. Bounding the count
+    /// here bounds push-time network fan-out, so a maliciously (or
+    /// accidentally) edited sidecar cannot be used to sweep thousands of
+    /// internal hosts/ports (SSRF/DoS mitigation).
+    ///
+    /// The cap lives on the **published** collection because that is the form
+    /// push reads; [`AuthoringDependencies`](super::authoring::AuthoringDependencies)
+    /// applies the same constant so the limit is reported at authoring time
+    /// too, rather than only on the projection.
+    pub const MAX_DEPENDENCIES: usize = 256;
+
     pub fn new(entries: Vec<Dependency>) -> Result<Self, DependencyError> {
+        if entries.len() > Self::MAX_DEPENDENCIES {
+            return Err(DependencyError::TooManyDependencies {
+                count: entries.len(),
+                max: Self::MAX_DEPENDENCIES,
+            });
+        }
         let mut seen_ids = HashSet::new();
         let mut seen_names: HashSet<DependencyName> = HashSet::new();
         for dep in &entries {
@@ -293,6 +314,56 @@ mod tests {
 
     fn make_digest() -> oci::Digest {
         oci::Digest::Sha256(sha256_hex())
+    }
+
+    // ── dependency count cap (SSRF/DoS mitigation) ────────────────────
+    //
+    // The cap lives here, on the PUBLISHED collection, because that is the
+    // form `ocx package push`'s `verify_dependency_pins` reads and fans one
+    // authenticated registry GET out over.
+
+    fn pinned_dep(repo_index: usize) -> Dependency {
+        let json = format!(
+            r#"{{"identifier":"example.com/dep{repo_index}:1@sha256:{}"}}"#,
+            sha256_hex()
+        );
+        serde_json::from_str(&json).expect("dependency parses")
+    }
+
+    #[test]
+    fn new_accepts_exactly_max_dependencies() {
+        let entries: Vec<_> = (0..Dependencies::MAX_DEPENDENCIES).map(pinned_dep).collect();
+        assert!(
+            Dependencies::new(entries).is_ok(),
+            "the max count itself must be accepted"
+        );
+    }
+
+    #[test]
+    fn new_rejects_more_than_max_dependencies() {
+        let entries: Vec<_> = (0..Dependencies::MAX_DEPENDENCIES + 1).map(pinned_dep).collect();
+        let err = Dependencies::new(entries).expect_err("257 distinct deps must be rejected");
+        assert!(
+            matches!(
+                err,
+                DependencyError::TooManyDependencies { count, max }
+                    if count == Dependencies::MAX_DEPENDENCIES + 1 && max == Dependencies::MAX_DEPENDENCIES
+            ),
+            "expected TooManyDependencies, got: {err}"
+        );
+    }
+
+    /// The cap must hold on the deserialize path too — push reads the sidecar
+    /// as bytes, never through `Dependencies::new` directly.
+    #[test]
+    fn deserializing_more_than_max_dependencies_is_rejected() {
+        let entries = (0..Dependencies::MAX_DEPENDENCIES + 1)
+            .map(|index| format!(r#"{{"identifier":"example.com/dep{index}:1@sha256:{}"}}"#, sha256_hex()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = serde_json::from_str::<Dependencies>(&format!("[{entries}]"))
+            .expect_err("an over-long dependency array must not deserialize");
+        assert!(err.to_string().contains("too many"), "unexpected: {err}");
     }
 
     // ── Dependency serde ──────────────────────────────────────────────

@@ -164,7 +164,7 @@ def _write_repo_metadata(path: Path, repo: str) -> None:
     path.write_text(
         json.dumps(
             {
-                "type": "bundle", "version": 1, "platform": current_platform(), "env": [
+                "type": "bundle", "version": 1, "env": [
                     {
                         "key": "PATH",
                         "type": "path",
@@ -545,7 +545,6 @@ def _strip_metadata(path: Path, strip: int) -> None:
             {
                 "type": "bundle",
                 "version": 1,
-                "platform": current_platform(),
                 "strip_components": strip,
                 "env": [
                     {
@@ -662,10 +661,12 @@ def test_strip_applied_at_assemble_local_path(
 
     # One bundle reused for both materializations → one shared layer digest.
     # `base_meta` feeds both `create` (bundle build) and `push` (`-m`)
-    # directly, so it carries its own `platform` rather than relying on
-    # create's rewritten sidecar (unused here — push reads `base_meta` as-is).
+    # directly rather than relying on create's rewritten sidecar (unused
+    # here — push reads `base_meta` as-is); the explicit `-p` on both
+    # `create` and `push` below is what determines the platform, not a
+    # recorded field in this file.
     base_meta = tmp_path / "local-base-meta.json"
-    base_meta.write_text(json.dumps({"type": "bundle", "version": 1, "platform": current_platform()}))
+    base_meta.write_text(json.dumps({"type": "bundle", "version": 1}))
     bundle = tmp_path / "local-topdir-bundle.tar.xz"
     ocx.plain(
         "package", "create", "-m", str(base_meta), "-o", str(bundle),

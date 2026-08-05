@@ -460,26 +460,36 @@ happened to carry moves to the single caller that fans out.
   `ocx package create --platform any` fails with a clear error (a dependency-pinning error, exit
   65), rather than silently deriving a covered subset. This replaces the intersection logic with
   a single invariant.
-- **Rule: an `any`-targeted bundle prohibits direct digest pins on its dependencies.** A leaf
-  manifest carries **no platform descriptor**, so a dependency pinned by a bare `@digest` cannot be
-  verified to be `any`-offered — the any-only rule above is unenforceable against it. Therefore both
-  `ocx package create` and `ocx package push` **reject** a direct digest pin in an `any`-targeted
-  bundle (dependency-pinning error, exit 65). Concrete-targeted bundles keep direct digest pins
-  unchanged (their target platform is known, so the pin's provenance is not in question). The
-  validation must inspect **already-pinned** dependencies too — `pin_dependencies` currently
-  short-circuits `is_pinned()` deps (`dependency_pinning.rs:61-65`), so the any-target digest-pin
-  check runs as a separate pass that does not skip them.
+- **Rule: `ocx package create` prohibits direct digest pins on an `any`-targeted bundle's
+  dependencies.** A leaf manifest carries **no platform descriptor**, so a dependency pinned by a
+  bare `@digest` cannot be verified to be `any`-offered from the digest alone. `create` resolves
+  against an index and has no registry evidence for a digest it did not resolve itself, so it
+  **rejects** a direct digest pin anywhere in an `any`-targeted bundle's dependency list
+  (dependency-pinning error, exit 65) — including one already present before `create` ran.
+  Concrete-targeted bundles keep direct digest pins unchanged (their target platform is known, so
+  the pin's provenance is not in question). The validation must inspect **already-pinned**
+  dependencies too — `pin_dependencies` currently short-circuits `is_pinned()` deps
+  (`dependency_pinning.rs:61-65`), so the any-target digest-pin check runs as a separate pass that
+  does not skip them. **`ocx package push` does not share this rule** — see the amendment below:
+  push has the registry in hand and checks the stronger, registry-verified claim directly, so a
+  bare digest the dependency's own index actually advertises as `any` is accepted.
 
 ### `any`-pin provenance (push gate)
 
-Sidecar map keys are publisher *claims*, not *evidence*: a dependency keyed `any` may pin a digest
-that is actually a platform-specific leaf. For an `any`-targeted bundle the push gate therefore
-**fetches each dependency's own manifest by tag** and requires an `any`-platform entry whose digest
+A dependency's digest pin is a sidecar-authored *claim*, not *evidence*: a bare `@digest` may name
+a digest that is actually a platform-specific leaf, and a leaf manifest carries no platform
+descriptor to check it against. For an `any`-targeted bundle the push gate therefore **fetches each
+dependency's own manifest by its advisory tag** and requires an `any`-platform entry whose digest
 equals the pin (a flat `Manifest::Image`: its own digest must equal the pin). Errors:
 `PublishGateError::AnyPinNotAdvertisedAsAny` (exit 65) when the fetched index advertises no such
 `any` entry; `AnyPinProvenanceUnavailable` (**fail-closed**, exit code chain-classified from the
 fetch cause) when the manifest cannot be fetched — an unverifiable claim is treated as untrusted,
-never silently accepted. Cost: one extra manifest GET per dependency, on `any`-target pushes only.
+never silently accepted. A dependency pinned with no advisory tag is fetched at `latest`
+(`Identifier::tag_or_latest`), which usually fails closed: the tag is what names the index stream
+the digest was resolved against, and without it there is nothing to re-derive provenance from. Cost:
+one extra manifest GET per dependency, on `any`-target pushes only. See the 2026-08-05 amendment
+below — this check now runs against a bare digest pin (the per-dependency `platforms` pin map this
+subsection originally described was subsequently deleted).
 
 ### No host default at create
 
@@ -512,7 +522,56 @@ one step that had kept a host default alive. Two consequences follow for free:
 64. Pre-1.0 clean break (D5 above) — no shim, no fallback, no deprecation window. Callers add the
 platform they were already targeting.
 
-### Recorded platform binds `create` to `push`/`test`
+### Build receipt binds `create` to `push`/`test` (superseded 2026-08-05 — see amendment)
+
+> **2026-08-05 amendment.** The `AuthoringBundle.platform` sidecar field and
+> `AuthoringError::{PlatformMismatch, MissingRecordedPlatform}` described below are **deleted**.
+> The platform never enters the metadata sidecar — it was metadata about the *build*, not about
+> the *package*, and a field a hand-authored sidecar could just as easily omit or contradict was
+> the wrong place to bind it. `ocx package create --metadata` now writes a second sidecar,
+> `<stem>-receipt.json` (`crates/ocx_cli/src/build_receipt.rs`), holding only
+> `{"version": 1, "platform": "..."}`. It is a **build artifact, not package metadata**: no
+> `schemars::JsonSchema` derive, never pushed to a registry, and read by nothing on the install
+> path. `ocx package push` and `ocx package test` resolve their target platform from
+> `build_receipt::resolve_target_platform(recorded, explicit, receipt_path)` — a pure function,
+> not a method on the metadata type:
+>
+> | Receipt | `--platform` | Outcome |
+> |---|---|---|
+> | present | absent | the recorded platform, silently |
+> | present | equal | the recorded platform, silently |
+> | present | different | the explicit value, with a warning naming both (was `PlatformMismatch`, exit 65 — now an override, not a rejection) |
+> | absent | given | the explicit value, with a notice that nothing cross-checked it |
+> | absent | absent | `UsageError` (exit 64) — was `MissingRecordedPlatform` (exit 65 `DataError`); reclassified because nothing about the invocation is malformed *data*, it is simply missing a required argument |
+>
+> The published metadata sidecar `create` writes is now **byte-identical to the published wire
+> form** `push` reads back — no platform key, ever — because the compiled projection
+> (`AuthoringMetadata::to_published`) carries no build-time fields at all; a test asserts the
+> serialized output has no `platform` key. This closes the same corruption class the original
+> recorded-platform binding closed (see rationale below), without a sidecar field a publisher could
+> edit or a hand-authored sidecar could omit. See the CLI's `build_receipt.rs` module doc, and the
+> D5 amendment in the Changelog for full context.
+>
+> **2026-08-05, second amendment — the receipt is a fallback, never an authority.** The advisory
+> semantics in the table above are **deleted** (`PlatformAdvisory` with them). The receipt is
+> consulted **only** for a value the command line did not supply: an explicit flag wins in
+> silence, is never compared against the receipt, and does not even cause it to be read. The
+> table collapses to three rows, applied per value:
+>
+> | Flag | Receipt | Outcome |
+> |---|---|---|
+> | given | anything | the flag, silently |
+> | absent | records the value | the recorded value (`debug!` log only) |
+> | absent | records nothing / no receipt | `UsageError` (exit 64) |
+>
+> Two further changes follow from it. `create` writes the receipt **whenever it has something to
+> record** — with or without `--metadata` — and records both the declared `--platform` and the
+> resolved `--identifier`; nothing declared means no file. `push`'s `--identifier` is therefore
+> **optional**, resolved on the same three rows (`ocx package test` keeps its required `-i`: it
+> names the local test subject and rejects `@digest`). V1 was reshaped in place, both fields
+> optional, since the feature had not shipped. The read is **lazy**: a fully explicit invocation
+> never opens the file, so a corrupt receipt cannot fail it — when the file *is* needed, a
+> corrupt one still propagates (exit 65) rather than degrading to "absent".
 
 `ocx package create` resolves every dependency against its required `--platform` value. That
 platform is **recorded in the authoring sidecar** — a new optional
@@ -699,7 +758,7 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
 | D2 grammar + `features`/`os_version` deletion | `oci/platform.rs` (`Display` 714-743, `FromStr` 745-832, delete `lock_key`/`base_lock_key`/`from_lock_key` 372-531 + escape helpers 638-712, **delete the `features` and `os_version` fields from `Platform::Specific`** L91 and every constructor — WP-A; `TryFrom<native::Platform>` keeps the inbound `features` and `os.version` warn-drops only), CLI help `crates/ocx_cli/src/options/platforms.rs:16-24` |
 | D3 lock V3 + canonical-key validation | `project/lock.rs` (`LockVersion`, version peek 342-434, delete V1/V2 read paths + `LockedResolution::LegacyIndex`, add `UnsupportedLockVersion` + `NoncanonicalPlatformKey`; canonical-key + canonical-platform-uniqueness pass on load and every write; **no** digest-value guard — key uniqueness only), `project/resolve.rs:655-678` (`build_platforms_map` keeps `guard_unique_key`, adds the `parsed.to_string() == key` + canonical-platform dedup check), `package/metadata/authoring/dependency.rs:72-140` (sidecar deserializer applies the same canonical-key check) |
 | D4 single-platform resolve | `oci/index.rs` (`select` signature → single `host`), `oci/platform.rs:542-622` (**delete** `supported_set` + `all_supported`), `package_manager/tasks/resolve.rs:279` (default `current().unwrap_or(Any)`), `crates/ocx_cli/src/conventions.rs:74-109` (drop `supported_platforms`/`all_supported_platforms`; rework `platforms_or_all_supported` into a `patch sync`-local concrete list), CLI `--platform` arity on resolution commands, `setup/bootstrap.rs:170,264,316`, `package_manager/tasks/update_check.rs:396` |
-| D5 authoring | delete `package/metadata/authoring/target_platforms.rs`, `package/dependency_pinning.rs:155-297`, retarget `package/metadata/authoring.rs` + `ocx package push` fan-out to the single `--platform` value; add the any-target direct-digest-pin rejection as a pass that does **not** skip `is_pinned()` deps (`dependency_pinning.rs:61-65`); recorded-platform binding: `AuthoringBundle.platform` field (`platform_field`/`platform_field_schema` serde-as-string), `AuthoringMetadata::{platform, with_platform, resolve_platform}`, `AuthoringError::{PlatformMismatch, MissingRecordedPlatform}`, wired at `package_push.rs:120` + `package_test.rs:126` |
+| D5 authoring | delete `package/metadata/authoring/target_platforms.rs`, `package/dependency_pinning.rs:155-297`, retarget `package/metadata/authoring.rs` + `ocx package push` fan-out to the single `--platform` value; add the any-target direct-digest-pin rejection as a pass that does **not** skip `is_pinned()` deps (`dependency_pinning.rs:61-65`). **2026-08-05:** recorded-platform binding replaced by a build receipt — `crates/ocx_cli/src/build_receipt.rs` (`BuildReceipt`, `ReceiptVersion`, `resolve_target_platform`, `PlatformAdvisory`), `conventions::{infer_receipt_file, resolve_receipt_path}`, wired at `package_create.rs` (writes), `package_push.rs`/`package_test.rs` (read via `resolve_target_platform`); per-dependency `platforms` pin map deleted from `authoring/dependency.rs` (single `identifier` digest, same shape for every declared platform including `any`); push's any-target enforcement moved to registry-verified provenance in `publisher/publish_gate.rs::verify_any_pin_provenance` |
 | Docs | `website/src/docs/reference/platforms.md`, `website/src/docs/authoring/multi-platform.*` (retitle/rewrite for single-platform), `metadata.md` (drop `platforms` target set), `.claude/rules/subsystem-oci.md` (Platform section: relation name, grammar, V3), `.claude/rules/arch-principles.md` (Platform glossary row), `website/src/docs/reference/command-line.md` (`--platform` flag docs), `website/src/docs/in-depth/versioning.md` (platform-key sections), `crates/ocx_schema` regenerate |
 
 ---
@@ -720,9 +779,12 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
       winners for the same host + candidate set via the shared `select_best` (authoring-vs-Index
       parity): Specific + `Any` candidates → Specific wins, no ambiguity; feature-specific + bare →
       feature-specific wins. *(implemented)*
-- [ ] `ocx package push`/`test` default to the sidecar's recorded platform; an explicit
-      `--platform` mismatching it → `PlatformMismatch` (65); a sidecar missing the field →
-      `MissingRecordedPlatform` (65).
+- [x] `ocx package push`/`test` default to the platform recorded in the build receipt beside the
+      bundle; an explicit `--platform` disagreeing with the receipt overrides it with a warning
+      naming both; no receipt and an explicit `--platform` proceeds with a notice that nothing
+      cross-checked it; no receipt and no `--platform` is a `UsageError` (64) — superseded
+      2026-08-05, was `PlatformMismatch`/`MissingRecordedPlatform` (65) against a sidecar field.
+      *(implemented — `build_receipt.rs` `resolve_target_platform` table tests, one per row)*
 - [x] `ocx package create --metadata` without `--platform` exits 64 naming both flags and writes no
       sidecar — including for an already-pinned sidecar, the case that previously succeeded and
       recorded the host's own platform. Mutation-checked: restoring the host default turns the
@@ -735,8 +797,13 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
       digest (Rosetta 2: `darwin/amd64` + `darwin/arm64` → one manifest) loads and resolves
       normally — no uniqueness rejection.
 - [ ] `ocx package create --platform any` fails when a dependency offers no `any` manifest.
-- [ ] `ocx package create`/`push --platform any` reject a dependency carrying a direct `@digest`
-      pin (including an already-pinned sidecar dep); a concrete-target bundle accepts it.
+- [x] `ocx package create --platform any` rejects a dependency carrying a direct `@digest` pin
+      (including an already-pinned sidecar dep); a concrete-target bundle accepts it. *(implemented,
+      `dependency_pinning.rs` `any_target_rejects_*` tests)*
+- [x] `ocx package push` accepts a bare digest pin under an `any` target **iff** the dependency's own
+      image index advertises that digest as `any`; a digest it does not advertise as `any` fails
+      (65) — superseded 2026-08-05, was an outright rejection matching `create`'s. *(implemented,
+      `publish_gate.rs` `any_target_*` tests)*
 - [x] Noncanonical V3 keys (`+a,a`, unsorted `+b,a`) fail load and write with
       `NoncanonicalPlatformKey`; two keys resolving to the same `Platform` are rejected (canonical-
       platform uniqueness), while two keys → same *digest* still load (R6). *(implemented)*
@@ -772,3 +839,5 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
 | 2026-07-17 | architect (opus) | Final gate-fix amendments (both verified against merged commit `9da15746`): (1) D5 **`any`-pin provenance check** — the push gate fetches each dependency's manifest by tag and requires an `any` entry whose digest equals the pin (flat manifest: own digest = pin); `PublishGateError::AnyPinNotAdvertisedAsAny` (65), `AnyPinProvenanceUnavailable` (fail-closed, chain-classified); one manifest GET per dep on any-target pushes. Sidecar keys are claims, not evidence. (2) D3 **write/load validation parity** — one `ProjectLock::validate` (declaration-hash version, bare repository, canonical keys) invoked by both `from_str_with_path` and `to_toml_string`/`save`; every serialized lock also loads (round-trip property test). |
 | 2026-07-17 | architect (sonnet) | **`os_version` axis removed from the model entirely** — no producer (authoring records `Platform::current()`, which never set it), no consumer (all five ship platforms bare), and anti-positioning (OS-version-tied binaries are the Homebrew-bottle disease OCX rejects, see `product-context.md`). Canonical grammar drops to `os/arch[/variant][+feature[,feature...]]` \| `any`; `@` loses reserved status in the percent-escape codec (legal literal, no escaping); `is_compatible`'s offer-gated strict equality and the scoring `matched_refinement_count` axis now apply to `variant` only. OCI boundary: an `os.version` key in a manifest `platform` entry is warn-dropped at the `TryFrom<native::Platform>` boundary, same pattern as the CPU `features` warn-drop — verbatim-observed foreign data, reversible without migration. Grammar, EBNF, escape table, truth table (renumbered #1–#16), scoring, round-trip, and validation sections updated to read as designed without it. |
 | 2026-07-27 | architect (opus) | **D5 loses the create-time host default** (defect found in `package_create.rs::validation_platform`, which still resolved an absent `--platform` to `Platform::current()`). `--platform` is now required whenever `--metadata` is given — usage error, exit 64, naming both flags — and has no default at all; without `--metadata` it stays optional and filename-only. The host platform answers what the build machine *supplies* (libc included); the sidecar field states what the artifact *demands*, and `create` is the step that records it, so the guess corrupted the pins, the `bin_scan` executable convention, and the value `push`/`test` bind to. Empirically: a glibc host recorded `linux/amd64+libc.glibc` with no platform named anywhere. Alternative (b) — record nothing and let `MissingRecordedPlatform` fire at push — was rejected: it still needs a platform for the projection and the binaries scan, and `Platform::any()` there both misfires D5's any-target rules on concrete bundles and silently bakes a wrong `binaries` claim, moving the guess to a field with no downstream guard. Consequences: the D5 any-target digest-pin check now runs on every `--metadata` invocation (the no-`--platform` path had skipped `pin_dependencies` for already-pinned sidecars), and the "omitted ⇒ must be fully pinned" usage error is deleted with the branch it guarded. Pre-1.0 clean break — a fully-pinned bundle created without `--platform` now exits 64. |
+| 2026-08-05 | doc-writer (sonnet), `testing-hardening` branch (`2fbfa894`) | **D5's recorded-platform field replaced by a build receipt; per-dependency `platforms` pin maps deleted.** `AuthoringBundle.platform` and `AuthoringError::{PlatformMismatch, MissingRecordedPlatform}` are gone — the platform never enters `metadata.json`, published or authoring. `ocx package create --metadata` now writes a second sidecar, `<stem>-receipt.json` (`build_receipt.rs`: `{"version": 1, "platform": "..."}`, no `JsonSchema` derive, never pushed), and `push`/`test` resolve their target via the pure `resolve_target_platform(recorded, explicit, receipt_path)` table function: a disagreeing explicit `--platform` now **overrides with a warning** (was a hard `PlatformMismatch` rejection); no receipt and no `--platform` is now `UsageError` (64, was `DataError` 65 via `MissingRecordedPlatform`) — a missing required argument, not malformed data. `AuthoringDependency` drops its `platforms: Option<BTreeMap<String, Digest>>` field entirely: every dependency pin, under a concrete platform or `any`, is now a single digest bare on the identifier — `dependency_pinning.rs::pin` collapsed to one code path with no map-write branch. This narrows push's `any`-target enforcement from a structural pin-map shape check to **registry-verified provenance** (`publish_gate.rs::verify_any_pin_provenance`, unchanged in principle from the prior amendment, now checking a bare digest instead of a map entry): push re-fetches the dependency's own manifest by its advisory tag and accepts the pin iff the index advertises that digest as `any`; `create` still refuses a pre-existing digest pin in an `any`-target outright (no registry access, no evidence). A dependency pinned with no advisory tag is fetched at `latest` for the provenance check, which usually fails closed — the tag is what names the index stream the digest came from. Rationale: the deleted field and map were sidecar-authored claims a hand-edited `metadata.json` could forge or omit with no downstream check; the receipt is a local, unpublished handoff between two steps of one build, and the any-target check now verifies the one fact that actually matters (does the registry agree this digest is `any`) instead of trusting a shape. D5 body, Implementation Surface Map, and Validation checklist updated; validation rows re-verified against `build_receipt.rs`, `dependency_pinning.rs`, and `publish_gate.rs` test suites. |
+| 2026-08-05 | builder (opus), `testing-hardening` branch | **The build receipt is a fallback, never an authority.** `PlatformAdvisory` is deleted with the advisory semantics of the row above: an explicit `--platform` / `--identifier` wins in silence, is never compared against the receipt, and does not cause it to be read at all. `resolve_target_platform(explicit, receipt)` and the new `resolve_target_identifier(explicit, receipt)` collapse to three rows each — flag given / receipt records it / neither (`UsageError` 64). `ocx package create` now writes the receipt whenever it has something to record (with or without `--metadata`), carrying the declared `--platform` and the resolved `--identifier`, both optional on the wire (V1 reshaped in place — unreleased, no compat shim); nothing declared writes no file. `ocx package push`'s `-i` becomes optional and resolves through the same table (`ocx package test` keeps its required `-i`: it names the local test subject and rejects `@digest`). Reads are lazy via `read_beside_bundle(layers)` — a fully explicit invocation never opens the file, so a corrupt receipt cannot fail it; when the file is needed, a corrupt one still propagates (65) rather than degrading to `absent`. Rationale (owner): a receipt that warns when overridden, and notes when absent, makes the publisher argue with a build artifact about a value they just stated; it is there to answer a question that was not asked. |
