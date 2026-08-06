@@ -65,6 +65,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
+    env,
     oci::{PinnedIdentifier, Platform},
     package::metadata::{BinaryName, EntrypointName, env::entry::Entry},
     package_manager::PatchProvenance,
@@ -227,7 +228,7 @@ impl ToolchainEnv {
         // Phase 4 overlay from local state and return the boundary: the global
         // path's `offline_view` preserves the patch tier (only the network is
         // disabled), so already-installed companions overlay the global env too.
-        let (entries, patch_start, provenance, admitted_binaries, admitted_entrypoints) = if context.global() {
+        let (mut entries, patch_start, provenance, admitted_binaries, admitted_entrypoints) = if context.global() {
             // OFFLINE lock-pinned resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             //
@@ -346,6 +347,14 @@ impl ToolchainEnv {
             )
         };
 
+        // W-11: settle each `list` entry's separator before any downstream
+        // branch (`--ci`, `--shell`, structured report) reads `entries`.
+        // Neither resolution path (global lock-pinned or project) keeps a
+        // second forwarded vector of its own — `project_env` above is moved
+        // into the scope that produced `entries` — so a single-vector pass
+        // covers both branches.
+        env::reconcile_list_separators(entries.iter_mut())?;
+
         // ── Emit ─────────────────────────────────────────────────────────────
         if let Some(provider) = ci {
             // CI sink: persist the composed env for later pipeline steps. An
@@ -386,6 +395,7 @@ impl ToolchainEnv {
                     key: e.key,
                     value: e.value,
                     kind: e.kind,
+                    separator: e.separator,
                     source,
                 }
             })

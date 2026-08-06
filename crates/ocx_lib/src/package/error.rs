@@ -49,6 +49,32 @@ pub enum Error {
     #[error("env var '{key}' declares unknown type '{type_name}'; upgrade ocx to use this package")]
     UnknownEnvModifier { key: String, type_name: String },
 
+    /// A `list` env var omits `separator`. Required on the wire: no human is
+    /// present when metadata is read, and the wrong separator fails silently
+    /// downstream.
+    #[error("env var '{key}' omits `separator`, which is required for list entries")]
+    MissingListSeparator { key: String },
+
+    /// A `list` env var's separator cannot be folded with — see
+    /// [`separator_is_valid`](super::metadata::env::list::separator_is_valid).
+    // `{:?}` on the separator: it is refused precisely for carrying something
+    // unprintable (empty, `=`, a line break), and a raw newline here would
+    // forge log lines (CWE-117) and hide the very byte being reported.
+    #[error(
+        "env var '{key}' declares list separator {separator:?}; a separator must be non-empty and free of '=', newline and carriage return"
+    )]
+    InvalidListSeparator { key: String, separator: String },
+
+    /// A `list` value starts or ends with its own separator, which would make
+    /// the append fold's flank match ambiguous. Checked as authored and again
+    /// once templates have resolved.
+    #[error("env var '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
+    SeparatorEdgedListValue {
+        key: String,
+        separator: String,
+        value: String,
+    },
+
     /// Entrypoint baked-arg template interpolation failed at publish time.
     #[error("entrypoint '{entrypoint}' arg '{arg}' {source}")]
     EntrypointArgInterpolation {
@@ -67,7 +93,10 @@ impl ClassifyExitCode for Error {
             | Self::InvalidLogoContent { .. }
             | Self::BuildMeta(_)
             | Self::EmptyPushSet
-            | Self::UnknownEnvModifier { .. } => Some(ExitCode::DataError),
+            | Self::UnknownEnvModifier { .. }
+            | Self::MissingListSeparator { .. }
+            | Self::InvalidListSeparator { .. }
+            | Self::SeparatorEdgedListValue { .. } => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointArgInterpolation { source, .. } => source.classify(),

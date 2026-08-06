@@ -9,6 +9,8 @@
 //! - [`validate_env_modifier_types`] — refuses an env var whose modifier `type`
 //!   this binary does not know, so a package built for a newer ocx fails closed
 //!   with a version remedy instead of running with a silently wrong environment.
+//! - [`validate_env_list_entries`] — enforces the wire contract for `list`
+//!   entries: a separator is present, foldable, and does not edge its value.
 //! - [`validate_env_tokens`] — walks env var values and checks that every
 //!   `${deps.NAME.FIELD}` token references a declared, non-ambiguous dep with
 //!   a supported field name.
@@ -75,6 +77,7 @@ impl TryFrom<Metadata> for ValidMetadata {
         // template complaint about a var whose grammar we cannot read would
         // send them to fix the wrong thing.
         validate_env_modifier_types(&metadata)?;
+        validate_env_list_entries(&metadata)?;
         validate_env_tokens(&metadata)?;
         validate_entrypoint_args(&metadata)?;
         Ok(Self(metadata))
@@ -144,6 +147,58 @@ pub(super) fn validate_env_modifier_types(metadata: &Metadata) -> Result<(), cra
             return Err(Error::UnknownEnvModifier {
                 key: var.key.clone(),
                 type_name: type_name.clone(),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Enforces the `list` wire contract on every list-typed env var.
+///
+/// The separator is **required** in package metadata, where no human is present
+/// to be told which one was assumed and a wrong guess fails silently in the
+/// consuming tool. Refusing it here rather than as a serde missing-field keeps
+/// the message on the variable the publisher has to go fix.
+///
+/// # Errors
+///
+/// [`crate::package::error::Error::MissingListSeparator`],
+/// [`crate::package::error::Error::InvalidListSeparator`], or
+/// [`crate::package::error::Error::SeparatorEdgedListValue`] for the first
+/// offending var in declaration order.
+pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+    use super::env::list;
+    use super::env::modifier::Modifier;
+
+    let Some(env) = metadata.env() else {
+        return Ok(());
+    };
+
+    for var in env {
+        let Modifier::List(declared) = &var.modifier else {
+            continue;
+        };
+        let Some(separator) = declared.separator.as_deref() else {
+            return Err(Error::MissingListSeparator { key: var.key.clone() }.into());
+        };
+        if !list::separator_is_valid(separator) {
+            return Err(Error::InvalidListSeparator {
+                key: var.key.clone(),
+                separator: separator.to_string(),
+            }
+            .into());
+        }
+        // The authored bytes only — a value that resolves to an edged one is
+        // caught again by `EnvResolver`, which is the first place the resolved
+        // form exists.
+        if list::is_separator_edged(&declared.value, separator) {
+            return Err(Error::SeparatorEdgedListValue {
+                key: var.key.clone(),
+                separator: separator.to_string(),
+                value: declared.value.clone(),
             }
             .into());
         }
@@ -498,13 +553,16 @@ mod tests {
     fn unknown_env_modifier_type_is_rejected_with_key_type_and_remedy() {
         let meta = make_metadata(
             &dep_json("cmake", None),
-            r#"{"key":"GODEBUG","type":"list","separator":",","value":"gctrace=1"}"#,
+            r#"{"key":"GODEBUG","type":"frobnicate","separator":",","value":"gctrace=1"}"#,
         );
         let message = ValidMetadata::try_from(meta)
             .expect_err("an unknown modifier type must fail closed")
             .to_string();
         assert!(message.contains("GODEBUG"), "must name the var key: {message}");
-        assert!(message.contains("list"), "must name the unrecognized type: {message}");
+        assert!(
+            message.contains("frobnicate"),
+            "must name the unrecognized type: {message}"
+        );
         assert!(
             message.contains("upgrade ocx"),
             "must state the remedy, not just the fault: {message}"
@@ -517,7 +575,10 @@ mod tests {
     fn unknown_env_modifier_type_exits_with_data_error() {
         use crate::cli::{ClassifyExitCode, ExitCode};
 
-        let meta = make_metadata(&dep_json("cmake", None), r#"{"key":"X","type":"list","value":"v"}"#);
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"X","type":"frobnicate","value":"v"}"#,
+        );
         let error = ValidMetadata::try_from(meta).expect_err("unknown type must fail");
         assert_eq!(error.classify(), Some(ExitCode::DataError));
     }
@@ -527,7 +588,7 @@ mod tests {
     #[test]
     fn first_unknown_env_modifier_in_declaration_order_is_named() {
         let env = concat!(
-            r#"{"key":"FIRST","type":"list","value":"a"},"#,
+            r#"{"key":"FIRST","type":"frobnicate","value":"a"},"#,
             r#"{"key":"SECOND","type":"map","value":"b"}"#
         );
         let meta = make_metadata(&dep_json("cmake", None), env);
@@ -544,7 +605,7 @@ mod tests {
     #[test]
     fn unknown_modifier_type_is_reported_before_a_template_fault() {
         let env = concat!(
-            r#"{"key":"NEWTYPE","type":"list","value":"a"},"#,
+            r#"{"key":"NEWTYPE","type":"frobnicate","value":"a"},"#,
             r#"{"key":"BROKEN","type":"constant","value":"${nonsense}"}"#
         );
         let meta = make_metadata(&dep_json("cmake", None), env);
@@ -562,6 +623,102 @@ mod tests {
     fn known_env_modifier_types_pass_the_gate() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installPath}/bin"));
         assert!(ValidMetadata::try_from(meta).is_ok());
+    }
+
+    // ── W-4: the `list` wire contract ─────────────────────────────────────────
+
+    /// The separator is required on the wire. The refusal names the variable
+    /// and the field, because a serde missing-field error would name neither.
+    #[test]
+    fn a_list_without_a_separator_is_refused_naming_the_var_and_the_field() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"JDK_JAVA_OPTIONS","type":"list","value":"-ea"}"#,
+        );
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("the wire requires an explicit separator")
+            .to_string();
+        assert!(message.contains("JDK_JAVA_OPTIONS"), "must name the var: {message}");
+        assert!(message.contains("separator"), "must name the field: {message}");
+    }
+
+    /// Same class as every other metadata refusal: malformed input, 65.
+    #[test]
+    fn a_list_without_a_separator_exits_with_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let meta = make_metadata(&dep_json("cmake", None), r#"{"key":"X","type":"list","value":"v"}"#);
+        let error = ValidMetadata::try_from(meta).expect_err("missing separator must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// An empty separator would degrade the fold's flank match to a bare
+    /// substring scan, deleting text out of the middle of unrelated elements.
+    #[test]
+    fn an_empty_list_separator_is_refused() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"OPTS","type":"list","separator":"","value":"-ea"}"#,
+        );
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("an empty separator is unfoldable")
+            .to_string();
+        assert!(message.contains("OPTS"), "must name the var: {message}");
+    }
+
+    /// `=` is the `--env KEY:list:SEP=VALUE` delimiter; a separator the flag
+    /// grammar cannot express must not be publishable either.
+    #[test]
+    fn a_list_separator_carrying_an_equals_is_refused() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"OPTS","type":"list","separator":"=","value":"-ea"}"#,
+        );
+        assert!(
+            ValidMetadata::try_from(meta).is_err(),
+            "a separator containing '=' must be refused"
+        );
+    }
+
+    /// A value edged by its own separator makes the fold's flank match
+    /// ambiguous — its own separator fuses with the wrapper.
+    #[test]
+    fn a_separator_edged_list_value_is_refused() {
+        for value in [",gctrace=1", "gctrace=1,"] {
+            let meta = make_metadata(
+                &dep_json("cmake", None),
+                &format!(r#"{{"key":"GODEBUG","type":"list","separator":",","value":"{value}"}}"#),
+            );
+            let message = ValidMetadata::try_from(meta)
+                .expect_err("a separator-edged value must be refused")
+                .to_string();
+            assert!(message.contains("GODEBUG"), "must name the var: {message}");
+        }
+    }
+
+    /// The happy path, including a value that legitimately carries the
+    /// separator in its interior (one opaque contribution, never tokenized).
+    #[test]
+    fn a_well_formed_list_entry_passes_the_gate() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"GODEBUG","type":"list","separator":",","value":"gctrace=1,madvdontneed=1"}"#,
+        );
+        assert!(ValidMetadata::try_from(meta).is_ok());
+    }
+
+    /// A list value still goes through template validation — the list gate
+    /// runs first but does not shadow it.
+    #[test]
+    fn a_list_value_with_an_unknown_placeholder_is_still_refused() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"OPTS","type":"list","separator":" ","value":"${nonsense}"}"#,
+        );
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("template faults still apply to list values")
+            .to_string();
+        assert!(message.contains("nonsense"), "must name the placeholder: {message}");
     }
 
     // ── validate_entrypoint_args ──────────────────────────────────────────────

@@ -4,6 +4,7 @@
 pub mod boolean_string;
 pub mod child_process;
 pub mod fs;
+pub mod list;
 pub mod path;
 pub mod result_ext;
 pub mod schema;

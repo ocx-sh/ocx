@@ -262,6 +262,164 @@ impl Shell {
         })
     }
 
+    /// Emit a **self-contained, idempotent, unique-append** shell statement that
+    /// appends `value` to the `separator`-joined list variable named `key`.
+    ///
+    /// The fold is pinned by `adr_env_modifier_types.md` D1 and computes the
+    /// same function as [`utility::list::append_unique`](crate::utility::list::append_unique),
+    /// so an exported shell line and the in-process child env (`ocx run`) agree
+    /// byte for byte:
+    ///
+    /// > wrap the ambient value in the separator; replace **every**
+    /// > `sep + value + sep` with `sep`, to a fixpoint; strip the wrapper;
+    /// > append `sep + value` (bare `value` when nothing survived).
+    ///
+    /// Every arm runs the same four steps: seed the working string with
+    /// `sep + ambient + sep`, or with a **bare `sep` when the ambient is
+    /// empty** — that branch is what keeps an empty ambient from yielding a
+    /// leading separator, and it makes a single *leading*-separator strip
+    /// equivalent to the primitive's strip-both-ends; replace to a fixpoint;
+    /// strip the one leading separator; concatenate `value`. The fixpoint loop
+    /// is what makes the removal total: a single replace pass leaves the second
+    /// of two *adjacent* duplicates behind, because the first match consumed
+    /// the separator they share.
+    ///
+    /// **The separator is untrusted text**, exactly like the value: both are
+    /// authored in package metadata and both go through the same per-shell
+    /// escaper. Matching is **case-sensitive in every shell** — list elements
+    /// are opaque option strings, where `-DFOO=1` and `-Dfoo=1` are different
+    /// options, so the case-insensitive default of PowerShell's `-replace`/`-eq`
+    /// would delete the wrong element. The PowerShell arm therefore calls the
+    /// ordinal .NET `String.Contains`/`String.Replace` rather than any
+    /// PowerShell operator, which also removes the need to regex-escape either
+    /// operand.
+    ///
+    /// **`cmd.exe` (`Shell::Batch`) returns `None`** — it cannot express this
+    /// fold. Its only string-replacement primitive, `%VAR:search=replace%`, is
+    /// case-**insensitive** with no case-sensitive form (measured: `%V:,abc,=,%`
+    /// deletes `,ABC,`), so it silently removes a differently-cased element;
+    /// its case-sensitive primitives (`IF` comparison, `%VAR:~n,m%`) cannot
+    /// locate a substring at an unknown position. An append that skips the
+    /// removal instead grows without bound when two entries share a key, and a
+    /// tail-anchored `IF` guard grows the same way as soon as a second entry is
+    /// interleaved. Emitting nothing beats emitting a statement that deletes
+    /// the wrong option or grows on every re-source.
+    ///
+    /// An empty `value` is a no-op (the primitive's rule), emitted as a shell
+    /// comment: folding with an empty value would make the search pattern
+    /// `sep + sep` and collapse the ambient's own adjacent separators.
+    ///
+    /// **Precondition:** `separator` is non-empty and `value` neither starts nor
+    /// ends with it — the same precondition
+    /// [`append_unique`](crate::utility::list::append_unique) documents, enforced
+    /// at every parse boundary and again after template resolution.
+    ///
+    /// Returns `None` when `key` is not a valid POSIX environment-variable name
+    /// (see [`Self::export_path`]) or when the shell cannot express the fold.
+    pub fn export_list(
+        self,
+        key: impl AsRef<str>,
+        value: impl AsRef<str>,
+        separator: impl AsRef<str>,
+    ) -> Option<String> {
+        let key = key.as_ref();
+        if !env::is_valid_env_key(key) {
+            return None;
+        }
+        let raw = value.as_ref();
+        let raw_separator = separator.as_ref();
+        if raw.is_empty() {
+            return Some(self.comment(format!("ocx: {key} list entry is empty, nothing to append")));
+        }
+        match self {
+            // POSIX family (bash/zsh + strict ash/ksh/dash) — one arm, pure
+            // builtins, no subprocess. `${l%%"$p"*}` is the prefix before the
+            // FIRST occurrence of `$__ocx_p` and `${l#*"$p"}` the part after it,
+            // so the loop body replaces that occurrence with the separator; the
+            // same `%%` expansion doubles as the loop guard, since it returns
+            // `$__ocx_l` unchanged exactly when the pattern does not occur (the
+            // idiom bash's `export_path` uses with `${//}`). Every interpolated
+            // pattern is a *quoted* expansion, which POSIX makes literal — so a
+            // separator containing `*`, `?` or `[` matches itself instead of
+            // globbing. Value and separator ride single-quoted literals, keeping
+            // `$`, backtick, `\` and `!` byte-exact (the double-quoted form's
+            // `\!` would not match a real `!`). `${KEY:+…}` supplies the
+            // empty-ambient branch inline and is `set -u`-safe.
+            Self::Bash | Self::Zsh | Self::Ash | Self::Ksh | Self::Dash => {
+                let value = escape_posix_single_quoted(raw);
+                let separator = escape_posix_single_quoted(raw_separator);
+                Some(format!(
+                    "__ocx_v='{value}'; __ocx_s='{separator}'; __ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; __ocx_l=\"${{{key}:+$__ocx_s${{{key}}}}}$__ocx_s\"; while [ \"$__ocx_l\" != \"${{__ocx_l%%\"$__ocx_p\"*}}\" ]; do __ocx_l=\"${{__ocx_l%%\"$__ocx_p\"*}}$__ocx_s${{__ocx_l#*\"$__ocx_p\"}}\"; done; export {key}=\"${{__ocx_l#\"$__ocx_s\"}}$__ocx_v\"; unset __ocx_v __ocx_s __ocx_p __ocx_l"
+                ))
+            }
+            // fish — `string replace` without `-r` is a literal, case-sensitive
+            // replace; `--all` covers one pass and the `$__ocx_n`/`$__ocx_l`
+            // compare drives it to the fixpoint. The final unflagged
+            // `string replace` removes the FIRST occurrence, which is the
+            // leading separator by construction. The variable is written as one
+            // plain string (`set -gx`, not a fish list) so the shell fold and
+            // the in-process fold produce identical bytes — a list-typed
+            // variable is a string in every other shell too.
+            Self::Fish => {
+                let value = self.escape_value(raw);
+                let separator = self.escape_value(raw_separator);
+                // `| string collect` on every substitution: fish splits command
+                // substitution output on newlines into a list, so a
+                // newline-bearing ambient or value would silently come back
+                // space-joined. (`--no-trim-newlines` hangs the loop — the
+                // trailing newline it preserves never compares equal.)
+                Some(format!(
+                    "set __ocx_v \"{value}\"; set __ocx_s \"{separator}\"; set __ocx_p \"$__ocx_s$__ocx_v$__ocx_s\"; set __ocx_l \"$__ocx_s\"; if test -n \"${key}\"; set __ocx_l \"$__ocx_s${key}$__ocx_s\"; end; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); while test \"$__ocx_n\" != \"$__ocx_l\"; set __ocx_l \"$__ocx_n\"; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); end; set __ocx_l (string replace -- \"$__ocx_s\" \"\" \"$__ocx_l\" | string collect); set -gx {key} \"$__ocx_l$__ocx_v\"; set -e __ocx_v __ocx_s __ocx_p __ocx_l __ocx_n"
+                ))
+            }
+            // PowerShell — ordinal (case-sensitive) .NET string methods, so no
+            // `-creplace` and no `[regex]::Escape` of either operand. The value
+            // and separator are single-quoted literals (`''` escapes a quote),
+            // which no `$`/backtick interpolation can reach. `.Substring` needs
+            // no bounds guard: the working string always starts with the
+            // separator.
+            Self::PowerShell => {
+                let value = escape_single_quoted_doubled(raw);
+                let separator = escape_single_quoted_doubled(raw_separator);
+                Some(format!(
+                    "$__ocx_v='{value}'; $__ocx_s='{separator}'; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length)+$__ocx_v; Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
+                ))
+            }
+            // elvish — `str:replace` mirrors Go's `strings.Replace`: literal,
+            // case-sensitive, all occurrences by default, and `&max=1` for the
+            // leading-separator strip. Single-quoted raw strings (`'` doubled)
+            // carry both operands, because elvish rejects `\$` / `` \` `` inside
+            // double quotes as invalid escape sequences. `has-env` guards the
+            // ambient read so an unset key cannot raise.
+            Self::Elvish => {
+                let value = escape_single_quoted_doubled(raw);
+                let separator = escape_single_quoted_doubled(raw_separator);
+                Some(format!(
+                    "use str; var __ocx_l = '{separator}'; if (and (has-env {key}) (not-eq $E:{key} '')) {{ set __ocx_l = '{separator}'$E:{key}'{separator}' }}; while (str:contains $__ocx_l '{separator}{value}{separator}') {{ set __ocx_l = (str:replace '{separator}{value}{separator}' '{separator}' $__ocx_l) }}; set E:{key} = (str:replace &max=1 '{separator}' '' $__ocx_l)'{value}'"
+                ))
+            }
+            // nushell — `str replace` without `--regex` is literal and
+            // case-sensitive; `--all` per pass, the `while` drives the fixpoint,
+            // and the unflagged form strips the leading separator (first
+            // occurrence). The variable is written as one string, not a nushell
+            // list, so the two folds agree byte for byte. Plain (non-interpolating)
+            // double-quoted literals, with `escape_value` neutralizing `$` and
+            // parentheses.
+            Self::Nushell => {
+                let value = self.escape_value(raw);
+                let separator = self.escape_value(raw_separator);
+                Some(format!(
+                    "mut __ocx_l = (if ($env.{key}? | default \"\") == \"\" {{ \"{separator}\" }} else {{ \"{separator}\" + ($env.{key}? | default \"\") + \"{separator}\" }}); while ($__ocx_l | str contains \"{separator}{value}{separator}\") {{ $__ocx_l = ($__ocx_l | str replace --all \"{separator}{value}{separator}\" \"{separator}\") }}; $env.{key} = (($__ocx_l | str replace \"{separator}\" \"\") + \"{value}\")"
+                ))
+            }
+            // batch (cmd.exe) — no emit; see the doc comment for the measured
+            // case-insensitivity of `%VAR:search=replace%` and why every
+            // single-statement alternative either deletes the wrong element or
+            // grows on re-source.
+            Self::Batch => None,
+        }
+    }
+
     /// Emit a shell line that sets `key=value` (replacing any prior value).
     ///
     /// Returns `None` when `key` is not a valid POSIX environment-variable
@@ -480,6 +638,9 @@ impl TryInto<clap_complete::Shell> for Shell {
 mod tests {
     use super::*;
     use crate::test;
+    // Iterating `value_variants()` keeps the "every shell" tests exhaustive by
+    // construction, so a new `Shell` cannot slip past them.
+    use clap_builder::ValueEnum as _;
 
     #[test]
     fn test_from_path() {
@@ -1338,6 +1499,314 @@ mod tests {
                 "batch move-to-front not idempotent across a double source"
             );
         }
+    }
+
+    // ══ Idempotent unique-append export_list (issue #277) ════════════════
+    //
+    // Same two layers as `export_path` above: exact-shape tests lock the
+    // emitted bytes against a `format!` regression, and `live_*` tests run the
+    // real statement through a real interpreter. The live assertions never
+    // hard-code an expected string — they compare against
+    // `utility::list::append_unique`, because "the shell snippet and the
+    // in-process fold produce identical strings" is the property the ADR pins,
+    // and a hand-written expectation could drift from the primitive.
+
+    /// `(ambient, value, separator)` triples every live list test drives.
+    const LIST_CASES: &[(&str, &str, &str)] = &[
+        ("", "-ea", " "),           // empty ambient — no leading separator
+        ("-Xmx1g", "-ea", " "),     // plain append
+        ("-ea -Xmx1g", "-ea", " "), // present already: move to the back
+        ("a,b,a,c", "a", ","),      // every occurrence removed, not just the first
+        ("a,a,b", "a", ","),        // adjacent duplicates need the fixpoint loop
+        ("a,a,a", "a", ","),
+        ("-eabc", "-ea", " "),      // a longer element is not a flank match
+        ("x", "a,b", ","),          // a value carrying the separator is one contribution
+        ("-Wall", "-Wextra", "; "), // multi-character separator
+        ("a b", "c d", " "),        // value with spaces
+        ("A,a", "a", ","),          // case-SENSITIVE: the `A` element must survive
+        ("0", "-ea", " "),          // a falsy-LOOKING ambient is a value, not an absent one
+        (",x", "a", ","),           // ambient already starts with the separator
+        ("a,,b", "x", ","),         // an empty element in the ambient survives verbatim
+        ("x", "v", "\""),           // ── metacharacter separators ──
+        ("x", "v", "%"),
+        ("x", "v", "`"),
+        ("x", "v", "$"),
+        ("x", "v", ";"),
+        ("x", "v", "*"), // a glob metachar must match itself, not pattern-match
+        ("a*b", "c", "*"),
+        ("x", "v", "'"),
+        ("x", "v", "\\"),
+        ("x", "v", "!"),
+        ("x", "v", "→"),   // a multi-byte separator is one delimiter, not three
+        ("a'b", "c", " "), // a quote-bearing ambient reds a mispaired test-harness escaper
+        // ── newline-bearing ambient and value ──
+        //
+        // Separators can never carry a newline (`list::separator_is_valid`
+        // refuses them), but the ambient value is whatever the user's shell
+        // holds and the contribution comes from package metadata. fish splits
+        // command-substitution output on newlines, so these are the cases that
+        // catch a missing `string collect`.
+        ("a\nb", "c", " "),
+        ("x", "a\nb", " "),
+        ("a\rb", "c", " "),
+        ("x", "a\rb", " "),
+    ];
+
+    fn folded(existing: &str, value: &str, separator: &str) -> String {
+        crate::utility::list::append_unique(existing, value, separator)
+    }
+
+    #[test]
+    fn export_list_posix_exact_shape() {
+        let expected = "__ocx_v='-ea'; __ocx_s=' '; __ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; __ocx_l=\"${OPTS:+$__ocx_s${OPTS}}$__ocx_s\"; while [ \"$__ocx_l\" != \"${__ocx_l%%\"$__ocx_p\"*}\" ]; do __ocx_l=\"${__ocx_l%%\"$__ocx_p\"*}$__ocx_s${__ocx_l#*\"$__ocx_p\"}\"; done; export OPTS=\"${__ocx_l#\"$__ocx_s\"}$__ocx_v\"; unset __ocx_v __ocx_s __ocx_p __ocx_l";
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Ash, Shell::Ksh, Shell::Dash] {
+            assert_eq!(
+                shell.export_list("OPTS", "-ea", " ").as_deref(),
+                Some(expected),
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_list_fish_exact_shape() {
+        let expected = "set __ocx_v \"-ea\"; set __ocx_s \" \"; set __ocx_p \"$__ocx_s$__ocx_v$__ocx_s\"; set __ocx_l \"$__ocx_s\"; if test -n \"$OPTS\"; set __ocx_l \"$__ocx_s$OPTS$__ocx_s\"; end; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); while test \"$__ocx_n\" != \"$__ocx_l\"; set __ocx_l \"$__ocx_n\"; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); end; set __ocx_l (string replace -- \"$__ocx_s\" \"\" \"$__ocx_l\" | string collect); set -gx OPTS \"$__ocx_l$__ocx_v\"; set -e __ocx_v __ocx_s __ocx_p __ocx_l __ocx_n";
+        assert_eq!(Shell::Fish.export_list("OPTS", "-ea", " ").as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn export_list_powershell_exact_shape() {
+        let expected = "$__ocx_v='-ea'; $__ocx_s=' '; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:OPTS) { \"$__ocx_s$($env:OPTS)$__ocx_s\" } else { $__ocx_s }; while ($__ocx_l.Contains($__ocx_p)) { $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }; $env:OPTS=$__ocx_l.Substring($__ocx_s.Length)+$__ocx_v; Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l";
+        assert_eq!(
+            Shell::PowerShell.export_list("OPTS", "-ea", " ").as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn export_list_elvish_exact_shape() {
+        let expected = "use str; var __ocx_l = ' '; if (and (has-env OPTS) (not-eq $E:OPTS '')) { set __ocx_l = ' '$E:OPTS' ' }; while (str:contains $__ocx_l ' -ea ') { set __ocx_l = (str:replace ' -ea ' ' ' $__ocx_l) }; set E:OPTS = (str:replace &max=1 ' ' '' $__ocx_l)'-ea'";
+        assert_eq!(Shell::Elvish.export_list("OPTS", "-ea", " ").as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn export_list_nushell_exact_shape() {
+        let expected = "mut __ocx_l = (if ($env.OPTS? | default \"\") == \"\" { \" \" } else { \" \" + ($env.OPTS? | default \"\") + \" \" }); while ($__ocx_l | str contains \" -ea \") { $__ocx_l = ($__ocx_l | str replace --all \" -ea \" \" \") }; $env.OPTS = (($__ocx_l | str replace \" \" \"\") + \"-ea\")";
+        assert_eq!(
+            Shell::Nushell.export_list("OPTS", "-ea", " ").as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn export_list_batch_is_unsupported() {
+        // cmd.exe has no case-sensitive string replacement: `%VAR:search=repl%`
+        // is case-INSENSITIVE (measured — `%V:,abc,=,%` deletes `,ABC,`), and
+        // its case-sensitive primitives (`IF`, `%VAR:~n,m%`) cannot find a
+        // substring at an unknown position. Emitting nothing beats emitting a
+        // statement that deletes a differently-cased option or grows on every
+        // re-source. The caller turns this into a stderr note naming the shell.
+        assert_eq!(Shell::Batch.export_list("OPTS", "-ea", " "), None);
+        // The path/constant emitters are unaffected — only the list fold is blocked.
+        assert!(Shell::Batch.export_path("PATH", "/opt/bin").is_some());
+        assert!(Shell::Batch.export_constant("OPTS", "-ea").is_some());
+    }
+
+    #[test]
+    fn export_list_rejects_invalid_key_all_shells() {
+        for shell in Shell::value_variants() {
+            assert!(shell.export_list("OPTS; rm -rf /", "-ea", " ").is_none(), "{shell}");
+        }
+    }
+
+    #[test]
+    fn export_list_empty_value_is_a_commented_no_op() {
+        // The primitive treats an empty contribution as a no-op; folding with an
+        // empty value would search for `sep+sep` and collapse the ambient's own
+        // adjacent separators. Every shell gets a comment instead of a statement.
+        for shell in Shell::value_variants() {
+            let line = shell.export_list("OPTS", "", ",").expect("a comment, not None");
+            assert_eq!(line, shell.comment("ocx: OPTS list entry is empty, nothing to append"));
+            assert!(!line.contains("__ocx_l"), "{shell}: must not emit the fold: {line}");
+        }
+    }
+
+    #[test]
+    fn export_list_is_generic_over_key() {
+        // The emitter must work for any list-style key (`GODEBUG`, `CFLAGS`, ...).
+        let line = Shell::Bash.export_list("GODEBUG", "gctrace=1", ",").unwrap();
+        assert!(line.contains("export GODEBUG="), "got: {line}");
+        assert!(!line.contains("OPTS"), "must not hardcode a key: {line}");
+    }
+
+    #[test]
+    fn export_list_escapes_the_separator_like_the_value() {
+        // The separator is untrusted authored text, so it goes through the same
+        // per-shell escaper as the value. Each case below would interpolate,
+        // break the quoting, or glob if the raw byte were emitted.
+        let cases: [(Shell, &str, &str); 6] = [
+            (Shell::Bash, "'", "__ocx_s='\'\\''"),      // POSIX close/escape/reopen
+            (Shell::Dash, "'", "__ocx_s='\'\\''"),      //
+            (Shell::PowerShell, "'", "$__ocx_s=''''"),  // doubled inside '...'
+            (Shell::Elvish, "'", "var __ocx_l = ''''"), // doubled inside '...'
+            (Shell::Fish, "$", "set __ocx_s \"\\$\""),  // backslash-escaped in "..."
+            (Shell::Nushell, "\"", "\\\""),             // backslash-escaped in "..."
+        ];
+        for (shell, separator, expected_fragment) in cases {
+            let line = shell.export_list("OPTS", "v", separator).unwrap();
+            assert!(
+                line.contains(expected_fragment),
+                "{shell}: separator {separator:?} must be escaped; expected {expected_fragment:?} in {line}"
+            );
+        }
+    }
+
+    /// Seed `OPTS`, apply the emitted statement **twice**, print `OPTS`, and
+    /// require the result to equal the in-process fold — proving both that the
+    /// two folds agree and that eval-twice ≡ eval-once.
+    #[cfg(unix)]
+    fn posix_list_roundtrip(argv: &[&str]) {
+        let shell = Shell::from_argv(argv);
+        for (existing, value, separator) in LIST_CASES {
+            let line = shell.export_list("OPTS", value, separator).unwrap();
+            let seed = escape_posix_single_quoted(existing);
+            let script = format!("export OPTS='{seed}'; {line}; {line}; printf '%s' \"$OPTS\"");
+            if let Some(out) = run_script(argv, &script) {
+                assert_eq!(
+                    out,
+                    folded(existing, value, separator),
+                    "argv={argv:?} ambient={existing:?} value={value:?} sep={separator:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_bash_zsh_list_matches_the_in_process_fold() {
+        posix_list_roundtrip(&["bash", "-c"]);
+        posix_list_roundtrip(&["zsh", "-c"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_posix_list_matches_the_in_process_fold() {
+        posix_list_roundtrip(&["dash", "-c"]);
+        posix_list_roundtrip(&["ksh", "-c"]);
+        posix_list_roundtrip(&["busybox", "ash", "-c"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_fish_list_matches_the_in_process_fold() {
+        for (existing, value, separator) in LIST_CASES {
+            let line = Shell::Fish.export_list("OPTS", value, separator).unwrap();
+            let seed = Shell::Fish.escape_value(existing);
+            let script = format!("set -gx OPTS \"{seed}\"; {line}; {line}; printf '%s' \"$OPTS\"");
+            if let Some(out) = run_script(&["fish", "-c"], &script) {
+                assert_eq!(
+                    out,
+                    folded(existing, value, separator),
+                    "fish ambient={existing:?} value={value:?} sep={separator:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_elvish_list_matches_the_in_process_fold() {
+        for (existing, value, separator) in LIST_CASES {
+            let line = Shell::Elvish.export_list("OPTS", value, separator).unwrap();
+            // Elvish raw strings are single-quoted with `'` doubled — the same
+            // escaper the pwsh seed uses. `escape_value` is the double-quote
+            // escaper and would mispair inside the `'…'` literal below.
+            let seed = escape_single_quoted_doubled(existing);
+            let script = format!("set-env OPTS '{seed}'; {line}; {line}; print $E:OPTS");
+            if let Some(out) = run_script(&["elvish", "-c"], &script) {
+                assert_eq!(
+                    out,
+                    folded(existing, value, separator),
+                    "elvish ambient={existing:?} value={value:?} sep={separator:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_nushell_list_matches_the_in_process_fold() {
+        for (existing, value, separator) in LIST_CASES {
+            let line = Shell::Nushell.export_list("OPTS", value, separator).unwrap();
+            let seed = Shell::Nushell.escape_value(existing);
+            let script = format!("$env.OPTS = \"{seed}\"; {line}; {line}; print -n $env.OPTS");
+            if let Some(out) = run_script(&["nu", "-c"], &script) {
+                assert_eq!(
+                    out,
+                    folded(existing, value, separator),
+                    "nu ambient={existing:?} value={value:?} sep={separator:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_powershell_list_matches_the_in_process_fold() {
+        // Also the executable proof of case-sensitivity for the one shell whose
+        // default operators (`-replace`, `-eq`) are case-INSENSITIVE: the
+        // `("A,a", "a", ",")` case keeps the `A` element only under an ordinal
+        // match.
+        for (existing, value, separator) in LIST_CASES {
+            let line = Shell::PowerShell.export_list("OPTS", value, separator).unwrap();
+            let seed = escape_single_quoted_doubled(existing);
+            let script = format!("$env:OPTS='{seed}'; {line}; {line}; [Console]::Out.Write($env:OPTS)");
+            if let Some(out) = run_script(&["pwsh", "-NoProfile", "-Command"], &script) {
+                assert_eq!(
+                    out,
+                    folded(existing, value, separator),
+                    "pwsh ambient={existing:?} value={value:?} sep={separator:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_list_injection_does_not_execute() {
+        // Three attacker-influenced inputs: the value and the separator both come
+        // from package metadata, and the ambient value is whatever the user's
+        // environment already holds. None may reach a command position — the
+        // whole fold runs through parameter expansion, which the shell does not
+        // re-scan for command substitution.
+        let marker = std::env::temp_dir().join("ocx_inj_live_list");
+        let hostile = format!("$(touch {})", marker.display());
+        for argv in [
+            &["bash", "-c"][..],
+            &["zsh", "-c"][..],
+            &["dash", "-c"][..],
+            &["ksh", "-c"][..],
+            &["busybox", "ash", "-c"][..],
+        ] {
+            for (ambient, value, separator) in [
+                ("a b", hostile.as_str(), " "),
+                ("a b", "v", hostile.as_str()),
+                (hostile.as_str(), "v", " "),
+            ] {
+                let _ = std::fs::remove_file(&marker);
+                let line = Shell::from_argv(argv).export_list("OPTS", value, separator).unwrap();
+                let seed = escape_posix_single_quoted(ambient);
+                let script = format!("export OPTS='{seed}'; {line}; {line}; printf '%s' \"$OPTS\"");
+                if let Some(out) = run_script(argv, &script) {
+                    assert!(
+                        !marker.exists(),
+                        "argv={argv:?}: injection executed via ambient={ambient:?} value={value:?} sep={separator:?}"
+                    );
+                    assert_eq!(out, folded(ambient, value, separator), "argv={argv:?}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

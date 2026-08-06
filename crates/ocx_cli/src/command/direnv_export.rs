@@ -168,9 +168,16 @@ impl DirenvExport {
             no_patches: project.config.no_patches_repositories(),
             env: project_env,
         };
-        let (entries, _, _) = offline
+        let (mut entries, _, _) = offline
             .resolve_env_with_patch_boundary(&applied.infos, false, scope)
             .await?;
+
+        // W-11: settle each `list` entry's separator before emitting — a
+        // package's explicit separator must be the one every `None`-separator
+        // contributor (project `[env]`, `--env`) inherits, not the fold's bare
+        // default. No forwarded copy exists here (this command never spawns a
+        // re-entrant launcher), so a single-vector pass is enough.
+        env::reconcile_list_separators(entries.iter_mut())?;
 
         // Delegate to the shared emit helper (C5 / conventions.rs).
         // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash

@@ -108,6 +108,7 @@ impl Var {
         match &self.modifier {
             Modifier::Path(path_var) => Some(&path_var.value),
             Modifier::Constant(constant_var) => Some(&constant_var.value),
+            Modifier::List(list_var) => Some(&list_var.value),
             Modifier::Unknown { .. } => None,
         }
     }

@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 
 use crate::log::*;
 use crate::package::metadata::env::conflict::ConstantTracker;
+use crate::package::metadata::env::list::DEFAULT_SEPARATOR;
 use crate::package::metadata::env::modifier::ModifierKind;
 
 use super::{error, flavor::Flavor};
@@ -28,6 +29,11 @@ pub(super) struct GitHubFlavor {
     path_entries: Vec<String>,
     /// Buffered non-PATH path entries: key → [values in prepend order].
     buffered_paths: IndexMap<String, Vec<String>>,
+    /// Buffered list entries: key → (separator, [values in append order]).
+    /// The separator is captured from the first entry buffered for a key;
+    /// every later entry for the same key already carries the same one,
+    /// settled upstream by `reconcile_list_separators`.
+    buffered_lists: IndexMap<String, (String, Vec<String>)>,
     /// Buffered constant entries: key → value (last-writer-wins).
     buffered_constants: IndexMap<String, String>,
     /// Tracks constant-type assignments to warn on conflicts.
@@ -44,6 +50,7 @@ impl GitHubFlavor {
             env_file,
             path_entries: Vec::new(),
             buffered_paths: IndexMap::new(),
+            buffered_lists: IndexMap::new(),
             buffered_constants: IndexMap::new(),
             constants: ConstantTracker::new(),
         })
@@ -51,7 +58,10 @@ impl GitHubFlavor {
 
     /// Returns `true` if there are any buffered entries to flush.
     fn has_buffered(&self) -> bool {
-        !self.path_entries.is_empty() || !self.buffered_paths.is_empty() || !self.buffered_constants.is_empty()
+        !self.path_entries.is_empty()
+            || !self.buffered_paths.is_empty()
+            || !self.buffered_lists.is_empty()
+            || !self.buffered_constants.is_empty()
     }
 
     /// Flushes all buffered entries to their respective files.
@@ -71,6 +81,10 @@ impl GitHubFlavor {
             let full = super::prepend_existing(&key, &values);
             append_env_var(&self.env_file, &key, &full)?;
         }
+        for (key, (separator, values)) in self.buffered_lists.drain(..) {
+            let full = super::append_existing(&key, &values, &separator);
+            append_env_var(&self.env_file, &key, &full)?;
+        }
         for (key, value) in self.buffered_constants.drain(..) {
             append_env_var(&self.env_file, &key, &value)?;
         }
@@ -79,7 +93,13 @@ impl GitHubFlavor {
 }
 
 impl Flavor for GitHubFlavor {
-    fn write_entry(&mut self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()> {
+    fn write_entry(
+        &mut self,
+        key: &str,
+        value: &str,
+        kind: &ModifierKind,
+        separator: Option<&str>,
+    ) -> crate::Result<()> {
         // Gate the key slot before any branch buffers it: a key bearing a
         // newline would inject a second `KEY=value` line into `$GITHUB_ENV`
         // (CWE-77), and a non-identifier charset corrupts the var name.
@@ -111,6 +131,14 @@ impl Flavor for GitHubFlavor {
                 }
                 self.buffered_constants.insert(key.to_string(), value.to_string());
             }
+            ModifierKind::List => {
+                let separator = separator.unwrap_or(DEFAULT_SEPARATOR);
+                self.buffered_lists
+                    .entry(key.to_string())
+                    .or_insert_with(|| (separator.to_string(), Vec::new()))
+                    .1
+                    .push(value.to_string());
+            }
         }
         Ok(())
     }
@@ -136,9 +164,13 @@ pub(super) fn detect() -> bool {
 }
 
 /// Appends a `KEY=value` entry to a GitHub Actions environment file,
-/// using heredoc delimiters for values containing newlines or double quotes.
+/// using heredoc delimiters for values containing line breaks or double quotes.
+///
+/// A lone `\r` counts as a line break here for the same reason the
+/// `$GITHUB_PATH` guard treats it as one: the runner's parser ends a record on
+/// it, so a `KEY=a\rINJECTED=1` line writes two variables (CWE-93).
 fn append_env_var(file: &Path, key: &str, value: &str) -> Result<(), error::Error> {
-    let needs_delimiter = value.contains('\n') || value.contains('"');
+    let needs_delimiter = value.contains(['\n', '\r', '"']);
     if needs_delimiter {
         let delim = unique_delimiter(value);
         let content = format!("{key}<<{delim}\n{value}\n{delim}\n");
@@ -221,7 +253,7 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("PATH", "/home/user/.ocx/objects/foo/bin", &ModifierKind::Path)
+            .write_entry("PATH", "/home/user/.ocx/objects/foo/bin", &ModifierKind::Path, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -240,6 +272,7 @@ mod tests {
                 "LD_LIBRARY_PATH",
                 "/home/user/.ocx/objects/foo/lib",
                 &ModifierKind::Path,
+                None,
             )
             .unwrap();
         targets.flush().unwrap();
@@ -262,6 +295,7 @@ mod tests {
                 "LD_LIBRARY_PATH",
                 "/home/user/.ocx/objects/foo/lib",
                 &ModifierKind::Path,
+                None,
             )
             .unwrap();
         targets.flush().unwrap();
@@ -282,7 +316,12 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("JAVA_HOME", "/home/user/.ocx/objects/foo", &ModifierKind::Constant)
+            .write_entry(
+                "JAVA_HOME",
+                "/home/user/.ocx/objects/foo",
+                &ModifierKind::Constant,
+                None,
+            )
             .unwrap();
         targets.flush().unwrap();
 
@@ -296,7 +335,7 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("MY_VAR", "line1\nline2", &ModifierKind::Constant)
+            .write_entry("MY_VAR", "line1\nline2", &ModifierKind::Constant, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -310,7 +349,7 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("MY_VAR", "contains\nEOF\ninside", &ModifierKind::Constant)
+            .write_entry("MY_VAR", "contains\nEOF\ninside", &ModifierKind::Constant, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -352,10 +391,10 @@ mod tests {
         env.remove("LD_LIBRARY_PATH");
 
         targets
-            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path, None)
             .unwrap();
         targets
-            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -377,10 +416,10 @@ mod tests {
         env.set("LD_LIBRARY_PATH", "/existing/lib");
 
         targets
-            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path, None)
             .unwrap();
         targets
-            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -408,7 +447,7 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("FOO\nINJECTED=evil", "value", &ModifierKind::Constant)
+            .write_entry("FOO\nINJECTED=evil", "value", &ModifierKind::Constant, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -430,7 +469,7 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("PATH", "/pkg/bin\n/injected/evil", &ModifierKind::Path)
+            .write_entry("PATH", "/pkg/bin\n/injected/evil", &ModifierKind::Path, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -439,6 +478,32 @@ mod tests {
         assert!(
             !content.contains("/injected/evil"),
             "injected PATH dir must not appear: got {content:?}"
+        );
+    }
+
+    /// A lone `\r` ends a record for the runner's `$GITHUB_ENV` parser exactly
+    /// as `\n` does, so a value carrying one must go out heredoc-framed. Written
+    /// as a bare `KEY=value` line it would define a second variable — the same
+    /// injection the `$GITHUB_PATH` guard above already refuses.
+    #[test]
+    fn env_value_with_carriage_return_uses_heredoc() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets
+            .write_entry("OPTS", "-ea\rINJECTED=1", &ModifierKind::Constant, None)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.env_file);
+        assert_eq!(
+            content, "OPTS<<EOF\n-ea\rINJECTED=1\nEOF\n",
+            "a carriage return must force the heredoc form"
+        );
+        assert!(
+            !content.starts_with("OPTS=-ea"),
+            "the bare KEY=value form would let the runner read a second variable: {content:?}"
         );
     }
 
@@ -452,10 +517,10 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("FOO=BAR", "value", &ModifierKind::Constant)
+            .write_entry("FOO=BAR", "value", &ModifierKind::Constant, None)
             .unwrap();
         targets
-            .write_entry("FOO BAR", "value", &ModifierKind::Constant)
+            .write_entry("FOO BAR", "value", &ModifierKind::Constant, None)
             .unwrap();
         targets.flush().unwrap();
 
@@ -484,7 +549,7 @@ mod tests {
         {
             let mut targets = super::GitHubFlavor::from_env().unwrap();
             targets
-                .write_entry("DROP_TEST", "drop-value", &ModifierKind::Constant)
+                .write_entry("DROP_TEST", "drop-value", &ModifierKind::Constant, None)
                 .unwrap();
             // Intentionally NO flush() call — drop must flush instead.
             drop(targets);
@@ -506,9 +571,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
-        targets.write_entry("PATH", "/shared/bin", &ModifierKind::Path).unwrap();
-        targets.write_entry("PATH", "/pkg/bin", &ModifierKind::Path).unwrap();
-        targets.write_entry("PATH", "/shared/bin", &ModifierKind::Path).unwrap();
+        targets
+            .write_entry("PATH", "/shared/bin", &ModifierKind::Path, None)
+            .unwrap();
+        targets
+            .write_entry("PATH", "/pkg/bin", &ModifierKind::Path, None)
+            .unwrap();
+        targets
+            .write_entry("PATH", "/shared/bin", &ModifierKind::Path, None)
+            .unwrap();
         targets.flush().unwrap();
 
         // keep-last: the first `/shared/bin` is dropped, leaving `/pkg/bin`
@@ -523,15 +594,121 @@ mod tests {
         let mut targets = setup_github_env(&env, &tmp);
 
         targets
-            .write_entry("JAVA_HOME", "/pkg1/java", &ModifierKind::Constant)
+            .write_entry("JAVA_HOME", "/pkg1/java", &ModifierKind::Constant, None)
             .unwrap();
         targets
-            .write_entry("JAVA_HOME", "/pkg2/java", &ModifierKind::Constant)
+            .write_entry("JAVA_HOME", "/pkg2/java", &ModifierKind::Constant, None)
             .unwrap();
         targets.flush().unwrap();
 
         // Only the last value should appear (constants are deduplicated on flush)
         let content = read(&targets.env_file);
         assert_eq!(content, "JAVA_HOME=/pkg2/java\n");
+    }
+
+    // ── W-9: `ModifierKind::List` buffering ─────────────────────────────────
+
+    #[test]
+    fn list_export_on_an_empty_ambient() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.remove("JDK_JAVA_OPTIONS");
+
+        targets
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        targets.flush().unwrap();
+
+        assert_eq!(read(&targets.env_file), "JDK_JAVA_OPTIONS=-ea\n");
+    }
+
+    #[test]
+    fn list_duplicate_contribution_moves_to_the_back() {
+        // A value already present in the ambient process env is removed from
+        // its old position and re-appended at the back — re-exporting an
+        // already-exported list variable must not grow it.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.set("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
+
+        targets
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        targets.flush().unwrap();
+
+        assert_eq!(read(&targets.env_file), "JDK_JAVA_OPTIONS=-Xmx1g -ea\n");
+    }
+
+    #[test]
+    fn list_entry_with_an_explicit_separator() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.remove("GODEBUG");
+
+        targets
+            .write_entry("GODEBUG", "gctrace=1", &ModifierKind::List, Some(","))
+            .unwrap();
+        targets
+            .write_entry("GODEBUG", "madvdontneed=1", &ModifierKind::List, Some(","))
+            .unwrap();
+        targets.flush().unwrap();
+
+        assert_eq!(read(&targets.env_file), "GODEBUG=gctrace=1,madvdontneed=1\n");
+    }
+
+    #[test]
+    fn list_entry_with_no_separator_defaults_to_space() {
+        // By the time an entry reaches `write_entry`, `reconcile_list_separators`
+        // has already settled every contributor to a key — a bare `None` here
+        // legitimately means "nobody declared one", which folds with `" "`.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.remove("JDK_JAVA_OPTIONS");
+
+        targets
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, None)
+            .unwrap();
+        targets
+            .write_entry("JDK_JAVA_OPTIONS", "-Xmx1g", &ModifierKind::List, None)
+            .unwrap();
+        targets.flush().unwrap();
+
+        assert_eq!(read(&targets.env_file), "JDK_JAVA_OPTIONS=-ea -Xmx1g\n");
+    }
+
+    #[test]
+    fn mixed_kind_same_key_bucket_order_not_call_order() {
+        // Accepted gap (`adr_env_modifier_types.md` Consequences, extending the
+        // pre-existing path/constant precedent to `list`): each kind buffers
+        // into its own bucket, and `flush_inner` drains buckets in a FIXED
+        // order (paths, then lists, then constants) — so when two entries for
+        // the SAME key carry DIFFERENT kinds, which line lands last in
+        // `$GITHUB_ENV` (and therefore wins when the file is sourced) depends
+        // on bucket order, not on the entries' actual call order. Here the
+        // constant is written FIRST and the list SECOND, but the constant
+        // bucket flushes last, so the constant's line wins anyway — the
+        // inverse of call order. Documented, not fixed.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.remove("OPTS");
+
+        targets
+            .write_entry("OPTS", "constant-value", &ModifierKind::Constant, None)
+            .unwrap();
+        targets
+            .write_entry("OPTS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        targets.flush().unwrap();
+
+        assert_eq!(
+            read(&targets.env_file),
+            "OPTS=-ea\nOPTS=constant-value\n",
+            "bucket order decides which line is last, regardless of call order"
+        );
     }
 }

@@ -16,9 +16,21 @@ use crate::package::metadata::env::modifier::ModifierKind;
 pub(super) trait Flavor {
     /// Writes a single environment variable entry to the CI system's runtime files.
     ///
-    /// For path-type variables, implementations may buffer values internally and
-    /// defer writing until [`flush`](Flavor::flush) is called.
-    fn write_entry(&mut self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()>;
+    /// For path-type and list-type variables, implementations may buffer values
+    /// internally and defer writing until [`flush`](Flavor::flush) is called.
+    ///
+    /// `separator` carries a `List` entry's fold separator; ignored for `Path`
+    /// and `Constant`. By the time an entry reaches this call,
+    /// [`reconcile_list_separators`](crate::env::reconcile_list_separators) has
+    /// already settled it across every contributor to `key`, so `None` here
+    /// legitimately means the default `" "`, not "not yet decided".
+    fn write_entry(
+        &mut self,
+        key: &str,
+        value: &str,
+        kind: &ModifierKind,
+        separator: Option<&str>,
+    ) -> crate::Result<()>;
 
     /// Flushes any buffered state to the CI system's runtime files.
     fn flush(&mut self) -> crate::Result<()>;

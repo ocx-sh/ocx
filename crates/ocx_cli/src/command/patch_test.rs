@@ -143,7 +143,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // Parse-level, before any file or registry work.
     let cwd = std::env::current_dir()
         .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
-    let env_overrides = args.env.entries(&cwd)?;
+    let mut env_overrides = args.env.entries(&cwd)?;
 
     // ── Step 1: Read + validate the descriptor file. ──
     let descriptor_bytes = tokio::fs::read(&args.descriptor)
@@ -190,10 +190,18 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // The overrides are cloned rather than moved: they are ALSO the forwarded
     // slice in step 6, and a handful of entries is cheaper than the machinery to
     // hand them back out of the composition.
-    let composition = manager
+    let mut composition = manager
         .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone())
         .await
         .map_err(ocx_lib::Error::from)?;
+
+    // W-11: `composition.entries` and `env_overrides` are disjoint `Vec`s
+    // holding independent copies of the `--env` overrides (mirrors exec.rs /
+    // package_test.rs) — reconcile them together, before any of the three
+    // downstream branches (script, command, or the printed report) reads
+    // either, so a package- or companion-established `list` separator reaches
+    // the forwarded copy.
+    env::reconcile_list_separators(composition.entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
     // ── Step 6: Build the composed process env (mirrors package_test.rs). ──
     //
@@ -270,6 +278,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
                     key: entry.key.clone(),
                     value: entry.value.clone(),
                     kind: entry.kind.clone(),
+                    separator: entry.separator.clone(),
                     source,
                 }
             })

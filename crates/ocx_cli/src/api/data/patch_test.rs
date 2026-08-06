@@ -10,8 +10,9 @@ use crate::api::data::env::EntrySource;
 
 /// A single composed environment variable entry shown by `ocx patch test`.
 ///
-/// JSON format: `{ "key": "...", "value": "...", "type": "constant"|"path"[,
-/// "source": { "kind": "patch", "rule": "...", "companion": "..." }] }`. The
+/// JSON format: `{ "key": "...", "value": "...", "type": "constant"|"path"|"list"[,
+/// "separator": "..."][, "source": { "kind": "patch", "rule": "...", "companion": "..." }] }`.
+/// The optional `separator` field is present only for a `"type":"list"` entry. The
 /// optional `source` object is present only for companion overlay entries and
 /// names the rule glob + companion that produced the entry; base-native entries
 /// omit it. Shares [`EntrySource`] with `--show-patches`.
@@ -21,6 +22,10 @@ pub struct PatchTestEntry {
     pub value: String,
     #[serde(rename = "type")]
     pub kind: ModifierKind,
+    /// The separator a [`ModifierKind::List`] entry folds with; `None` on
+    /// every other kind. Skipped in JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
     /// Provenance for a companion overlay entry; `None` for base-native entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<EntrySource>,
@@ -37,7 +42,7 @@ pub struct PatchTestEntry {
 ///
 /// JSON format:
 /// `{ "base": "...", "companions": ["...", ...], "entries": [{ "key", "value", "type"[,
-/// "source": { "kind": "patch", "rule", "companion" }] }, ...] }`.
+/// "separator"][, "source": { "kind": "patch", "rule", "companion" }] }, ...] }`.
 #[derive(Serialize)]
 pub struct PatchTestReport {
     /// The base identifier the descriptor was composed onto.
@@ -113,6 +118,7 @@ mod tests {
             key: key.to_owned(),
             value: "value".to_owned(),
             kind: ModifierKind::Constant,
+            separator: None,
             source,
         }
     }
@@ -155,5 +161,35 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serializes");
         assert!(!json.contains("\"source\""), "native entry omits source: {json}");
         assert!(!has_overlay_entry(&report.entries));
+    }
+
+    // ── separator field (W-10) ─────────────────────────────────────────────
+
+    #[test]
+    fn list_entry_serializes_type_and_separator() {
+        let report = PatchTestReport::new(
+            "ocx.sh/java:21".to_owned(),
+            Vec::new(),
+            vec![PatchTestEntry {
+                key: "JAVA_TOOL_OPTIONS".to_owned(),
+                value: "-Xmx2g".to_owned(),
+                kind: ModifierKind::List,
+                separator: Some(" ".to_owned()),
+                source: None,
+            }],
+        );
+        let json = serde_json::to_string(&report).expect("serializes");
+        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""separator":" ""#), "separator must be present: {json}");
+    }
+
+    #[test]
+    fn path_entry_omits_the_separator_field() {
+        let report = PatchTestReport::new("ocx.sh/cmake:3".to_owned(), Vec::new(), vec![entry("PATH", None)]);
+        let json = serde_json::to_string(&report).expect("serializes");
+        assert!(
+            !json.contains("\"separator\""),
+            "a non-list entry must omit separator entirely: {json}"
+        );
     }
 }

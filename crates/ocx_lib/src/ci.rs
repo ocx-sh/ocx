@@ -47,7 +47,7 @@ impl CiFlavor {
         };
 
         for entry in entries {
-            target.write_entry(&entry.key, &entry.value, &entry.kind)?;
+            target.write_entry(&entry.key, &entry.value, &entry.kind, entry.separator.as_deref())?;
         }
 
         target.flush()?;
@@ -90,6 +90,37 @@ fn prepend_existing(key: &str, values: &[String]) -> String {
         result = move_to_front(&result, OsStr::new(value));
     }
     result.to_string_lossy().into_owned()
+}
+
+/// Computes the final value for a list-type variable shared by both CI flavors.
+///
+/// The append-direction sibling of [`prepend_existing`]: reads the existing
+/// process value of `key` and folds each buffered package value from `values`
+/// (in accumulation order) through
+/// [`append_unique`](crate::utility::list::append_unique) — the same
+/// operation [`Env::add_list`](crate::env::Env::add_list) applies once per
+/// entry on the in-process `ocx run` path.
+///
+/// **Last-applied wins, landing at the BACK** — the opposite end from
+/// `prepend_existing`'s front, matching `list`'s move-to-back operator
+/// (`adr_env_modifier_types.md` D1) instead of `path`'s move-to-front. A value
+/// already present (in an earlier `values` entry, or in `existing`) is removed
+/// from its old position and re-appended at the new back, so re-running an
+/// export against an already-exported variable does not grow it.
+///
+/// `separator` is the entry's own fold separator. By the time entries reach
+/// this call, [`reconcile_list_separators`](crate::env::reconcile_list_separators)
+/// has already settled it across every contributor to `key` at the CLI
+/// finalize sites — a bare `" "` default here is exactly what a caller-side
+/// `None` legitimately reconciles to, not a value left undecided.
+fn append_existing(key: &str, values: &[String], separator: &str) -> String {
+    use crate::utility::list::append_unique;
+
+    let mut result = crate::env::var(key).unwrap_or_default();
+    for value in values {
+        result = append_unique(&result, value, separator);
+    }
+    result
 }
 
 impl std::fmt::Display for CiFlavor {
@@ -206,5 +237,54 @@ mod tests {
         env.set("PREPEND_TEST", "/existing/bin");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
         assert_eq!(result, format!("/b/bin{SEP}/a/bin{SEP}/existing/bin"));
+    }
+
+    // ── append_existing move-to-back (last-applied-wins) ───────────────────
+    //
+    // W-9: the append-direction sibling of `prepend_existing`. A `list`
+    // contribution moves to the BACK on re-application — the opposite end
+    // from `path`'s front — matching `Env::add_list`'s `ocx run` semantics.
+
+    #[test]
+    fn append_existing_on_an_empty_ambient_yields_the_bare_value() {
+        let env = crate::test::env::lock();
+        env.remove("APPEND_TEST");
+        let result = super::append_existing("APPEND_TEST", &["-ea".to_string()], " ");
+        assert_eq!(result, "-ea");
+    }
+
+    #[test]
+    fn append_existing_moves_a_duplicate_contribution_to_the_back() {
+        // A value already present (from the ambient process env) is removed
+        // from its old position and re-appended at the back, so re-exporting
+        // an already-exported variable does not grow it.
+        let env = crate::test::env::lock();
+        env.set("APPEND_TEST", "-ea -Xmx1g");
+        let result = super::append_existing("APPEND_TEST", &["-ea".to_string()], " ");
+        assert_eq!(result, "-Xmx1g -ea");
+    }
+
+    #[test]
+    fn append_existing_last_applied_value_follows_earlier_values() {
+        // Two distinct list contributions for the same key, applied in
+        // sequence: `-ea` first, `-server` second. Last-applied-wins lands
+        // `-server` at the back, after `-ea`.
+        let env = crate::test::env::lock();
+        env.remove("APPEND_TEST");
+        let result = super::append_existing("APPEND_TEST", &["-ea".to_string(), "-server".to_string()], " ");
+        assert_eq!(result, "-ea -server");
+    }
+
+    #[test]
+    fn append_existing_uses_the_entrys_own_separator() {
+        // `GODEBUG`-style comma separator, distinct from the space default.
+        let env = crate::test::env::lock();
+        env.remove("APPEND_TEST");
+        let result = super::append_existing(
+            "APPEND_TEST",
+            &["gctrace=1".to_string(), "madvdontneed=1".to_string()],
+            ",",
+        );
+        assert_eq!(result, "gctrace=1,madvdontneed=1");
     }
 }

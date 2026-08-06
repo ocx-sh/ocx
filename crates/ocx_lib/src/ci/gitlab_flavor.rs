@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::log::*;
 use crate::package::metadata::env::conflict::ConstantTracker;
+use crate::package::metadata::env::list::DEFAULT_SEPARATOR;
 use crate::package::metadata::env::modifier::ModifierKind;
 
 use super::{error, flavor::Flavor};
@@ -34,6 +35,11 @@ pub(super) struct GitLabFlavor {
     /// Buffered path entries (any key, `PATH` included): key → values in
     /// prepend order.
     buffered_paths: IndexMap<String, Vec<String>>,
+    /// Buffered list entries: key → (separator, [values in append order]).
+    /// The separator is captured from the first entry buffered for a key;
+    /// every later entry for the same key already carries the same one,
+    /// settled upstream by `reconcile_list_separators`.
+    buffered_lists: IndexMap<String, (String, Vec<String>)>,
     /// Buffered constant entries: key → value (last-writer-wins).
     buffered_constants: IndexMap<String, String>,
     /// Tracks constant-type assignments to warn on conflicts.
@@ -68,6 +74,7 @@ impl GitLabFlavor {
         Self {
             sink,
             buffered_paths: IndexMap::new(),
+            buffered_lists: IndexMap::new(),
             buffered_constants: IndexMap::new(),
             constants: ConstantTracker::new(),
         }
@@ -75,7 +82,7 @@ impl GitLabFlavor {
 
     /// Returns `true` if there are any buffered entries to flush.
     fn has_buffered(&self) -> bool {
-        !self.buffered_paths.is_empty() || !self.buffered_constants.is_empty()
+        !self.buffered_paths.is_empty() || !self.buffered_lists.is_empty() || !self.buffered_constants.is_empty()
     }
 
     /// Computes the final key/value pairs and serializes them as JSON-lines.
@@ -86,6 +93,10 @@ impl GitLabFlavor {
         let mut lines: Vec<(String, String)> = Vec::new();
         for (key, values) in self.buffered_paths.drain(..) {
             let full = super::prepend_existing(&key, &values);
+            lines.push((key, full));
+        }
+        for (key, (separator, values)) in self.buffered_lists.drain(..) {
+            let full = super::append_existing(&key, &values, &separator);
             lines.push((key, full));
         }
         for (key, value) in self.buffered_constants.drain(..) {
@@ -101,7 +112,13 @@ impl GitLabFlavor {
 }
 
 impl Flavor for GitLabFlavor {
-    fn write_entry(&mut self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()> {
+    fn write_entry(
+        &mut self,
+        key: &str,
+        value: &str,
+        kind: &ModifierKind,
+        separator: Option<&str>,
+    ) -> crate::Result<()> {
         // Gate the key slot before buffering: a non-identifier charset (spaces,
         // `=`, newlines) corrupts the JSON-lines `name` field. Values are
         // serde-framed so they need no separate newline guard here.
@@ -123,6 +140,14 @@ impl Flavor for GitLabFlavor {
                     warn!("{}", conflict);
                 }
                 self.buffered_constants.insert(key.to_string(), value.to_string());
+            }
+            ModifierKind::List => {
+                let separator = separator.unwrap_or(DEFAULT_SEPARATOR);
+                self.buffered_lists
+                    .entry(key.to_string())
+                    .or_insert_with(|| (separator.to_string(), Vec::new()))
+                    .1
+                    .push(value.to_string());
             }
         }
         Ok(())
@@ -213,7 +238,7 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -231,10 +256,10 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path, None)
             .unwrap();
         target
-            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -259,7 +284,7 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -281,7 +306,9 @@ mod tests {
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
-        target.write_entry("PATH", "/pkg/bin", &ModifierKind::Path).unwrap();
+        target
+            .write_entry("PATH", "/pkg/bin", &ModifierKind::Path, None)
+            .unwrap();
         target.flush().unwrap();
 
         assert_eq!(
@@ -300,7 +327,7 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("JAVA_HOME", "/pkg/java", &ModifierKind::Constant)
+            .write_entry("JAVA_HOME", "/pkg/java", &ModifierKind::Constant, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -314,10 +341,10 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("JAVA_HOME", "/pkg1/java", &ModifierKind::Constant)
+            .write_entry("JAVA_HOME", "/pkg1/java", &ModifierKind::Constant, None)
             .unwrap();
         target
-            .write_entry("JAVA_HOME", "/pkg2/java", &ModifierKind::Constant)
+            .write_entry("JAVA_HOME", "/pkg2/java", &ModifierKind::Constant, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -334,7 +361,7 @@ mod tests {
         // A value with a double-quote, backslash, and newline must be escaped
         // so each entry stays exactly one JSON line.
         target
-            .write_entry("WEIRD", "a\"b\\c\nd", &ModifierKind::Constant)
+            .write_entry("WEIRD", "a\"b\\c\nd", &ModifierKind::Constant, None)
             .unwrap();
         target.flush().unwrap();
 
@@ -350,7 +377,7 @@ mod tests {
 
         let mut target = super::GitLabFlavor::new(Some(export.clone())).unwrap();
         target
-            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path)
+            .write_entry("LD_LIBRARY_PATH", "/pkg/lib", &ModifierKind::Path, None)
             .unwrap();
         target.flush().unwrap();
         drop(target);
@@ -368,10 +395,10 @@ mod tests {
         let mut target = flavor(&buf);
 
         target
-            .write_entry("FOO\nINJECTED", "value", &ModifierKind::Constant)
+            .write_entry("FOO\nINJECTED", "value", &ModifierKind::Constant, None)
             .unwrap();
         target
-            .write_entry("PATH\nINJECTED", "/pkg/bin", &ModifierKind::Path)
+            .write_entry("PATH\nINJECTED", "/pkg/bin", &ModifierKind::Path, None)
             .unwrap();
         assert!(!target.has_buffered(), "invalid keys must not be buffered");
         target.flush().unwrap();
@@ -387,8 +414,12 @@ mod tests {
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
-        target.write_entry("FOO=BAR", "value", &ModifierKind::Constant).unwrap();
-        target.write_entry("FOO BAR", "value", &ModifierKind::Constant).unwrap();
+        target
+            .write_entry("FOO=BAR", "value", &ModifierKind::Constant, None)
+            .unwrap();
+        target
+            .write_entry("FOO BAR", "value", &ModifierKind::Constant, None)
+            .unwrap();
         assert!(!target.has_buffered(), "invalid-charset keys must not be buffered");
         target.flush().unwrap();
 
@@ -409,7 +440,7 @@ mod tests {
         {
             let mut target = target;
             target
-                .write_entry("DROP_TEST", "drop-value", &ModifierKind::Constant)
+                .write_entry("DROP_TEST", "drop-value", &ModifierKind::Constant, None)
                 .unwrap();
             // Intentionally NO flush() call — drop must flush instead.
             drop(target);
@@ -420,6 +451,120 @@ mod tests {
             buf.contents(),
             "{\"name\":\"DROP_TEST\",\"value\":\"drop-value\"}\n",
             "Drop must flush buffered entries without an explicit flush() call"
+        );
+    }
+
+    // ── W-9: `ModifierKind::List` buffering ─────────────────────────────────
+
+    #[test]
+    fn list_export_on_an_empty_ambient() {
+        let env = crate::test::env::lock();
+        env.remove("JDK_JAVA_OPTIONS");
+        let buf = SharedBuf::new();
+        let mut target = flavor(&buf);
+
+        target
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        target.flush().unwrap();
+
+        assert_eq!(buf.contents(), "{\"name\":\"JDK_JAVA_OPTIONS\",\"value\":\"-ea\"}\n");
+    }
+
+    #[test]
+    fn list_duplicate_contribution_moves_to_the_back() {
+        // A value already present in the ambient process env is removed from
+        // its old position and re-appended at the back — re-exporting an
+        // already-exported list variable must not grow it.
+        let env = crate::test::env::lock();
+        env.set("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
+        let buf = SharedBuf::new();
+        let mut target = flavor(&buf);
+
+        target
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        target.flush().unwrap();
+
+        assert_eq!(
+            buf.contents(),
+            "{\"name\":\"JDK_JAVA_OPTIONS\",\"value\":\"-Xmx1g -ea\"}\n"
+        );
+    }
+
+    #[test]
+    fn list_entry_with_an_explicit_separator() {
+        let env = crate::test::env::lock();
+        env.remove("GODEBUG");
+        let buf = SharedBuf::new();
+        let mut target = flavor(&buf);
+
+        target
+            .write_entry("GODEBUG", "gctrace=1", &ModifierKind::List, Some(","))
+            .unwrap();
+        target
+            .write_entry("GODEBUG", "madvdontneed=1", &ModifierKind::List, Some(","))
+            .unwrap();
+        target.flush().unwrap();
+
+        assert_eq!(
+            buf.contents(),
+            "{\"name\":\"GODEBUG\",\"value\":\"gctrace=1,madvdontneed=1\"}\n"
+        );
+    }
+
+    #[test]
+    fn list_entry_with_no_separator_defaults_to_space() {
+        // By the time an entry reaches `write_entry`, `reconcile_list_separators`
+        // has already settled every contributor to a key — a bare `None` here
+        // legitimately means "nobody declared one", which folds with `" "`.
+        let env = crate::test::env::lock();
+        env.remove("JDK_JAVA_OPTIONS");
+        let buf = SharedBuf::new();
+        let mut target = flavor(&buf);
+
+        target
+            .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, None)
+            .unwrap();
+        target
+            .write_entry("JDK_JAVA_OPTIONS", "-Xmx1g", &ModifierKind::List, None)
+            .unwrap();
+        target.flush().unwrap();
+
+        assert_eq!(
+            buf.contents(),
+            "{\"name\":\"JDK_JAVA_OPTIONS\",\"value\":\"-ea -Xmx1g\"}\n"
+        );
+    }
+
+    #[test]
+    fn mixed_kind_same_key_bucket_order_not_call_order() {
+        // Accepted gap (`adr_env_modifier_types.md` Consequences, extending the
+        // pre-existing path/constant precedent to `list`): each kind buffers
+        // into its own bucket, and `flush_inner` drains buckets in a FIXED
+        // order (paths, then lists, then constants) — so when two entries for
+        // the SAME key carry DIFFERENT kinds, which line lands last (and
+        // therefore wins when the file is sourced) depends on bucket order,
+        // not on the entries' actual call order. Here the constant is written
+        // FIRST and the list SECOND, but the constant bucket flushes last, so
+        // its line is emitted last anyway — the inverse of call order.
+        // Documented, not fixed.
+        let _env = crate::test::env::lock();
+        let buf = SharedBuf::new();
+        let mut target = flavor(&buf);
+
+        target
+            .write_entry("OPTS", "constant-value", &ModifierKind::Constant, None)
+            .unwrap();
+        target
+            .write_entry("OPTS", "-ea", &ModifierKind::List, Some(" "))
+            .unwrap();
+        target.flush().unwrap();
+
+        assert_eq!(
+            buf.contents(),
+            "{\"name\":\"OPTS\",\"value\":\"-ea\"}\n{\"name\":\"OPTS\",\"value\":\"constant-value\"}\n",
+            "bucket order decides which line is last, regardless of call order"
         );
     }
 

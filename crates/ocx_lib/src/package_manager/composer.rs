@@ -811,6 +811,7 @@ fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
         key: "PATH".to_string(),
         value: pkg.entrypoints().to_string_lossy().into_owned(),
         kind: ModifierKind::Path,
+        separator: None,
     }
 }
 

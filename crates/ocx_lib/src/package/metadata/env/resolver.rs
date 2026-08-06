@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::dep_context::DependencyContext;
 use super::entry::Entry;
+use super::list;
 use super::modifier::ModifierKind;
 use super::var::{Modifier, Var};
 use crate::package::metadata::{dependency::DependencyName, template::TemplateResolver};
@@ -47,6 +48,8 @@ impl<'a> EnvResolver<'a> {
     ///   resolution failure (unknown dep ref, unknown field, dep not installed).
     /// - [`crate::package::error::Error::RequiredPathMissing`] when a
     ///   `required` path-modifier resolves to a path that does not exist.
+    /// - [`crate::package::error::Error::SeparatorEdgedListValue`] when a
+    ///   list-modifier value *resolves* to one edged by its own separator.
     pub fn resolve(&self, var: &Var) -> crate::Result<Option<Entry>> {
         let Some(template) = var.value() else {
             return Ok(None);
@@ -94,6 +97,28 @@ impl<'a> EnvResolver<'a> {
             value = path.to_string_lossy().to_string();
         }
 
+        // A second separator-edge check, on the resolved bytes. The parse
+        // boundaries see the authored template, and `${installPath}` with
+        // separator `/` resolves to a `/`-edged value none of them could have
+        // seen — one that makes the fold's flank match ambiguous.
+        let separator = if let Modifier::List(list_modifier) = &var.modifier {
+            // `None` is refused for package metadata by `ValidMetadata`, which
+            // runs on every load path; the fallback is what the human-facing
+            // surfaces authored through.
+            let separator = list_modifier.separator.as_deref().unwrap_or(list::DEFAULT_SEPARATOR);
+            if list::is_separator_edged(&value, separator) {
+                return Err(crate::package::error::Error::SeparatorEdgedListValue {
+                    key: var.key.clone(),
+                    separator: separator.to_string(),
+                    value,
+                }
+                .into());
+            }
+            list_modifier.separator.clone()
+        } else {
+            None
+        };
+
         Ok(Some(Entry {
             key: var.key.clone(),
             value,
@@ -102,6 +127,7 @@ impl<'a> EnvResolver<'a> {
             // already refused it on every load path.
             kind: ModifierKind::try_from(&var.modifier)
                 .expect("a var with a resolvable value template names a known modifier kind"),
+            separator,
         }))
     }
 }
@@ -133,6 +159,17 @@ mod tests {
 
     fn constant_var(key: &str, value: &str) -> Var {
         Var::new_constant(key, value)
+    }
+
+    fn list_var(key: &str, value: &str, separator: &str) -> Var {
+        Var {
+            key: key.to_string(),
+            modifier: Modifier::List(list::List {
+                separator: Some(separator.to_string()),
+                value: value.to_string(),
+            }),
+            visibility: crate::package::metadata::visibility::Visibility::PRIVATE,
+        }
     }
 
     /// Resolve a single var via [`EnvResolver::resolve`] and return its
@@ -294,6 +331,72 @@ mod tests {
             )),
             "unexpected error: {err}"
         );
+    }
+
+    // ── W-4: list values are re-checked after template resolution ─────────
+
+    /// The resolved entry carries the separator the fold needs.
+    #[test]
+    fn a_list_var_resolves_into_an_entry_carrying_its_separator() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+        let entry = resolver
+            .resolve(&list_var("GODEBUG", "gctrace=1", ","))
+            .unwrap()
+            .expect("a list var resolves to an entry");
+        assert_eq!(entry.kind, ModifierKind::List);
+        assert_eq!(entry.separator.as_deref(), Some(","));
+        assert_eq!(entry.value, "gctrace=1");
+    }
+
+    /// The parse gates only ever see the authored template, which here carries
+    /// no comma at all — the comma arrives from the dependency's install path.
+    /// A gate reading the authored bytes cannot catch that, so the resolver
+    /// checks again on the resolved ones.
+    #[test]
+    fn a_value_resolving_to_a_separator_edged_one_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let edged = dir.path().join("opts,");
+        std::fs::create_dir(&edged).unwrap();
+        let mut ctxs = HashMap::new();
+        ctxs.insert(
+            dep_name("tool"),
+            DependencyContext::path_only(pinned("tool"), edged.clone()),
+        );
+
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+        let error = resolver
+            .resolve(&list_var("PARTS", "${deps.tool.installPath}", ","))
+            .expect_err("a resolved value edged by its separator must be refused");
+        let message = error.to_string();
+        assert!(message.contains("PARTS"), "must name the var: {message}");
+        assert!(
+            message.contains(&edged.to_string_lossy().to_string()),
+            "must show the resolved value, which is what the parse gate could not see: {message}"
+        );
+    }
+
+    /// The same template with a separator that does not edge the resolved
+    /// value passes — the check keys on the separator, not on the path shape.
+    #[test]
+    fn a_resolved_value_not_edged_by_its_separator_passes() {
+        let dir = TempDir::new().unwrap();
+        let edged = dir.path().join("opts,");
+        std::fs::create_dir(&edged).unwrap();
+        let mut ctxs = HashMap::new();
+        ctxs.insert(
+            dep_name("tool"),
+            DependencyContext::path_only(pinned("tool"), edged.clone()),
+        );
+
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+        let entry = resolver
+            .resolve(&list_var("PARTS", "${deps.tool.installPath}", " "))
+            .unwrap()
+            .expect("a space separator does not edge this value");
+        assert_eq!(entry.value, edged.to_string_lossy());
     }
 
     // ── Regression: Windows verbatim prefix (`\\?\`) must not appear in

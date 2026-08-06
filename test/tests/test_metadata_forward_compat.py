@@ -43,7 +43,10 @@ REMEDY_METADATA = f"declares unknown type '{UNKNOWN_TYPE}'; upgrade ocx to use t
 
 # The shared `FromStr` remedy (`modifier.rs::ParseModifierKindError`), reused
 # verbatim by both the `ocx.toml` (78) and `--env` (64) surfaces.
-REMEDY_PARSE = f"unknown modifier type '{UNKNOWN_TYPE}'; expected `path` or `constant` (a newer ocx may support it)"
+REMEDY_PARSE = (
+    f"unknown modifier type '{UNKNOWN_TYPE}'; "
+    "expected `path`, `constant` or `list` (a newer ocx may support it)"
+)
 
 # The lenient `ocx package deps` read-site warning (`command/deps.rs`).
 DEPS_SKIP_WARNING = "skipping package: it requires a newer ocx than this one"
