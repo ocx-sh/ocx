@@ -281,6 +281,14 @@ async fn resolve_dep_via_metadata(
     load_install_info((*resolved_id).clone(), content).await
 }
 
+/// Whether validation refused the metadata for declaring an env modifier type
+/// this ocx does not know — the one failure here that means "too old", not
+/// "broken".
+fn is_unknown_env_modifier(error: &ocx_lib::Error) -> bool {
+    matches!(error, ocx_lib::Error::Package(cause)
+        if matches!(cause.as_ref(), ocx_lib::package::error::Error::UnknownEnvModifier { .. }))
+}
+
 async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path::PathBuf) -> Option<InstallInfo> {
     let (metadata, resolved) = tokio::join!(
         Metadata::read_json(content.with_file_name("metadata.json")),
@@ -303,11 +311,22 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
     let metadata = match ValidMetadata::try_from(raw_metadata) {
         Ok(m) => m.into(),
         Err(err) => {
-            tracing::warn!(
-                package = %identifier,
-                error = %err,
-                "skipping corrupted install: metadata.json failed validation"
-            );
+            // A package declaring a modifier type this ocx does not know is a
+            // newer package, not a damaged one — sending its publisher to
+            // reinstall would be advice for a fault that is not there.
+            if is_unknown_env_modifier(&err) {
+                tracing::warn!(
+                    package = %identifier,
+                    error = %err,
+                    "skipping package: it requires a newer ocx than this one"
+                );
+            } else {
+                tracing::warn!(
+                    package = %identifier,
+                    error = %err,
+                    "skipping corrupted install: metadata.json failed validation"
+                );
+            }
             return None;
         }
     };

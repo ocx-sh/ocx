@@ -6,6 +6,9 @@
 //! This module owns all logic that runs when a publisher calls
 //! [`ValidMetadata::try_from`]:
 //!
+//! - [`validate_env_modifier_types`] — refuses an env var whose modifier `type`
+//!   this binary does not know, so a package built for a newer ocx fails closed
+//!   with a version remedy instead of running with a silently wrong environment.
 //! - [`validate_env_tokens`] — walks env var values and checks that every
 //!   `${deps.NAME.FIELD}` token references a declared, non-ambiguous dep with
 //!   a supported field name.
@@ -67,6 +70,11 @@ impl TryFrom<Metadata> for ValidMetadata {
     ///   uses that name — in this case `name` must be set to disambiguate.
     /// - An entrypoint `args` element contains a `${deps.*}` token or an unknown placeholder.
     fn try_from(metadata: Metadata) -> Result<Self, Self::Error> {
+        // Runs first: an unknown modifier type means the reader is too old for
+        // this package, which is the answer the user needs — reporting a
+        // template complaint about a var whose grammar we cannot read would
+        // send them to fix the wrong thing.
+        validate_env_modifier_types(&metadata)?;
         validate_env_tokens(&metadata)?;
         validate_entrypoint_args(&metadata)?;
         Ok(Self(metadata))
@@ -109,6 +117,39 @@ fn build_name_and_collision_maps<'a>(
     }
 
     (name_map, collision_map)
+}
+
+/// Rejects the first env var whose modifier `type` this binary does not know.
+///
+/// Parsing keeps such a var (as `Modifier::Unknown`) precisely so this gate can
+/// name it. Skipping it instead would run the package in an environment its
+/// publisher never published — the failure would surface downstream, in the
+/// tool, with nothing pointing back at ocx's version.
+///
+/// # Errors
+///
+/// [`crate::package::error::Error::UnknownEnvModifier`] naming the var key, the
+/// unrecognized type, and the remedy. Declaration order decides which var is
+/// named when several are unreadable.
+pub(super) fn validate_env_modifier_types(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+    use super::env::modifier::Modifier;
+
+    let Some(env) = metadata.env() else {
+        return Ok(());
+    };
+
+    for var in env {
+        if let Modifier::Unknown { type_name } = &var.modifier {
+            return Err(Error::UnknownEnvModifier {
+                key: var.key.clone(),
+                type_name: type_name.clone(),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates env var values: checks every `${deps.NAME.FIELD}` token for declared,
@@ -445,6 +486,82 @@ mod tests {
             msg.contains("Python") || msg.contains("${deps.Python.installPath}"),
             "expected Python placeholder in error: {msg}"
         );
+    }
+
+    // ── R-4: validate_env_modifier_types ──────────────────────────────────────
+
+    /// An env var declaring a modifier type this binary does not know fails
+    /// closed, naming the key, the type, and the remedy. Running the package
+    /// with that var silently dropped would put it in a state its publisher
+    /// never published.
+    #[test]
+    fn unknown_env_modifier_type_is_rejected_with_key_type_and_remedy() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            r#"{"key":"GODEBUG","type":"list","separator":",","value":"gctrace=1"}"#,
+        );
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("an unknown modifier type must fail closed")
+            .to_string();
+        assert!(message.contains("GODEBUG"), "must name the var key: {message}");
+        assert!(message.contains("list"), "must name the unrecognized type: {message}");
+        assert!(
+            message.contains("upgrade ocx"),
+            "must state the remedy, not just the fault: {message}"
+        );
+    }
+
+    /// The rejection carries `DataError` (65) — malformed-for-this-reader input,
+    /// the same class as every other metadata refusal.
+    #[test]
+    fn unknown_env_modifier_type_exits_with_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let meta = make_metadata(&dep_json("cmake", None), r#"{"key":"X","type":"list","value":"v"}"#);
+        let error = ValidMetadata::try_from(meta).expect_err("unknown type must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// With several unreadable vars, declaration order decides which is named —
+    /// so the message is reproducible across runs rather than map-order noise.
+    #[test]
+    fn first_unknown_env_modifier_in_declaration_order_is_named() {
+        let env = concat!(
+            r#"{"key":"FIRST","type":"list","value":"a"},"#,
+            r#"{"key":"SECOND","type":"map","value":"b"}"#
+        );
+        let meta = make_metadata(&dep_json("cmake", None), env);
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("unknown types must fail")
+            .to_string();
+        assert!(message.contains("FIRST"), "the first offender must be named: {message}");
+        assert!(!message.contains("SECOND"), "only one offender is reported: {message}");
+    }
+
+    /// The type gate runs before template validation: a var whose grammar this
+    /// binary cannot read must not be reported as a broken template, which
+    /// would send the reader to edit a value that is not the problem.
+    #[test]
+    fn unknown_modifier_type_is_reported_before_a_template_fault() {
+        let env = concat!(
+            r#"{"key":"NEWTYPE","type":"list","value":"a"},"#,
+            r#"{"key":"BROKEN","type":"constant","value":"${nonsense}"}"#
+        );
+        let meta = make_metadata(&dep_json("cmake", None), env);
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("both faults are fatal")
+            .to_string();
+        assert!(
+            message.contains("upgrade ocx"),
+            "the version gap outranks the template fault: {message}"
+        );
+    }
+
+    /// Metadata using only known types is unaffected by the new gate.
+    #[test]
+    fn known_env_modifier_types_pass_the_gate() {
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installPath}/bin"));
+        assert!(ValidMetadata::try_from(meta).is_ok());
     }
 
     // ── validate_entrypoint_args ──────────────────────────────────────────────

@@ -101,10 +101,14 @@ impl Var {
         }
     }
 
+    /// The unresolved value template, or `None` when there is nothing to
+    /// resolve — the case for a modifier type this binary does not know, whose
+    /// value fields it cannot interpret.
     pub fn value(&self) -> Option<&str> {
         match &self.modifier {
             Modifier::Path(path_var) => Some(&path_var.value),
             Modifier::Constant(constant_var) => Some(&constant_var.value),
+            Modifier::Unknown { .. } => None,
         }
     }
 }

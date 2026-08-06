@@ -194,4 +194,35 @@ mod tests {
             "the read-side string|object element union must never appear in the published schema"
         );
     }
+
+    /// `Modifier::Unknown` is a read-side fallback for a `type` this binary does
+    /// not know. It must not reach the published schema: the schema is the
+    /// **write** contract, and an `Unknown` arm would advertise a modifier that
+    /// resolves to nothing — telling authors a shape ocx will refuse at
+    /// `ValidMetadata` is valid. Kept out by `#[schemars(skip)]`, which this
+    /// pins: the `oneOf` stays exactly the two executable types.
+    #[test]
+    fn metadata_schema_omits_the_unknown_modifier_fallback() {
+        let schema = schema_for("metadata").expect("metadata schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+
+        let arms = value
+            .pointer("/$defs/Var/oneOf")
+            .and_then(|v| v.as_array())
+            .expect("Var must flatten the modifier into a oneOf");
+        let tags: Vec<&str> = arms
+            .iter()
+            .filter_map(|arm| arm.pointer("/properties/type/const").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            tags,
+            vec!["path", "constant"],
+            "the published modifier vocabulary must be exactly the executable types"
+        );
+
+        assert!(
+            !schema.contains("type_name"),
+            "the Unknown variant's tag-capture field must never appear in the published schema"
+        );
+    }
 }

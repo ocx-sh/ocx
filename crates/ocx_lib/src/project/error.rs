@@ -198,8 +198,14 @@ pub enum ProjectErrorKind {
     EnvInvalidKey { scope: String, key: String },
 
     /// An `[env]` table value declares a `type` that is neither `path` nor
-    /// `constant`.
-    #[error("[{scope}] key '{key}': unknown type '{found}'; expected \"path\" or \"constant\"")]
+    /// `constant`. Message text mirrors [`crate::package::metadata::env::modifier::ParseModifierKindError`]
+    /// verbatim (past the `[{scope}] key '{key}':` prefix this surface adds)
+    /// so the same "a newer ocx may support it" remedy reaches a reader here
+    /// as it does from `--env` — a type name a newer ocx defines is a version
+    /// gap, not a typo.
+    #[error(
+        "[{scope}] key '{key}': unknown modifier type '{found}'; expected `path` or `constant` (a newer ocx may support it)"
+    )]
     EnvUnknownModifier { scope: String, key: String, found: String },
 
     /// An `[env]` value is neither a bare string nor a well-formed

@@ -722,9 +722,15 @@ fn metadata_node(metadata: &Metadata) -> Node {
         let vars = env
             .into_iter()
             .map(|var| {
-                let kind = ModifierKind::from(&var.modifier);
+                // A tree render is not a gate: a modifier type this binary does
+                // not know still gets a row, labelled as such. The refusal lives
+                // in `ValidMetadata`, which every execution path runs first.
+                let note = match ModifierKind::try_from(&var.modifier) {
+                    Ok(kind) => kind.to_string(),
+                    Err(_) => "unknown type".to_string(),
+                };
                 let mut node = Node::leaf(var.key.clone())
-                    .with_note(kind.to_string())
+                    .with_note(note)
                     .with_visibility(var.visibility);
                 if let Some(value) = var.value() {
                     node = node.with_plain(value.to_string());
