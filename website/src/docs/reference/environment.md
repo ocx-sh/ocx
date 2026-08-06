@@ -344,14 +344,14 @@ opt-out), see the [`[patches]`][config-patches] configuration reference and the
 
 ### `OCX_ENV` {#ocx-env}
 
-A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. A `--env` override may carry either kind, `constant` or `path`, the same as a project- or group-declared entry. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
+A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. A `--env` override may carry any of the three kinds — `constant`, `path`, or [`list`][reference-env-list] — the same as a project- or group-declared entry; a `list` entry additionally carries the separator it settled on during composition. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
 
 ```sh
 # Managed by OCX; not set manually.
 export OCX_ENV='[...]'
 ```
 
-This variable is **resolution-affecting** and is forwarded automatically; manually setting it overrides the project/group `[env]` tier for that subprocess tree. It carries no envelope version. Instead, each forwarded entry's own kind (constant or path) is validated strictly on decode: an ocx binary receiving a kind it does not recognize — from a newer release, or a forged value — fails closed on the **whole** payload rather than defaulting the unknown entry to a constant, which would silently apply the wrong semantics.
+This variable is **resolution-affecting** and is forwarded automatically; manually setting it overrides the project/group `[env]` tier for that subprocess tree. It carries no envelope version. Instead, each forwarded entry's own kind (`constant`, `path`, or `list`) is validated strictly on decode: an ocx binary receiving a kind it does not recognize — from a newer release, or a forged value — fails closed on the **whole** payload rather than defaulting the unknown entry to a constant, which would silently apply the wrong semantics. A `list` entry additionally requires a usable separator — non-empty, and free of `=`, a newline, or a carriage return — and a value that does not start or end with it; a missing, unusable, or edging separator fails the payload the same way.
 
 ::: warning Malformed values abort at startup
 A malformed `OCX_ENV` value — invalid JSON, or an entry with an unrecognized kind — is a **hard startup error**, mirroring [`OCX_PATCHES`](#ocx-patches) and [`OCX_MIRRORS`](#ocx-mirrors). Setting `OCX_DEFAULT_REGISTRY` or any other `OCX_*`/`__OCX_*` key through it has no effect: those keys are rejected before the payload is ever built (see below) and rejected again on decode, so a forged `OCX_ENV` cannot reach ocx's own resolution surface.
@@ -610,7 +610,7 @@ All other path-type variables (such as `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG
 
 ### `GITHUB_ENV` {#external-github-env}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append environment variables to this file using `KEY=VALUE` syntax (or [heredoc delimiters][github-multiline-env] for multiline values); the runner exports each entry to all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write all non-`PATH` entries here: constant-type variables as `KEY=VALUE`, and path-type variables other than `PATH` (such as `LD_LIBRARY_PATH`) as `KEY=<prepended-value>` with OCX-provided directories prepended to the existing value.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append environment variables to this file using `KEY=VALUE` syntax (or [heredoc delimiters][github-multiline-env] for multiline values); the runner exports each entry to all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write all non-`PATH` entries here: constant-type variables as `KEY=VALUE`, path-type variables other than `PATH` (such as `LD_LIBRARY_PATH`) as `KEY=<prepended-value>` with OCX-provided directories prepended to the existing value, and [`list`][reference-env-list]-type variables (such as `JDK_JAVA_OPTIONS`) as `KEY=<appended-value>` with OCX-provided contributions appended to the existing value, joined by the key's separator.
 
 ### `GITLAB_CI` {#external-gitlab-ci}
 
@@ -746,6 +746,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- reference -->
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [env-composition-project-env]: ./env-composition.md#project-env
+[reference-env-list]: ./metadata.md#env-list
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects

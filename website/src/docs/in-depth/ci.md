@@ -22,7 +22,7 @@ When a pipeline runs `eval "$(ocx env --shell=bash)"`, those exports live only i
 
 `ocx env --ci=github` reads the paths of those files from the runner's own `GITHUB_PATH` and `GITHUB_ENV` variables and appends the resolved tool paths and variables directly. No `jq`, no redirect.
 
-Only the literal `PATH` variable goes to `$GITHUB_PATH`. All other path-type variables — `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG_PATH`, and any others declared in package metadata — are written to `$GITHUB_ENV` as `KEY=value`, with OCX-provided directories prepended to the existing value.
+Only the literal `PATH` variable goes to `$GITHUB_PATH`. All other path-type variables — `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG_PATH`, and any others declared in package metadata — are written to `$GITHUB_ENV` as `KEY=value`, with OCX-provided directories prepended to the existing value. A [`list`][reference-env-list]-type variable (such as `JDK_JAVA_OPTIONS`) also goes to `$GITHUB_ENV`, but folds the opposite direction: OCX's contribution is *appended* to the existing value, joined by the key's separator, instead of prepended.
 
 Running `--ci=github` outside a [GitHub Actions][github-actions-docs] runner — where `GITHUB_ENV` and `GITHUB_PATH` are unset — exits 78 (configuration error).
 
@@ -107,7 +107,7 @@ The step runner persists variables across steps within a job using an export fil
 
 `ocx env --ci=gitlab` produces this exact format — either to `--export-file=PATH` or to stdout when `--export-file` is omitted.
 
-[GitLab CI/CD][gitlab-ci-docs] has no separate `PATH` channel. `ocx env --ci=gitlab` flattens all path-type entries: package values are prepended to the current process value of `PATH` (and any other path-type variable such as `LD_LIBRARY_PATH`), joined with the platform path separator (`:` on Unix, `;` on Windows), and emitted as a single JSON-lines entry. The step runner injects the resulting value into the environment of subsequent steps.
+[GitLab CI/CD][gitlab-ci-docs] has no separate `PATH` channel. `ocx env --ci=gitlab` flattens all path-type entries: package values are prepended to the current process value of `PATH` (and any other path-type variable such as `LD_LIBRARY_PATH`), joined with the platform path separator (`:` on Unix, `;` on Windows), and emitted as a single JSON-lines entry. A [`list`][reference-env-list]-type variable flattens the same way but folds the opposite direction — package values are *appended* to the current process value, joined by the key's own separator — and is emitted as its own JSON-lines entry. The step runner injects the resulting values into the environment of subsequent steps.
 
 :::warning GitLab Functions / step runner only
 `--ci=gitlab` produces JSON-lines output (`{"name":"…","value":"…"}`). This format is consumed by the [GitLab step runner][gitlab-step-runner-docs] via `${{ export_file }}` — an **experimental** feature in GitLab, available on self-managed instances running the step runner, with the `run:` keyword only.
@@ -182,6 +182,9 @@ Bare `--ci` without `=gitlab` also works inside [GitLab CI/CD][gitlab-ci-docs] b
 [gitlab-ci-docs]: https://docs.gitlab.com/ee/ci/
 [gitlab-step-runner-docs]: https://docs.gitlab.com/ci/functions/create/
 [gitlab-ci-dotenv]: https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv
+
+<!-- reference -->
+[reference-env-list]: ../reference/metadata.md#env-list
 
 <!-- environment -->
 [env-github-actions]: ../reference/environment.md#external-github-actions

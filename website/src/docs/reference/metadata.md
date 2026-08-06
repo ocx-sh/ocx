@@ -107,7 +107,7 @@ Here `cmake` dispatches to a binary named `cmake` (empty object, the common case
 The `env` array declares environment variables that OCX exposes when running
 commands with the package (via [`ocx package exec`][cmd-exec] or [`ocx env`][cmd-env]).
 
-Each entry is an object with a `key`, a `type` (`path` or `constant`), and a `value`
+Each entry is an object with a `key`, a `type` (`path`, `constant`, or `list`), and a `value`
 template. Two placeholders are available in `value`:
 
 - **`${installPath}`** — replaced with the absolute path to this package's content directory.
@@ -162,6 +162,62 @@ Constant variables **replace** any existing value of the environment variable.
 
 Constants are useful for home directory variables (`JAVA_HOME`, `CARGO_HOME`) and
 fixed values that do not depend on the install path (e.g. a version string).
+
+### List Variables {#env-list}
+
+List variables are **appended** to any existing value of the environment variable, joined by
+`separator`, with any earlier occurrence of the same contribution removed first — so
+re-declaring the same value moves it to the back instead of duplicating it. Use `list` for
+option-list variables that accumulate flags across packages — `JDK_JAVA_OPTIONS`,
+`JAVA_TOOL_OPTIONS`, `GODEBUG`, `NODE_OPTIONS` — where [`path`](#env-path) would join with the
+platform path separator instead of an author-chosen one, and [`constant`](#env-constant) would
+erase every other package's contribution instead of composing with it.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `key` | string | Yes | Environment variable name. |
+| `type` | string | Yes | Must be `"list"`. |
+| `separator` | string | Yes | The string this contribution joins to the variable's existing value (e.g. `" "` for `JDK_JAVA_OPTIONS`, `","` for `GODEBUG`). Required in package metadata — see [Separator Is Required](#env-list-separator) below. Must be non-empty and must not contain `=`, a newline, or a carriage return. |
+| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. Must not start or end with `separator` (see below). |
+| `visibility` | string | No | Entry visibility. See [Entry Visibility](#env-entry-visibility). Default: `"private"`. |
+
+```json
+{
+  "key": "GODEBUG",
+  "type": "list",
+  "separator": ",",
+  "value": "gctrace=1"
+}
+```
+
+A contribution is opaque: OCX never splits it into elements, so a value carrying its own
+separator (`"gctrace=1,madvdontneed=1"` joined with `","`) is still one contribution and is
+removed and re-appended as a unit, never partially matched.
+
+#### Separator Is Required {#env-list-separator}
+
+Unlike `path` and `constant`, `separator` has no default in package metadata — a publisher must
+spell it out explicitly. The `[env]` table in [`ocx.toml`][config-project-env] and the
+[`--env`][cmd-run] flag may still omit it: on those human-facing surfaces an omitted
+separator inherits whatever another contributor to the same key already declared, or defaults
+to a single space if nothing did. See [Env Composition][env-composition-list] for the full
+per-key agreement rule across a composition.
+
+A separator that is empty, contains `=`, contains a newline or carriage return, or edges the
+`value` (a value starting or ending with its own separator) is rejected with exit 65, naming
+the variable — enforced wherever `metadata.json` is validated: [`ocx package
+create`][cmd-package-create] / [`push`][cmd-package-push], and every later read. The newline
+and carriage-return exclusion exists because every export surface downstream is
+line-oriented — a CI env file, a shell snippet, a JSON-lines record — and a separator that
+ends a line is an injection primitive, not a delimiter any real consumer asks for.
+
+::: warning A silent wrong separator is worse than a loud missing one
+[Go's `GODEBUG`][godebug-doc] scans its setting list backward and ignores anything it cannot
+parse — a `list` entry joined with the wrong separator does not error, it silently produces a
+value the consumer ignores. Requiring `separator` on the wire is the fail-closed answer: an
+author omitting it on `ocx.toml`/`--env` is choosing to inherit an already-established
+separator, never guessing at one from scratch.
+:::
 
 ### Entry Visibility {#env-entry-visibility}
 
@@ -724,6 +780,7 @@ Behavioral changes made within `version: 1` since the initial release:
 | **Baked entry-point arguments** | Entry-point values now accept an optional `args` array of fixed leading arguments prepended before user-supplied arguments at dispatch time. `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time. An absent or empty `args` array is wire-identical to prior behavior — packages without `args` are unaffected. |
 | **Dependency manifest pinning** | The authoring sidecar accepts a digest-optional dependency identifier — `ocx package create --platform` resolves it against the selected index and pins the manifest digest directly on the identifier, the same shape for a concrete platform or `any`. The published digest must reference a platform manifest, never an OCI Image Index — see [Manifest Pins, Never Index Pins](#dependencies-manifest-pins). `ocx package push` rejects an index-pinned or unpinned dependency (exit 65). |
 | **Declared executables** | New optional `binaries` field: a sorted, unique array of bare executable-name strings, publisher-declared and unverified. Additive — absent is wire-identical to every package published before this field existed. `None` and `[]` are deliberately distinct wire states (unlike `entrypoints`, which collapses absent and empty). See [Executables](#executables). |
+| **`list` env type** | New `list` modifier type for option-list variables: appends instead of replacing or prepending, removing any earlier occurrence of the same contribution first. Carries a new `separator` field, required for `list` entries and rejected on `path`/`constant`. Additive — packages using only `path`/`constant` are unaffected. See [List Variables](#env-list). |
 
 ::: warning These changes affect existing packages
 If you published packages before the visibility-default flip, their untagged env entries will no longer appear on the consumer surface. Add `"visibility": "public"` explicitly to vars that consumers should see.
@@ -745,6 +802,7 @@ If you published packages before the visibility-default flip, their untagged env
 [npm-bin]: https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bin
 [cargo-bin]: https://doc.rust-lang.org/cargo/reference/cargo-targets.html#binaries
 [nixpkgs-main-program]: https://nixos.org/manual/nixpkgs/stable/#var-meta-mainProgram
+[godebug-doc]: https://go.dev/doc/godebug
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json
@@ -753,6 +811,7 @@ If you published packages before the visibility-default flip, their untagged env
 [exec-modes]: ../in-depth/environments.md#visibility-views
 [env-composition]: ../in-depth/environments.md
 [env-composition-edge-filter]: ../in-depth/environments.md#edge-filter
+[env-composition-list]: ./env-composition.md#composition-order-list
 [in-depth-project-lock]: ../in-depth/project.md#lock
 [in-depth-project-lock-format]: ../in-depth/project.md#lock-format
 
@@ -767,9 +826,13 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-package-push-layout]: ./command-line.md#package-push-layout
 [cmd-package-install]: ./command-line.md#package-install
 [cmd-package-test]: ./command-line.md#package-test
+[cmd-run]: ./command-line.md#run
 
 <!-- reference -->
 [reference-platforms]: ./platforms.md
+
+<!-- configuration -->
+[config-project-env]: ./configuration.md#project-config-env
 
 <!-- guide -->
 [authoring-migration]: ../authoring/env-surface.md#migrating

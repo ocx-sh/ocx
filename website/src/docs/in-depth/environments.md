@@ -103,10 +103,11 @@ Each package has two surfaces, and they are orthogonal. The edge visibility (`Vi
 
 ## Last-Wins Scalar Semantics {#last-wins}
 
-Two composition types:
+Three composition types:
 
 - **`path` entries** (e.g. `PATH`, `LD_LIBRARY_PATH`) — **prepended**. Each dep's `bin/` directory is inserted before the existing value. Because root contributions come after TC entries, the root's `bin/` wins lookup over any transitive dep's `bin/`.
 - **`constant` entries** (e.g. `JAVA_HOME`) — **last-writer-wins**. The last package in topological order that sets a constant variable determines the final value. Root is always last for its own env-var declarations. When two unrelated TC entries both set the same constant, a warning is emitted (see [conflicting scalars][ug-conflicts]).
+- **[`list`][metadata-env-list] entries** (e.g. `JDK_JAVA_OPTIONS`, `GODEBUG`) — **appended**, joined by the key's agreed separator, with any earlier occurrence of the same contribution removed first. Same iteration order as `path` (TC entries first, root's own declarations last) but the opposite fold direction: a dep's contribution lands *after* the existing value instead of before it, so the root's own `list` declarations — applied last — end up at the very end rather than the very front. For a consumer that itself resolves duplicate options last-wins (true for most option-list variables — [Appending Option Lists][authoring-env-surface-lists] documents the exceptions), the root's flags take effect over a dependency's.
 
 ## Worked Example {#worked-example}
 
@@ -256,8 +257,12 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [metadata-ref]: ../reference/metadata.md
 [metadata-entry-visibility]: ../reference/metadata.md#env-entry-visibility
 [metadata-dep-visibility]: ../reference/metadata.md#dependencies-visibility
+[metadata-env-list]: ../reference/metadata.md#env-list
 [visibility-through-edge]: ../reference/metadata.md#dependencies-through-edge
 [visibility-merge]: ../reference/metadata.md#dependencies-merge
+
+<!-- authoring -->
+[authoring-env-surface-lists]: ../authoring/env-surface.md#lists
 
 <!-- environment -->
 [env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin

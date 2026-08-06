@@ -157,7 +157,7 @@ This rule determines iteration order through the resolved tool set. The composer
 
 ### Project and group `[env]` {#running-project-env}
 
-The rule above governs package-composed env — stage 2 of a longer pipeline. [Project Environment][env-composition-project-env] in the Environment Composition reference is the full six-stage table: ambient, packages, patches, project `[env]`, group `[env]`, then `--env` — which accepts the same `constant`/`path` typing as the file form (see [`--env`][cmd-run]). Project and group `[env]` entries append after every package's own entries, so a project or group value always wins a same-key collision with a package default.
+The rule above governs package-composed env — stage 2 of a longer pipeline. [Project Environment][env-composition-project-env] in the Environment Composition reference is the full six-stage table: ambient, packages, patches, project `[env]`, group `[env]`, then `--env` — which accepts the same `constant`/`path`/[`list`][metadata-env-list] typing as the file form (see [`--env`][cmd-run]). Project and group `[env]` entries compose after every package's own entries: a `constant` or `path` value there always wins a same-key collision with a package default, and a `list` value there is appended last, so a last-wins consumer sees it take effect over a package's own contribution to the same key.
 
 Worked example, continuing the `[tools]` / `[group.ci]` declaration from [Groups](#groups):
 
@@ -169,7 +169,7 @@ SOURCE_DATE_EPOCH = "0"
 SOURCE_DATE_EPOCH = "1700000000"
 ```
 
-`ocx run -g ci -- CMD` composes the project's own `[env]` (stage 4) and then `[group.ci.env]` (stage 5) — the later stage wins, so the child sees `SOURCE_DATE_EPOCH=1700000000`. This is the same later-wins rule the group-selection order above already applies to `-g ci,release`: whichever `[env]` stage is composed later in the pipeline overrides an earlier one for the same key.
+`ocx run -g ci -- CMD` composes the project's own `[env]` (stage 4) and then `[group.ci.env]` (stage 5) — the later stage wins, so the child sees `SOURCE_DATE_EPOCH=1700000000`. This is the same later-wins rule the group-selection order above already applies to `-g ci,release`, but what "wins" means depends on the type: for `constant` entries, whichever `[env]` stage runs later replaces an earlier one for the same key; for `path` entries the later stage prepends ahead of the earlier one; for [`list`][metadata-env-list] entries the later stage appends after it instead of replacing or prepending anything — see [Append Semantics][env-composition-list] for the fold direction and the per-key separator agreement.
 
 ### PATH precedence consequence {#running-path-precedence}
 
@@ -351,6 +351,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [reference-platforms]: ../reference/platforms.md
 [reference-platforms-compatibility]: ../reference/platforms.md#compatibility
 [reference-platforms-shared-digests]: ../reference/platforms.md#shared-digests
+[metadata-env-list]: ../reference/metadata.md#env-list
 
 <!-- cross-page -->
 [user-project]: ../user-guide.md#project
@@ -358,6 +359,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [user-guide-global]: ../user-guide.md#global-toolchain
 [env-composition-strict-isolation]: ../reference/env-composition.md#strict-isolation
 [env-composition-project-env]: ../reference/env-composition.md#project-env
+[env-composition-list]: ../reference/env-composition.md#composition-order-list
 [in-depth-versioning-locking]: ./versioning.md#locking
 [in-depth-indices]: ./indices.md
 [in-depth-indices-local]: ./indices.md#local

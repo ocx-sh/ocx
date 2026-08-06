@@ -592,16 +592,24 @@ Each entry in `[env]` or `[group.<name>.env]` is either a bare string — a **co
 CI = "1"                                            # string → constant, same as below
 JAVA_OPTS = { type = "constant", value = "-Xmx2g" }
 PATH = { type = "path", value = "node_modules/.bin" }
+GODEBUG = { type = "list", separator = ",", value = "gctrace=1" }
 ```
 
 | `type` | Behavior |
 |--------|----------|
 | `constant` (implicit for the bare-string form) | Replaces any earlier value for the key. |
 | `path` | Prepends to the key (typically `PATH`). A relative `value` resolves against the **project root** — the directory holding `ocx.toml` — never the process's current working directory; an absolute `value` passes through unchanged. |
+| `list` | Appends to the key, joined by `separator`, removing any earlier occurrence of the same contribution first. |
+
+`list` accepts one more field, valid only alongside it:
+
+| Field | Required | Description |
+|---|---|---|
+| `separator` | No | The string this contribution joins to the key's existing value. Must be non-empty and must not contain `=`, a newline, or a carriage return when given — a footgun-guard error names the field, not a byte offset (exit 78). Omit it to inherit whatever separator another contributor to the same key already declared — a package's own `list` entry, another group's, or [`--env`][cmd-run] — falling back to a single space only when nothing established one. See [Env Composition][env-composition-list] for the full per-key agreement rule. A `separator` alongside `constant` or `path` is rejected (exit 78). |
 
 There is no interpolation in v1 — every value is literal. The `path` type is what makes a project-local directory like `node_modules/.bin` expressible without one: no `${projectRoot}` token is needed, because relative resolution already targets the project root.
 
-The [`--env`][cmd-run] flag takes the same two types, written `KEY:TYPE=VALUE`, with one deliberate difference: a relative `path` value there resolves against the **current directory**, not the project root. A checked-in file must mean the same thing from any subdirectory; a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute.
+The [`--env`][cmd-run] flag takes the same three types, written `KEY[:TYPE[:SEP]]=VALUE`, with one deliberate difference: a relative `path` value there resolves against the **current directory**, not the project root. A checked-in file must mean the same thing from any subdirectory; a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute.
 
 Two key classes are rejected everywhere `[env]` can appear — the project table, every `[group.<name>.env]`, and the [`--env`][cmd-run] flag on `ocx run`:
 
@@ -710,6 +718,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 <!-- env composition -->
 [env-composition-patch-opt-out]: ./env-composition.md#patch-opt-out-scope
 [env-composition-project-env]: ./env-composition.md#project-env
+[env-composition-list]: ./env-composition.md#composition-order-list
 
 <!-- patches user guide -->
 [patches-user-guide]: ../user-guide/patches.md
