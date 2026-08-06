@@ -335,6 +335,31 @@ impl Env {
         self.vars.insert(key, new_value);
     }
 
+    /// Appends `value` to the list-style variable `key` with **move-to-back**
+    /// semantics: any existing occurrence of `value` is removed and `value` is
+    /// placed at the back, joined by `separator`, so re-applying the same
+    /// contribution never duplicates it. See
+    /// [`utility::list::append_unique`](crate::utility::list::append_unique)
+    /// for the pinned algorithm.
+    ///
+    /// An empty `value` is a no-op — on an absent key too, which is where this
+    /// deliberately differs from [`Self::add_path`]: appending nothing must not
+    /// bring a variable into existence.
+    ///
+    /// The ambient value is read through `to_string_lossy`. Option-list
+    /// variables carry authored text, and the fold is defined on UTF-8; a
+    /// non-UTF-8 ambient value would not survive the append with its bytes
+    /// intact either way.
+    pub fn add_list(&mut self, key: impl Into<OsString>, value: &str, separator: &str) {
+        if value.is_empty() {
+            return;
+        }
+        let key = EnvKey::new(key);
+        let existing = self.vars.get(&key).map(|v| v.to_string_lossy().into_owned());
+        let folded = utility::list::append_unique(existing.as_deref().unwrap_or_default(), value, separator);
+        self.vars.insert(key, OsString::from(folded));
+    }
+
     /// Borrowing iterator over `(key, value)` pairs.
     ///
     /// Lets a caller feed this env to `Command::envs` without consuming or
@@ -513,6 +538,18 @@ impl Env {
                     }
                 }
                 ModifierKind::Constant => self.set(&entry.key, &entry.value),
+                ModifierKind::List => {
+                    // A `None` here is one that survived
+                    // [`reconcile_list_separators`] — no contributor to this key
+                    // established a separator — so the human-surface default is
+                    // the honest reading, not a guess over someone's explicit
+                    // choice.
+                    let separator = entry
+                        .separator
+                        .as_deref()
+                        .unwrap_or(crate::package::metadata::env::list::DEFAULT_SEPARATOR);
+                    self.add_list(&entry.key, &entry.value, separator);
+                }
             }
         }
     }
@@ -750,6 +787,139 @@ impl Env {
         }
         Ok(found)
     }
+}
+
+/// A `list` key's separator agreement could not be settled.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ListSeparatorError {
+    /// Two entries for one key declare different separators.
+    ///
+    /// Fail-closed rather than first-wins: the two contributors disagree about
+    /// the grammar of a value they are both writing, and either choice
+    /// silently corrupts one of them for the consuming tool.
+    #[error(
+        "env var '{key}' is contributed as a list with conflicting separators {first:?} and {second:?}; every contributor to one key must agree"
+    )]
+    Conflict {
+        /// The env-var name both contributors write.
+        key: String,
+        /// The separator established first, in composition order.
+        first: String,
+        /// The conflicting separator that arrived later.
+        second: String,
+    },
+
+    /// A value is edged by the separator agreement settled on it.
+    ///
+    /// Parse boundaries can only edge-check a separator the author *wrote*;
+    /// one that arrives by inheritance is first known here.
+    #[error("env var '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
+    EdgedValue {
+        /// The env-var name.
+        key: String,
+        /// The separator the entry ended up folding with.
+        separator: String,
+        /// The offending value.
+        value: String,
+    },
+}
+
+impl crate::cli::ClassifyExitCode for ListSeparatorError {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        // Declarations that cannot be honoured as written — malformed input,
+        // the same class as every other env-declaration refusal.
+        Some(crate::cli::ExitCode::DataError)
+    }
+}
+
+/// Settles which separator every `list` entry for a key folds with, before any
+/// of them is applied.
+///
+/// One separator per key per composition: the first entry carrying an explicit
+/// separator **establishes** the key's, and a later entry with `None`
+/// **inherits** it. A key nobody established keeps `None`, which
+/// [`Env::apply_entries`] reads as the default separator.
+///
+/// Without this, a package appending `GODEBUG` with `","` plus a project entry
+/// omitting the separator would render `gctrace=1 madvdontneed=1` — a value
+/// the consumer silently ignores, which is exactly the silent-wrong-separator
+/// failure an explicit separator exists to prevent.
+///
+/// Call it once per composition, after the last contributor has been appended;
+/// entries are read in iteration order, which is composition order.
+///
+/// Takes an iterator rather than a slice because a caller's entries are not
+/// necessarily one contiguous `Vec` — `ocx run` composes the package set and
+/// forwards the project set as separate vectors, and agreement has to span
+/// both. Chain them: `composed.iter_mut().chain(project.iter_mut())`.
+///
+/// # Errors
+///
+/// [`ListSeparatorError::Conflict`] when two entries for one key declare
+/// *different* explicit separators; [`ListSeparatorError::EdgedValue`] when the
+/// separator an entry ends up with edges its value.
+pub fn reconcile_list_separators<'a>(
+    entries: impl IntoIterator<Item = &'a mut crate::package::metadata::env::entry::Entry>,
+) -> Result<(), ListSeparatorError> {
+    use crate::package::metadata::env::modifier::ModifierKind;
+
+    let mut entries: Vec<&mut crate::package::metadata::env::entry::Entry> = entries.into_iter().collect();
+
+    let mut established: HashMap<EnvKey, String> = HashMap::new();
+    for entry in entries.iter() {
+        if entry.kind != ModifierKind::List {
+            continue;
+        }
+        let Some(separator) = entry.separator.as_deref() else {
+            continue;
+        };
+        match established.get(&EnvKey::new(entry.key.as_str())) {
+            Some(first) if first != separator => {
+                return Err(ListSeparatorError::Conflict {
+                    key: entry.key.clone(),
+                    first: first.clone(),
+                    second: separator.to_string(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                established.insert(EnvKey::new(entry.key.as_str()), separator.to_string());
+            }
+        }
+    }
+
+    for entry in entries.iter_mut() {
+        if entry.kind != ModifierKind::List || entry.separator.is_some() {
+            continue;
+        }
+        if let Some(separator) = established.get(&EnvKey::new(entry.key.as_str())) {
+            entry.separator = Some(separator.clone());
+        }
+    }
+
+    // Only now is every entry's effective separator known. A parse boundary
+    // edge-checks the separator the author wrote; an inherited one — and the
+    // `" "` default for a key nobody declared — first exists here, and an
+    // edged value fuses with the fold's wrapper and degrades dedup.
+    for entry in entries.iter() {
+        if entry.kind != ModifierKind::List {
+            continue;
+        }
+        let separator = entry
+            .separator
+            .as_deref()
+            .unwrap_or(crate::package::metadata::env::list::DEFAULT_SEPARATOR);
+        if crate::package::metadata::env::list::is_separator_edged(&entry.value, separator) {
+            return Err(ListSeparatorError::EdgedValue {
+                key: entry.key.clone(),
+                separator: separator.to_string(),
+                value: entry.value.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// True when `command` names a file directly rather than a bare name to look
@@ -1008,6 +1178,39 @@ pub enum ForwardedEnvError {
         /// The offending env-var name.
         key: String,
     },
+
+    /// A `list` entry arrives without the separator it folds with.
+    ///
+    /// Not defaulted: the parent that wrote the payload had the answer, so an
+    /// absent separator means the payload is wrong. Silently choosing a space
+    /// would re-join a comma list unparseably for its consumer.
+    #[error("OCX_ENV entry '{key}' is a list without a separator")]
+    MissingSeparator {
+        /// The entry's env-var name.
+        key: String,
+    },
+
+    /// A `list` entry's separator cannot be folded with — empty, or carrying
+    /// the `=` that the `--env` grammar reserves.
+    #[error("OCX_ENV entry '{key}' has unusable list separator {separator:?}")]
+    InvalidSeparator {
+        /// The entry's env-var name.
+        key: String,
+        /// The unusable separator as received.
+        separator: String,
+    },
+
+    /// A `list` entry's value starts or ends with its own separator, which
+    /// makes the append fold's flank match ambiguous.
+    #[error("OCX_ENV entry '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
+    SeparatorEdgedValue {
+        /// The entry's env-var name.
+        key: String,
+        /// The entry's separator.
+        separator: String,
+        /// The offending value as received.
+        value: String,
+    },
 }
 
 impl crate::cli::ClassifyExitCode for ForwardedEnvError {
@@ -1039,7 +1242,7 @@ fn encode_forwarded_env(entries: &[crate::package::metadata::env::entry::Entry])
     let array: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
-            serde_json::json!({
+            let mut object = serde_json::json!({
                 "key":   entry.key,
                 "value": entry.value,
                 // `type`, not `kind`: the same spelling `ocx --format json env`
@@ -1048,7 +1251,26 @@ fn encode_forwarded_env(entries: &[crate::package::metadata::env::entry::Entry])
                 // tag. One vocabulary for one concept. (`kind` is taken on the
                 // JSON surface — it discriminates `EntrySource`.)
                 "type":  entry.kind.to_string(),
-            })
+            });
+            // Every list entry is forwarded with the separator it will actually
+            // fold with, defaulted here rather than on the far side. The
+            // human-facing surfaces let an author omit it, and the parent is
+            // the last process that knows what "omitted" resolved to — the
+            // launcher re-entry only has the payload, so the decoder treats a
+            // missing separator as a forged one.
+            if entry.kind == crate::package::metadata::env::modifier::ModifierKind::List
+                && let Some(fields) = object.as_object_mut()
+            {
+                let separator = entry
+                    .separator
+                    .as_deref()
+                    .unwrap_or(crate::package::metadata::env::list::DEFAULT_SEPARATOR);
+                fields.insert(
+                    "separator".to_string(),
+                    serde_json::Value::String(separator.to_string()),
+                );
+            }
+            object
         })
         .collect();
     match serde_json::to_string(&serde_json::json!({ "entries": array })) {
@@ -1085,6 +1307,7 @@ fn encode_forwarded_env(entries: &[crate::package::metadata::env::entry::Entry])
 /// Returns [`ForwardedEnvError`] — see that type; every variant is fail-closed.
 pub fn forwarded_env() -> Result<Vec<crate::package::metadata::env::entry::Entry>, ForwardedEnvError> {
     use crate::package::metadata::env::entry::Entry;
+    use crate::package::metadata::env::list;
     use crate::package::metadata::env::modifier::ModifierKind;
 
     let Some(raw) = var(keys::OCX_ENV) else {
@@ -1122,20 +1345,50 @@ pub fn forwarded_env() -> Result<Vec<crate::package::metadata::env::entry::Entry
         if is_reserved_ocx_key(key) {
             return Err(ForwardedEnvError::ReservedKey { key: key.to_string() });
         }
-        let kind = match kind {
-            "path" => ModifierKind::Path,
-            "constant" => ModifierKind::Constant,
-            unknown => {
-                return Err(ForwardedEnvError::UnknownKind {
+        // Through `ModifierKind`'s own `FromStr` rather than a hand-rolled
+        // match: the vocabulary has one home, and a second copy here would go
+        // on rejecting a type the rest of the binary already executes.
+        let kind = kind
+            .parse::<ModifierKind>()
+            .map_err(|error| ForwardedEnvError::UnknownKind {
+                key: key.to_string(),
+                found: error.found,
+            })?;
+
+        // Fail closed on every list-shape fault. Defaulting an absent separator
+        // here would silently re-join a comma list with spaces on the far side
+        // of the launcher hop — the payload came from a parent that had the
+        // answer, so its absence means the payload is wrong, not that a default
+        // applies.
+        let separator = if kind == ModifierKind::List {
+            let Some(separator) = object.get("separator").and_then(serde_json::Value::as_str) else {
+                return Err(ForwardedEnvError::MissingSeparator { key: key.to_string() });
+            };
+            if !list::separator_is_valid(separator) {
+                return Err(ForwardedEnvError::InvalidSeparator {
                     key: key.to_string(),
-                    found: unknown.to_string(),
+                    separator: separator.to_string(),
                 });
             }
+            // The same post-resolution check `EnvResolver` runs: these values
+            // are already resolved, and an edged one folds ambiguously.
+            if list::is_separator_edged(value, separator) {
+                return Err(ForwardedEnvError::SeparatorEdgedValue {
+                    key: key.to_string(),
+                    separator: separator.to_string(),
+                    value: value.to_string(),
+                });
+            }
+            Some(separator.to_string())
+        } else {
+            None
         };
+
         out.push(Entry {
             key: key.to_string(),
             value: value.to_string(),
             kind,
+            separator,
         });
     }
     Ok(out)
@@ -1301,6 +1554,17 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
             kind,
+            separator: None,
+        }
+    }
+
+    /// A list entry carrying its separator, for the forwarding round-trip.
+    fn list_entry(key: &str, value: &str, separator: &str) -> crate::package::metadata::env::entry::Entry {
+        crate::package::metadata::env::entry::Entry {
+            key: key.to_string(),
+            value: value.to_string(),
+            kind: crate::package::metadata::env::modifier::ModifierKind::List,
+            separator: Some(separator.to_string()),
         }
     }
 
@@ -1335,6 +1599,145 @@ mod tests {
             assert_eq!(got.value, want.value);
             assert_eq!(got.kind, want.kind, "modifier kind must survive the round-trip");
         }
+    }
+
+    // ── W-7: `list` entries survive the launcher hop ─────────────────────
+
+    /// A comma list must reach the far side of the launcher hop with its
+    /// separator intact. Losing it would silently re-join the value with
+    /// spaces, and `GODEBUG` ignores settings it cannot parse.
+    #[test]
+    fn forwarded_env_round_trips_a_list_entry_with_its_separator() {
+        let guard = crate::test::env::lock();
+        let original = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            list_entry("JDK_JAVA_OPTIONS", "-ea", " "),
+        ];
+
+        let mut child = Env::clean();
+        child.set_forwarded_env(&original);
+        let encoded = child
+            .get(keys::OCX_ENV)
+            .expect("a non-empty payload must set OCX_ENV")
+            .to_str()
+            .expect("OCX_ENV must be valid UTF-8")
+            .to_string();
+        guard.set(keys::OCX_ENV, encoded);
+
+        let parsed = forwarded_env().expect("a self-encoded list payload must decode");
+        assert_eq!(parsed.len(), original.len());
+        for (got, want) in parsed.iter().zip(&original) {
+            assert_eq!(got.key, want.key);
+            assert_eq!(got.value, want.value);
+            assert_eq!(got.kind, want.kind);
+            assert_eq!(got.separator, want.separator, "the separator must survive the hop");
+        }
+    }
+
+    /// A list entry nobody established a separator for is forwarded with the
+    /// *effective* one, not with the field omitted. The human surfaces let an
+    /// author omit it, the decoder refuses a list without one, and the parent
+    /// is the last process that knows what "omitted" resolved to — without
+    /// this, `GODEBUG = { type = "list", value = "x" }` in `ocx.toml` would
+    /// exit 65 the moment `ocx run` went through an entrypoint launcher.
+    #[test]
+    fn forwarded_env_fills_in_the_effective_separator_for_a_list_without_one() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let guard = crate::test::env::lock();
+        let mut child = Env::clean();
+        child.set_forwarded_env(&[Entry {
+            key: "JDK_JAVA_OPTIONS".to_string(),
+            value: "-ea".to_string(),
+            kind: ModifierKind::List,
+            separator: None,
+        }]);
+        let encoded = child
+            .get(keys::OCX_ENV)
+            .expect("payload present")
+            .to_str()
+            .expect("UTF-8")
+            .to_string();
+        guard.set(keys::OCX_ENV, encoded);
+
+        let parsed = forwarded_env().expect("a separator-less list entry must still decode");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].separator.as_deref(),
+            Some(crate::package::metadata::env::list::DEFAULT_SEPARATOR)
+        );
+    }
+
+    /// Only list entries carry the field — a constant has no separator to
+    /// resolve, and writing one would invite a decoder to act on it.
+    #[test]
+    fn forwarded_env_omits_the_separator_for_non_list_entries() {
+        use crate::package::metadata::env::modifier::ModifierKind;
+
+        let mut child = Env::clean();
+        child.set_forwarded_env(&[entry("CI", "1", ModifierKind::Constant)]);
+        let encoded = child
+            .get(keys::OCX_ENV)
+            .expect("payload present")
+            .to_str()
+            .expect("UTF-8")
+            .to_string();
+        assert!(
+            !encoded.contains("separator"),
+            "a constant entry must not carry a separator field; got: {encoded}"
+        );
+    }
+
+    /// A `list` entry without its separator fails the whole payload closed.
+    /// Defaulting here would re-join a comma list with spaces on the child
+    /// side, which is the silent wrong environment the envelope exists to
+    /// prevent.
+    #[test]
+    fn forwarded_env_rejects_a_list_entry_without_a_separator() {
+        let guard = crate::test::env::lock();
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"GODEBUG","value":"gctrace=1","type":"list"}]}"#,
+        );
+        let error = forwarded_env().expect_err("a list without a separator must not decode");
+        assert!(
+            matches!(&error, ForwardedEnvError::MissingSeparator { key } if key == "GODEBUG"),
+            "expected MissingSeparator naming the key; got: {error}"
+        );
+    }
+
+    /// An unusable separator is refused rather than folded with: an empty one
+    /// degrades the flank match to a bare substring scan.
+    #[test]
+    fn forwarded_env_rejects_an_unusable_list_separator() {
+        let guard = crate::test::env::lock();
+        for separator in ["", "="] {
+            guard.set(
+                keys::OCX_ENV,
+                format!(r#"{{"entries":[{{"key":"OPTS","value":"-ea","type":"list","separator":"{separator}"}}]}}"#),
+            );
+            let error = forwarded_env().expect_err("an unusable separator must not decode");
+            assert!(
+                matches!(&error, ForwardedEnvError::InvalidSeparator { key, .. } if key == "OPTS"),
+                "expected InvalidSeparator naming the key; got: {error}"
+            );
+        }
+    }
+
+    /// The decoded values are already resolved, so the separator-edge check
+    /// `EnvResolver` runs post-resolution applies here verbatim.
+    #[test]
+    fn forwarded_env_rejects_a_separator_edged_list_value() {
+        let guard = crate::test::env::lock();
+        guard.set(
+            keys::OCX_ENV,
+            r#"{"entries":[{"key":"GODEBUG","value":",gctrace=1","type":"list","separator":","}]}"#,
+        );
+        let error = forwarded_env().expect_err("an edged value must not decode");
+        assert!(
+            matches!(&error, ForwardedEnvError::SeparatorEdgedValue { key, .. } if key == "GODEBUG"),
+            "expected SeparatorEdgedValue naming the key; got: {error}"
+        );
     }
 
     /// An empty payload removes the key rather than writing an empty envelope,
@@ -1647,6 +2050,7 @@ mod tests {
             key: "JAVA_HOME".to_string(),
             value: "/opt/java".to_string(),
             kind: ModifierKind::Constant,
+            separator: None,
         }];
         env.apply_entries(&entries);
         assert_eq!(env.get("JAVA_HOME").unwrap(), "/opt/java");
@@ -1662,6 +2066,7 @@ mod tests {
             key: "PATH".to_string(),
             value: "/opt/bin".to_string(),
             kind: ModifierKind::Path,
+            separator: None,
         }];
         env.apply_entries(&entries);
         let path = env.get("PATH").unwrap().to_str().unwrap();
@@ -1679,16 +2084,336 @@ mod tests {
                 key: "HOME".to_string(),
                 value: "/home/user".to_string(),
                 kind: ModifierKind::Constant,
+                separator: None,
             },
             Entry {
                 key: "PATH".to_string(),
                 value: "/opt/bin".to_string(),
                 kind: ModifierKind::Path,
+                separator: None,
             },
         ];
         env.apply_entries(&entries);
         assert_eq!(env.get("HOME").unwrap(), "/home/user");
         assert_eq!(env.get("PATH").unwrap(), "/opt/bin");
+    }
+
+    // ── W-2: `Env::add_list` ──────────────────────────────────────────────
+
+    #[test]
+    fn add_list_appends_behind_the_existing_value() {
+        let mut env = Env::clean();
+        env.set("JDK_JAVA_OPTIONS", "-Xmx2g");
+        env.add_list("JDK_JAVA_OPTIONS", "-ea", " ");
+        assert_eq!(env.get("JDK_JAVA_OPTIONS").unwrap(), "-Xmx2g -ea");
+    }
+
+    #[test]
+    fn add_list_on_an_absent_key_sets_the_bare_value() {
+        let mut env = Env::clean();
+        env.add_list("GODEBUG", "gctrace=1", ",");
+        assert_eq!(env.get("GODEBUG").unwrap(), "gctrace=1");
+    }
+
+    /// Re-applying moves the contribution to the back instead of duplicating
+    /// it, so a repeated `direnv` re-entry leaves the value byte-stable.
+    #[test]
+    fn add_list_is_idempotent_and_moves_to_the_back() {
+        let mut env = Env::clean();
+        env.set("GODEBUG", "gctrace=1,madvdontneed=1");
+        env.add_list("GODEBUG", "gctrace=1", ",");
+        assert_eq!(env.get("GODEBUG").unwrap(), "madvdontneed=1,gctrace=1");
+        env.add_list("GODEBUG", "gctrace=1", ",");
+        assert_eq!(
+            env.get("GODEBUG").unwrap(),
+            "madvdontneed=1,gctrace=1",
+            "a second application must change nothing"
+        );
+    }
+
+    /// Appending nothing must not bring a variable into existence — the
+    /// deliberate difference from `add_path`'s empty-insert asymmetry.
+    #[test]
+    fn add_list_with_an_empty_value_is_a_no_op_on_an_absent_key() {
+        let mut env = Env::clean();
+        env.add_list("GODEBUG", "", ",");
+        assert!(env.get("GODEBUG").is_none(), "an empty append must not create the key");
+
+        env.set("GODEBUG", "gctrace=1");
+        env.add_list("GODEBUG", "", ",");
+        assert_eq!(env.get("GODEBUG").unwrap(), "gctrace=1", "nor change an existing one");
+    }
+
+    // ── W-3: `apply_entries` on list entries ──────────────────────────────
+
+    #[test]
+    fn apply_entries_list_folds_with_the_entry_separator() {
+        let mut env = Env::clean();
+        env.set("GODEBUG", "madvdontneed=1");
+        env.apply_entries(&[list_entry("GODEBUG", "gctrace=1", ",")]);
+        assert_eq!(env.get("GODEBUG").unwrap(), "madvdontneed=1,gctrace=1");
+    }
+
+    /// A separator that survived reconciliation as `None` means nobody
+    /// established one, which reads as the human-surface default.
+    #[test]
+    fn apply_entries_list_without_a_separator_folds_with_a_space() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut env = Env::clean();
+        env.set("JDK_JAVA_OPTIONS", "-Xmx2g");
+        env.apply_entries(&[Entry {
+            key: "JDK_JAVA_OPTIONS".to_string(),
+            value: "-ea".to_string(),
+            kind: ModifierKind::List,
+            separator: None,
+        }]);
+        assert_eq!(env.get("JDK_JAVA_OPTIONS").unwrap(), "-Xmx2g -ea");
+    }
+
+    /// Mixed kinds on one key resolve in vector order, which is composition
+    /// order: a constant lands, then a later list appends to what it set. The
+    /// rendered value is the sandwich, not a merge.
+    #[test]
+    fn apply_entries_mixed_kinds_on_one_key_follow_vector_order() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut env = Env::clean();
+        env.apply_entries(&[
+            list_entry("OPTS", "-first", " "),
+            Entry {
+                key: "OPTS".to_string(),
+                value: "-replaced".to_string(),
+                kind: ModifierKind::Constant,
+                separator: None,
+            },
+            list_entry("OPTS", "-last", " "),
+        ]);
+        assert_eq!(
+            env.get("OPTS").unwrap(),
+            "-replaced -last",
+            "the constant clears what came before it; the later list appends to it"
+        );
+    }
+
+    // ── W-11: per-key separator agreement ─────────────────────────────────
+
+    /// The first explicit separator establishes the key's; a later entry that
+    /// omits one inherits it. Without this a package's comma list plus a
+    /// project entry with no separator would render space-joined and the
+    /// consumer would silently ignore the contribution.
+    #[test]
+    fn reconcile_lets_a_later_entry_inherit_the_established_separator() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            Entry {
+                key: "GODEBUG".to_string(),
+                value: "madvdontneed=1".to_string(),
+                kind: ModifierKind::List,
+                separator: None,
+            },
+        ];
+        reconcile_list_separators(&mut entries).expect("one explicit separator is agreement");
+        assert_eq!(entries[1].separator.as_deref(), Some(","));
+
+        let mut env = Env::clean();
+        env.apply_entries(&entries);
+        assert_eq!(env.get("GODEBUG").unwrap(), "gctrace=1,madvdontneed=1");
+    }
+
+    /// An entry that omits the separator can also come *first*: the explicit
+    /// one still establishes the key, wherever it sits.
+    #[test]
+    fn reconcile_establishes_from_a_later_explicit_separator() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![
+            Entry {
+                key: "GODEBUG".to_string(),
+                value: "madvdontneed=1".to_string(),
+                kind: ModifierKind::List,
+                separator: None,
+            },
+            list_entry("GODEBUG", "gctrace=1", ","),
+        ];
+        reconcile_list_separators(&mut entries).expect("one explicit separator is agreement");
+        assert_eq!(entries[0].separator.as_deref(), Some(","));
+    }
+
+    /// Nobody established one → the entries keep `None`, and the fold applies
+    /// the default. Filling in a space here would erase that distinction from
+    /// everything downstream, including the forwarding envelope.
+    #[test]
+    fn reconcile_leaves_none_when_no_contributor_declared_one() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![Entry {
+            key: "JDK_JAVA_OPTIONS".to_string(),
+            value: "-ea".to_string(),
+            kind: ModifierKind::List,
+            separator: None,
+        }];
+        reconcile_list_separators(&mut entries).expect("no declaration is not a conflict");
+        assert_eq!(entries[0].separator, None);
+    }
+
+    /// Two explicit separators that disagree fail closed, naming the key and
+    /// both spellings. First-wins would silently corrupt the loser's
+    /// contribution for the consuming tool.
+    #[test]
+    fn reconcile_rejects_conflicting_explicit_separators() {
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            list_entry("GODEBUG", "madvdontneed=1", ";"),
+        ];
+        let error = reconcile_list_separators(&mut entries).expect_err("two separators cannot both apply");
+        let ListSeparatorError::Conflict { key, first, second } = &error else {
+            panic!("expected a conflict; got {error:?}");
+        };
+        assert_eq!(key, "GODEBUG");
+        assert_eq!(first, ",");
+        assert_eq!(second, ";");
+        let message = error.to_string();
+        assert!(message.contains("GODEBUG") && message.contains(',') && message.contains(';'));
+    }
+
+    /// Agreement is per key: two keys with different separators is the normal
+    /// case, not a conflict. A `Path` entry sharing a key with a list is
+    /// likewise none of this function's business.
+    #[test]
+    fn reconcile_is_scoped_to_one_key() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            list_entry("JDK_JAVA_OPTIONS", "-ea", " "),
+            Entry {
+                key: "GODEBUG".to_string(),
+                value: "/opt/bin".to_string(),
+                kind: ModifierKind::Path,
+                separator: None,
+            },
+        ];
+        reconcile_list_separators(&mut entries).expect("different keys never conflict");
+        assert_eq!(entries[0].separator.as_deref(), Some(","));
+        assert_eq!(entries[1].separator.as_deref(), Some(" "));
+        assert_eq!(entries[2].separator, None, "a non-list entry inherits nothing");
+    }
+
+    /// Agreement has to span the caller's *whole* composition, which is not
+    /// one vector: `ocx run` composes the package entries and keeps the
+    /// project entries separate so it can forward only the latter. Chaining
+    /// two `iter_mut()`s is the shape that has to work.
+    #[test]
+    fn reconcile_spans_two_disjoint_vectors() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut composed = [list_entry("GODEBUG", "gctrace=1", ",")];
+        let mut project = [Entry {
+            key: "GODEBUG".to_string(),
+            value: "madvdontneed=1".to_string(),
+            kind: ModifierKind::List,
+            separator: None,
+        }];
+
+        reconcile_list_separators(composed.iter_mut().chain(project.iter_mut()))
+            .expect("one explicit separator across both vectors is agreement");
+        assert_eq!(project[0].separator.as_deref(), Some(","));
+
+        let mut conflicting = [list_entry("GODEBUG", "asyncpreemptoff=1", ";")];
+        let error = reconcile_list_separators(composed.iter_mut().chain(conflicting.iter_mut()))
+            .expect_err("a conflict across two vectors is still a conflict");
+        assert!(matches!(&error, ListSeparatorError::Conflict { key, .. } if key == "GODEBUG"));
+    }
+
+    /// A value the author never edged becomes edged once it inherits a
+    /// separator. `--env "GODEBUG:list=,a"` is legal at parse — the effective
+    /// separator is not known there — so this is the only place it can be
+    /// caught, and an edged value fuses with the fold's wrapper.
+    #[test]
+    fn reconcile_rejects_a_value_edged_by_its_inherited_separator() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            Entry {
+                key: "GODEBUG".to_string(),
+                value: ",madvdontneed=1".to_string(),
+                kind: ModifierKind::List,
+                separator: None,
+            },
+        ];
+        let error = reconcile_list_separators(&mut entries).expect_err("an inherited separator must still be checked");
+        assert!(
+            matches!(&error, ListSeparatorError::EdgedValue { key, separator, value }
+                if key == "GODEBUG" && separator == "," && value == ",madvdontneed=1"),
+            "expected EdgedValue naming key, separator and value; got: {error}"
+        );
+    }
+
+    /// Nobody declared a separator, so the key folds with the default — and a
+    /// value edged by *that* is just as ambiguous.
+    #[test]
+    fn reconcile_rejects_a_value_edged_by_the_default_separator() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        for value in [" -ea", "-ea "] {
+            let mut entries = vec![Entry {
+                key: "JDK_JAVA_OPTIONS".to_string(),
+                value: value.to_string(),
+                kind: ModifierKind::List,
+                separator: None,
+            }];
+            let error =
+                reconcile_list_separators(&mut entries).expect_err("the default separator is an effective separator");
+            assert!(
+                matches!(&error, ListSeparatorError::EdgedValue { separator, .. } if separator == " "),
+                "expected EdgedValue naming the default separator; got: {error}"
+            );
+        }
+    }
+
+    /// A value carrying the separator in its interior is one opaque
+    /// contribution, not an edged one — the check must not reject it.
+    #[test]
+    fn reconcile_accepts_values_that_merely_contain_their_separator() {
+        use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
+
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1,madvdontneed=1", ","),
+            Entry {
+                key: "GODEBUG".to_string(),
+                value: "asyncpreemptoff=1".to_string(),
+                kind: ModifierKind::List,
+                separator: None,
+            },
+        ];
+        reconcile_list_separators(&mut entries).expect("an interior separator is not an edge");
+        assert_eq!(entries[1].separator.as_deref(), Some(","));
+    }
+
+    /// Repeating the same separator is agreement, not a conflict.
+    #[test]
+    fn reconcile_accepts_repeated_agreement() {
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            list_entry("GODEBUG", "madvdontneed=1", ","),
+        ];
+        reconcile_list_separators(&mut entries).expect("agreeing entries are not a conflict");
+    }
+
+    #[test]
+    fn reconcile_conflict_classifies_as_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let mut entries = vec![
+            list_entry("GODEBUG", "gctrace=1", ","),
+            list_entry("GODEBUG", "madvdontneed=1", ";"),
+        ];
+        let error = reconcile_list_separators(&mut entries).expect_err("conflict");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
     }
 
     // ── apply_ocx_config ─────────────────────────────────────────────────
@@ -2392,6 +3117,7 @@ mod tests {
     /// Builds a `PATH`-kind entry for `dir`, as the composer would.
     fn path_entry(key: &str, dir: &std::path::Path) -> crate::package::metadata::env::entry::Entry {
         crate::package::metadata::env::entry::Entry {
+            separator: None,
             key: key.to_string(),
             value: dir.to_str().unwrap().to_string(),
             kind: crate::package::metadata::env::modifier::ModifierKind::Path,

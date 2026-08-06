@@ -26,12 +26,13 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `metadata/binary.rs` | `BinaryName` newtype (bare, case-preserving, looser grammar than `EntrypointName` — admits `python3.13`, `c++`, `MSBuild`; `TryFrom<String>`/`TryFrom<&str>`, `MAX_LEN = slug::SLUG_MAX_LEN`); `Binaries` — sorted/unique `BTreeSet<BinaryName>` wrapper, derived `Serialize` (bare-string array), custom `Deserialize` (untagged `string \| object` element union → `TryFrom<BTreeSet<BinaryName>>`, case-fold-collision check), manual `impl schemars::JsonSchema` (write-contract-only: plain string array); `BinaryError` (`thiserror`, `#[non_exhaustive]`) — `Empty`, `InvalidCharacter`, `Whitespace`, `LeadingDash`, `LeadingOrTrailingDot`, `TooLong`, `ReservedWindowsDeviceName`, `CaseFoldCollision`. `Bundle.binaries: Option<Binaries>` — `Option`, not the `Entrypoints`/`Dependencies` `#[serde(default)]` + `X::is_empty` pattern: `None` (undeclared) and `Some(empty)` (publisher asserts zero) are deliberately distinct wire states. ADR `adr_declared_binaries_metadata.md`. |
 | `bin_scan.rs` | `scan_directory_files(dir)` — the one content-tree directory walk (regular files + followed metadata, missing dir and dangling symlink yield nothing, every other I/O failure propagates), shared with `libc_lint.rs`; each caller applies its own filter over it, never a flag passed into it. `scan_interface_binaries(content_root, metadata, platform)` — the `ocx package create` compile step (sibling of `dependency_pinning.rs`) that scans `${installPath}`-rooted, interface-visible `Path` env vars' target directories for executables (Unix exec-bit vs. Windows extension allowlist `BIN_SCAN_WINDOWS_EXTENSIONS`), returning a plain `BTreeSet<BinaryName>`; `verify_declared_binaries` — one-directional diff against a declared `Binaries` claim; `ScanMode` (`Auto`/`Verify`/`Off` — lib-local mirror of `ocx_cli::options::BinScanMode`, duplicated per lib-hosts-substance/CLI-thin convention); `resolve_binaries(content_root, metadata, platform, mode)` — the full fill/verify/pass-through orchestration; `BinScanError` (`ClassifyExitCode` → `DataError` 65) — `UndeclaredBinary`, `DeclaredNotExecutable`, `Binary(#[from] BinaryError)`, `Scan(#[from] crate::Error)`. ADR `adr_declared_binaries_metadata.md` §2. |
 | `libc_lint.rs` | `checks_declared_libc(platform)` — the ONE implementation of the lint's scope rule (Linux + `any`; every other concrete target is out of scope). `check_declared_libc` early-returns on it and the CLI gates its `--no-libc-lint` bypass warning on it, so a bypass never claims something went unverified on a platform that was never going to be checked. `check_declared_libc(content_root, metadata, platform)` — the third `ocx package create` compile step (sibling of `bin_scan.rs` / `dependency_pinning.rs`): reads the ELF `PT_INTERP` of every file on an interface `PATH` dir (walked by `bin_scan::scan_directory_files`, the shared walk, with no filter applied — the binaries scan's exec-bit/name-grammar predicates would hide files whose loader still matters). Scope resolution stays this module's own (`resolve_scan_scope`), deliberately NOT `bin_scan`'s: the two ask different questions of the same metadata and refuses a Linux `--platform` whose `os.features` do not cover the libc family the binaries need. Linux targets only (macOS has one libc; OCX defines no `libc.*` tag for the Windows CRTs). Fail-closed: absent ELF magic is a positive "not in scope", but an ELF that will not parse or names an unattributable loader errors rather than passing as "needs nothing". `LibcLintError` (`ClassifyExitCode` → `DataError` 65, the same code the resolve-time mirror image `SelectResult::FeatureMismatch` maps to; `Read` → `IoError` 74). ELF parsing delegates to the `elf` crate, the same reader behind `oci::host_capabilities`. |
-| `metadata/env.rs` | `Env` struct (array of Var); `resolve_into_env()`, `EnvBuilder` |
-| `metadata/env/var.rs` | `Var` with flattened modifier (key + Path or Constant) |
+| `metadata/env.rs` | `Env` struct (array of Var); `EnvBuilder` |
+| `metadata/env/var.rs` | `Var` with flattened modifier (key + Path, Constant or List) |
 | `metadata/env/path.rs` | Path modifier: prepended to existing values, `${installPath}` template |
 | `metadata/env/constant.rs` | Constant modifier: replaces existing values, `${installPath}` template |
-| `metadata/env/entry.rs` | `Entry { key, value, kind }`: resolved env-var binding produced by [`EnvResolver`] |
-| `metadata/env/modifier.rs` | `Modifier` enum (Path/Constant) + `ModifierKind` stripped enum |
+| `metadata/env/list.rs` | List modifier: appended to existing values with earlier occurrences removed, `${installPath}` template; `separator` REQUIRED on the wire (refused at `ValidMetadata`, not by serde, so the message names the var), defaulted to `" "` on `ocx.toml` / `--env`. `separator_is_valid` (non-empty, no `=`) + `is_separator_edged` are the shared predicates each surface folds into its own typed error (65 / 78 / 64) |
+| `metadata/env/entry.rs` | `Entry { key, value, kind, separator }`: resolved env-var binding produced by [`EnvResolver`]; `separator` is a plain field with no invariant (`pub` fields, many struct-literal sites) settled at compose time by `env::reconcile_list_separators` |
+| `metadata/env/modifier.rs` | `Modifier` enum (Path/Constant/List + read-only `Unknown` fallback) + `ModifierKind` stripped enum (derives `JsonSchema` so schemas `$ref` one vocabulary) |
 | `metadata/env/dep_context.rs` | `DependencyContext` enum (`Full(Arc<InstallInfo>)` / `PathOnly`) for `${deps.NAME.*}` interpolation |
 | `metadata/env/resolver.rs` | `EnvResolver`: per-var resolver — `resolve(var) → Option<Entry>`; surface gating (`has_interface()` / `has_private()`) happens upstream at `composer.rs`, not inside `EnvResolver` |
 | `metadata/slug.rs` | `SLUG_PATTERN` regex + `SLUG_MAX_LEN` constant shared by `DependencyName` and `EntrypointName` validation |
@@ -58,7 +59,8 @@ Metadata (tagged enum: "type" = "bundle")
        └─ Env { variables: Vec<Var> }
             └─ Var { key: String, visibility: Visibility, modifier: Modifier (flattened) }
                  ├─ Path { required: bool, value: String }
-                 └─ Constant { value: String }
+                 ├─ Constant { value: String }
+                 └─ List { separator: Option<String>, value: String }
 ```
 
 `binaries` is `Option<Binaries>` (not `Entrypoints`'s `#[serde(default)]` + `is_empty` skip)
@@ -86,10 +88,11 @@ and `#[schemars(schema_with = "entry_visibility_schema")]`. `"sealed"` is reject
 - Interface surface (`--self` off): emits vars where `var.visibility.has_interface()` is true.
 - Private surface (`--self` on): emits vars where `var.visibility.has_private()` is true.
 
-`resolve_into_env` on `Env` is a convenience wrapper; the canonical runtime surface build is
+The canonical — and only — runtime surface build is
 `composer::compose(roots, store, self_view)` in `package_manager/composer.rs`, which iterates
 each root's pre-built TC flat, gates by surface, and emits only a dep's interface-tagged vars
-when that dep crosses an edge.
+when that dep crosses an edge. Entries reach the process env through
+`env::Env::apply_entries`; there is deliberately no second, ungated fold path on `Env` itself.
 
 Every `Serialize`/`Deserialize` struct needs `#[derive(schemars::JsonSchema)]`.
 
@@ -99,9 +102,17 @@ Every `Serialize`/`Deserialize` struct needs `#[derive(schemars::JsonSchema)]`.
 |------|----------|----------|---------|
 | `path` | Prepended to existing value (like PATH) | `${installPath}` | `PATH=${installPath}/bin` |
 | `constant` | Replaces existing value | `${installPath}` | `JAVA_HOME=${installPath}` |
+| `list` | Appended to existing value, joined by `separator`, earlier occurrences of the same contribution removed | `${installPath}` | `GODEBUG=gctrace=1` with `separator: ","` |
+
+The `list` fold is pinned by `adr_env_modifier_types.md` D1 and implemented once in
+`utility::list::append_unique` (wrap in separator → replace every `sep+value+sep` with `sep`
+to a fixpoint → strip wrapper → append). Every shell snippet must implement the same
+algorithm, or the in-process env and the exported text disagree on separator-bearing values.
 
 Resolution flow: `EnvResolver::new(content_path, &dep_contexts).resolve(var) → Option<Entry>`
-resolves a single `Var` to a concrete `Entry { key, value, kind }`. The composer calls this
+resolves a single `Var` to a concrete `Entry { key, value, kind, separator }`. For a `list`
+var it re-checks the separator edge on the *resolved* value — a parse gate only ever sees the
+authored template. The composer calls this
 per-var unconditionally after surface-gating the var's `Visibility` itself. Surface gating
 is the composer's responsibility, not the resolver's.
 

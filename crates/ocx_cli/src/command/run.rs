@@ -28,6 +28,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::env;
+use ocx_lib::package::metadata::env::entry::Entry;
 use ocx_lib::project::{
     DEFAULT_GROUP, check_duplicate_selection, expand_all_keyword, resolve_selected_tools, select_tool_set,
 };
@@ -216,10 +217,20 @@ impl Run {
         // A toolchain consumer is a consumer of every tool it declares, so the
         // self view would compose a strictly worse toolchain. The flag belongs
         // on `ocx package exec` / `ocx package env`, and only there.
-        let entries = manager
+        let mut entries = manager
             .resolve_env_with_patch_boundary(&install_infos, false, scope)
             .await?
             .0;
+
+        // W-11: `entries` and `project_env` are disjoint `Vec`s (the latter is
+        // ALSO forwarded raw over `OCX_ENV` below) — reconcile them together so
+        // a package-established `list` separator reaches the forwarded copy.
+        // This is the motivating case: without it, a package appending
+        // `GODEBUG` with `","` plus this project's own `GODEBUG` entry (which
+        // may omit the separator) would forward the project's copy with `None`,
+        // and a re-entrant launcher would fold it with the bare `" "` default
+        // instead of the separator the package actually established.
+        reconcile_run_entries(&mut entries, &mut project_env)?;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
@@ -284,6 +295,28 @@ impl Run {
     }
 }
 
+/// Settles every `list` entry's separator across `entries` (composed, applied
+/// to this process) and `project_env` (forwarded raw over `OCX_ENV` for a
+/// re-entrant launcher) in one pass (W-11).
+///
+/// The two are disjoint `Vec`s holding independent [`Entry`] copies: without
+/// chaining them through one [`env::reconcile_list_separators`] call, a
+/// package's explicit separator would settle `entries` alone and leave
+/// `project_env`'s own copy at whatever separator it was declared with —
+/// `None` inherits nothing, and a re-entrant launcher would fold it with the
+/// bare default instead of the separator the package actually established.
+/// Extracted from [`Run::execute`] so this exact wiring is unit-testable
+/// without a full project/registry fixture.
+///
+/// # Errors
+///
+/// [`env::ListSeparatorError`] when two entries for one key declare different
+/// explicit separators, or when the separator an entry settles on edges its
+/// value.
+fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), env::ListSeparatorError> {
+    env::reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +328,49 @@ mod tests {
 
     fn sha(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
+    }
+
+    // ── W-11: reconcile_run_entries (chained-vector wiring) ────────────────────
+
+    fn list_entry(key: &str, value: &str, separator: Option<&str>) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ocx_lib::package::metadata::env::modifier::ModifierKind::List,
+            separator: separator.map(str::to_owned),
+        }
+    }
+
+    /// The motivating case: a package's explicit separator (in `entries`)
+    /// must reach the project's own entry for the same key even though it
+    /// lives in the disjoint `project_env` vector — `ocx_lib::env`'s own
+    /// `reconcile_spans_two_disjoint_vectors` test proves the underlying
+    /// primitive; this proves `run.rs` actually wires it with both vectors.
+    #[test]
+    fn reconcile_run_entries_lets_project_env_inherit_the_package_separator() {
+        let mut entries = vec![list_entry("GODEBUG", "gctrace=1", Some(","))];
+        let mut project_env = vec![list_entry("GODEBUG", "madvdontneed=1", None)];
+
+        reconcile_run_entries(&mut entries, &mut project_env).expect("one explicit separator is agreement");
+
+        assert_eq!(
+            project_env[0].separator.as_deref(),
+            Some(","),
+            "the forwarded copy must inherit the package-established separator"
+        );
+    }
+
+    /// Two explicit separators for the same key across the two vectors fail
+    /// closed instead of silently picking one — the failure mode a wrong
+    /// choice would corrupt for the consuming tool.
+    #[test]
+    fn reconcile_run_entries_rejects_a_conflict_across_the_two_vectors() {
+        let mut entries = vec![list_entry("GODEBUG", "gctrace=1", Some(","))];
+        let mut project_env = vec![list_entry("GODEBUG", "madvdontneed=1", Some(";"))];
+
+        let error = reconcile_run_entries(&mut entries, &mut project_env)
+            .expect_err("conflicting explicit separators must not both apply");
+        assert!(matches!(&error, env::ListSeparatorError::Conflict { key, .. } if key == "GODEBUG"));
     }
 
     // ── select → filter → resolve (named scope regression) ────────────────────

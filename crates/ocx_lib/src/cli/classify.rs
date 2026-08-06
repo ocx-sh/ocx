@@ -82,7 +82,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
     use crate::config::managed::ManagedConfigError;
-    use crate::env::{CommandResolutionError, ForwardedEnvError};
+    use crate::env::{CommandResolutionError, ForwardedEnvError, ListSeparatorError};
     use crate::file_structure::error::Error as FileStructureError;
     use crate::forge::ForgeError;
     use crate::managed_config::{
@@ -128,6 +128,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(crate::Error);
     try_downcast!(ConfigError);
     try_downcast!(ForwardedEnvError);
+    try_downcast!(ListSeparatorError);
     try_downcast!(CommandResolutionError);
     try_downcast!(ClientError);
     try_downcast!(OciIndexError);

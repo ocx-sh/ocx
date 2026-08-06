@@ -64,7 +64,7 @@ impl Exec {
         // same base the project tier's flag uses.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
-        let env_overrides = self.env.entries(&cwd)?;
+        let mut env_overrides = self.env.entries(&cwd)?;
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         let infos = manager
@@ -76,7 +76,7 @@ impl Exec {
         // will. The only thing a caller can contribute here is the override it
         // typed on this invocation — that is a CLI argument, not project
         // configuration, so carrying it does not cross the tier boundary.
-        let entries = manager
+        let mut entries = manager
             .resolve_env(
                 &install_infos,
                 self.self_view,
@@ -85,6 +85,12 @@ impl Exec {
                 },
             )
             .await?;
+        // W-11: `entries` (composed, applied to this process) and
+        // `env_overrides` (forwarded raw over `OCX_ENV` for a re-entrant
+        // launcher) are disjoint `Vec`s holding independent copies of the
+        // `--env` overrides — reconcile them together so a package-established
+        // `list` separator reaches the forwarded copy.
+        env::reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
         self.run_with_env(entries, &env_overrides, context.config_view()).await
     }
 

@@ -197,14 +197,14 @@ pub enum ProjectErrorKind {
     #[error("[{scope}] key '{key}' is not a valid environment variable name; expected [A-Za-z_][A-Za-z0-9_]*")]
     EnvInvalidKey { scope: String, key: String },
 
-    /// An `[env]` table value declares a `type` that is neither `path` nor
-    /// `constant`. Message text mirrors [`crate::package::metadata::env::modifier::ParseModifierKindError`]
+    /// An `[env]` table value declares a `type` outside the modifier
+    /// vocabulary. Message text mirrors [`crate::package::metadata::env::modifier::ParseModifierKindError`]
     /// verbatim (past the `[{scope}] key '{key}':` prefix this surface adds)
     /// so the same "a newer ocx may support it" remedy reaches a reader here
     /// as it does from `--env` — a type name a newer ocx defines is a version
     /// gap, not a typo.
     #[error(
-        "[{scope}] key '{key}': unknown modifier type '{found}'; expected `path` or `constant` (a newer ocx may support it)"
+        "[{scope}] key '{key}': unknown modifier type '{found}'; expected `path`, `constant` or `list` (a newer ocx may support it)"
     )]
     EnvUnknownModifier { scope: String, key: String, found: String },
 
@@ -214,7 +214,7 @@ pub enum ProjectErrorKind {
     #[error("[{scope}] key '{key}': expected a string or {{ type, value }} table, found {found}")]
     EnvInvalidValue { scope: String, key: String, found: String },
 
-    /// An `[env]` table value carries a field other than `type` or `value`.
+    /// An `[env]` table value carries a field belonging to no modifier.
     ///
     /// Rejected rather than ignored, for the same reason
     /// [`Self::UnknownGroupSection`] is: accepting-and-dropping would let a
@@ -223,8 +223,45 @@ pub enum ProjectErrorKind {
     /// silently ignoring it would discard a fail-if-absent intent. It also
     /// keeps the runtime in step with the generated schema, which declares
     /// `additionalProperties: false` on this table.
-    #[error("[{scope}] key '{key}': unknown field '{field}'; expected only `type` and `value`")]
+    #[error(
+        "[{scope}] key '{key}': unknown field '{field}'; expected only `type`, `value`, and `separator` (list only)"
+    )]
     EnvUnknownValueField { scope: String, key: String, field: String },
+
+    /// An `[env]` table value declares `separator` on a type that does not
+    /// fold. Distinct from [`Self::EnvUnknownValueField`] because `separator`
+    /// is a field this ocx knows — it is in the wrong company, so the remedy
+    /// is a choice between two edits rather than a deletion.
+    #[error(
+        "[{scope}] key '{key}': `separator` applies to `type = \"list\"` only, not `{kind}`; remove it or change the type"
+    )]
+    EnvSeparatorOnNonList {
+        scope: String,
+        key: String,
+        kind: crate::package::metadata::env::modifier::ModifierKind,
+    },
+
+    /// An `[env]` list value declares a separator the fold cannot use — see
+    /// [`separator_is_valid`](crate::package::metadata::env::list::separator_is_valid).
+    #[error(
+        "[{scope}] key '{key}': separator {separator:?} must be non-empty and free of '=', newline and carriage return"
+    )]
+    EnvInvalidSeparator {
+        scope: String,
+        key: String,
+        separator: String,
+    },
+
+    /// An `[env]` list value starts or ends with its own separator, which
+    /// would make the append fold's flank match ambiguous. The wire form
+    /// refuses the same shape at exit 65.
+    #[error("[{scope}] key '{key}': value {value:?} starts or ends with its separator {separator:?}")]
+    EnvSeparatorEdgedValue {
+        scope: String,
+        key: String,
+        separator: String,
+        value: String,
+    },
 
     /// A `--group` CLI argument contained an empty segment (e.g.
     /// `-g ci,,lint`). The CLI layer pre-validates this before calling
@@ -500,6 +537,9 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::EnvUnknownModifier { .. }
                 | ProjectErrorKind::EnvInvalidValue { .. }
                 | ProjectErrorKind::EnvUnknownValueField { .. }
+                | ProjectErrorKind::EnvSeparatorOnNonList { .. }
+                | ProjectErrorKind::EnvInvalidSeparator { .. }
+                | ProjectErrorKind::EnvSeparatorEdgedValue { .. }
                 | ProjectErrorKind::LockRepositoryNotBare { .. }
                 // The file on disk is valid TOML by the serde parser's reckoning
                 // but not an editable document — same class, same remedy.

@@ -155,9 +155,12 @@ pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
 /// - `ocx package env` (OCI-tier, delegates here for `--shell` output)
 /// - `ocx direnv export` (delegates here instead of inlining the loop)
 ///
-/// Wraps [`Shell::export_path`] / [`Shell::export_constant`] and skips entries
-/// whose key fails POSIX validation (emitting a `# ocx:` note to stderr so the
-/// caller is informed without aborting the full output).
+/// Wraps [`Shell::export_path`] / [`Shell::export_constant`] /
+/// [`Shell::export_list`] and skips entries the shell cannot express — a key
+/// that fails POSIX validation, or a `list` entry under `cmd.exe`, which has no
+/// case-sensitive string replacement. Either way a `# ocx:` note goes to stderr
+/// naming the actual reason, so the caller is informed without aborting the
+/// full output.
 ///
 /// `Shell::Bash` is the fixed shell for `direnv export` (direnv always evals
 /// `.envrc` in a bash sub-shell — no `--shell` flag on that command). For
@@ -168,15 +171,42 @@ pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
 /// This function is infallible — `None` from `export_path` / `export_constant`
 /// is handled by a stderr note.
 pub fn emit_lines(shell: Shell, entries: &[Entry]) {
+    use ocx_lib::package::metadata::env::list::DEFAULT_SEPARATOR;
     use ocx_lib::package::metadata::env::modifier::ModifierKind;
+
+    /// The `--shell=` value name (`cmd`-style), not the Rust variant name —
+    /// read from clap's own possible values so the two cannot drift.
+    fn shell_argument_name(shell: Shell) -> String {
+        use clap::ValueEnum as _;
+        shell
+            .to_possible_value()
+            .map_or_else(|| shell.to_string(), |value| value.get_name().to_string())
+    }
+
     for entry in entries {
         let line = match entry.kind {
             ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
             ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
+            // A surviving `None` separator has already been through compose-time
+            // reconciliation, so nothing established one for this key.
+            ModifierKind::List => shell.export_list(
+                &entry.key,
+                &entry.value,
+                entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
+            ),
         };
         match line {
             Some(line) => println!("{line}"),
-            None => eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key),
+            None if !ocx_lib::env::is_valid_env_key(&entry.key) => {
+                eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key);
+            }
+            // The `--shell=` spelling, not the Rust variant name: this is the
+            // word the reader typed and would type again.
+            None => eprintln!(
+                "# ocx: skipping list env var {:?} — {} has no case-sensitive unique append",
+                entry.key,
+                shell_argument_name(shell)
+            ),
         }
     }
 }
@@ -300,6 +330,7 @@ pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
             key: entry.key.clone(),
             value: entry.value.clone(),
             kind: entry.kind.clone(),
+            separator: entry.separator.clone(),
             // Patch provenance is an `ocx env` concern — the inspect report
             // carries no package-composed entries to attribute.
             source: None,
@@ -494,6 +525,7 @@ mod tests {
             key: "JAVA_HOME".to_string(),
             value: "/pkg/java".to_string(),
             kind: ModifierKind::Constant,
+            separator: None,
         }];
 
         export_ci(CiFlavor::GitLab, Some(export.clone()), &entries).expect("gitlab export ok");

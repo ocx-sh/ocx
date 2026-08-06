@@ -105,7 +105,7 @@ impl LauncherExec {
         // invocation with no `ocx run` parent has no payload and gets an empty
         // vector — identical to the pre-forwarding behaviour.
         let project_env = ocx_lib::env::forwarded_env().map_err(anyhow::Error::new)?;
-        let entries = manager
+        let mut entries = manager
             .resolve_env(
                 &[std::sync::Arc::new(info)],
                 true,
@@ -115,6 +115,13 @@ impl LauncherExec {
                 },
             )
             .await?;
+        // Same per-key list-separator agreement `ocx run` and `ocx package
+        // exec` settle before applying. A launcher re-entry composes the
+        // package's own entries afresh, so two contributors disagreeing on one
+        // key's separator has to fail here too — otherwise the same package
+        // exits 65 through `exec` and folds with a silently-chosen separator
+        // through its own launcher.
+        ocx_lib::env::reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
         // argv[0] is the launcher's own filename — the invocable entrypoint
         // name. argv[1..] are the user args.
@@ -170,7 +177,11 @@ impl LauncherExec {
     ///
     /// `project_env` is the validated payload decoded from `OCX_ENV` — the
     /// project/group `[env]` (+ `ocx run --env`) already folded into `entries`
-    /// as stages 4-6. It is re-emitted onto the child env so a *nested*
+    /// as stages 4-6. It is deliberately NOT chained into the caller's
+    /// `reconcile_list_separators` pass: the `OCX_ENV` decode gate already
+    /// refuses a list entry without a settled separator, and any conflict
+    /// reds through the composed copies these entries were folded into. It is
+    /// re-emitted onto the child env so a *nested*
     /// launcher (an entrypoint that itself invokes a generated launcher) can
     /// re-apply it after its own package entries, instead of letting a package
     /// value beat the project override at the second hop.

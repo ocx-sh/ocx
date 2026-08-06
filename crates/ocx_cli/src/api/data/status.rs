@@ -30,6 +30,12 @@ use crate::api::Printable;
 pub struct EnvValueOut {
     #[serde(rename = "type")]
     kind: ModifierKind,
+    /// The declared separator for a `list`-typed value. `None` for every
+    /// other kind, and for a `list` that declared none — the project surface
+    /// may omit it, and what the omission inherits is decided at compose
+    /// time, which status does not do. Skipped in JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    separator: Option<String>,
     /// Verbatim as written. A relative `path` value stays relative — resolving
     /// it against the project root is composition, which `ocx inspect` and
     /// `ocx env` do.
@@ -154,6 +160,7 @@ fn env_out(env: &ProjectEnv) -> BTreeMap<String, EnvValueOut> {
                 key.clone(),
                 EnvValueOut {
                     kind: declared.kind.clone(),
+                    separator: declared.separator.clone(),
                     value: declared.value.clone(),
                 },
             )
@@ -421,5 +428,64 @@ impl Printable for StatusReport {
         }
 
         data.print_tree(&Node::branch(self.project.clone(), sections));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── separator field (W-10) ─────────────────────────────────────────────
+    //
+    // Driven through a real `ProjectEnv`, not a hand-built `EnvValueOut`: the
+    // thing worth pinning is that a separator declared in `ocx.toml` reaches
+    // the report, which a stubbed report value cannot show.
+
+    /// Parse a `[env]` table the way `ocx.toml` loading does, then project it
+    /// through the report's own mapping.
+    fn declared(source: serde_json::Value) -> BTreeMap<String, EnvValueOut> {
+        let env: ProjectEnv = serde_json::from_value(source).expect("the fixture must parse as an [env] table");
+        env_out(&env)
+    }
+
+    #[test]
+    fn list_value_serializes_type_and_separator_when_present() {
+        let reported = declared(serde_json::json!({
+            "GODEBUG": { "type": "list", "separator": ",", "value": "gctrace=1" }
+        }));
+        let json = serde_json::to_string(&reported).expect("serializes");
+        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(
+            json.contains(r#""separator":",""#),
+            "the declared separator must reach the report: {json}"
+        );
+    }
+
+    #[test]
+    fn constant_and_path_values_omit_the_separator_field() {
+        let reported = declared(serde_json::json!({
+            "CI": "1",
+            "TOOLS": { "type": "path", "value": "bin" }
+        }));
+        let json = serde_json::to_string(&reported).expect("serializes");
+        assert!(
+            !json.contains("\"separator\""),
+            "a non-list value must omit separator entirely: {json}"
+        );
+    }
+
+    /// A `list` entry that declared no separator reports none — the value it
+    /// will inherit is settled at compose time, which status does not run.
+    #[test]
+    fn list_value_without_a_declared_separator_omits_the_field() {
+        let reported = declared(serde_json::json!({
+            "GODEBUG": { "type": "list", "value": "gctrace=1" }
+        }));
+        let json = serde_json::to_string(&reported).expect("serializes");
+        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(
+            !json.contains("\"separator\""),
+            "an undeclared separator must not be invented: {json}"
+        );
     }
 }

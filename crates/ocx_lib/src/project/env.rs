@@ -47,8 +47,16 @@ pub const DEFAULT_ENV_SCOPE: &str = "env";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvValue {
     /// How the value combines with any existing binding for the key:
-    /// [`ModifierKind::Constant`] replaces, [`ModifierKind::Path`] prepends.
+    /// [`ModifierKind::Constant`] replaces, [`ModifierKind::Path`] prepends,
+    /// [`ModifierKind::List`] appends.
     pub kind: ModifierKind,
+    /// The string a [`ModifierKind::List`] value is joined to the key's
+    /// existing value with. `None` on every other kind, and on a list that
+    /// declared none — this surface has a human to tell, so it may omit the
+    /// separator where package metadata may not, and
+    /// [`reconcile_list_separators`](crate::env::reconcile_list_separators)
+    /// settles what the omission inherits.
+    pub separator: Option<String>,
     /// The literal value, verbatim as written. Never interpolated.
     pub value: String,
 }
@@ -59,6 +67,7 @@ impl EnvValue {
     pub fn constant(value: impl Into<String>) -> Self {
         Self {
             kind: ModifierKind::Constant,
+            separator: None,
             value: value.into(),
         }
     }
@@ -67,6 +76,17 @@ impl EnvValue {
     pub fn path(value: impl Into<String>) -> Self {
         Self {
             kind: ModifierKind::Path,
+            separator: None,
+            value: value.into(),
+        }
+    }
+
+    /// A [`ModifierKind::List`] value, appended to the key's existing value.
+    /// `separator` is `None` when the table omitted it.
+    pub fn list(value: impl Into<String>, separator: Option<String>) -> Self {
+        Self {
+            kind: ModifierKind::List,
+            separator,
             value: value.into(),
         }
     }
@@ -119,8 +139,14 @@ impl ProjectEnv {
     /// - [`ProjectErrorKind::EnvReservedKey`] — an `OCX_*` / `__OCX_*` key.
     /// - [`ProjectErrorKind::EnvInvalidKey`] — a key outside the POSIX
     ///   environment-name grammar.
-    /// - [`ProjectErrorKind::EnvUnknownModifier`] — a table `type` that is
-    ///   neither `path` nor `constant`.
+    /// - [`ProjectErrorKind::EnvUnknownModifier`] — a table `type` outside the
+    ///   modifier vocabulary.
+    /// - [`ProjectErrorKind::EnvSeparatorOnNonList`] — a `separator` on a type
+    ///   that does not fold.
+    /// - [`ProjectErrorKind::EnvInvalidSeparator`] /
+    ///   [`ProjectErrorKind::EnvSeparatorEdgedValue`] — a separator the fold
+    ///   cannot use, or one the value's own flank fuses with.
+    /// - [`ProjectErrorKind::EnvUnknownValueField`] — any other field.
     /// - [`ProjectErrorKind::EnvInvalidValue`] — a value that is neither a
     ///   string nor a well-formed `{ type, value }` table.
     pub fn from_table(scope: &str, raw: &toml::Table) -> Result<Self, ProjectErrorKind> {
@@ -163,7 +189,9 @@ impl ProjectEnv {
             .map(|(key, declared)| Entry {
                 key: key.clone(),
                 value: match declared.kind {
-                    ModifierKind::Constant => declared.value.clone(),
+                    // A list contribution is literal text like a constant — the
+                    // project root anchors directories, not option strings.
+                    ModifierKind::Constant | ModifierKind::List => declared.value.clone(),
                     // `join` is the whole resolution: an absolute value
                     // replaces the root outright, a relative one lands under
                     // it. On Windows a driveless-but-rooted value (`/opt/bin`,
@@ -175,13 +203,15 @@ impl ProjectEnv {
                     ModifierKind::Path => project_root.join(&declared.value).to_string_lossy().into_owned(),
                 },
                 kind: declared.kind.clone(),
+                separator: declared.separator.clone(),
             })
             .collect()
     }
 }
 
 /// The one value-grammar branch: a bare string is a
-/// [`ModifierKind::Constant`], a `{ type, value }` table names its modifier.
+/// [`ModifierKind::Constant`], a `{ type, value }` table names its modifier,
+/// and a `list` table may add a `separator`.
 ///
 /// Shared by [`ProjectEnv::from_table`] and — through it — the
 /// [`serde::Deserialize`] impl, per the [`crate::config::mirror::parse_mirror_value`]
@@ -189,9 +219,14 @@ impl ProjectEnv {
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::EnvUnknownModifier`] for a `type` that is neither
-/// `path` nor `constant`; [`ProjectErrorKind::EnvInvalidValue`] for any other
-/// shape, carrying the TOML type name of the offending value.
+/// [`ProjectErrorKind::EnvUnknownModifier`] for a `type` outside the modifier
+/// vocabulary; [`ProjectErrorKind::EnvSeparatorOnNonList`],
+/// [`ProjectErrorKind::EnvInvalidSeparator`] and
+/// [`ProjectErrorKind::EnvSeparatorEdgedValue`] for a `separator` in the wrong
+/// company, unusable, or fused with the value's own flank;
+/// [`ProjectErrorKind::EnvUnknownValueField`] for any other field;
+/// [`ProjectErrorKind::EnvInvalidValue`] for any other shape, carrying the
+/// TOML type name of the offending value.
 fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvValue, ProjectErrorKind> {
     if let Some(constant) = value.as_str() {
         return Ok(EnvValue::constant(constant));
@@ -223,19 +258,36 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
     let Some(literal) = table.get("value").and_then(toml::Value::as_str) else {
         return Err(invalid_value());
     };
+    let declared_separator = match table.get("separator") {
+        None => None,
+        Some(raw) => Some(raw.as_str().ok_or_else(invalid_value)?),
+    };
 
-    // Reject anything beyond `type` and `value`, matching the generated
-    // schema's `additionalProperties: false` and `Group`'s
+    // `separator` parameterizes the fold, so it belongs to `list` and nowhere
+    // else. Checked before the unknown-field sweep below, which would
+    // otherwise report a field this ocx knows perfectly well as unknown.
+    let folds = kind == ModifierKind::List;
+    if declared_separator.is_some() && !folds {
+        return Err(ProjectErrorKind::EnvSeparatorOnNonList {
+            scope: scope.to_string(),
+            key: key.to_string(),
+            kind,
+        });
+    }
+
+    // Reject anything beyond the fields the declared type admits, matching the
+    // generated schema's `additionalProperties: false` and `Group`'s
     // `deny_unknown_fields`. Accepting-and-ignoring would let a file authored
     // against a newer ocx run here with materially different semantics and no
     // signal — `required` on a path entry is a deferred ADR feature, so
     // `{ type = "path", value = "bin", required = true }` would silently drop
     // the caller's fail-if-absent intent. It would also leave the editor
     // (which validates against the schema) disagreeing with the CLI.
-    if let Some(unknown) = table
-        .keys()
-        .find(|name| name.as_str() != "type" && name.as_str() != "value")
-    {
+    if let Some(unknown) = table.keys().find(|name| match name.as_str() {
+        "type" | "value" => false,
+        "separator" => !folds,
+        _ => true,
+    }) {
         return Err(ProjectErrorKind::EnvUnknownValueField {
             scope: scope.to_string(),
             key: key.to_string(),
@@ -243,8 +295,31 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         });
     }
 
+    // The same two predicates the wire form and `--env` fold into their own
+    // exit codes. An omitted separator is unchecked on purpose: what it will
+    // inherit is not known until compose time, so judging the value against
+    // the bare default here would refuse entries that end up correct.
+    if let Some(separator) = declared_separator {
+        if !crate::package::metadata::env::list::separator_is_valid(separator) {
+            return Err(ProjectErrorKind::EnvInvalidSeparator {
+                scope: scope.to_string(),
+                key: key.to_string(),
+                separator: separator.to_string(),
+            });
+        }
+        if crate::package::metadata::env::list::is_separator_edged(literal, separator) {
+            return Err(ProjectErrorKind::EnvSeparatorEdgedValue {
+                scope: scope.to_string(),
+                key: key.to_string(),
+                separator: separator.to_string(),
+                value: literal.to_string(),
+            });
+        }
+    }
+
     Ok(EnvValue {
         kind,
+        separator: declared_separator.map(str::to_string),
         value: literal.to_string(),
     })
 }
@@ -257,11 +332,18 @@ impl serde::Serialize for ProjectEnv {
         use serde::ser::SerializeMap as _;
 
         /// The table arm. `kind` serializes through [`ModifierKind`]'s own
-        /// derive, so the `path`/`constant` spelling has one source.
+        /// derive, so the `path`/`constant`/`list` spelling has one source.
+        ///
+        /// `separator` is skipped when absent — unlike the wire form, which
+        /// keeps the field so the published schema can require it. Here the
+        /// omission is legal input, so emitting `separator = ""` for it would
+        /// write back something the parser refuses.
         #[derive(serde::Serialize)]
         struct TableForm<'a> {
             #[serde(rename = "type")]
             kind: &'a ModifierKind,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            separator: Option<&'a str>,
             value: &'a str,
         }
 
@@ -269,10 +351,11 @@ impl serde::Serialize for ProjectEnv {
         for (key, declared) in &self.entries {
             match declared.kind {
                 ModifierKind::Constant => map.serialize_entry(key, &declared.value)?,
-                ModifierKind::Path => map.serialize_entry(
+                ModifierKind::Path | ModifierKind::List => map.serialize_entry(
                     key,
                     &TableForm {
                         kind: &declared.kind,
+                        separator: declared.separator.as_deref(),
                         value: &declared.value,
                     },
                 )?,
@@ -300,13 +383,27 @@ impl schemars::JsonSchema for ProjectEnv {
         std::borrow::Cow::Borrowed("ProjectEnv")
     }
 
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // Hand-written because schemars reads the field's Rust TYPE and so
         // cannot see the string-or-table union the hand-rolled Deserialize
         // accepts. A derive would publish the table arm only — and the
         // string arm is the common case (`CI = "1"`), so nearly every
         // correct `[env]` block would be red-underlined in any taplo-enabled
         // editor. `taplo.toml` binds this schema live to every `ocx.toml`.
+        //
+        // The `type` vocabulary is NOT hand-spelled: it `$ref`s
+        // `ModifierKind`'s own derive, so adding a modifier updates the
+        // published `ocx.toml` schema without anyone remembering this file.
+        // Draft 2020-12 permits keywords beside `$ref`, so the description
+        // stays local to the field.
+        let mut modifier_kind = generator.subschema_for::<ModifierKind>();
+        modifier_kind.ensure_object().insert(
+            "description".to_owned(),
+            serde_json::Value::String(
+                "`constant` replaces the variable's value; `path` prepends to it; `list` appends to it.".to_owned(),
+            ),
+        );
+        let modifier_kind = modifier_kind.to_value();
         schemars::json_schema!({
             "type": "object",
             "description": "Environment variables applied to tools run from this project. Keys matching OCX_* or __OCX_* are rejected: a checked-in file must not be able to reconfigure how ocx itself resolves. Values are literal — no interpolation.",
@@ -315,14 +412,10 @@ impl schemars::JsonSchema for ProjectEnv {
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        // ponytail: enum spelled out rather than $ref'd at
-                        // ModifierKind (which derives no JsonSchema today).
-                        // Two variants, closed internal enum — a third is an
-                        // ADR-level event. Specify phase pins the pairing.
-                        "type": {
+                        "type": modifier_kind,
+                        "separator": {
                             "type": "string",
-                            "enum": ["path", "constant"],
-                            "description": "`constant` replaces the variable's value; `path` prepends to it."
+                            "description": "For `list` only: the string this contribution is joined to the variable's existing value with. Omit it to inherit whatever separator another contributor to the same key declared, or a single space if none did."
                         },
                         "value": {
                             "type": "string",
@@ -414,6 +507,172 @@ mod tests {
             PathBuf::from(&entries[0].value),
             absolute,
             "absolute path value must pass through unchanged, not be joined onto project_root"
+        );
+    }
+
+    // ── the list form (W-6) ─────────────────────────────────────────────
+
+    #[test]
+    fn list_table_form_carries_its_separator() {
+        let table: toml::Table = toml::from_str(r#"GODEBUG = { type = "list", separator = ",", value = "gctrace=1" }"#)
+            .expect("fixture TOML must parse");
+        let env = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table).expect("a list table must parse");
+        assert_eq!(
+            env.get("GODEBUG"),
+            Some(&EnvValue::list("gctrace=1", Some(",".to_string())))
+        );
+    }
+
+    /// Omitting the separator is legal here — unlike on the wire, where no
+    /// human is present to be told what was assumed. What the omission
+    /// inherits is decided later, at compose time.
+    #[test]
+    fn list_table_form_may_omit_the_separator() {
+        let table: toml::Table =
+            toml::from_str(r#"JDK_JAVA_OPTIONS = { type = "list", value = "-Xmx2g" }"#).expect("fixture TOML parses");
+        let env = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table).expect("a separatorless list must parse");
+        assert_eq!(env.get("JDK_JAVA_OPTIONS"), Some(&EnvValue::list("-Xmx2g", None)));
+    }
+
+    /// The declared separator has to survive into the resolved entry — it is
+    /// what the fold and every shell emitter join with.
+    #[test]
+    fn to_entries_carries_the_declared_separator() {
+        let table: toml::Table = toml::from_str(r#"GODEBUG = { type = "list", separator = ",", value = "gctrace=1" }"#)
+            .expect("fixture TOML must parse");
+        let env = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table).expect("a list table must parse");
+
+        let entries = env.to_entries(&std::env::temp_dir());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, ModifierKind::List);
+        assert_eq!(entries[0].value, "gctrace=1", "a list value is literal, never anchored");
+        assert_eq!(entries[0].separator.as_deref(), Some(","));
+    }
+
+    /// `separator` parameterizes the fold, and only `list` folds. Rejected
+    /// with its own message rather than as an unknown field: the field IS
+    /// known, so the remedy is a choice between two edits.
+    #[test]
+    fn separator_on_a_non_list_type_rejected() {
+        for source in [
+            r#"X = { type = "constant", separator = ",", value = "v" }"#,
+            r#"PATH = { type = "path", separator = "/", value = "bin" }"#,
+        ] {
+            let table: toml::Table = toml::from_str(source).expect("fixture TOML must parse");
+            let err = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+                .expect_err("a separator outside a list must be rejected");
+            let ProjectErrorKind::EnvSeparatorOnNonList { scope, .. } = &err else {
+                panic!("expected EnvSeparatorOnNonList for {source}, got {err:?}");
+            };
+            assert_eq!(scope, DEFAULT_ENV_SCOPE);
+            let message = err.to_string();
+            assert!(
+                message.contains("list"),
+                "the message must name the type that admits it; got: {message}"
+            );
+        }
+    }
+
+    /// The two separator predicates are the shared ones, folded into this
+    /// surface's own error so the exit code stays 78.
+    #[test]
+    fn unusable_separator_rejected() {
+        for (source, expected) in [
+            (r#"X = { type = "list", separator = "", value = "v" }"#, ""),
+            (r#"X = { type = "list", separator = "=", value = "v" }"#, "="),
+        ] {
+            let table: toml::Table = toml::from_str(source).expect("fixture TOML must parse");
+            let err = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+                .expect_err("a separator the fold cannot use must be rejected");
+            let ProjectErrorKind::EnvInvalidSeparator { scope, key, separator } = &err else {
+                panic!("expected EnvInvalidSeparator for {source}, got {err:?}");
+            };
+            assert_eq!(scope, DEFAULT_ENV_SCOPE);
+            assert_eq!(key, "X");
+            assert_eq!(separator, expected);
+        }
+    }
+
+    #[test]
+    fn separator_edged_value_rejected() {
+        for value in [",gctrace=1", "gctrace=1,"] {
+            let source = format!(r#"GODEBUG = {{ type = "list", separator = ",", value = {value:?} }}"#);
+            let table: toml::Table = toml::from_str(&source).expect("fixture TOML must parse");
+            let err = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+                .expect_err("a value edged by its own separator must be rejected");
+            let ProjectErrorKind::EnvSeparatorEdgedValue {
+                key,
+                separator,
+                value: rejected,
+                ..
+            } = &err
+            else {
+                panic!("expected EnvSeparatorEdgedValue for {source}, got {err:?}");
+            };
+            assert_eq!(key, "GODEBUG");
+            assert_eq!(separator, ",");
+            assert_eq!(rejected, value);
+        }
+    }
+
+    /// The field check is type-aware, not relaxed: a list still rejects
+    /// everything but its own three fields.
+    #[test]
+    fn unknown_field_still_rejected_on_a_list() {
+        let table: toml::Table =
+            toml::from_str(r#"GODEBUG = { type = "list", separator = ",", value = "v", required = true }"#)
+                .expect("fixture TOML must parse");
+        let err = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+            .expect_err("an unknown field must be rejected on a list too");
+        let ProjectErrorKind::EnvUnknownValueField { field, .. } = &err else {
+            panic!("expected EnvUnknownValueField, got {err:?}");
+        };
+        assert_eq!(field, "required");
+    }
+
+    /// A parsed table writes back as a table the parser accepts, separator
+    /// included — `ocx add` rewrites `ocx.toml` through this serializer, so a
+    /// dropped field would silently rewrite the user's declaration.
+    #[test]
+    fn declared_values_round_trip_through_the_serializer() {
+        let table: toml::Table = toml::from_str(
+            r#"
+            CI = "1"
+            TOOLS = { type = "path", value = "bin" }
+            GODEBUG = { type = "list", separator = ",", value = "gctrace=1" }
+            JDK_JAVA_OPTIONS = { type = "list", value = "-Xmx2g" }
+            "#,
+        )
+        .expect("fixture TOML must parse");
+        let env = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table).expect("fixture must parse");
+
+        let emitted = toml::Value::try_from(&env).expect("ProjectEnv serializes");
+        let emitted = emitted.as_table().expect("a ProjectEnv serializes as a table");
+        assert!(
+            emitted.get("CI").and_then(toml::Value::as_str) == Some("1"),
+            "a constant must stay a bare string: {emitted:?}"
+        );
+        assert_eq!(
+            emitted
+                .get("GODEBUG")
+                .and_then(toml::Value::as_table)
+                .and_then(|list| list.get("separator"))
+                .and_then(toml::Value::as_str),
+            Some(","),
+            "a declared separator must be written back: {emitted:?}"
+        );
+        assert!(
+            emitted
+                .get("JDK_JAVA_OPTIONS")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|list| !list.contains_key("separator")),
+            "an undeclared separator must not be invented on write-back: {emitted:?}"
+        );
+
+        assert_eq!(
+            ProjectEnv::from_table(DEFAULT_ENV_SCOPE, emitted).expect("the emitted table must re-parse"),
+            env,
+            "the write-back form must mean exactly what was read"
         );
     }
 

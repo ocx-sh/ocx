@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use crate::{api, conventions::*, options};
 use clap::Parser;
+use ocx_lib::env;
 use ocx_lib::shell::Shell;
 
 /// Print the resolved environment variables for one or more installed packages.
@@ -135,13 +136,18 @@ impl Env {
         // configuration, so it composes here without the tier reading a file.
         // Their being applied last is what makes this command's output equal
         // to what `ocx package exec --env` executes with.
-        let (entries, patch_start, provenance, attribution) = manager
+        let (mut entries, patch_start, provenance, attribution) = manager
             .resolve_env_with_attribution(
                 &info,
                 self.self_view,
                 ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
             )
             .await?;
+        // W-11: settle each `list` entry's separator before any of the three
+        // downstream branches (`--ci`, `--shell`, structured report) reads
+        // `entries` — none of them may show an unreconciled `None` a package
+        // separator would otherwise have settled.
+        env::reconcile_list_separators(entries.iter_mut())?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline
         // steps). Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(provider) = ci {
@@ -177,6 +183,7 @@ impl Env {
                     key: e.key,
                     value: e.value,
                     kind: e.kind,
+                    separator: e.separator,
                     source,
                 }
             })

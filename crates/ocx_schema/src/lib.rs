@@ -200,7 +200,7 @@ mod tests {
     /// **write** contract, and an `Unknown` arm would advertise a modifier that
     /// resolves to nothing — telling authors a shape ocx will refuse at
     /// `ValidMetadata` is valid. Kept out by `#[schemars(skip)]`, which this
-    /// pins: the `oneOf` stays exactly the two executable types.
+    /// pins: the `oneOf` stays exactly the executable types.
     #[test]
     fn metadata_schema_omits_the_unknown_modifier_fallback() {
         let schema = schema_for("metadata").expect("metadata schema exists");
@@ -216,13 +216,58 @@ mod tests {
             .collect();
         assert_eq!(
             tags,
-            vec!["path", "constant"],
+            vec!["path", "constant", "list"],
             "the published modifier vocabulary must be exactly the executable types"
         );
 
         assert!(
             !schema.contains("type_name"),
             "the Unknown variant's tag-capture field must never appear in the published schema"
+        );
+    }
+
+    /// `separator` is required on the wire for a `list` entry: no human is
+    /// present when metadata is read, and a wrongly assumed separator fails
+    /// silently in the consuming tool. The Rust field is `Option` only so the
+    /// refusal can come from `ValidMetadata` (naming the variable) instead of
+    /// serde, so `#[schemars(required)]` is the only thing keeping the write
+    /// contract honest — and it is silently dropped by a
+    /// `skip_serializing_if` on the same field.
+    #[test]
+    fn metadata_schema_requires_a_separator_on_list_entries() {
+        let schema = schema_for("metadata").expect("metadata schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+        let defs = value.get("$defs").expect("schema has $defs");
+
+        let list_arm = value
+            .pointer("/$defs/Var/oneOf")
+            .and_then(|v| v.as_array())
+            .expect("Var must flatten the modifier into a oneOf")
+            .iter()
+            .find(|arm| arm.pointer("/properties/type/const").and_then(|v| v.as_str()) == Some("list"))
+            .expect("the published vocabulary must carry a `list` arm");
+
+        let name = list_arm
+            .get("$ref")
+            .and_then(|r| r.as_str())
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            .expect("the `list` arm must $ref its modifier def");
+        let list_def = defs
+            .get(name)
+            .unwrap_or_else(|| panic!("$ref target {name} missing from $defs"));
+
+        let required = list_def
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("the list def has a `required` array");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("separator")),
+            "`separator` must be required for a list entry: {required:?}"
+        );
+        assert_eq!(
+            list_def.pointer("/properties/separator/type").and_then(|v| v.as_str()),
+            Some("string"),
+            "`separator` must be a plain string — a nullable arm would readmit the omission"
         );
     }
 }

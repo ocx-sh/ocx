@@ -190,6 +190,12 @@ every load site (store reads, post-pull, install-info), so unknown placeholders 
 fail closed at read time — the enabling prerequisite for
 [#175](https://github.com/ocx-sh/ocx/issues/175) exists today.
 
+**Delivery note.** Reader and writer landed together — one branch, one PR, a single
+release. Whether to still stage the reader one release ahead of the writer is an open
+owner decision at merge/release time. Either way the publisher-side guidance is
+unchanged: adopting `list` raises a package's effective minimum ocx, so publishers wait
+for their fleet floor before using it.
+
 ## Alternatives Rejected
 
 - **`map` type** (`pair_sep`/`kv_sep`, GODEBUG/RUST_LOG-style): observably identical to
@@ -218,15 +224,23 @@ fail closed at read time — the enabling prerequisite for
 
 ## Consequences
 
-- Cost center is `shell.rs`: one idempotent `export_list` snippet × 10 shells,
-  implementing the pinned wrap-replace-strip algorithm. The **separator is untrusted
-  text** and routes through each shell's value escaper exactly like the value (panel
-  spec-4); list matching is **case-sensitive on every shell** — PowerShell needs `-cne`
-  (default `-ne` is case-insensitive), cmd needs a new pattern (its move-to-front matches
-  `value<sep>`, structurally blind to last position; two mirrored substitutions inside the
-  single-statement constraint is the spike's starting point — panel D5). The Batch
-  amendment precedent forbids an "impractical" waiver without proof. `move_to_front` is
-  not reusable (hardcoded `std::env::split_paths`); the new primitive is UTF-8 `&str`.
+- Cost center is `shell.rs`: one idempotent `export_list` snippet across nine of the ten
+  shells (every dialect but `cmd.exe`), implementing the pinned wrap-replace-strip
+  algorithm. The **separator is untrusted text** and routes through each shell's value
+  escaper exactly like the value (panel spec-4); list matching is **case-sensitive on
+  every emitting shell** — as shipped, PowerShell uses ordinal `String.Contains` /
+  `String.Replace` rather than the case-insensitive `-replace`/`-eq` operators, which is
+  case-sensitive without regex-escaping either operand (`-cne` would have handled the
+  case axis alone, and would still have needed `[regex]::Escape`).
+  cmd.exe is refused, not solved, with the proof the Batch amendment precedent requires:
+  `%VAR:search=replace%` measured case-**insensitive** with no case-sensitive form
+  (`%V:,abc,=,%` deletes `,ABC,`), and every single-statement alternative considered either
+  deletes a differently-cased element it should have kept or grows unbounded on repeated
+  export. `export_list` returns `None` for `Batch`, so the CLI emit helper skips a `list`
+  entry under `--shell=cmd` with a stderr `# ocx:` note naming the key — an export-surface
+  limitation only, since `ocx run`/`ocx package exec` compose `list` variables in-process
+  regardless of host shell. `move_to_front` is not reusable (hardcoded
+  `std::env::split_paths`); the new primitive is UTF-8 `&str`.
 - `--format json` env output gains `"type": "list"` + `"separator"` (skip-if-`None`) —
   additive output-contract change across `env`, `status`, `patch test`, and the inspect
   closure surfaces (changelog subject).

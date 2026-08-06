@@ -235,8 +235,8 @@ impl PackageTest {
         // `ocx.toml`, so they are the only thing this scope can carry.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
-        let env_overrides = self.env.entries(&cwd)?;
-        let entries = manager
+        let mut env_overrides = self.env.entries(&cwd)?;
+        let mut entries = manager
             .resolve_env(
                 &[Arc::new(info_via_root)],
                 self.self_view,
@@ -248,6 +248,11 @@ impl PackageTest {
                 },
             )
             .await?;
+        // W-11: `entries` and `env_overrides` are disjoint `Vec`s holding
+        // independent copies of the `--env` overrides (mirrors exec.rs) —
+        // reconcile them together so a package-established `list` separator
+        // reaches the forwarded copy.
+        env::reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
         // Step 6: Compose env (mirrors exec.rs). Composed entries + forwarded
         // ocx config + forwarded overrides, in the one order that is correct —

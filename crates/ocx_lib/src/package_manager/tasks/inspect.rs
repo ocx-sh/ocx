@@ -205,6 +205,12 @@ pub struct ClosureNode {
 pub struct ClosureEnvVar {
     pub key: String,
     pub kind: metadata::env::modifier::ModifierKind,
+    /// The declared separator for a `list`-kind var; `None` for every other
+    /// kind. Package metadata requires `list` to carry one, so this is only
+    /// ever `None` for a non-list var — declaration order is preserved and
+    /// there is no cross-node agreement to settle here, unlike the applied
+    /// entries `ocx env` composes.
+    pub separator: Option<String>,
     pub visibility: Visibility,
 }
 
@@ -1078,6 +1084,10 @@ fn closure_env_vars(metadata: &ValidMetadata) -> Vec<ClosureEnvVar> {
             // this binary does not know, so no `Unknown` survives to here.
             kind: metadata::env::modifier::ModifierKind::try_from(&var.modifier)
                 .expect("ValidMetadata rejects unknown modifier types before any closure walk"),
+            separator: match &var.modifier {
+                metadata::env::modifier::Modifier::List(list) => list.separator.clone(),
+                _ => None,
+            },
             visibility: var.visibility,
         })
         .collect()

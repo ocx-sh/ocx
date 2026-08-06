@@ -59,12 +59,23 @@ impl fmt::Display for EntrySource {
 /// `Some(EntrySource::Patch { rule, companion })` for entries that came from a
 /// companion overlay (carrying the rule + companion provenance). The field is
 /// omitted from JSON output when absent.
+///
+/// The optional `separator` field carries the fold separator for a
+/// [`ModifierKind::List`] entry; every other kind omits it. Callers construct
+/// this type from entries that already passed compose-time separator
+/// agreement (`ocx_lib::env::reconcile_list_separators`), so a `list` entry
+/// reaching here never carries a bare `None` unless nothing in the
+/// composition ever declared one.
 #[derive(Serialize)]
 pub struct EnvEntry {
     pub key: String,
     pub value: String,
     #[serde(rename = "type")]
     pub kind: ModifierKind,
+    /// The separator a [`ModifierKind::List`] entry folds with. `None` on
+    /// every other kind. Skipped in JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
     /// Origin annotation for `--show-patches`. `None` = package native entry;
     /// `Some(EntrySource::Patch { rule, companion })` = companion overlay entry
     /// carrying its provenance. Skipped in JSON when `None`.
@@ -114,13 +125,14 @@ impl BinaryAttribution {
 /// An ordered list (rather than type-keyed maps) preserves declaration order, allows multiple
 /// entries per key with different kinds, and naturally accommodates future modifier types.
 ///
-/// JSON format: `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"[,
-/// "source": {"kind": "patch", "rule": "...", "companion": "..."}]}, ...], "binaries":
-/// [{"name": "...", "package": "..."}, ...], "entrypoints": [{"name": "...", "package":
+/// JSON format: `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"|"list"[,
+/// "separator": "..."][, "source": {"kind": "patch", "rule": "...", "companion": "..."}]}, ...],
+/// "binaries": [{"name": "...", "package": "..."}, ...], "entrypoints": [{"name": "...", "package":
 /// "..."}, ...]}`.
-/// The optional `"source"` object is present only when `--show-patches` is passed and only
-/// for companion overlay entries; it is omitted for package-native entries. `binaries` and
-/// `entrypoints` are the admitted-set claim attribution (`adr_declared_binaries_metadata.md`
+/// The optional `"separator"` field is present only for a `"type":"list"` entry — every other
+/// kind omits it. The optional `"source"` object is present only when `--show-patches` is passed
+/// and only for companion overlay entries; it is omitted for package-native entries. `binaries`
+/// and `entrypoints` are the admitted-set claim attribution (`adr_declared_binaries_metadata.md`
 /// §4) — always present as arrays, possibly empty. The `entries` envelope is the canonical
 /// shape shared with `ci export` so consumers can branch on a single shape; `binaries` and
 /// `entrypoints` are top-level siblings, not nested inside `entries`.
@@ -237,6 +249,7 @@ mod tests {
             key: key.to_owned(),
             value: "value".to_owned(),
             kind: ModifierKind::Constant,
+            separator: None,
             source,
         }
     }
@@ -278,6 +291,49 @@ mod tests {
         assert!(
             !json.contains("\"source\""),
             "native entry must omit source field, got {json}"
+        );
+    }
+
+    // ── separator field (W-10) ─────────────────────────────────────────────
+
+    #[test]
+    fn list_entry_serializes_type_and_separator() {
+        let vars = EnvVars::new(
+            vec![EnvEntry {
+                key: "GODEBUG".to_owned(),
+                value: "gctrace=1".to_owned(),
+                kind: ModifierKind::List,
+                separator: Some(",".to_owned()),
+                source: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let json = serde_json::to_string(&vars).expect("serializes");
+        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""separator":",""#), "separator must be present: {json}");
+    }
+
+    #[test]
+    fn path_and_constant_entries_omit_the_separator_field() {
+        let vars = EnvVars::new(
+            vec![
+                entry("PATH", None), // built via the Constant fixture helper above
+                EnvEntry {
+                    key: "PATH2".to_owned(),
+                    value: "/opt/bin".to_owned(),
+                    kind: ModifierKind::Path,
+                    separator: None,
+                    source: None,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let json = serde_json::to_string(&vars).expect("serializes");
+        assert!(
+            !json.contains("\"separator\""),
+            "a non-list entry must omit separator entirely: {json}"
         );
     }
 

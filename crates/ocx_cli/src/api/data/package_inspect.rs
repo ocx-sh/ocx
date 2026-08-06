@@ -186,13 +186,17 @@ struct SurfaceOut {
 }
 
 /// One env key exposed on the interface surface, attributed to the package that
-/// declares it. `type` is the modifier kind (`path` | `constant`). No value —
-/// see [`SurfaceOut::env`].
+/// declares it. `type` is the modifier kind (`path` | `constant` | `list`).
+/// No value — see [`SurfaceOut::env`].
 #[derive(Serialize)]
 struct EnvVarAttribution {
     key: String,
     #[serde(rename = "type")]
     kind: String,
+    /// The declared separator for a `list`-kind entry; `None` for every other
+    /// kind. Skipped in JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    separator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     package: Option<String>,
 }
@@ -206,6 +210,7 @@ impl EnvVarAttribution {
             .map(|(identifier, var)| Self {
                 key: var.key.clone(),
                 kind: var.kind.to_string(),
+                separator: var.separator.clone(),
                 package: Some(identifier.to_string()),
             })
             .collect()
@@ -1209,6 +1214,18 @@ mod tests {
         ClosureEnvVar {
             key: key.to_string(),
             kind,
+            separator: None,
+            visibility,
+        }
+    }
+
+    /// A `list`-kind fixture carrying an explicit separator — the sibling of
+    /// [`env_var`] for the one kind that has one.
+    fn env_list_var(key: &str, separator: &str, visibility: Visibility) -> ClosureEnvVar {
+        ClosureEnvVar {
+            key: key.to_string(),
+            kind: ModifierKind::List,
+            separator: Some(separator.to_string()),
             visibility,
         }
     }
@@ -1582,6 +1599,44 @@ mod tests {
             .expect("DEP_HOME env entry present");
         assert_eq!(dep_home["type"], "constant");
         assert!(dep_home["package"].as_str().unwrap_or_default().contains("dep"));
+    }
+
+    /// A `list`-kind surface entry additionally carries its declared
+    /// `separator`; a `path` entry sharing the same array has no such key.
+    #[test]
+    fn json_closure_surface_env_list_entry_carries_separator() {
+        let root = pinned("root", 'a');
+        let interface = surface_with_env(
+            vec![
+                (root.clone(), env_list_var("GODEBUG", ",", Visibility::PUBLIC)),
+                (root.clone(), env_var("PATH", ModifierKind::Path, Visibility::PUBLIC)),
+            ],
+            true,
+        );
+        let closure = closure_of(vec![root_node(root.clone())], interface, empty_surface(true));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+        let env = value["closure"]["surface"]["interface"]["env"]
+            .as_array()
+            .expect("closure.surface.interface.env is an array");
+
+        let godebug = env
+            .iter()
+            .find(|e| e["key"] == "GODEBUG")
+            .expect("GODEBUG env entry present");
+        assert_eq!(godebug["type"], "list");
+        assert_eq!(godebug["separator"], ",");
+
+        let path = env.iter().find(|e| e["key"] == "PATH").expect("PATH env entry present");
+        assert!(
+            path.get("separator").is_none(),
+            "a path entry must carry no separator key: {path}"
+        );
     }
 
     // ── Plain render ──────────────────────────────────────────────────────
