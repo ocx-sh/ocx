@@ -758,11 +758,19 @@ impl PackageManager {
             return store_only.pull(&companion_id.clone_with_digest(digest), platform).await;
         }
 
-        // No pin, or a sync re-checking the tag: resolve through a view that
-        // can never grow the local index, then pull that digest pinned (a
-        // `tag@digest` pull skips tag growth too).
-        let top_digest = self
-            .read_only_index()
+        // No pin, or a sync that must see the tag move: resolve through a view
+        // that can never grow the local index, then pull that digest pinned
+        // (a `tag@digest` pull skips tag growth too).
+        //
+        // Sync resolves LIVE (`remote_view` — `ChainMode::Remote` +
+        // `LocalWritePolicy::ReadOnly`): the ambient chain answers a known tag
+        // from the local index first, which is exactly the stale answer a sync
+        // exists to replace. It still cannot move a package-tier pin.
+        let resolver = match mode {
+            PatchDiscoveryMode::Lazy => self.read_only_index(),
+            PatchDiscoveryMode::Sync => self.index().remote_view(),
+        };
+        let top_digest = resolver
             .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Resolve)
             .await
             .map_err(PackageErrorKind::Internal)?

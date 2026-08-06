@@ -702,6 +702,70 @@ def assert_no_index_footprint(ocx: OcxRunner, registry: str, repo: str, why: str
     )
 
 
+def test_patch_sync_advances_a_same_tag_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx patch sync` re-resolves a companion tag that did not change name.
+
+    The descriptor names a ROLLING tag (`:1`), so republishing the companion
+    re-points that same tag at a new digest without touching the descriptor.
+    Sync must notice: it re-resolves the companion live and advances the
+    patch-tier pin. Answering from the already-recorded pin (or from the local
+    index's stale package-tier pointer) leaves the base composing v1 forever,
+    with no diagnostic — the silence the fix removes.
+
+    The v2 publish deliberately skips `ocx index update`, so nothing but sync
+    itself can move the binding.
+    """
+    companion_repo = _unique_repo("rolling_companion")
+    rolling_fq = f"{registry}/{companion_repo}:1"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path / "v1", "ROLLING_CA", "/certs/v1/ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    descriptor_path = tmp_path / "rolling_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [rolling_fq]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+
+    before = _entry_by_key(_env_entries(ocx, base_pkg.short), "ROLLING_CA")
+    assert before is not None, "ROLLING_CA must be composed after the initial install"
+    assert before["value"] == "/certs/v1/ca.pem"
+    pin_before = _companion_pin(ocx, registry, companion_repo)["1"]
+
+    # v2 at the same rolling tag: the cascade re-points `:1` at the new digest.
+    # `index=False` keeps the local package-tier index at v1, so only a live
+    # re-resolve can see the move.
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.1",
+        tmp_path / "v2",
+        bins=[],
+        env=[{"key": "ROLLING_CA", "type": "constant", "value": "/certs/v2/ca.pem", "visibility": "interface"}],
+        new=True,
+        cascade=True,
+        platform="any",
+        index=False,
+    )
+
+    sync_result = ocx.run("patch", "sync", format=None, check=False)
+    assert sync_result.returncode == 0, (
+        f"ocx patch sync must succeed; got {sync_result.returncode}\nstderr: {sync_result.stderr}"
+    )
+
+    pin_after = _companion_pin(ocx, registry, companion_repo)["1"]
+    assert pin_after != pin_before, (
+        f"patch sync must advance the companion pin for the rolling tag; still {pin_after}"
+    )
+
+    after = _entry_by_key(_env_entries(ocx, base_pkg.short), "ROLLING_CA")
+    assert after is not None, "ROLLING_CA must still be composed after sync"
+    assert after["value"] == "/certs/v2/ca.pem", (
+        f"after sync the same-tag companion must compose v2; got: {after['value']}"
+    )
+
+
 def test_compose_does_not_advance_a_companion_between_syncs(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
