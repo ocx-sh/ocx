@@ -44,6 +44,11 @@ pub enum Error {
         source: super::metadata::template::TemplateError,
     },
 
+    /// An env var declares a modifier `type` this binary does not know — the
+    /// package was published against a newer ocx.
+    #[error("env var '{key}' declares unknown type '{type_name}'; upgrade ocx to use this package")]
+    UnknownEnvModifier { key: String, type_name: String },
+
     /// Entrypoint baked-arg template interpolation failed at publish time.
     #[error("entrypoint '{entrypoint}' arg '{arg}' {source}")]
     EntrypointArgInterpolation {
@@ -61,7 +66,8 @@ impl ClassifyExitCode for Error {
             | Self::UnsupportedLogoFormat(_)
             | Self::InvalidLogoContent { .. }
             | Self::BuildMeta(_)
-            | Self::EmptyPushSet => Some(ExitCode::DataError),
+            | Self::EmptyPushSet
+            | Self::UnknownEnvModifier { .. } => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointArgInterpolation { source, .. } => source.classify(),

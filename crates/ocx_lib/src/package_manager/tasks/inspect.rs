@@ -1074,7 +1074,10 @@ fn closure_env_vars(metadata: &ValidMetadata) -> Vec<ClosureEnvVar> {
         .flatten()
         .map(|var| ClosureEnvVar {
             key: var.key.clone(),
-            kind: metadata::env::modifier::ModifierKind::from(&var.modifier),
+            // `ValidMetadata` (the parameter type) rejects every modifier type
+            // this binary does not know, so no `Unknown` survives to here.
+            kind: metadata::env::modifier::ModifierKind::try_from(&var.modifier)
+                .expect("ValidMetadata rejects unknown modifier types before any closure walk"),
             visibility: var.visibility,
         })
         .collect()

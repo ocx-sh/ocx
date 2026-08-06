@@ -97,7 +97,11 @@ impl<'a> EnvResolver<'a> {
         Ok(Some(Entry {
             key: var.key.clone(),
             value,
-            kind: ModifierKind::from(&var.modifier),
+            // `Var::value()` above returns `None` for an unknown modifier type,
+            // so this point is unreachable for one; `ValidMetadata` has also
+            // already refused it on every load path.
+            kind: ModifierKind::try_from(&var.modifier)
+                .expect("a var with a resolvable value template names a known modifier kind"),
         }))
     }
 }
