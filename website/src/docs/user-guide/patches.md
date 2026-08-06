@@ -84,6 +84,31 @@ own companion": one rule per runtime whose CA mechanism differs, each pointing a
 package that knows how to install it. There is no single companion that reaches every
 runtime at once.
 
+`JAVA_TOOL_OPTIONS` is itself a space-separated option list, not a single value — a `constant`
+entry would erase whatever flags the base JDK package or another companion already put there,
+and a [`path`][reference-env-path] entry would join with the platform path separator instead of
+a space and prepend instead of append. The `jdk-truststore` companion above declares it as
+[`list`][reference-env-list], so its trust-store flag appends after anything already
+contributed:
+
+```json
+{
+  "env": [
+    {
+      "key": "JAVA_TOOL_OPTIONS",
+      "type": "list",
+      "separator": " ",
+      "value": "-Djavax.net.ssl.trustStore=${installPath}/cacerts",
+      "visibility": "interface"
+    }
+  ]
+}
+```
+
+`visibility` is `interface`: the companion contributes this flag to the base package's
+consumers without needing it for any runtime of its own. See [Appending option
+lists][authoring-env-surface-lists] for when to reach for `list` in your own packages.
+
 ## Consumer experience {#patches-consumer}
 
 <Terminal src="/casts/user-guide/patches-consumer.cast" title="Running packages with patch overlays" collapsed />
@@ -413,6 +438,13 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- schemas -->
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
+
+<!-- reference -->
+[reference-env-path]: ../reference/metadata.md#env-path
+[reference-env-list]: ../reference/metadata.md#env-list
+
+<!-- authoring -->
+[authoring-env-surface-lists]: ../authoring/env-surface.md#lists
 
 <!-- configuration -->
 [config-patches]: ../reference/configuration.md#keys-patches

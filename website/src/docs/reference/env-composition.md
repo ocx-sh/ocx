@@ -140,6 +140,34 @@ For `ocx run`, the full order rule is:
 
 See [In Depth — Project Toolchain → Composition order rule][in-depth-project-composition] for the worked example with `-g ci,all,release`.
 
+### List Variables {#composition-order-list}
+
+The prepend rule above is for `path` entries. A [`list`][metadata-env-list] entry does the opposite: each contribution is **appended**, matching how the surveyed option-list consumers themselves resolve duplicates — `GODEBUG` scans its setting list backward, and a repeated `NODE_OPTIONS` scalar flag takes the last occurrence. Ordering a `list` value the same way a `path` value is ordered would put the wrong contribution first for consumers like these.
+
+Every fold — `path` or `list` — is a **render, not accumulated state**: the composer recomputes a variable's value from the ambient value plus every applicable contribution, in application order:
+
+```
+[prepend-zone: vector reversed] [ambient value] [append-zone: vector order]
+```
+
+`path` contributions land ahead of the ambient value, most-recently-applied first (move-to-front). `list` contributions land after it, in the order applied (move-to-back) — the last package or project stage to contribute a `list` value lands at the very end, which is what a last-wins consumer resolves to.
+
+::: tip Idempotence, the same guarantee as `path`
+Re-running the fold with a value already present removes it from its old position and re-appends it at the back, so a repeated `ocx run`, a re-evaluated `.envrc`, or a launcher re-entry never grows a `list` variable — the same [move-to-front idempotence](#strict-isolation-idempotent) `path` entries guarantee, mirrored for the opposite end.
+:::
+
+#### Separator agreement across a composition {#composition-order-list-separator}
+
+A `list` entry's `separator` is settled **per key**, not per entry: every contribution to one key over one composition must agree. The first entry that declares an explicit separator establishes it for that key; a later entry that omits `separator` inherits the established one, and a key nobody gives an explicit separator falls back to a single space. Two entries for the same key with *different* explicit separators fail the whole composition closed (exit 65), naming the key and both separators, Rust debug-quoted (e.g. `","` and `";"`) — a package declaring `GODEBUG` with `,` plus a project `[env]` entry that omits the separator inherits the comma, keeping `GODEBUG` parseable; the same package plus a project entry that explicitly writes `;` is a conflict, not a silent second delimiter.
+
+This agreement runs once every contributing entry for the composition is known — package-composed, patch-companion, project, group, and `--env` alike — so it sees the whole picture before any fold happens. See [`separator` is required][metadata-env-list-separator] on package metadata and the [`[env]` value grammar][config-project-env] for where each surface may or must spell the separator out.
+
+Settling a separator also re-checks every entry's value against it, because a parse-time check can only compare a value to the separator that entry itself declared — an entry that inherits a separator from another contributor was never checked against it. A value edged by the separator it inherits therefore fails the composition closed (exit 65) even though its own parse-time check passed.
+
+::: warning `cmd.exe` cannot export a `list` entry
+`ocx env --shell=cmd` and `ocx package env --shell=cmd` skip every `list`-typed entry with a `# ocx:` note on stderr, naming the key. `cmd.exe`'s only string-replacement primitive, `%VAR:search=replace%`, matches case-**insensitively** with no case-sensitive form — and list elements are opaque option strings where `-DFOO=1` and `-Dfoo=1` are different options, so a case-blind removal would delete the wrong one. Every other type (`path`, `constant`) still exports normally under `cmd`. This is a text-export limitation only: the in-process environment `ocx run` and `ocx package exec` build for a child process on Windows is unaffected — only a captured `--shell=cmd` script loses the `list` lines.
+:::
+
 ## Project Environment {#project-env}
 
 `ocx.toml` can declare its own environment on top of what packages provide: [`[env]`][config-project-env] for project-wide constants, [`[group.<name>.env]`][config-project-env] for group-scoped ones, and the [`--env`][cmd-run] flag for a one-off override.
@@ -155,11 +183,11 @@ Project and group `[env]` entries materialize as ordinary env entries and are **
 | 1 (lowest) | Ambient inherited env | Skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
-| 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend |
+| 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
 | 5 | Group [`[group.<name>.env]`][config-project-env] | In `-g` selection order — a group listed later wins |
-| 6 (highest) | [`--env KEY[:TYPE]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use |
+| 6 (highest) | [`--env KEY[:TYPE[:SEP]]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends, `list` appends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use |
 
-A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). Stage 6's `path` resolution differs from stages 4 and 5 in one respect: a relative value anchors to the directory ocx was invoked from, not the project root — see [`--env`][cmd-run] for why. A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
+A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path` entry for the same key — it is applied later, and every `path` application is [idempotent with move-to-front semantics](#strict-isolation-idempotent). A stage-4, 5, or 6 `list` entry lands the opposite way: *behind* a stage-2 package `list` entry for the same key, in the same append-zone — see [List Variables](#composition-order-list) above. Stage 6's `path` resolution differs from stages 4 and 5 in one respect: a relative value anchors to the directory ocx was invoked from, not the project root — see [`--env`][cmd-run] for why. A project constant that shadows a package-declared constant of the same key logs at `debug`, never `warn`: overriding a package default is the declared purpose of stages 4–6, not a collision to flag.
 
 ### Where `--env` lives {#project-env-flag-surfaces}
 
@@ -214,6 +242,10 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [config-patches-no-patches]: ./configuration.md#keys-patches-no-patches
 [config-patches-scopes]: ./configuration.md#keys-patches-scopes
 [config-project-env]: ./configuration.md#project-config-env
+
+<!-- reference -->
+[metadata-env-list]: ./metadata.md#env-list
+[metadata-env-list-separator]: ./metadata.md#env-list-separator
 
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain

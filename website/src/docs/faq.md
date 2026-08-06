@@ -73,7 +73,7 @@ Both commands:
 - Auto-install missing packages from the registry
 - Compose and forward the [package-declared environment][in-depth-environments]
 - Accept `--clean` to strip inherited shell state
-- Accept `--env KEY[:TYPE]=VALUE` for a per-invocation override
+- Accept `--env KEY[:TYPE[:SEP]]=VALUE` for a per-invocation override
 - Forward the child's exit code byte-for-byte
 
 Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's `entrypoints/` off `PATH` — launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every tool it declares, so the self view would compose a strictly worse toolchain there.
