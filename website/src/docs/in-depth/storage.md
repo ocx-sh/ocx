@@ -26,7 +26,19 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
       <Description>local index collection — one subtree per source (see Index below)</Description>
     </Node>
     <Node name="state/" icon="🗄️">
-      <Description>persistent runtime state — update-check throttles, managed-config snapshot</Description>
+      <Description>persistent runtime state — one subdirectory per concern</Description>
+      <Node name="update-check/" icon="⏱️">
+        <Description>throttle markers for the background update-check probe</Description>
+      </Node>
+      <Node name="managed-config/" icon="🗂️">
+        <Description>the managed-config tier's own snapshot pin</Description>
+      </Node>
+      <Node name="patch-descriptors/" icon="📄">
+        <Description>per-repository record of whether a patch descriptor was found</Description>
+      </Node>
+      <Node name="patch-companions/" icon="📌">
+        <Description>per-repository companion tag→digest pins — never in the local index</Description>
+      </Node>
     </Node>
     <Node name="symlinks/" icon="🔀">
       <Description>stable symlinks safe to embed in shell profiles and configs</Description>
