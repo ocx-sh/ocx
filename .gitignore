@@ -120,3 +120,6 @@ venv/
 # =============================================================================
 test/manual/announce-e2e/results/*
 !test/manual/announce-e2e/results/.gitkeep
+
+# Agent scratch: worktrees, logs, tmp — never committed
+.agents/
