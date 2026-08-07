@@ -389,6 +389,39 @@ def _entry_by_key(entries: list[dict], key: str) -> dict | None:
     return next((e for e in entries if e["key"] == key), None)
 
 
+def test_frozen_index_update_exits_81(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx index update` under `--frozen` refuses with exit 81.
+
+    `index update` is the PACKAGE tier's discovery verb: its whole job is
+    learning a new tag→digest binding and writing it into the local index.
+    That is precisely what `--frozen` forbids, so it must refuse the way the
+    other tiers' explicit update verbs already do (`ocx patch sync`,
+    `ocx config update` — both exit 81), rather than quietly moving pins under
+    a policy the user set to stop exactly that.
+
+    The `[patches]` tier is configured so the piggyback sync is in scope too:
+    the refusal happens before it, so nothing about it can surface either.
+    """
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    _write_patches_config(ocx, registry, required=False)
+
+    result = _run(ocx, "--frozen", "index", "update", base.short)
+    assert result.returncode == POLICY_BLOCKED, (
+        f"--frozen index update must exit 81 (PolicyBlocked); rc={result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "without --frozen" in result.stderr, (
+        "the refusal must name re-running without --frozen as the remedy; "
+        f"stderr: {result.stderr}"
+    )
+    assert "patch descriptor sync failed" not in result.stderr, (
+        "the refusal happens before the patch piggyback, so it cannot warn about it; "
+        f"stderr: {result.stderr}"
+    )
+
+
 @pytest.mark.xdist_group("patch_global_slot")
 def test_frozen_install_composes_a_pinned_companion(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str

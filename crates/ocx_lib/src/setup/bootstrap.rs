@@ -224,7 +224,9 @@ async fn ensure_pinned(
             // index hint is attached unconditionally (acceptable per plan D9):
             // under `--frozen` the resolution came from the local index and a
             // refresh is the likely fix; online it is harmless advice.
-            hint: Some("if you froze resolution to a stale local index, run `ocx index update`".to_string()),
+            hint: Some(
+                "if you froze resolution to a stale local index, run `ocx index update` without --frozen".to_string(),
+            ),
         });
     }
 

@@ -514,6 +514,18 @@ mod tests {
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
+    #[test]
+    fn verb_policy_blocked_maps_to_policy_blocked() {
+        // Verb-level policy block (`ocx index update` under --frozen) →
+        // PolicyBlocked (81), so a CI script can `case $?` on it exactly like
+        // the offline refusal it sits beside.
+        let err = crate::Error::PolicyBlocked {
+            operation: "`ocx index update`",
+            policy: "frozen",
+        };
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
     // ── singleflight::Error exit-code classification ─────────────────────────
 
     #[test]

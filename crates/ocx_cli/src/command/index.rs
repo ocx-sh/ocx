@@ -20,6 +20,10 @@ pub enum Index {
     /// package itself - use `ocx package install` or `ocx package pull`
     /// for that.
     ///
+    /// Run it without `--frozen`: recording a new tag-to-digest mapping is
+    /// the discovery a freeze exists to refuse, so `--frozen` rejects this
+    /// command with exit 81 instead of moving any pin.
+    ///
     /// A tagged identifier (`cmake:3.28`) records only that tag; a bare
     /// identifier (`cmake`) records every tag.
     ///
