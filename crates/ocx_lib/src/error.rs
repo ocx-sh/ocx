@@ -187,6 +187,45 @@ pub fn file_error(path: impl AsRef<std::path::Path>, error: std::io::Error) -> E
     Error::InternalFile(path.as_ref().to_path_buf(), error)
 }
 
+/// Flatten an error and its `source()` chain into one line, `": {source}"` per
+/// link.
+///
+/// `Display` renders the outermost message only, which for a wrapper variant
+/// that adds no `{0}` interpolation (`#[error("failed to fetch managed
+/// config")] Fetch(#[from] …)`) names nothing at all. The `{err:#}` chain walk
+/// that makes such an error readable happens at the CLI boundary, so anywhere
+/// an error is rendered into a value that does NOT reach `main` — a warn line,
+/// a machine-readable `reason` field — the chain has to be walked here instead.
+///
+/// A link whose text the output already ends with is skipped: leaf subsystem
+/// errors still interpolate their own source, and this keeps the walk
+/// duplicate-free either way.
+pub fn render_chain(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    append_chain(&mut out, error.source());
+    out
+}
+
+/// Append a cause chain to an already-rendered message, `": {source}"` per
+/// link — the shared tail of [`render_chain`] and the batch-entry renderer in
+/// `package_manager::error`, which starts the walk at a different link.
+///
+/// A link whose text the output already ends with is skipped: leaf subsystem
+/// errors still interpolate their own source, and this keeps the walk
+/// duplicate-free either way.
+pub fn append_chain(out: &mut String, first_cause: Option<&(dyn std::error::Error + 'static)>) {
+    use std::fmt::Write as _;
+
+    let mut cause = first_cause;
+    while let Some(source) = cause {
+        let text = source.to_string();
+        if !out.ends_with(&text) {
+            let _ = write!(out, ": {text}");
+        }
+        cause = source.source();
+    }
+}
+
 /// Clonable, source-preserving wrapper around [`Error`].
 ///
 /// `crate::Error` is not `Clone` because several of its variants hold
@@ -297,6 +336,41 @@ mod tests {
             occurrences, 1,
             "the io source text must appear exactly once in the alternate-format chain; got: {rendered}"
         );
+    }
+
+    /// The reason `render_chain` exists: a wrapper variant with no `{0}`
+    /// interpolation renders a message that names nothing, and the failure it
+    /// wraps is only reachable through `source()`. `RefreshUnavailable`'s
+    /// machine-readable `reason` is built from exactly this shape.
+    #[test]
+    fn render_chain_surfaces_a_cause_the_wrapper_display_hides() {
+        let error = crate::managed_config::ManagedConfigUpdateError::Fetch(
+            crate::managed_config::ManagedConfigFetchError::NoAnyPlatformEntry,
+        );
+        assert_eq!(
+            error.to_string(),
+            "failed to fetch managed config",
+            "the wrapper's own Display names no cause — that is the bug this guards"
+        );
+        assert_eq!(
+            render_chain(&error),
+            "failed to fetch managed config: managed config package has no any/any platform entry"
+        );
+    }
+
+    /// Leaf subsystem errors still interpolate their own source; appending it a
+    /// second time is the doubling bug of github issue #286.
+    #[test]
+    fn render_chain_does_not_append_an_already_interpolated_link() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("inner failed")]
+        struct Inner;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("outer failed: {0}")]
+        struct Outer(#[source] Inner);
+
+        assert_eq!(render_chain(&Outer(Inner)), "outer failed: inner failed");
     }
 
     /// Regression for github issue #286: converting a

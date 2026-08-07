@@ -142,9 +142,11 @@ impl BootstrapEntry {
 // ── managed-config adoption outcome (phase 1.5) ──────────────────────────────
 
 /// JSON-serialized managed-config adoption outcome:
-/// `{"status":"…"}` or, for `Adopted`/`AlreadyAdopted`,
+/// `{"status":"…"}` or, for the adopt/refresh paths,
 /// `{"status":"…","digest":"sha256:<hex>"}` (the digest is the operator's
-/// TOFU signal — always visible on adopt paths).
+/// TOFU signal — always visible on adopt paths). `refreshed` additionally
+/// carries `previous_digest`; `refresh_unavailable` carries `reason`. Both are
+/// omitted everywhere else, so existing consumers stay byte-identical.
 ///
 /// Shared with `api/data/config_setup.rs` — `ocx config setup` reports the
 /// same entry shape so fleet tooling parses both commands with one schema.
@@ -153,6 +155,12 @@ pub struct ManagedConfigEntry {
     status: ManagedConfigStatusKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
+    /// The digest the snapshot carried before a `refreshed` run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_digest: Option<String>,
+    /// Why a `refresh_unavailable` run could not reach the registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// Serde-facing mirror of [`ManagedConfigSetupOutcome`] (`snake_case` discriminant).
@@ -162,52 +170,84 @@ enum ManagedConfigStatusKind {
     NotConfigured,
     AlreadyAdopted,
     Adopted,
+    Refreshed,
+    RefreshUnavailable,
     Cleared,
     Dirty,
     WouldAdopt,
+    WouldRefresh,
 }
 
 impl ManagedConfigEntry {
+    /// The common shape: a status with an optional digest and neither of the
+    /// two refresh-only fields.
+    fn with_digest(status: ManagedConfigStatusKind, digest: Option<String>) -> Self {
+        Self {
+            status,
+            digest,
+            previous_digest: None,
+            reason: None,
+        }
+    }
+
     pub fn from_outcome(outcome: &ManagedConfigSetupOutcome) -> Self {
         match outcome {
-            ManagedConfigSetupOutcome::NotConfigured => Self {
-                status: ManagedConfigStatusKind::NotConfigured,
-                digest: None,
+            ManagedConfigSetupOutcome::NotConfigured => Self::with_digest(ManagedConfigStatusKind::NotConfigured, None),
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => {
+                Self::with_digest(ManagedConfigStatusKind::AlreadyAdopted, Some(digest.to_string()))
+            }
+            ManagedConfigSetupOutcome::Adopted { digest } => {
+                Self::with_digest(ManagedConfigStatusKind::Adopted, Some(digest.to_string()))
+            }
+            ManagedConfigSetupOutcome::Refreshed { from, to } => Self {
+                status: ManagedConfigStatusKind::Refreshed,
+                digest: Some(to.to_string()),
+                previous_digest: Some(from.to_string()),
+                reason: None,
             },
-            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => Self {
-                status: ManagedConfigStatusKind::AlreadyAdopted,
+            ManagedConfigSetupOutcome::RefreshUnavailable { digest, reason } => Self {
+                status: ManagedConfigStatusKind::RefreshUnavailable,
                 digest: Some(digest.to_string()),
+                previous_digest: None,
+                reason: Some(reason.clone()),
             },
-            ManagedConfigSetupOutcome::Adopted { digest } => Self {
-                status: ManagedConfigStatusKind::Adopted,
-                digest: Some(digest.to_string()),
-            },
-            ManagedConfigSetupOutcome::Cleared => Self {
-                status: ManagedConfigStatusKind::Cleared,
-                digest: None,
-            },
-            ManagedConfigSetupOutcome::Dirty => Self {
-                status: ManagedConfigStatusKind::Dirty,
-                digest: None,
-            },
-            ManagedConfigSetupOutcome::WouldAdopt => Self {
-                status: ManagedConfigStatusKind::WouldAdopt,
-                digest: None,
-            },
+            ManagedConfigSetupOutcome::Cleared => Self::with_digest(ManagedConfigStatusKind::Cleared, None),
+            ManagedConfigSetupOutcome::Dirty => Self::with_digest(ManagedConfigStatusKind::Dirty, None),
+            ManagedConfigSetupOutcome::WouldAdopt => Self::with_digest(ManagedConfigStatusKind::WouldAdopt, None),
+            ManagedConfigSetupOutcome::WouldRefresh { digest } => {
+                Self::with_digest(ManagedConfigStatusKind::WouldRefresh, Some(digest.to_string()))
+            }
         }
     }
 
     /// Plain-text summary of the adoption outcome for the key/value table.
+    ///
+    /// The `refresh_unavailable` cause is deliberately not repeated here — it
+    /// is already on stderr as a warning, and a registry error string would
+    /// blow the plain-table column budget.
     pub fn summary(&self) -> String {
-        match (&self.status, &self.digest) {
-            (ManagedConfigStatusKind::NotConfigured, _) => "not configured".to_string(),
-            (ManagedConfigStatusKind::AlreadyAdopted, Some(digest)) => format!("already adopted ({digest})"),
-            (ManagedConfigStatusKind::AlreadyAdopted, None) => "already adopted".to_string(),
-            (ManagedConfigStatusKind::Adopted, Some(digest)) => format!("adopted ({digest})"),
-            (ManagedConfigStatusKind::Adopted, None) => "adopted".to_string(),
-            (ManagedConfigStatusKind::Cleared, _) => "cleared".to_string(),
-            (ManagedConfigStatusKind::Dirty, _) => "dirty (edited by hand)".to_string(),
-            (ManagedConfigStatusKind::WouldAdopt, _) => "would adopt".to_string(),
+        let digest = || self.digest.clone().unwrap_or_default();
+        match self.status {
+            ManagedConfigStatusKind::NotConfigured => "not configured".to_string(),
+            ManagedConfigStatusKind::AlreadyAdopted => match &self.digest {
+                Some(digest) => format!("already adopted ({digest})"),
+                None => "already adopted".to_string(),
+            },
+            ManagedConfigStatusKind::Adopted => match &self.digest {
+                Some(digest) => format!("adopted ({digest})"),
+                None => "adopted".to_string(),
+            },
+            ManagedConfigStatusKind::Refreshed => match &self.previous_digest {
+                Some(previous) => format!("refreshed ({previous} -> {})", digest()),
+                None => format!("refreshed ({})", digest()),
+            },
+            ManagedConfigStatusKind::RefreshUnavailable => {
+                format!("refresh unavailable, keeping {}", digest())
+            }
+            ManagedConfigStatusKind::Cleared => "cleared".to_string(),
+            ManagedConfigStatusKind::Dirty => "dirty (edited by hand)".to_string(),
+            ManagedConfigStatusKind::WouldAdopt => "would adopt".to_string(),
+            ManagedConfigStatusKind::WouldRefresh => format!("would refresh ({})", digest()),
         }
     }
 }
@@ -224,7 +264,9 @@ impl ManagedConfigEntry {
 /// - `{"status":"completed","bootstrap":{…},"shims":[…],"profiles":[{"path":"…","outcome":"completed"}],"managed_config":{"status":"not_configured"}}`
 /// - dirty → `{"status":"skipped",…,"dirty_profiles":["…"]}`
 /// - `managed_config` is always present: `{"status":"…"}`, plus `"digest"` on
-///   the adopt paths (`adopted` / `already_adopted`).
+///   the adopt/refresh paths (`adopted` / `already_adopted` / `refreshed` /
+///   `refresh_unavailable` / `would_refresh`), `"previous_digest"` on
+///   `refreshed`, and `"reason"` on `refresh_unavailable`.
 /// - `exec_policy_warning`, `conflicting_ocx`, and `reload_hint` appear only
 ///   when present.
 #[derive(Serialize)]
