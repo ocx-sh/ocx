@@ -21,7 +21,7 @@ fully covered at the Rust unit level instead):
 |---|---|
 | 1 | ``test_fresh_home_no_seed_is_noop_parity`` |
 | 2 | ``test_onboard_syncs_before_fence_write`` |
-| 3 | ``test_resetup_same_ref_is_noop_no_refetch`` |
+| 3 (amended) | ``test_resetup_refreshes_to_newer_payload_via_self_setup`` — setup now reconciles on every run instead of no-op'ing a Current fence; see also ``test_setup_refresh_syncs_patch_descriptors``, ``test_paused_setup_skips_refresh_and_keeps_pause`` |
 | 4 | ``test_resetup_different_ref_re_adopts`` |
 | 5 | ``test_dirty_fence_exit_82_force_overwrites`` |
 | 6 | ``test_required_no_snapshot_exit_78_online_and_offline`` |
@@ -211,27 +211,131 @@ def test_onboard_syncs_before_fence_write(
 
 
 # ---------------------------------------------------------------------------
-# Criterion 3 — same-ref re-setup: fence Current, no re-fetch
+# Criterion 3 (amended) — same-ref re-setup reconciles the tier: newer
+# registry content refreshes in place, sharing `apply_managed_config` with
+# `ocx config setup` (`test_config_setup.py::test_rerun_refreshes_to_newer_payload`
+# pins the identical contract there).
 # ---------------------------------------------------------------------------
 
 
-def test_resetup_same_ref_is_noop_no_refetch(
+def test_resetup_refreshes_to_newer_payload_via_self_setup(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
+    """A re-run of `ocx self setup --managed-config <same-ref>` reconciles the
+    tier on every invocation, not just at first adopt: when the registry now
+    serves newer content under the same tag, setup refreshes in place --
+    `status == "refreshed"`, `previous_digest` names the digest it replaced --
+    proving the shared `apply_managed_config` implementation covers this entry
+    point exactly like `ocx config setup`."""
     ref = f"{registry}/{unique_repo}:v1"
-    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "resetup-same.example"\n')
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "resetup-a.example"\n')
     self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
     snapshot_path = Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "snapshot.json"
 
     first = _self_setup(ocx, ref, self_image)
     assert first.returncode == 0, f"first setup must succeed: {first.stderr}"
-    first_fetched_at = json.loads(snapshot_path.read_text())["fetched_at"]
+    first_digest = json.loads(snapshot_path.read_text())["digest"]
+
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "resetup-b.example"\n')
 
     second = _self_setup(ocx, ref, self_image)
-    assert second.returncode == 0, f"same-ref re-setup must succeed: {second.stderr}"
-    second_fetched_at = json.loads(snapshot_path.read_text())["fetched_at"]
+    assert second.returncode == 0, f"a refresh to newer content must succeed: {second.stderr}"
+    payload = json.loads(second.stdout)["managed_config"]
+    assert payload["status"] == "refreshed", payload
+    assert payload["previous_digest"] == first_digest, payload
+    assert payload["digest"] != first_digest, "a refresh to newer content must change the digest"
 
-    assert second_fetched_at == first_fetched_at, "same-ref re-setup must not re-fetch (fence Current)"
+    assert json.loads(snapshot_path.read_text())["digest"] == payload["digest"]
+    combined = _registry_probe(ocx)
+    assert "resetup-b.example" in combined, (
+        f"the refreshed snapshot must merge into subsequent commands: {combined!r}"
+    )
+
+
+def test_setup_refresh_syncs_patch_descriptors(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """A managed-config refresh that introduces a `[patches]` pointer
+    converges the patch tier via the same best-effort piggyback `ocx config
+    update` already carries (`sync_patches_from_payload` in
+    `package_manager/tasks/managed_config.rs`, introduced by
+    `fix(managed-config): auto-sync patches after a config update`): the
+    freshly fetched payload's `[patches].registry` is re-resolved from the
+    payload text (not the manager's stale construction-time config) and `ocx
+    patch sync`'s companion discovery runs against it, so an already-installed
+    base picks up a global descriptor's companion without a separate `ocx
+    patch sync`. Mirrors the env-appears assertion
+    `test_patches.py::test_patch_sync_refreshes_descriptor_and_companion` uses
+    for the same underlying sync.
+    """
+    ref = f"{registry}/{unique_repo}:v1"
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "managed-patch-v1.example"\n')
+    self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
+    assert _self_setup(ocx, ref, self_image).returncode == 0
+
+    # Install a base BEFORE any patch tier exists anywhere -- `sync_patches`'
+    # known-set enumeration walks the symlink store, so an already-installed
+    # base becomes a sync target the moment a patch tier appears.
+    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, new=True, cascade=True)
+    ocx.plain("package", "install", base_pkg.short)
+
+    # Publish a global descriptor + its companion to a dedicated patch
+    # registry (`--registry` targets it directly, bypassing the need for a
+    # local `[patches]` config block).
+    companion_repo = f"{unique_repo}_companion"
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.0",
+        tmp_path,
+        bins=[],
+        env=[
+            {
+                "key": "MANAGED_PATCH_CA",
+                "type": "constant",
+                "value": "/etc/ssl/managed-patch-ca.pem",
+                "visibility": "interface",
+            }
+        ],
+        new=True,
+        cascade=True,
+        platform="any",
+    )
+    descriptor_path = tmp_path / "managed_patch_descriptor.json"
+    descriptor_path.write_text(
+        json.dumps({"version": 1, "rules": [{"match": "*", "packages": [companion_fq], "required": False}]})
+    )
+    publish = ocx.run(
+        "patch", "publish", "--descriptor", str(descriptor_path), "--global", "--registry", registry,
+        format=None, check=False,
+    )
+    assert publish.returncode == 0, f"global descriptor publish must succeed: {publish.stderr}"
+
+    # Republish the SAME managed-config ref, now adding a `[patches]` pointer
+    # at the registry the descriptor was just published to.
+    push_raw_config_package(
+        registry,
+        unique_repo,
+        "v1",
+        (
+            '[registry]\ndefault = "managed-patch-v2.example"\n'
+            f'[patches]\nregistry = "{registry}"\nrequired = false\n'
+        ).encode(),
+    )
+
+    refreshed = _self_setup(ocx, ref, self_image)
+    assert refreshed.returncode == 0, f"the refresh must succeed: {refreshed.stderr}"
+    assert json.loads(refreshed.stdout)["managed_config"]["status"] == "refreshed", refreshed.stdout
+
+    entries = ocx.json("package", "env", base_pkg.short)["entries"]
+    ca_entry = next((e for e in entries if e["key"] == "MANAGED_PATCH_CA"), None)
+    assert ca_entry is not None, (
+        "the companion named by the payload's freshly-introduced [patches] pointer must "
+        f"reach the base's env after the managed-config refresh; got keys: "
+        f"{[e['key'] for e in entries]}"
+    )
+    assert ca_entry["value"] == "/etc/ssl/managed-patch-ca.pem"
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +658,19 @@ def test_no_config_refresh_kill_switch_silences_debug_hook_but_not_explicit_upda
     push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "kill-switch-b.example"\n')
     update = _run(ocx, "config", "update", env_overrides={"OCX_NO_CONFIG_REFRESH": "1"})
     assert update.returncode == 0, f"explicit `ocx config update` must still work under the kill switch: {update.stderr}"
+
+    # Half C: the kill switch must NOT block the setup-driven reconciling
+    # refresh either -- `ocx config setup` (like `ocx self setup`) is an
+    # explicit run of the natural provisioning entry point, not the automatic
+    # background tick the kill switch is scoped to.
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "kill-switch-c.example"\n')
+    reconciled = _run(
+        ocx, "config", "setup", "--managed-config", ref, env_overrides={"OCX_NO_CONFIG_REFRESH": "1"}
+    )
+    assert reconciled.returncode == 0, (
+        f"the setup refresh must still work under the kill switch: {reconciled.stderr}"
+    )
+    assert json.loads(reconciled.stdout)["managed_config"]["status"] == "refreshed", reconciled.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1073,42 @@ def test_config_update_pause_writes_and_bare_update_clears(
     bare = _run(ocx, "config", "update", env_overrides=env)
     assert bare.returncode == 0
     assert not _pause_file(ocx).exists(), "an explicit update without --pause must clear the pause"
+
+
+def test_paused_setup_skips_refresh_and_keeps_pause(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """An in-force `ocx config update --pause` freezes the reconciling setup
+    refresh too, not just the background tick: setup is not an explicit fetch
+    request (unlike `config update`, which clears the pause), so pause's
+    documented "freeze as-is" meaning holds across it. `--check` still reports
+    the pause afterward -- setup never clears or otherwise touches it."""
+    ref = f"{registry}/{unique_repo}:v1"
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "pause-setup-a.example"\n')
+    self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
+    assert _self_setup(ocx, ref, self_image).returncode == 0
+    snapshot_path = Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "snapshot.json"
+    fetched_at_before = json.loads(snapshot_path.read_text())["fetched_at"]
+
+    paused = _run(ocx, "config", "update", "--pause", "4h")
+    assert paused.returncode == 0, paused.stderr
+    assert _pause_file(ocx).exists()
+
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "pause-setup-b.example"\n')
+
+    result = _self_setup(ocx, ref, self_image)
+    assert result.returncode == 0, f"a paused re-run must still succeed: {result.stderr}"
+    payload = json.loads(result.stdout)["managed_config"]
+    assert payload["status"] == "already_adopted", payload
+    assert json.loads(snapshot_path.read_text())["fetched_at"] == fetched_at_before, (
+        "a paused refresh must not re-fetch"
+    )
+    assert _pause_file(ocx).exists(), "setup must never clear the pause"
+
+    check = _run(ocx, "config", "update", "--check")
+    assert check.returncode == 0, check.stderr
+    check_payload = json.loads(check.stdout)
+    assert check_payload.get("paused_until"), check_payload
 
 
 def test_config_update_pause_with_version_pins_then_pauses(
