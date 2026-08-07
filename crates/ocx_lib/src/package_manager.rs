@@ -288,6 +288,7 @@ pub use tasks::inspect::{
     InspectResult, RepositoryConflict, Surface,
 };
 pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
+pub use tasks::patch_discovery::PatchDiscoveryMode;
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{
@@ -348,17 +349,6 @@ pub struct PackageManager {
     /// falls back to `file_structure.index` — correct for tests and for any
     /// invocation without a redirect. Set by `Context::try_init`.
     index_store: Option<file_structure::IndexStore>,
-    /// A private index store this manager owns exclusively: consulted BEFORE
-    /// [`Self::effective_index_store`] for guaranteed-local lookups, and the
-    /// store this manager writes its own tag pointers into.
-    ///
-    /// `ocx patch test` sets it to its scratch store. That command composes in
-    /// a scratch `FileStructure` while resolving through the invocation's real
-    /// index home, so a `--companion-archive` companion — which is unpublished
-    /// and must never leave a tag pointer in the shared home — is only
-    /// resolvable if the read consults the scratch store too. `None`
-    /// everywhere else: one store, read and written.
-    index_overlay: Option<file_structure::IndexStore>,
 }
 
 impl PackageManager {
@@ -384,7 +374,6 @@ impl PackageManager {
             patch_snapshot: None,
             managed_config_client: None,
             index_store: None,
-            index_overlay: None,
         }
     }
 
@@ -397,45 +386,12 @@ impl PackageManager {
         self
     }
 
-    /// Inject a private index store this manager reads first and writes its own
-    /// tag pointers into — see the [`Self::index_overlay`] field. Called by
-    /// `ocx patch test` with its scratch store; nothing else sets it.
-    pub fn with_index_overlay(mut self, index_store: file_structure::IndexStore) -> Self {
-        self.index_overlay = Some(index_store);
-        self
-    }
-
     /// The effective index store for guaranteed-local lookups: the
     /// `--index` / `OCX_INDEX` redirect when set, else `file_structure.index`.
     pub(crate) fn effective_index_store(&self) -> file_structure::IndexStore {
         self.index_store
             .clone()
             .unwrap_or_else(|| self.file_structure.index.clone())
-    }
-
-    /// The index stores a guaranteed-local lookup consults, in order: the
-    /// private overlay (when set) before the effective home. Exactly one entry
-    /// unless a caller declared an overlay.
-    pub(crate) fn local_lookup_index_stores(&self) -> Vec<file_structure::IndexStore> {
-        self.index_overlay
-            .iter()
-            .cloned()
-            .chain(std::iter::once(self.effective_index_store()))
-            .collect()
-    }
-
-    /// The index store this manager writes its OWN tag pointers into: the
-    /// private overlay when set, else its file structure's index — deliberately
-    /// **not** the `--index` redirect, since a manager that declares an overlay
-    /// does so precisely because its writes must not reach the shared home.
-    ///
-    /// Under `--index` with no overlay declared, the write store
-    /// (`file_structure.index`) and the first read store (the redirect) are
-    /// therefore different directories. Unreachable today: the only caller is
-    /// `ocx patch test`, which always declares an overlay. A second caller must
-    /// declare one too, or read its own writes back through this same accessor.
-    pub(crate) fn local_tag_store(&self) -> &file_structure::IndexStore {
-        self.index_overlay.as_ref().unwrap_or(&self.file_structure.index)
     }
 
     /// Injects the dedicated managed-config-fetch client (built from the
@@ -694,9 +650,6 @@ impl PackageManager {
             // Carry the effective index-store redirect so an offline view's
             // guaranteed-local lookups read the same home as the parent.
             index_store: self.index_store.clone(),
-            // Same for the private overlay: an offline view of a scratch manager
-            // must still see the tag pointers that manager wrote itself.
-            index_overlay: self.index_overlay.clone(),
         }
     }
 

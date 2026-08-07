@@ -122,6 +122,26 @@ impl FileStructure {
             .join(repository_path(identifier.repository()))
             .with_added_extension("json")
     }
+
+    /// Machine-local path holding the patch tier's own companion pins for
+    /// `identifier`'s repository — a `BTreeMap<String, String>` tag→digest map
+    /// recording the top (image-index) digest each companion tag was last
+    /// resolved to.
+    ///
+    /// Layout: `{root}/state/patch-companions/{registry_slug}/{repo}.json`.
+    /// A companion is a package the user never named, so its tag→digest
+    /// binding is patch-tier state and must never become a package-tier pin in
+    /// the local index (`subsystem-oci`: a pin moves only when named). Like
+    /// [`patch_descriptor_path`](Self::patch_descriptor_path) it lives under
+    /// `state/` and never carries `--index` / `OCX_INDEX` redirection.
+    pub fn patch_companion_path(&self, identifier: &crate::oci::Identifier) -> PathBuf {
+        self.root
+            .join("state")
+            .join("patch-companions")
+            .join(slugify(identifier.registry()))
+            .join(repository_path(identifier.repository()))
+            .with_added_extension("json")
+    }
 }
 
 /// Returns the OCX data root directory.

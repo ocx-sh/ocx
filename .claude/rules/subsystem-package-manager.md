@@ -58,6 +58,12 @@ pub struct PackageManager {
 
 All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network).
 
+### Patch companions pin in patch state, never the local index
+
+`install_companion` (`tasks/patch_discovery.rs`) owns the companion tier's binding: a recorded pin (`FileStructure::patch_companion_path` — see `subsystem-file-structure.md`) is pulled by digest with no tag resolve; a miss resolves through a view that cannot grow the local index (`read_only_index()` when lazy, `index().remote_view()` under `PatchDiscoveryMode::Sync`, which must see a tag that moved upstream), pulls that digest pinned, then records it. Compose reads the same binding through `companion_pin` (snapshot ▸ record) in `tasks/resolve.rs`; `resolve_site_patch_roots` deliberately uses `companion_pin_recorded` (record only) so `ocx patch freeze` snapshots live state instead of its own snapshot. There is no fallback to a local-index tag pointer for the same repository — that pointer is package-tier and belongs to whoever named the package.
+
+**Zero bytes under `index/`, not just no tag pointer.** Both companion pulls run on `PackageManager::read_only_view()` (`LocalWritePolicy::ReadOnly`). Resolving no tag is not sufficient: a `tag@digest` pull skips `commit_root_tag` but under `Full` still `persist_dispatch`es the image index the digest names into the companion repository's own `p/<repo>/o/<algo>/<hex>.json`, and the blob-store `AbsentDispatch` recovery self-heals one back the other way. `ReadOnly` closes both. Content is unaffected — `stage_and_link_chain_blobs` still writes every chain blob to `$OCX_HOME/blobs` and ref-links it from the installed package, which is where compose and GC read it back from. Both companion readers (`find_companion_local`, `resolve_site_patch_roots`) therefore go through the one `companion_manifest_index(manager)` helper in `tasks/resolve.rs`: no sources + `ChainMode::Offline` + the attached `fs.blobs` content store + `read_only_view` — digest-addressed, network-free, digest-verified, and incapable of re-creating the directory the pin move emptied. Unit: `patch_discovery::tests::companion_install_writes_nothing_into_the_local_index_home`; acceptance: `test/tests/test_patches.py` (`assert_no_index_footprint`).
+
 ## Three-Layer Error Model
 
 ```rust

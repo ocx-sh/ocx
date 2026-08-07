@@ -33,7 +33,12 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package, make_package_with_entrypoints, push_managed_config
+from src.helpers import (
+    make_package,
+    make_package_with_entrypoints,
+    push_managed_config,
+    resolved_metadata_path,
+)
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
@@ -652,6 +657,107 @@ def test_patch_sync_refreshes_descriptor_and_companion(
     assert ca_after is not None, "SYNC_CA must still be present after sync"
     assert ca_after["value"] == "/certs/v2/ca.pem", (
         f"After sync, SYNC_CA must reflect v2; got: {ca_after['value']}"
+    )
+
+    # ── The just-synced companion is a GC root ──
+    #
+    # GC reads the patch tier's own pin record to derive companion roots, so a
+    # companion the sync pinned must survive `ocx clean`.
+    clean_result = ocx.run("clean", "--force", format=None, check=False)
+    assert clean_result.returncode == 0, (
+        f"ocx clean --force must succeed; got {clean_result.returncode}\nstderr: {clean_result.stderr}"
+    )
+    ca_after_clean = _entry_by_key(_env_entries(ocx, base_pkg.short), "SYNC_CA")
+    assert ca_after_clean is not None and ca_after_clean["value"] == "/certs/v2/ca.pem", (
+        f"the synced companion must survive `ocx clean` — its pin is a GC root; got: {ca_after_clean}"
+    )
+
+
+def _companion_pin(ocx: OcxRunner, registry: str, repo: str) -> dict:
+    """Return the patch-tier companion pin record (tag -> digest) for `repo`."""
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{repo}.json"
+    assert pin_path.exists(), (
+        f"expected a companion pin record at {pin_path}; a discovered companion is pinned in "
+        "patch state, never in the shared local index"
+    )
+    return json.loads(pin_path.read_text())
+
+
+def assert_no_index_footprint(ocx: OcxRunner, registry: str, repo: str, why: str) -> None:
+    """Assert `repo` owns **zero bytes** anywhere under ``$OCX_HOME/index``.
+
+    A companion is named by a descriptor, not by the user, so nothing about it
+    may enter the package tier's index — and the root document is only the
+    visible half. A pinned (``tag@digest``) pull commits no tag but still
+    persists the DISPATCH OBJECT into ``p/<repo>/o/<algo>/<hex>.json``, which
+    is the same shared directory; asserting on the root document alone passes
+    over it.
+    """
+    package_dir = ocx.ocx_home / "index" / registry_dir(registry) / "p" / repo
+    root_document = package_dir.with_name(f"{package_dir.name}.json")
+    leftovers = sorted(str(p.relative_to(ocx.ocx_home)) for p in package_dir.rglob("*") if p.is_file())
+    assert not root_document.exists() and not leftovers, (
+        f"{why}: {repo} must own nothing under the local index; found "
+        f"{'the root document ' if root_document.exists() else ''}{leftovers}"
+    )
+
+
+def test_compose_does_not_advance_a_companion_between_syncs(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A companion advances on sync, never as a side effect of an index refresh.
+
+    `ocx index update <companion>` moves that repository's PACKAGE-tier pin in
+    the local index — here with the `[patches]` tier switched off, so no
+    patch-sync piggyback runs and the refresh is purely package-tier. The patch
+    tier keeps its own pin, so compose must stay on the digest the last
+    discovery recorded, and must not fail closed chasing a version nothing ever
+    installed.
+    """
+    companion_repo = _unique_repo("determinism_companion")
+    rolling_fq = f"{registry}/{companion_repo}:1"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path / "v1", "DETERMINISM_CA", "/certs/v1/ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    descriptor_path = tmp_path / "determinism_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [rolling_fq]}])
+    config_path = _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    pinned = _companion_pin(ocx, registry, companion_repo)["1"]
+
+    # v2 exists in the registry but is neither indexed nor installed.
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.1",
+        tmp_path / "v2",
+        bins=[],
+        env=[{"key": "DETERMINISM_CA", "type": "constant", "value": "/certs/v2/ca.pem", "visibility": "interface"}],
+        new=True,
+        cascade=True,
+        platform="any",
+        index=False,
+    )
+    # Refresh the companion's package-tier pins with the patch tier switched
+    # off, so `index update`'s patch-sync piggyback cannot run: the local index
+    # now points `:1` at v2 while the patch pin still names v1.
+    config_path.write_text("")
+    ocx.plain("index", "update", companion_repo)
+    _write_config(ocx, registry)
+
+    result = ocx.run("--format", "json", "package", "env", base_pkg.short, format=None, check=False)
+    assert result.returncode == 0, (
+        "compose must not fail closed when the local index moved past the pinned companion; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["entries"], "DETERMINISM_CA")
+    assert entry is not None, "DETERMINISM_CA must still be composed"
+    assert entry["value"] == "/certs/v1/ca.pem", (
+        f"compose must stay on the pinned companion until the next sync; got: {entry['value']}"
+    )
+    assert _companion_pin(ocx, registry, companion_repo)["1"] == pinned, (
+        "an index refresh must not rewrite the patch-tier companion pin"
     )
 
 
@@ -1362,6 +1468,86 @@ def test_patch_test_composes_env_locally_without_publishing(
     assert len(report["companions"]) >= 1, "patch test report must list at least one companion"
 
 
+def _local_companion_archive(
+    ocx: OcxRunner, tmp_path: Path, repo: str, tag: str, env_key: str, env_value: str
+) -> Path:
+    """Build — but never publish — a companion bundle for `--companion-archive`.
+
+    `ocx package create` writes the canonicalized metadata sidecar next to the
+    bundle; `patch test` reads the companion's identifier from that sibling, so
+    the identifier is added there after `create` has run.
+    """
+    pkg_dir = tmp_path / f"local-{repo}"
+    (pkg_dir / "certs").mkdir(parents=True)
+    (pkg_dir / "certs" / "ca.pem").write_text("local-ca\n")
+    metadata_in = tmp_path / f"local-{repo}-input.json"
+    metadata_in.write_text(
+        json.dumps(
+            {
+                "type": "bundle",
+                "version": 1,
+                "env": [
+                    {"key": env_key, "type": "constant", "value": env_value, "visibility": "interface"}
+                ],
+            }
+        )
+    )
+    bundle = tmp_path / f"local-{repo}.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(metadata_in),
+        "-o", str(bundle),
+        "-p", "any",
+        str(pkg_dir),
+    )
+    sidecar = resolved_metadata_path(bundle)
+    document = json.loads(sidecar.read_text())
+    document["identifier"] = f"{ocx.registry}/{repo}:{tag}"
+    sidecar.write_text(json.dumps(document))
+    return bundle
+
+
+def test_patch_test_companion_archive_still_resolves(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--companion-archive` previews a companion that was never published.
+
+    The archive is materialized into the scratch store and its tag -> digest
+    binding registered there, so the compose step resolves it with no registry
+    round-trip. That registration is patch-tier state, so it has to travel with
+    the scratch `FileStructure` the preview composes against.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    companion_repo = _unique_repo("archive_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    archive = _local_companion_archive(
+        ocx, tmp_path, companion_repo, "1.0.0", "ARCHIVE_CA", "/certs/archive/ca.pem"
+    )
+
+    descriptor_path = tmp_path / "archive_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    result = ocx.run(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--companion-archive", str(archive),
+        base_pkg.short,
+        format="json",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "patch test must resolve an unpublished companion handed to it as an archive; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["entries"], "ARCHIVE_CA")
+    assert entry is not None, "the archive companion's INTERFACE var must be composed"
+    assert entry["value"] == "/certs/archive/ca.pem", (
+        f"ARCHIVE_CA must carry the archive companion's value; got: {entry['value']}"
+    )
+
+
 def test_frozen_patch_test_refuses_to_resolve_an_unindexed_companion(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -1854,7 +2040,11 @@ def test_patch_on_sealed_dep_not_inherited(
     ocx.run("patch", "sync", format=None, check=False)
 
     ocx.plain("package", "install", root.short)
-    ocx.plain("package", "install", companion_fq)
+    # Installing the dependency as a user-requested base is what runs discovery
+    # against the rule that names it, so the companion arrives — and is pinned —
+    # through the patch tier. A hand-installed companion package carries no
+    # patch-tier pin and therefore composes nothing.
+    ocx.plain("package", "install", dep.short)
 
     consumer_entries = _env_entries(ocx, root.short)
     self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
@@ -1936,7 +2126,11 @@ def test_patch_on_private_dep_only_under_self(
     ocx.run("patch", "sync", format=None, check=False)
 
     ocx.plain("package", "install", root.short)
-    ocx.plain("package", "install", companion_fq)
+    # Installing the dependency as a user-requested base is what runs discovery
+    # against the rule that names it, so the companion arrives — and is pinned —
+    # through the patch tier. A hand-installed companion package carries no
+    # patch-tier pin and therefore composes nothing.
+    ocx.plain("package", "install", dep.short)
 
     consumer_entries = _env_entries(ocx, root.short)
     self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
@@ -2021,7 +2215,11 @@ def test_patch_on_public_dep_inherited_by_consumer(
     ocx.run("patch", "sync", format=None, check=False)
 
     ocx.plain("package", "install", root.short)
-    ocx.plain("package", "install", companion_fq)
+    # Installing the dependency as a user-requested base is what runs discovery
+    # against the rule that names it, so the companion arrives — and is pinned —
+    # through the patch tier. A hand-installed companion package carries no
+    # patch-tier pin and therefore composes nothing.
+    ocx.plain("package", "install", dep.short)
 
     consumer_entries = _env_entries(ocx, root.short)
     dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
@@ -2095,7 +2293,11 @@ def test_patch_on_interface_dep_inherited_by_consumer(
     ocx.run("patch", "sync", format=None, check=False)
 
     ocx.plain("package", "install", root.short)
-    ocx.plain("package", "install", companion_fq)
+    # Installing the dependency as a user-requested base is what runs discovery
+    # against the rule that names it, so the companion arrives — and is pinned —
+    # through the patch tier. A hand-installed companion package carries no
+    # patch-tier pin and therefore composes nothing.
+    ocx.plain("package", "install", dep.short)
 
     consumer_entries = _env_entries(ocx, root.short)
     dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
@@ -2441,25 +2643,26 @@ def test_patch_test_script_asserts_composed_env(
 # ---------------------------------------------------------------------------
 
 
-def test_index_update_writes_global_companion_into_the_local_index(
+def test_index_update_does_not_pin_a_global_companion_in_the_local_index(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """`ocx index update <base>` also indexes GLOBAL companions of that base.
+    """A companion is pinned in patch state, never in the shared local index.
 
-    Provenance regression test — this is the chain that puts a repository the
-    user never typed into the local index:
+    `ocx index update <base>` piggybacks `sync_patches`, which re-checks the
+    reserved, registry-wide `<patch-registry>/global:__ocx.patch` descriptor
+    for every installed base and installs newly-referenced companions. That
+    companion is a repository the user never typed, so its tag -> digest
+    binding must land in `state/patch-companions/`, leaving the local index's
+    package-tier pins untouched (`subsystem-oci`: a pin moves only when named).
 
-      1. `index update` piggybacks `sync_patches` whenever a `[patches]` tier
-         is configured and the manager is online (`command/index_update.rs`).
-      2. `sync_patches` re-fetches the reserved, registry-wide
-         `<patch-registry>/global:__ocx.patch` descriptor for every installed
-         base and installs newly-referenced companions.
-      3. Installing a package refreshes its tag pointers into the index.
+    Previously the companion install committed a tag pointer into the local
+    index — which leaked this suite's throwaway companions into any
+    dogfooding shell pointed at a git-tracked `OCX_INDEX`, and made a
+    same-tag companion unable to ever advance (the stale pin answered first).
 
-    Consequence worth knowing: a `match: "*"` global descriptor left behind in
-    a SHARED registry (this suite publishes several) leaks its companion into
-    every later `ocx index update` run against that registry — including a
-    dogfooding shell pointed at a git-tracked `OCX_INDEX`.
+    The contract is zero bytes, not just no root document: a `tag@digest` pull
+    writes no tag pointer but did keep persisting the dispatch object into the
+    companion's own `o/` directory inside that same index.
     """
     companion_repo = _unique_repo("index_update_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -2483,19 +2686,36 @@ def test_index_update_writes_global_companion_into_the_local_index(
     base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
-    # Drop the companion's index entry so the assertion below can only pass if
-    # THIS `index update` rewrote it (the companion is already installed at
-    # this point — the piggyback re-checks and refreshes regardless).
+    # The discovery that ran with the base install recorded the companion in
+    # patch state, keyed by the tag the descriptor named.
+    pin = _companion_pin(ocx, registry, companion_repo)
+    assert pin.get("1.0.0", "").startswith("sha256:"), (
+        f"the companion pin must record tag 1.0.0 -> digest; got: {pin}"
+    )
+
+    # Drop everything the user-named `index update` inside the publish helper
+    # legitimately wrote for the companion — the root document AND its dispatch
+    # objects — so the assertion below can only pass if no patch-tier write
+    # recreated any of it.
     index_home = ocx.ocx_home / "index" / registry_dir(registry) / "p"
     companion_root = index_home / f"{companion_repo}.json"
-    companion_root.unlink(missing_ok=True)
+    assert companion_root.exists(), (
+        "setup: the publish helper's own `ocx index update` must have written the companion's "
+        "root document, or the deletion below removes nothing and the assertion is vacuous"
+    )
+    companion_root.unlink()
+    shutil.rmtree(index_home / companion_repo, ignore_errors=True)
 
     ocx.plain("index", "update", base_pkg.short)
 
-    assert companion_root.exists(), (
-        f"expected {companion_root.name} — `ocx index update {base_pkg.short}` grows the index "
-        "with the global companion via the patch-sync piggyback; if this now fails, the piggyback "
-        "changed and the surprising cross-repository index writes are gone"
+    assert_no_index_footprint(
+        ocx,
+        registry,
+        companion_repo,
+        f"`ocx index update {base_pkg.short}` names only the base, so the patch-sync piggyback",
+    )
+    assert _companion_pin(ocx, registry, companion_repo) == pin, (
+        "the companion pin must survive the sync piggyback unchanged (same digest, same tag)"
     )
 
 
