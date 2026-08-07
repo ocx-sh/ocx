@@ -44,6 +44,8 @@ use crate::command::config_setup::resolve_managed_config_arg;
 /// | Outcome | Exit |
 /// |---|---|
 /// | completed / no-op / migrated | 0 |
+/// | managed config adopted / refreshed / already adopted / cleared | 0 |
+/// | managed-config refresh of an already-adopted seed failed (snapshot kept) | 0 |
 /// | bad VERSION syntax | 64 |
 /// | tag@digest mismatch (immutability assertion failed) | 65 |
 /// | registry unreachable | 69 |
@@ -53,6 +55,12 @@ use crate::command::config_setup::resolve_managed_config_arg;
 /// | authentication failed while fetching the managed-config snapshot | 80 |
 /// | bootstrap blocked (offline, not installed) | 81 |
 /// | a profile was dirty and skipped (no `--force`) | 82 |
+///
+/// The registry codes (69 / 79 / 80) apply to the managed-config tier only
+/// when it is being adopted for the first time, or when the snapshot on disk
+/// is missing or belongs to another source. Once a matching snapshot exists,
+/// a failed refresh *fetch* keeps it and reports `refresh_unavailable` with
+/// exit 0; a failure writing the refreshed snapshot to disk still errors (74).
 #[derive(Parser)]
 pub struct SelfSetup {
     /// Version to install: tag, `sha256:<hex>`, or `tag@sha256:<hex>`.
@@ -104,6 +112,11 @@ pub struct SelfSetup {
     /// Precedence when omitted: `OCX_MANAGED_CONFIG` env var, then the
     /// existing seed. Omit entirely to leave the managed-config tier
     /// untouched.
+    ///
+    /// Every run reconciles an already-adopted seed against the registry, so a
+    /// newer published config is picked up here too. If that refresh cannot
+    /// reach the registry, the existing snapshot is kept and setup still
+    /// succeeds.
     #[arg(long, value_name = "REF")]
     managed_config: Option<String>,
 }

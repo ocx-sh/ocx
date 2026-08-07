@@ -158,11 +158,42 @@ pub struct SetupOutcome {
 pub enum ManagedConfigSetupOutcome {
     /// No `--managed-config` flag/env/seed resolved — nothing to do.
     NotConfigured,
-    /// The resolved ref matches the existing seed AND a matching snapshot is
-    /// on disk; fence left `Current`, no re-fetch.
+    /// The resolved ref matches the existing seed, a matching snapshot is on
+    /// disk, and the re-sync produced no new content — either the registry
+    /// still serves the recorded digest, or the refresh was deliberately
+    /// skipped (digest-pinned seed, no network, in-force pause).
     AlreadyAdopted {
         /// The existing snapshot's verified digest (operator TOFU signal —
         /// decision 10: the digest is always visible on adopt paths).
+        digest: crate::oci::Digest,
+    },
+    /// An already-adopted seed was re-synced and the registry served newer
+    /// content: the snapshot was replaced in place, the fence untouched.
+    Refreshed {
+        /// The digest the snapshot carried before this run.
+        from: crate::oci::Digest,
+        /// The newly persisted digest.
+        to: crate::oci::Digest,
+    },
+    /// The refresh of an already-adopted seed failed before anything was
+    /// written (fetch fault, source vanished from the registry, or a published
+    /// payload that fails validation); the existing snapshot is kept and the
+    /// run still succeeds (exit 0). Never reported as `AlreadyAdopted` — a
+    /// refresh that did not run must not look healthy. A snapshot-*write*
+    /// failure is NOT downgraded to this outcome: it can leave the new payload
+    /// live under the old provenance, so it propagates as an error instead.
+    RefreshUnavailable {
+        /// The retained snapshot's digest — unchanged by the failed refresh.
+        digest: crate::oci::Digest,
+        /// Why the refresh did not complete — the fetch error with its full
+        /// `source()` chain flattened in (`crate::error::render_chain`), since
+        /// the outermost message alone names no cause.
+        reason: String,
+    },
+    /// `--dry-run` against an already-adopted seed: a refresh would run, but
+    /// nothing was fetched and nothing was written.
+    WouldRefresh {
+        /// The existing snapshot's digest.
         digest: crate::oci::Digest,
     },
     /// A new or changed ref was adopted: synchronous fetch+persist succeeded
@@ -300,19 +331,37 @@ pub async fn run(
 /// `format!` interpolation of the raw ref), then follows ADR "Setup ordering":
 /// synchronous fetch+persist FIRST, fence written only on success. A dirty
 /// fence (user-edited) is left untouched without `force`
-/// ([`ManagedConfigSetupOutcome::Dirty`]); a fence already `Current` for the
-/// same rendered body skips the fetch entirely (no re-adopt, no re-fetch).
-/// `dry_run` short-circuits to [`ManagedConfigSetupOutcome::WouldAdopt`]
-/// before any write.
+/// ([`ManagedConfigSetupOutcome::Dirty`]). `dry_run` short-circuits to
+/// [`ManagedConfigSetupOutcome::WouldAdopt`] before any write.
+///
+/// # Refresh on re-run
+///
+/// A fence already `Current` for the same rendered body does **not** skip the
+/// fetch: setup reconciles the tier on every run, so a newer fleet config is
+/// picked up by the natural provisioning entry point
+/// ([`ManagedConfigSetupOutcome::Refreshed`]; unchanged content reports
+/// [`ManagedConfigSetupOutcome::AlreadyAdopted`], now verified rather than
+/// assumed). The fence itself is never rewritten — `rc_block::apply` returns
+/// `None` for a `Current` block.
+///
+/// The refresh is **best-effort only when an identity-matching snapshot is
+/// already on disk**: a failed fetch then warns, keeps that snapshot, and
+/// returns [`ManagedConfigSetupOutcome::RefreshUnavailable`] with exit 0.
+/// First adoption and self-heal (fence current but the snapshot is wiped or
+/// belongs to another source) have nothing to fall back on and keep the
+/// hard-fail fetch-first ADR contract. A refresh is skipped entirely — without
+/// a warning — for a digest-pinned seed, with no network, or under an in-force
+/// `ocx config update --pause` (see [`refresh_skip_reason`]); `dry_run`
+/// reports [`ManagedConfigSetupOutcome::WouldRefresh`] and never fetches.
 ///
 /// # Errors
 ///
 /// Returns [`error::Error`] when the ref does not parse as an OCI identifier,
-/// the fetch+persist fails (no partial state — the fence is not written), or
-/// a filesystem write fails. A system-locked tier (the merged `config`'s
-/// `[managed] required = true`) rejects an explicit clear or redirect with
-/// [`error::Error::ManagedConfigLocked`] (exit 78) before any write, so a
-/// direct library caller cannot bypass the lock.
+/// the fetch+persist of a not-yet-adopted seed fails (no partial state — the
+/// fence is not written), or a filesystem write fails. A system-locked tier
+/// (the merged `config`'s `[managed] required = true`) rejects an explicit
+/// clear or redirect with [`error::Error::ManagedConfigLocked`] (exit 78)
+/// before any write, so a direct library caller cannot bypass the lock.
 pub async fn apply_managed_config(
     config: &crate::config::Config,
     managed_config: Option<&str>,
@@ -322,6 +371,7 @@ pub async fn apply_managed_config(
     file_structure: &FileStructure,
 ) -> Result<ManagedConfigSetupOutcome, error::Error> {
     use crate::config::managed::{ManagedConfig, check_locked_managed_override};
+    use crate::package_manager::ManagedConfigUpdateResult;
     use crate::setup::rc_block;
 
     let Some(flag_value) = managed_config else {
@@ -370,23 +420,52 @@ pub async fn apply_managed_config(
     if state == rc_block::BlockState::Dirty && !force {
         return Ok(ManagedConfigSetupOutcome::Dirty);
     }
+    // The identity-matching snapshot already on disk, if any. Its presence is
+    // the ONLY licence for the best-effort refresh arm below: a failed fetch
+    // can fall back to it. First adopt and self-heal leave this `None`, so they
+    // keep the hard-fail fetch-first contract and a `required = true` fence can
+    // never be written with no snapshot behind it.
+    let mut adopted: Option<crate::config::managed::ManagedConfigSnapshot> = None;
     if state == rc_block::BlockState::Current {
         // W3: a `Current` fence alone does not prove the tier is healthy — the
         // snapshot may have been wiped or belong to a different source (e.g. a
         // restored $OCX_HOME). Only a present, identity-matching snapshot
-        // short-circuits; otherwise fall through to the fetch+persist below to
-        // self-heal (the fence itself is never rewritten — `rc_block::apply`
+        // counts as adopted; otherwise fall through to the fetch+persist below
+        // to self-heal (the fence itself is never rewritten — `rc_block::apply`
         // returns `None` for a `Current` block).
         let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state).await;
-        if let Some(snapshot) = snapshot
-            && crate::config::managed::snapshot_matches_source(&snapshot, &identifier)
-        {
+        match snapshot {
+            Some(snapshot) if crate::config::managed::snapshot_matches_source(&snapshot, &identifier) => {
+                adopted = Some(snapshot);
+            }
+            _ => {
+                crate::log::info!(
+                    "managed-config fence is current but the snapshot is absent or mismatched; re-syncing"
+                );
+            }
+        }
+    }
+
+    if let Some(snapshot) = &adopted {
+        // A deliberate skip is not a failure: report the existing snapshot as
+        // adopted and stay silent on stderr (no warn noise for `--offline`, a
+        // digest-pinned seed, or an in-force pause).
+        let paused = crate::managed_config::read_pause(&file_structure.state).await.is_some();
+        if let Some(reason) = refresh_skip_reason(&identifier, manager.can_fetch_managed_config(), paused) {
+            crate::log::debug!("managed-config refresh skipped ({reason})");
             return Ok(ManagedConfigSetupOutcome::AlreadyAdopted {
-                digest: snapshot.digest,
+                digest: snapshot.digest.clone(),
             });
         }
-        crate::log::info!("managed-config fence is current but the snapshot is absent or mismatched; re-syncing");
+        if dry_run {
+            // Dry-run never fetches — `ocx config update --check` is the probe
+            // surface. Report that a refresh would run, nothing more.
+            return Ok(ManagedConfigSetupOutcome::WouldRefresh {
+                digest: snapshot.digest.clone(),
+            });
+        }
     }
+
     if dry_run {
         return Ok(ManagedConfigSetupOutcome::WouldAdopt);
     }
@@ -403,14 +482,46 @@ pub async fn apply_managed_config(
         system_required: false,
     };
     // An absent-in-registry source (`Ok(None)` from the fetch) surfaces as
-    // `Err(ManagedConfigUpdateError::SourceNotFound)` via `?` above, propagated
-    // through `Error::ManagedConfigUpdateFailed` — no fence is written, no
-    // partial state (ADR "Setup ordering"). A successful update always carries
-    // the persisted digest.
-    let result = manager.update_managed_config(&resolved, None).await?;
-    let digest = match result {
-        crate::package_manager::ManagedConfigUpdateResult::Updated { digest }
-        | crate::package_manager::ManagedConfigUpdateResult::AlreadyCurrent { digest } => digest,
+    // `Err(ManagedConfigUpdateError::SourceNotFound)`, propagated through
+    // `Error::ManagedConfigUpdateFailed` — no fence is written, no partial
+    // state (ADR "Setup ordering"). A successful update always carries the
+    // persisted digest.
+    let result = match manager.update_managed_config(&resolved, None).await {
+        Ok(result) => result,
+        Err(error) => {
+            // Best-effort ONLY behind an identity-matching snapshot, and ONLY
+            // for errors proven to fire before any snapshot write: a registry
+            // blip or a bad published payload must not fail a re-run, because
+            // the tier stays usable on the content already on disk. A
+            // `SnapshotWriteFailed` can fire AFTER the payload rename (the
+            // metadata write is a separate atomic rename), leaving the new
+            // payload live under the old provenance — reporting "kept the
+            // existing snapshot" there would be false, so it propagates.
+            let pre_write_failure = matches!(
+                &error,
+                crate::managed_config::ManagedConfigUpdateError::Fetch(_)
+                    | crate::managed_config::ManagedConfigUpdateError::SourceNotFound { .. }
+                    | crate::managed_config::ManagedConfigUpdateError::Persist(
+                        crate::managed_config::ManagedConfigPersistError::InvalidToml { .. }
+                    )
+            );
+            let Some(previous) = adopted.filter(|_| pre_write_failure) else {
+                return Err(error.into());
+            };
+            // The error never reaches `main`, so nothing walks its `source()`
+            // chain for us — and the dominant variant (`Fetch`) interpolates
+            // nothing, so its bare `Display` would name no cause at all.
+            let reason = crate::error::render_chain(&error);
+            crate::log::warn!(
+                "could not refresh the managed-config snapshot from '{}': {reason}; keeping the existing snapshot \
+                 (run `ocx config update` to retry)",
+                resolved.source
+            );
+            return Ok(ManagedConfigSetupOutcome::RefreshUnavailable {
+                digest: previous.digest,
+                reason,
+            });
+        }
     };
 
     // Fence written only after the fetch+persist above succeeded.
@@ -418,7 +529,45 @@ pub async fn apply_managed_config(
         write_profile(&config_path, &new_content).await?;
     }
 
-    Ok(ManagedConfigSetupOutcome::Adopted { digest })
+    Ok(match (adopted, result) {
+        (Some(previous), ManagedConfigUpdateResult::Updated { digest }) => ManagedConfigSetupOutcome::Refreshed {
+            from: previous.digest,
+            to: digest,
+        },
+        (Some(_), ManagedConfigUpdateResult::AlreadyCurrent { digest }) => {
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest }
+        }
+        (
+            None,
+            ManagedConfigUpdateResult::Updated { digest } | ManagedConfigUpdateResult::AlreadyCurrent { digest },
+        ) => ManagedConfigSetupOutcome::Adopted { digest },
+    })
+}
+
+/// Why a refresh of an **already-adopted** managed-config seed is skipped, or
+/// `None` when it must run.
+///
+/// Pure decision, no I/O — the whole matrix is unit-testable without a
+/// registry. Precedence is deliberate: a digest-pinned seed is content-
+/// addressed and cannot drift, so it reports first; a missing client (offline)
+/// outranks a pause because no fetch could happen either way.
+///
+/// The returned string is a diagnostic label, not a user-facing message — each
+/// case reports [`ManagedConfigSetupOutcome::AlreadyAdopted`] and logs at
+/// debug. `OCX_NO_CONFIG_REFRESH` is deliberately absent: that kill switch
+/// gates the background tick only, and `--offline` is the no-network lever for
+/// setup.
+fn refresh_skip_reason(identifier: &crate::oci::Identifier, can_fetch: bool, paused: bool) -> Option<&'static str> {
+    if identifier.digest().is_some() {
+        return Some("digest-pinned");
+    }
+    if !can_fetch {
+        return Some("cannot-fetch");
+    }
+    if paused {
+        return Some("paused");
+    }
+    None
 }
 
 /// Clears the `--managed-config` tier: removes the `[managed]` fence from
@@ -935,47 +1084,554 @@ mod tests {
         );
     }
 
-    /// W3 matrix — `Current` fence + matching snapshot: no re-fetch, outcome
-    /// `AlreadyAdopted` carrying the existing verified digest (TOFU signal).
+    // ── setup refresh: a Current fence + matching snapshot re-syncs ──────────
+
+    /// Adopt `reference` against a stub serving `payload`, asserting the first
+    /// run wrote the fence and the snapshot. Returns the persisted digest.
+    async fn adopt(home: &Path, file_structure: &FileStructure, reference: &str, payload: &str) -> crate::oci::Digest {
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let manager = manager_with_stub(home, &identifier, payload);
+        let outcome = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &manager,
+            file_structure,
+        )
+        .await
+        .expect("first adopt must succeed");
+        match outcome {
+            ManagedConfigSetupOutcome::Adopted { digest } => digest,
+            other => panic!("expected Adopted, got {other:?}"),
+        }
+    }
+
+    /// A manager whose managed-config client serves a DIFFERENT repository, so
+    /// every fetch for the seed under test resolves to `SourceNotFound` — the
+    /// unit-test stand-in for an unreachable registry.
+    fn manager_with_failing_fetch(root: &Path) -> PackageManager {
+        let elsewhere = crate::oci::Identifier::parse("other.example.com/unrelated-config:v1").unwrap();
+        manager_with_stub(root, &elsewhere, "[registry]\ndefault = \"unrelated\"\n")
+    }
+
+    /// The `Current` fence + matching snapshot path RE-SYNCS: setup reconciles
+    /// the managed tier on every run, so a newer payload published under the
+    /// same tag is picked up here (`Refreshed`, from != to) and the snapshot on
+    /// disk carries the new content. Restoring the old early return reds this.
     #[tokio::test]
-    async fn apply_managed_config_current_fence_matching_snapshot_no_refetch() {
+    async fn apply_managed_config_current_fence_matching_snapshot_refreshes() {
         let env = crate::test::env::lock();
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = crate::oci::Identifier::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
-        let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"adopted\"\n");
 
-        let first = apply_managed_config(
-            &crate::config::Config::default(),
-            Some(reference),
-            false,
-            false,
-            &manager,
+        let first_digest = adopt(
+            home.path(),
             &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
         )
-        .await
-        .expect("first adopt must succeed");
-        let ManagedConfigSetupOutcome::Adopted { digest: adopted_digest } = first else {
-            panic!("expected Adopted, got {first:?}");
-        };
+        .await;
+        let fence_before = read(&home.path().join("config.toml"));
 
+        // The operator republishes the same tag with new content.
+        let republished = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"republished\"\n");
         let second = apply_managed_config(
             &crate::config::Config::default(),
             Some(reference),
             false,
             false,
-            &manager,
+            &republished,
+            &file_structure,
+        )
+        .await
+        .expect("a re-run against newer content must succeed");
+
+        match second {
+            ManagedConfigSetupOutcome::Refreshed { from, to } => {
+                assert_eq!(from, first_digest, "`from` is the digest the snapshot carried");
+                assert_ne!(from, to, "a refresh to newer content must change the digest");
+            }
+            other => panic!("expected Refreshed, got {other:?}"),
+        }
+
+        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("the refreshed snapshot must be readable");
+        assert!(
+            snapshot.config.contains("republished"),
+            "the persisted payload must be the newly published one, got {:?}",
+            snapshot.config
+        );
+        assert_eq!(
+            read(&home.path().join("config.toml")),
+            fence_before,
+            "the fence itself is never rewritten by a refresh"
+        );
+    }
+
+    /// A re-run whose registry content is unchanged persists nothing and
+    /// reports `AlreadyAdopted` with the same verified digest — now proven by
+    /// a fetch rather than assumed from the fence.
+    #[tokio::test]
+    async fn apply_managed_config_rerun_same_content_stays_already_adopted() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+        let payload = "[registry]\ndefault = \"adopted\"\n";
+
+        let first_digest = adopt(home.path(), &file_structure, reference, payload).await;
+        let fetched_at_before = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("snapshot must exist after adopt")
+            .fetched_at;
+
+        let unchanged = manager_with_stub(home.path(), &identifier, payload);
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &unchanged,
             &file_structure,
         )
         .await
         .expect("re-run must succeed");
         match second {
             ManagedConfigSetupOutcome::AlreadyAdopted { digest } => {
-                assert_eq!(digest, adopted_digest, "AlreadyAdopted carries the verified digest");
+                assert_eq!(digest, first_digest, "AlreadyAdopted carries the verified digest");
             }
             other => panic!("expected AlreadyAdopted, got {other:?}"),
+        }
+
+        assert_eq!(
+            crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+                .await
+                .expect("snapshot must survive")
+                .fetched_at,
+            fetched_at_before,
+            "unchanged content must not re-persist the snapshot"
+        );
+    }
+
+    /// A failed refresh BEHIND an identity-matching snapshot is best-effort:
+    /// the snapshot is kept at its original digest, the fence is untouched, and
+    /// the run succeeds with `RefreshUnavailable` (never `AlreadyAdopted` — a
+    /// refresh that did not run must not look healthy).
+    #[tokio::test]
+    async fn apply_managed_config_refresh_failure_keeps_snapshot() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        let broken = manager_with_failing_fetch(home.path());
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &broken,
+            &file_structure,
+        )
+        .await
+        .expect("a failed refresh behind a matching snapshot must not fail the run");
+
+        match second {
+            ManagedConfigSetupOutcome::RefreshUnavailable { digest, reason } => {
+                assert_eq!(digest, first_digest, "the retained snapshot's digest is reported");
+                assert!(!reason.is_empty(), "the cause must be carried, got {reason:?}");
+            }
+            other => panic!("expected RefreshUnavailable, got {other:?}"),
+        }
+
+        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("the snapshot must survive a failed refresh");
+        assert_eq!(snapshot.digest, first_digest, "the snapshot is kept, not replaced");
+        assert!(snapshot.config.contains("adopted"), "the payload is kept verbatim");
+    }
+
+    /// A published payload that fails validation (`Persist(InvalidToml)`) is a
+    /// pre-write fault — nothing on disk has moved — so behind a matching
+    /// snapshot it stays best-effort, exactly like a fetch fault.
+    #[tokio::test]
+    async fn apply_managed_config_refresh_invalid_payload_stays_best_effort() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        let invalid = manager_with_stub(home.path(), &identifier, "not = [valid toml");
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &invalid,
+            &file_structure,
+        )
+        .await
+        .expect("an invalid published payload must not fail a re-run behind a matching snapshot");
+        assert!(
+            matches!(second, ManagedConfigSetupOutcome::RefreshUnavailable { .. }),
+            "expected RefreshUnavailable, got {second:?}"
+        );
+        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("the snapshot must survive");
+        assert_eq!(snapshot.digest, first_digest, "the snapshot is kept, not replaced");
+    }
+
+    /// A snapshot-WRITE failure is never downgraded to `RefreshUnavailable`:
+    /// the metadata write is a separate atomic rename after the payload
+    /// rename, so a failure there can strand the new payload under the old
+    /// provenance — claiming "kept the existing snapshot" would be false. The
+    /// error propagates even behind a matching snapshot.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_managed_config_refresh_snapshot_write_failure_propagates() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        // Newer content forces a persist; a read-only snapshot dir makes the
+        // write fail deterministically before anything moves.
+        let newer = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"newer\"\n");
+        let dir = file_structure.state.managed_config_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let result = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &newer,
+            &file_structure,
+        )
+        .await;
+
+        let mut restore = std::fs::metadata(&dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&dir, restore).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a snapshot-write failure must propagate, got {result:?}"
+        );
+        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("the original snapshot is still present");
+        assert_eq!(snapshot.digest, first_digest, "the original snapshot is untouched");
+    }
+
+    /// ADR "Setup ordering" invariant, guarded against an over-broad
+    /// best-effort arm: a FIRST adopt whose fetch fails still hard-fails, and
+    /// no `[managed]` fence is written — a `required = true` fence must never
+    /// exist with no snapshot behind it.
+    #[tokio::test]
+    async fn apply_managed_config_first_adopt_fetch_failure_hard_fails_without_fence() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+        let broken = manager_with_failing_fetch(home.path());
+
+        let result = apply_managed_config(
+            &crate::config::Config::default(),
+            Some("corp.example.com/ocx-config:user"),
+            false,
+            false,
+            &broken,
+            &file_structure,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a first adopt with no snapshot to fall back on must hard-fail, got {result:?}"
+        );
+        assert!(
+            !home.path().join("config.toml").exists(),
+            "a failed first adopt must not write the [managed] fence"
+        );
+        assert!(
+            !file_structure.state.managed_config_snapshot_file().exists(),
+            "a failed first adopt must not leave a snapshot"
+        );
+    }
+
+    /// Self-heal sibling of the invariant above: a `Current` fence whose
+    /// snapshot was wiped has no fallback either, so a failing fetch propagates
+    /// instead of reporting `RefreshUnavailable`.
+    #[tokio::test]
+    async fn apply_managed_config_self_heal_fetch_failure_hard_fails() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+        // Restored $OCX_HOME: fence current, snapshot gone.
+        std::fs::remove_dir_all(file_structure.state.managed_config_dir()).unwrap();
+
+        let broken = manager_with_failing_fetch(home.path());
+        let result = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &broken,
+            &file_structure,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a self-heal with a wiped snapshot has no fallback and must hard-fail, got {result:?}"
+        );
+    }
+
+    /// Offline (no managed-config client): the refresh is a deliberate skip,
+    /// not a failure — `AlreadyAdopted`, never `RefreshUnavailable`, and no
+    /// stderr warning.
+    #[tokio::test]
+    async fn apply_managed_config_offline_rerun_is_already_adopted() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        let offline = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"newer\"\n")
+            .with_managed_config_client(None);
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &offline,
+            &file_structure,
+        )
+        .await
+        .expect("an offline re-run must succeed");
+        match second {
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => assert_eq!(digest, first_digest),
+            other => panic!("expected AlreadyAdopted, got {other:?}"),
+        }
+    }
+
+    /// A digest-pinned seed is content-addressed and cannot drift, so the
+    /// refresh is skipped even with a client present — proved by using a client
+    /// that could only fail the fetch.
+    #[tokio::test]
+    async fn apply_managed_config_digest_pinned_seed_skips_refresh() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let payload = "[registry]\ndefault = \"pinned\"\n";
+        // The stub's index digest does not depend on the identifier, so it can
+        // be computed first and then baked into the pinned reference.
+        let (_, index_digest) = crate::managed_config::test_support::stub_client_with_package(
+            &crate::oci::Identifier::parse("corp.example.com/ocx-config:user").unwrap(),
+            payload,
+        );
+        let reference = format!("corp.example.com/ocx-config:user@{index_digest}");
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(home.path(), &file_structure, &reference, payload).await;
+
+        let broken = manager_with_failing_fetch(home.path());
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(&reference),
+            false,
+            false,
+            &broken,
+            &file_structure,
+        )
+        .await
+        .expect("a digest-pinned re-run must not fetch, so it cannot fail");
+        match second {
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => assert_eq!(digest, first_digest),
+            other => panic!("expected AlreadyAdopted, got {other:?}"),
+        }
+    }
+
+    /// An in-force `ocx config update --pause` freezes the setup refresh too,
+    /// and setup does NOT clear the pause (unlike `ocx config update`, setup is
+    /// not an explicit fetch request).
+    #[tokio::test]
+    async fn apply_managed_config_pause_skips_refresh_and_keeps_pause() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        let pause = crate::managed_config::ManagedConfigPause::for_duration(std::time::Duration::from_secs(3600), None);
+        crate::managed_config::write_pause(&file_structure.state, &pause)
+            .await
+            .unwrap();
+
+        let republished = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"republished\"\n");
+        let second = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            false,
+            false,
+            &republished,
+            &file_structure,
+        )
+        .await
+        .expect("a paused re-run must succeed");
+        match second {
+            ManagedConfigSetupOutcome::AlreadyAdopted { digest } => assert_eq!(digest, first_digest),
+            other => panic!("expected AlreadyAdopted while paused, got {other:?}"),
+        }
+        assert!(
+            crate::managed_config::read_pause(&file_structure.state).await.is_some(),
+            "setup must not clear the pause"
+        );
+    }
+
+    /// `--dry-run` against an adopted seed never fetches: it reports
+    /// `WouldRefresh` and leaves the snapshot exactly as it was.
+    #[tokio::test]
+    async fn apply_managed_config_dry_run_on_adopted_seed_would_refresh() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let reference = "corp.example.com/ocx-config:user";
+        let identifier = crate::oci::Identifier::parse(reference).unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let first_digest = adopt(
+            home.path(),
+            &file_structure,
+            reference,
+            "[registry]\ndefault = \"adopted\"\n",
+        )
+        .await;
+
+        let republished = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"republished\"\n");
+        let outcome = apply_managed_config(
+            &crate::config::Config::default(),
+            Some(reference),
+            true,
+            false,
+            &republished,
+            &file_structure,
+        )
+        .await
+        .expect("a dry-run re-run must succeed");
+        match outcome {
+            ManagedConfigSetupOutcome::WouldRefresh { digest } => assert_eq!(digest, first_digest),
+            other => panic!("expected WouldRefresh, got {other:?}"),
+        }
+
+        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+            .await
+            .expect("the snapshot must survive a dry run");
+        assert_eq!(snapshot.digest, first_digest, "dry-run must not persist anything");
+        assert!(
+            snapshot.config.contains("adopted"),
+            "dry-run must not fetch the new payload"
+        );
+    }
+
+    /// Full 2^3 matrix of the pure skip decision, including its precedence:
+    /// a digest pin outranks a missing client, which outranks a pause.
+    #[test]
+    fn refresh_skip_reason_matrix() {
+        let floating = crate::oci::Identifier::parse("corp.example.com/ocx-config:user").unwrap();
+        let pinned =
+            crate::oci::Identifier::parse(&format!("corp.example.com/ocx-config:user@sha256:{}", "a".repeat(64)))
+                .unwrap();
+
+        // Not pinned.
+        assert_eq!(refresh_skip_reason(&floating, true, false), None, "the refresh runs");
+        assert_eq!(refresh_skip_reason(&floating, true, true), Some("paused"));
+        assert_eq!(refresh_skip_reason(&floating, false, false), Some("cannot-fetch"));
+        assert_eq!(
+            refresh_skip_reason(&floating, false, true),
+            Some("cannot-fetch"),
+            "a missing client outranks a pause"
+        );
+
+        // Pinned — content-addressed, so it wins in every combination.
+        for can_fetch in [true, false] {
+            for paused in [true, false] {
+                assert_eq!(
+                    refresh_skip_reason(&pinned, can_fetch, paused),
+                    Some("digest-pinned"),
+                    "a digest pin outranks can_fetch={can_fetch} paused={paused}"
+                );
+            }
         }
     }
 

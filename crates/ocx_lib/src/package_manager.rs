@@ -446,6 +446,18 @@ impl PackageManager {
         self
     }
 
+    /// Whether a managed-config fetch can even be attempted: `false` when the
+    /// dedicated managed-config client is absent (offline).
+    ///
+    /// The single predicate for "would a managed-config fetch reach the
+    /// network at all" — `ocx self setup` / `ocx config setup` consult it to
+    /// skip the refresh of an already-adopted seed instead of attempting a
+    /// fetch that can only fail. Whatever narrows the client's construction
+    /// (offline today, `--frozen` later) narrows the refresh with it.
+    pub fn can_fetch_managed_config(&self) -> bool {
+        self.managed_config_client.is_some()
+    }
+
     /// Inject the resolved patch configuration into this manager.
     ///
     /// Called from `Context::try_init` after `config_view.patches` is resolved.

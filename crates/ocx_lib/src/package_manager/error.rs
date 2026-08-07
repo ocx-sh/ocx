@@ -258,21 +258,9 @@ fn format_batch(verb: &str, errors: &[PackageError]) -> String {
 /// (see the type's doc comment), so the entry itself reports no source.
 fn render_entry(entry: &PackageError) -> String {
     use std::error::Error as _;
-    use std::fmt::Write as _;
 
     let mut out = entry.to_string();
-    let mut cause = entry.kind.source();
-    while let Some(source) = cause {
-        // Leaf subsystem errors (archive, oci/client, package/env, ci) still
-        // interpolate their own source; normalizing them is a deferred sweep,
-        // and skipping a link the text already ends with keeps the walk
-        // duplicate-free either way.
-        let text = source.to_string();
-        if !out.ends_with(&text) {
-            let _ = write!(out, ": {text}");
-        }
-        cause = source.source();
-    }
+    crate::error::append_chain(&mut out, entry.kind.source());
     out
 }
 

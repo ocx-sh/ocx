@@ -30,6 +30,12 @@ use crate::api::data::config_setup::ConfigSetupData;
 /// mismatched snapshot). Nothing resolved at any level is a usage error -
 /// unlike `ocx self setup`, this command exists only to set up the tier.
 ///
+/// Every run reconciles an already-adopted seed against the registry, so a
+/// newer published config is picked up without a separate `ocx config update`.
+/// If that refresh cannot reach the registry, the existing snapshot is kept
+/// and the run still succeeds. A digest-pinned seed, `--offline`, and an
+/// in-force `ocx config update --pause` each skip the refresh.
+///
 /// Unlike `ocx self setup`, no binary is installed and no shell profile is
 /// touched - this is the configuration-only entry point for automation and
 /// CI environments.
@@ -38,7 +44,9 @@ use crate::api::data::config_setup::ConfigSetupData;
 ///
 /// | Outcome | Exit |
 /// |---|---|
-/// | adopted / already adopted / cleared / would adopt | 0 |
+/// | adopted / refreshed / already adopted / cleared | 0 |
+/// | would adopt / would refresh (`--dry-run`) | 0 |
+/// | the refresh fetch of an already-adopted seed failed (snapshot kept; a snapshot-write failure still exits 74) | 0 |
 /// | nothing to set up (no flag, no env var, no seed) | 64 |
 /// | the fetched managed-config package is malformed (digest mismatch, no `any/any` entry, missing `config.toml`, over 64 KiB, or invalid TOML) | 65 |
 /// | the registry is unreachable while fetching the snapshot | 69 |
@@ -47,6 +55,10 @@ use crate::api::data::config_setup::ConfigSetupData;
 /// | package not found in registry | 79 |
 /// | authentication failed while fetching the snapshot | 80 |
 /// | the `[managed]` fence carries user edits (no `--force`) | 82 |
+///
+/// The registry codes (69 / 79 / 80) apply only while the tier is being
+/// adopted for the first time, or when the snapshot on disk is missing or
+/// belongs to another source.
 #[derive(Parser)]
 pub struct ConfigSetupArgs {
     /// Adopt (or clear) this managed-config source.
