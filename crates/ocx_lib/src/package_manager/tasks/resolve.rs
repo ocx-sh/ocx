@@ -303,6 +303,26 @@ pub struct SitePatchRoots {
     pub descriptor_pins: Vec<(String, oci::Digest)>,
 }
 
+/// Which patch-tier pins a [`SitePatchRoots`] resolution reads.
+///
+/// The patch tier has two bindings for the same companion or descriptor: the
+/// live record under `state/patch-*/`, and — when a freeze is active — the
+/// [`PatchSnapshot`](crate::patch::PatchSnapshot) pin. They diverge the moment
+/// an `ocx patch sync` advances the record past a snapshot, and the two callers
+/// of [`PackageManager::resolve_site_patch_roots`] want opposite things then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchRootScope {
+    /// The live record only — what `ocx patch freeze` must snapshot. Reading
+    /// through an active snapshot would let a freeze re-freeze its own output
+    /// instead of recording live state.
+    Recorded,
+    /// The live record UNION the active snapshot's pins — what garbage
+    /// collection must retain. Compose resolves snapshot ▸ record, so a root
+    /// set seeded from the record alone collects the very companion (and
+    /// descriptor blob) a frozen build still composes.
+    RecordedAndSnapshot,
+}
+
 /// What a [`ChainBlob`] is in OCI terms — disambiguates the otherwise
 /// opaque digest list so `inspect` can label each entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1429,11 +1449,20 @@ impl PackageManager {
     ///   image index, so the pinned identifier matches the path the package was
     ///   actually installed at. Both callers (GC root derivation, `ocx patch
     ///   freeze`) pass the host platform.
+    /// - `scope` — which patch-tier pins to read; see [`PatchRootScope`].
+    ///   `ocx patch freeze` passes [`PatchRootScope::Recorded`] so it snapshots
+    ///   live state; garbage collection passes
+    ///   [`PatchRootScope::RecordedAndSnapshot`] so it retains everything an
+    ///   active freeze still composes.
     ///
     /// # Errors
     ///
     /// Returns an error if the local filesystem state cannot be read.
-    pub async fn resolve_site_patch_roots(&self, platform: &oci::Platform) -> crate::Result<SitePatchRoots> {
+    pub async fn resolve_site_patch_roots(
+        &self,
+        platform: &oci::Platform,
+        scope: PatchRootScope,
+    ) -> crate::Result<SitePatchRoots> {
         // Short-circuit: no patch tier configured → empty roots.
         let Some(patches) = self.patches() else {
             return Ok(SitePatchRoots::default());
@@ -1493,6 +1522,15 @@ impl PackageManager {
             &mut descriptor_digests,
         )
         .await?;
+        seed_snapshot_descriptor_digests(
+            self,
+            scope,
+            blob_store,
+            &global_id,
+            global_manifest_digest.as_ref(),
+            &mut descriptor_digests,
+        )
+        .await;
         if let Some(manifest_digest) = global_manifest_digest {
             descriptor_pins.push((descriptor_source_key(&global_id), manifest_digest));
         }
@@ -1520,6 +1558,15 @@ impl PackageManager {
                 &mut descriptor_digests,
             )
             .await?;
+            seed_snapshot_descriptor_digests(
+                self,
+                scope,
+                blob_store,
+                &pkg_specific_id,
+                pkg_manifest_digest.as_ref(),
+                &mut descriptor_digests,
+            )
+            .await;
             if let Some(manifest_digest) = pkg_manifest_digest {
                 descriptor_pins.push((descriptor_source_key(&pkg_specific_id), manifest_digest));
             }
@@ -1540,7 +1587,10 @@ impl PackageManager {
         //   a) Read the RECORDED pin (`companion_pin_recorded`) — deliberately not
         //      `companion_pin`: `ocx patch freeze` builds its snapshot from these
         //      roots, so reading through an active snapshot would let a freeze
-        //      re-freeze its own output instead of recording live state.
+        //      re-freeze its own output instead of recording live state. Under
+        //      `PatchRootScope::RecordedAndSnapshot` the snapshot's own pin is
+        //      resolved AS WELL (never instead), because compose resolves
+        //      snapshot-first and GC must retain what compose will read.
         //   b) If the manifest blob at that digest is locally cached, read it and
         //      perform platform selection for image-index companions (multi-platform case).
         //      For single-platform companions (`Manifest::Image`), the pinned digest
@@ -1557,10 +1607,10 @@ impl PackageManager {
         companion_set.sort_by_key(|id| id.to_string());
         companion_set.dedup_by_key(|id| id.to_string());
 
-        'companion: for companion_id in &companion_set {
+        for companion_id in &companion_set {
             // Step a: read the recorded patch-tier pin.
             let top_digest = match self.companion_pin_recorded(companion_id).await {
-                Ok(Some(d)) => d,
+                Ok(Some(digest)) => digest,
                 Ok(None) => {
                     log::debug!(
                         "resolve-site-patch-roots: companion '{}' has no patch-tier pin; skipping",
@@ -1577,105 +1627,23 @@ impl PackageManager {
                 }
             };
 
-            // Step b: if the manifest blob is cached, read it and select the platform.
-            let top_id = companion_id.clone_with_digest(top_digest.clone());
-            let resolved_pinned: oci::PinnedIdentifier = match local_index
-                .fetch_manifest(&top_id, oci::index::IndexOperation::Query)
-                .await
-            {
-                Ok(Some((_, oci::Manifest::Image(_)))) => {
-                    // Single-platform: tag-store digest = platform manifest digest.
-                    let digest_only_id =
-                        oci::Identifier::new_registry(companion_id.repository(), companion_id.registry())
-                            .clone_with_digest(top_digest.clone());
-                    match oci::PinnedIdentifier::try_from(digest_only_id) {
-                        Ok(pinned) => pinned,
-                        Err(_) => {
-                            log::debug!(
-                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
-                                companion_id
-                            );
-                            continue 'companion;
-                        }
-                    }
-                }
-                Ok(Some((_, oci::Manifest::ImageIndex(_)))) => {
-                    // Multi-platform: select the child manifest for `platform`.
-                    let selected_id = match local_index
-                        .select(&top_id, platform, oci::index::IndexOperation::Query)
-                        .await
-                    {
-                        Ok(SelectResult::Found(id)) => id,
-                        Ok(
-                            SelectResult::NotFound | SelectResult::Ambiguous(_) | SelectResult::FeatureMismatch { .. },
-                        ) => {
-                            log::debug!(
-                                "resolve-site-patch-roots: could not select platform for companion '{}'; skipping",
-                                companion_id
-                            );
-                            continue 'companion;
-                        }
-                        Err(error) => {
-                            log::debug!(
-                                "resolve-site-patch-roots: error selecting platform for companion '{}': {error}; skipping",
-                                companion_id
-                            );
-                            continue 'companion;
-                        }
-                    };
-                    let Some(platform_digest) = selected_id.digest() else {
-                        log::debug!(
-                            "resolve-site-patch-roots: selected '{}' missing digest; skipping",
-                            companion_id
-                        );
-                        continue 'companion;
-                    };
-                    let digest_only_id =
-                        oci::Identifier::new_registry(selected_id.repository(), selected_id.registry())
-                            .clone_with_digest(platform_digest);
-                    match oci::PinnedIdentifier::try_from(digest_only_id) {
-                        Ok(pinned) => pinned,
-                        Err(_) => {
-                            log::debug!(
-                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
-                                companion_id
-                            );
-                            continue 'companion;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // Step c (fallback): manifest blob absent — use the tag-store digest directly.
-                    // Correct for single-platform companions; for multi-platform companions
-                    // without a locally cached image index this is best-effort.
-                    log::debug!(
-                        "resolve-site-patch-roots: manifest blob absent for '{}'; using tag-store digest as fallback",
-                        companion_id
-                    );
-                    let digest_only_id =
-                        oci::Identifier::new_registry(companion_id.repository(), companion_id.registry())
-                            .clone_with_digest(top_digest.clone());
-                    match oci::PinnedIdentifier::try_from(digest_only_id) {
-                        Ok(pinned) => pinned,
-                        Err(_) => {
-                            log::debug!(
-                                "resolve-site-patch-roots: could not pin companion '{}'; skipping",
-                                companion_id
-                            );
-                            continue 'companion;
-                        }
-                    }
-                }
-                Err(error) => {
-                    log::debug!(
-                        "resolve-site-patch-roots: error reading manifest for companion '{}': {error}; skipping",
-                        companion_id
-                    );
-                    continue 'companion;
-                }
-            };
+            // Steps b/c: pin → platform manifest.
+            if let Some(pinned) = resolve_companion_pinned(&local_index, companion_id, &top_digest, platform).await {
+                companions.push(pinned);
+            }
+        }
 
-            companions.push(resolved_pinned);
+        // Step 4 (GC only): every companion an active freeze pins is a root as
+        // well. Taken from the snapshot's own companion map rather than by
+        // re-reading pins for `companion_set`, because BOTH bindings can have
+        // moved since the freeze: the recorded digest (a sync advanced it) and
+        // the descriptor that names the companion at all (a sync advanced that
+        // too, possibly dropping the rule). Compose under a freeze reads the
+        // snapshot for both, so the root set has to as well.
+        for (companion_id, top_digest) in snapshot_companion_roots(self, scope) {
+            if let Some(pinned) = resolve_companion_pinned(&local_index, &companion_id, &top_digest, platform).await {
+                companions.push(pinned);
+            }
         }
 
         // Dedup and sort both vecs for deterministic output.
@@ -2117,14 +2085,189 @@ async fn collect_descriptor_digests(
         DescriptorLoadResult::Loaded(manifest_digest, descriptor) => (manifest_digest, descriptor),
     };
 
-    // Record the manifest digest (registry-qualified).
+    push_descriptor_blob_digests(blob_store, registry, &manifest_digest, descriptor_digests).await;
+
+    Ok((Some(descriptor), Some(manifest_digest)))
+}
+
+/// Every companion an active freeze pins, as `(identifier, top digest)` pairs.
+///
+/// Empty under [`PatchRootScope::Recorded`] and when no snapshot is loaded.
+/// The snapshot's own companion map is the authority here — not the
+/// descriptor-derived companion set — so a companion whose rule the live
+/// descriptor has since dropped is still retained for the frozen build that
+/// composes it. Keys are `registry/repository`; the split is unambiguous
+/// because an identifier's registry is a bare host authority. The identifier
+/// is deliberately tagless: the digest is the whole binding.
+fn snapshot_companion_roots(manager: &PackageManager, scope: PatchRootScope) -> Vec<(oci::Identifier, oci::Digest)> {
+    if scope != PatchRootScope::RecordedAndSnapshot {
+        return Vec::new();
+    }
+    let Some(snapshot) = manager.patch_snapshot() else {
+        return Vec::new();
+    };
+    snapshot
+        .companions
+        .iter()
+        .filter_map(|(key, digest)| {
+            let (registry, repository) = key.split_once('/')?;
+            Some((oci::Identifier::new_registry(repository, registry), digest.clone()))
+        })
+        .collect()
+}
+
+/// Seed the blob digests of a snapshot-pinned descriptor as GC roots.
+///
+/// Sibling of [`snapshot_companion_roots`] on the descriptor axis: under an
+/// active freeze compose loads each descriptor by its SNAPSHOT manifest digest
+/// from the CAS, so a root set built from the recorded pointer alone collects
+/// the descriptor blobs a frozen build still reads once a sync has advanced the
+/// record. No-op when the snapshot pins the digest already recorded.
+async fn seed_snapshot_descriptor_digests(
+    manager: &PackageManager,
+    scope: PatchRootScope,
+    blob_store: &crate::file_structure::BlobStore,
+    descriptor_id: &oci::Identifier,
+    recorded_manifest: Option<&oci::Digest>,
+    descriptor_digests: &mut Vec<(String, oci::Digest)>,
+) {
+    if scope != PatchRootScope::RecordedAndSnapshot {
+        return;
+    }
+    let Some(snapshot) = manager.patch_snapshot() else {
+        return;
+    };
+    let Some(pinned) = snapshot.descriptors.get(&descriptor_source_key(descriptor_id)) else {
+        return;
+    };
+    if recorded_manifest == Some(pinned) {
+        return;
+    }
+    push_descriptor_blob_digests(blob_store, descriptor_id.registry(), pinned, descriptor_digests).await;
+}
+
+/// Resolve one companion top digest to the pinned identifier the package store
+/// keys by, or `None` when it cannot be resolved locally.
+///
+/// The patch tier pins the TOP manifest digest (image index, or image manifest
+/// for a single-platform companion); the package store keys by PLATFORM
+/// manifest digest. Mirrors `find_companion_local`:
+///
+/// - `Manifest::Image` → the top digest already IS the platform digest.
+/// - `Manifest::ImageIndex` → select the host-platform child manifest.
+/// - manifest blob absent → fall back to the top digest (correct for a
+///   single-platform or locally materialized companion).
+async fn resolve_companion_pinned(
+    local_index: &oci::index::Index,
+    companion_id: &oci::Identifier,
+    top_digest: &oci::Digest,
+    host_platform: &oci::Platform,
+) -> Option<oci::PinnedIdentifier> {
+    fn pin(
+        repository: &str,
+        registry: &str,
+        digest: oci::Digest,
+        companion_id: &oci::Identifier,
+    ) -> Option<oci::PinnedIdentifier> {
+        let digest_only_id = oci::Identifier::new_registry(repository, registry).clone_with_digest(digest);
+        oci::PinnedIdentifier::try_from(digest_only_id)
+            .inspect_err(|_| {
+                log::debug!(
+                    "resolve-site-patch-roots: could not pin companion '{}'; skipping",
+                    companion_id
+                );
+            })
+            .ok()
+    }
+
+    let top_id = companion_id.clone_with_digest(top_digest.clone());
+    match local_index
+        .fetch_manifest(&top_id, oci::index::IndexOperation::Query)
+        .await
+    {
+        Ok(Some((_, oci::Manifest::Image(_)))) => pin(
+            companion_id.repository(),
+            companion_id.registry(),
+            top_digest.clone(),
+            companion_id,
+        ),
+        Ok(Some((_, oci::Manifest::ImageIndex(_)))) => {
+            let selected_id = match local_index
+                .select(&top_id, host_platform, oci::index::IndexOperation::Query)
+                .await
+            {
+                Ok(SelectResult::Found(id)) => id,
+                Ok(SelectResult::NotFound | SelectResult::Ambiguous(_) | SelectResult::FeatureMismatch { .. }) => {
+                    log::debug!(
+                        "resolve-site-patch-roots: could not select platform for companion '{}'; skipping",
+                        companion_id
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    log::debug!(
+                        "resolve-site-patch-roots: error selecting platform for companion '{}': {error}; skipping",
+                        companion_id
+                    );
+                    return None;
+                }
+            };
+            let Some(platform_digest) = selected_id.digest() else {
+                log::debug!(
+                    "resolve-site-patch-roots: selected '{}' missing digest; skipping",
+                    companion_id
+                );
+                return None;
+            };
+            pin(
+                selected_id.repository(),
+                selected_id.registry(),
+                platform_digest,
+                companion_id,
+            )
+        }
+        Ok(None) => {
+            // Manifest blob absent — use the pinned top digest directly.
+            // Correct for single-platform companions; for multi-platform ones
+            // without a locally cached image index this is best-effort.
+            log::debug!(
+                "resolve-site-patch-roots: manifest blob absent for '{}'; using tag-store digest as fallback",
+                companion_id
+            );
+            pin(
+                companion_id.repository(),
+                companion_id.registry(),
+                top_digest.clone(),
+                companion_id,
+            )
+        }
+        Err(error) => {
+            log::debug!(
+                "resolve-site-patch-roots: error reading manifest for companion '{}': {error}; skipping",
+                companion_id
+            );
+            None
+        }
+    }
+}
+
+/// Push one descriptor manifest digest and every layer digest it names onto the
+/// GC-root list.
+///
+/// Shared by the recorded-descriptor walk and the snapshot-pinned one, so both
+/// retain the same blob set. The manifest blob is re-read purely to parse its
+/// layer list — `load_descriptor_from_cas` already content-verified it on the
+/// recorded path, and on the snapshot path an unreadable blob is a root that
+/// simply matches nothing.
+async fn push_descriptor_blob_digests(
+    blob_store: &crate::file_structure::BlobStore,
+    registry: &str,
+    manifest_digest: &oci::Digest,
+    descriptor_digests: &mut Vec<(String, oci::Digest)>,
+) {
     descriptor_digests.push((registry.to_string(), manifest_digest.clone()));
 
-    // Extract layer digests from the manifest blob on disk.  The manifest was
-    // already verified by `load_descriptor_from_cas` inside
-    // `load_descriptor_for_id`, so we re-read the on-disk bytes only to parse
-    // the layer descriptor list — no re-verification needed.
-    let data_path = blob_store.path(registry, &manifest_digest).join("data");
+    let data_path = blob_store.path(registry, manifest_digest).join("data");
     match tokio::fs::read(&data_path).await {
         Ok(bytes) => {
             if let Ok(manifest_value) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -2145,8 +2288,6 @@ async fn collect_descriptor_digests(
             );
         }
     }
-
-    Ok((Some(descriptor), Some(manifest_digest)))
 }
 
 /// The reader both companion consumers — compose (`find_companion_local`) and
@@ -5706,6 +5847,7 @@ mod phase5a_spec_tests {
 
     use super::{
         super::patch_discovery::{PatchTagMap, global_descriptor_id},
+        PatchRootScope, descriptor_source_key,
         phase4_spec_tests::{seed_companion_pin, seed_package_with_constant_var},
     };
 
@@ -5887,7 +6029,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&crate::oci::Platform::any())
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -5916,6 +6058,177 @@ mod phase5a_spec_tests {
                 .any(|(reg, dig)| reg == PATCH_REGISTRY && dig == &layer_digest),
             "spec test 1: descriptor layer digest must be in .descriptors; got: {:?}",
             roots.descriptors
+        );
+    }
+
+    /// GC roots seeded under [`PatchRootScope::RecordedAndSnapshot`] retain the
+    /// companion an active freeze pins, not just the one the live record names.
+    ///
+    /// The two diverge as soon as an `ocx patch sync` advances the record past
+    /// the `patches.snapshot.json` an invocation adopted, because compose
+    /// resolves snapshot-first while GC used to seed record-only. The result
+    /// was `ocx clean` under `OCX_PATCH_SNAPSHOT` collecting the very companion
+    /// the next compose reads (optional: silently absent; required: 81).
+    /// `ocx patch freeze` keeps record-only scope — asserted here too, since a
+    /// freeze that read through its own snapshot could never record live state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn site_patch_roots_retain_the_snapshot_pinned_companion_for_garbage_collection() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        // The record advanced to v2 (a sync); the snapshot still pins v1.
+        let frozen_digest = sha256('c');
+        let synced_digest = sha256('d');
+        let pinned_at = |digest: &Digest| {
+            PinnedIdentifier::try_from(
+                Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(digest.clone()),
+            )
+            .unwrap()
+        };
+
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        seed_companion_pin(&file_structure, &companion_tag_id, &synced_digest);
+        seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
+
+        // A second frozen companion no live descriptor names any more — the
+        // rule was dropped by the same sync that advanced the record. The
+        // frozen build still composes it, so GC still has to retain it.
+        let dropped_digest = sha256('e');
+        let dropped_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("legacy-ca", PATCH_REGISTRY).clone_with_digest(dropped_digest.clone()),
+        )
+        .unwrap();
+
+        let snapshot = crate::patch::PatchSnapshot {
+            version: crate::patch::snapshot::SnapshotVersion::V1,
+            companions: [
+                (format!("{PATCH_REGISTRY}/ca-bundle"), frozen_digest.clone()),
+                (format!("{PATCH_REGISTRY}/legacy-ca"), dropped_digest.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            descriptors: std::collections::BTreeMap::new(),
+        };
+        let manager = make_manager(&dir)
+            .with_patches(Some(patch_config.clone()))
+            .with_patch_snapshot(Some(snapshot));
+
+        let gc_roots = manager
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::RecordedAndSnapshot)
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+        assert!(
+            gc_roots.companions.contains(&pinned_at(&frozen_digest)),
+            "GC roots must retain the snapshot-pinned companion a frozen compose still reads; got: {:?}",
+            gc_roots.companions
+        );
+        assert!(
+            gc_roots.companions.contains(&pinned_at(&synced_digest)),
+            "GC roots must retain the recorded companion as well; got: {:?}",
+            gc_roots.companions
+        );
+        assert!(
+            gc_roots.companions.contains(&dropped_pinned),
+            "GC roots must retain a frozen companion no live descriptor names any more; got: {:?}",
+            gc_roots.companions
+        );
+
+        let freeze_roots = manager
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+        assert_eq!(
+            freeze_roots.companions,
+            vec![pinned_at(&synced_digest)],
+            "a freeze must snapshot live state only, never re-freeze its own snapshot"
+        );
+    }
+
+    /// The descriptor half of the snapshot-blind GC hole: an active freeze
+    /// loads each descriptor by its SNAPSHOT manifest digest from the CAS, so
+    /// those blobs are GC roots too once a sync has advanced the record.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn site_patch_roots_retain_the_snapshot_pinned_descriptor_blobs() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        seed_installed_base_symlink(&dir, &base_id);
+
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let (recorded_manifest, _) =
+            seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
+
+        // A second, older descriptor generation — still in the CAS, still what
+        // the snapshot pins, no longer what the record points at.
+        let blob_store = BlobStore::new(dir.path().join("blobs"));
+        let frozen_layer_bytes = serde_json::json!({ "version": 1, "rules": [] }).to_string();
+        let frozen_layer_digest = Algorithm::Sha256.hash(frozen_layer_bytes.as_bytes());
+        let frozen_manifest_bytes = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{ "digest": frozen_layer_digest.to_string() }],
+        })
+        .to_string();
+        let frozen_manifest_digest = Algorithm::Sha256.hash(frozen_manifest_bytes.as_bytes());
+        blob_store
+            .write_blob(
+                PATCH_REGISTRY,
+                &frozen_manifest_digest,
+                frozen_manifest_bytes.as_bytes(),
+            )
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &frozen_layer_digest, frozen_layer_bytes.as_bytes())
+            .await
+            .unwrap();
+        assert_ne!(
+            recorded_manifest, frozen_manifest_digest,
+            "the two descriptor generations must differ for this test to discriminate"
+        );
+
+        let global_key = descriptor_source_key(&global_descriptor_id(&patch_config));
+        let snapshot = crate::patch::PatchSnapshot {
+            version: crate::patch::snapshot::SnapshotVersion::V1,
+            companions: std::collections::BTreeMap::new(),
+            descriptors: [(global_key, frozen_manifest_digest.clone())].into_iter().collect(),
+        };
+        let manager = make_manager(&dir)
+            .with_patches(Some(patch_config.clone()))
+            .with_patch_snapshot(Some(snapshot));
+
+        let gc_roots = manager
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::RecordedAndSnapshot)
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+        for digest in [&frozen_manifest_digest, &frozen_layer_digest] {
+            assert!(
+                gc_roots
+                    .descriptors
+                    .iter()
+                    .any(|(registry, rooted)| registry == PATCH_REGISTRY && rooted == digest),
+                "GC roots must retain the snapshot-pinned descriptor blob {digest}; got: {:?}",
+                gc_roots.descriptors
+            );
+        }
+
+        let freeze_roots = manager
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+        assert!(
+            !freeze_roots
+                .descriptors
+                .iter()
+                .any(|(_, rooted)| rooted == &frozen_manifest_digest),
+            "a freeze must see live state only; got: {:?}",
+            freeze_roots.descriptors
         );
     }
 
@@ -5970,7 +6283,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&crate::oci::Platform::any())
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
             .await
             .expect("resolve_site_patch_roots must succeed even under ChainMode::Remote");
 
@@ -6003,7 +6316,7 @@ mod phase5a_spec_tests {
         seed_installed_base_symlink(&dir, &base_id);
 
         let roots = manager
-            .resolve_site_patch_roots(&crate::oci::Platform::any())
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
             .await
             .expect("resolve_site_patch_roots with patches=None must return Ok(empty)");
 
@@ -6127,7 +6440,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&crate::oci::Platform::any())
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -6251,7 +6564,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&crate::oci::Platform::any())
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), PatchRootScope::Recorded)
             .await
             .expect("resolve_site_patch_roots must succeed");
 

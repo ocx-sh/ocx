@@ -135,6 +135,26 @@ pub enum PatchError {
         #[source]
         source: crate::Error,
     },
+
+    /// A companion carries no recorded patch-tier pin and `--offline` forbids
+    /// resolving its tag to discover one.
+    ///
+    /// Raised by
+    /// [`install_companion`](crate::package_manager::PackageManager::install_companion):
+    /// pulling an already-pinned digest stays allowed, but learning a NEW
+    /// tag→digest binding needs the network. `--frozen` is deliberately NOT a
+    /// cause — it scopes to the package tier, and a companion resolves live
+    /// under it.
+    ///
+    /// The remedy names `ocx patch sync` because it is the ONLY command that
+    /// writes a companion pin — the package-tier `ocx index update` never does.
+    #[error(
+        "offline mode refused to resolve unpinned companion '{identifier}'; run `ocx patch sync` without --offline"
+    )]
+    PolicyBlocked {
+        /// The companion whose tag could not be resolved.
+        identifier: Box<crate::oci::Identifier>,
+    },
 }
 
 impl ClassifyExitCode for PatchError {
@@ -145,6 +165,8 @@ impl ClassifyExitCode for PatchError {
             Self::FetchFailed { source } => source.classify(),
             // Blob-write failures are I/O errors.
             Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
+            // A deliberate local policy refused the resolution — not a fault.
+            Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
             // Descriptor shape / version / parse issues = malformed data.
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }

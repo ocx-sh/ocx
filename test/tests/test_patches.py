@@ -1612,24 +1612,17 @@ def test_patch_test_companion_archive_still_resolves(
     )
 
 
-def test_frozen_patch_test_refuses_to_resolve_an_unindexed_companion(
+def test_frozen_patch_test_resolves_an_unindexed_companion_live(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """`--frozen` must reach `patch test`'s scratch resolution chain.
+    """`--frozen` does not reach a companion resolve, in `patch test` either.
 
-    `patch test` builds its own chain over a scratch root rather than reusing
-    `default_index`, so the invocation's policy ceiling has to be threaded into
-    it explicitly. It is not decoration: that chain now carries every
-    index-bearing namespace's source, so a hardcoded `Default` lets a frozen
-    invocation resolve an unpinned companion live — dialling the index and then
-    the physical host — which is the exact egress `--frozen` exists to prevent.
-
-    The two halves are deliberately asymmetric so the assertion can only be
-    about the companion. The base IS indexed locally, so frozen resolves it
-    with no network and the run gets as far as the companion; the companion is
-    published to the registry but `index=False`, so it has no local tag pointer
-    and an unpinned-tag miss under a no-resolve policy is a policy block (81),
-    the same contract `ocx --frozen pull` honours for the same identifier.
+    `--frozen` scopes to the package tier; patches float by design. The two
+    halves are deliberately asymmetric so the assertion can only be about the
+    companion: the base IS indexed locally, so the frozen chain resolves it
+    with no network; the companion is published but `index=False`, so it has
+    no local tag pointer at all and only the mode-independent live view can
+    find it.
     """
     base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
 
@@ -1654,16 +1647,21 @@ def test_frozen_patch_test_refuses_to_resolve_an_unindexed_companion(
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
 
-    result = ocx.plain(
+    result = ocx.run(
         "--frozen",
         "patch", "test",
         "--descriptor", str(descriptor_path),
         base_pkg.short,
+        format="json",
         check=False,
     )
-    assert result.returncode == 81, (
-        "ocx --frozen patch test must refuse to resolve an unpinned, unindexed companion "
-        f"(exit 81 PolicyBlocked); got {result.returncode}\nstderr: {result.stderr}"
+    assert result.returncode == 0, (
+        "ocx --frozen patch test must resolve an unpinned, unindexed companion live; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["entries"], "FROZEN_PATCH_VAR")
+    assert entry is not None and entry["value"] == "v", (
+        f"the live-resolved companion's INTERFACE var must compose; got: {entry}"
     )
 
 

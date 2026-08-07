@@ -37,9 +37,11 @@ impl PatchFreezeArgs {
         // `[patches]` config tier). When no patch tier is configured, roots is
         // empty and the snapshot records zero companions / descriptors.
         let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        // Record-only: a freeze snapshots LIVE state. Reading through an
+        // already-active snapshot would make it re-freeze its own output.
         let roots = context
             .manager()
-            .resolve_site_patch_roots(&host)
+            .resolve_site_patch_roots(&host, ocx_lib::package_manager::PatchRootScope::Recorded)
             .await
             .map_err(anyhow::Error::new)?;
 

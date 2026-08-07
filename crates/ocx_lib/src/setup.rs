@@ -556,7 +556,8 @@ pub async fn apply_managed_config(
 /// case reports [`ManagedConfigSetupOutcome::AlreadyAdopted`] and logs at
 /// debug. `OCX_NO_CONFIG_REFRESH` is deliberately absent: that kill switch
 /// gates the background tick only, and `--offline` is the no-network lever for
-/// setup.
+/// setup. `--frozen` is absent for a different reason: it scopes to the
+/// package tier, so the managed tier behaves identically with and without it.
 fn refresh_skip_reason(identifier: &crate::oci::Identifier, can_fetch: bool, paused: bool) -> Option<&'static str> {
     if identifier.digest().is_some() {
         return Some("digest-pinned");
