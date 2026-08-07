@@ -25,6 +25,28 @@ digest, and logical → physical routing (a root's `repository` field). Three co
 3. **GC never changes identity.** `ocx clean` may evict blob CONTENT (refetched by digest,
    byte-stable); which digest a pin resolves to is out of its reach.
 
+**Cross-tier routing follows from consequence 2.** A patch companion or a managed-config
+source is never "named" the way consequence 2 means it — a companion is named by a
+descriptor on the operator's behalf, and a managed-config source is not a package at all —
+so neither pins here. They pin in their own tier-scoped state instead:
+`state/patch-companions/` and `state/managed-config/snapshot.json`. Nothing under
+`oci/index/**` may be asked to record either binding; see `subsystem-package-manager.md`
+and `subsystem-file-structure.md` for where that state actually lives.
+
+The tag pointer is not the only thing that would land here. A pinned `tag@digest` pull
+skips `commit_root_tag` but still writes the **dispatch object** into the repository's
+`o/`, so a companion install carries `LocalWritePolicy::ReadOnly` all the way through
+(`PackageManager::read_only_view`) and the companion readers resolve their pin from
+`$OCX_HOME/blobs` through a `ReadOnly` view rather than from `o/` — otherwise the
+`AbsentDispatch` self-heal writes the object back on the first compose. A companion
+repository owns **zero bytes** under `index/`.
+
+The corollary is that `--frozen` does not reach them either. It freezes THIS pin, so a
+companion resolve routes through `Index::remote_view` — mode-independent by construction —
+rather than the ambient chain, whose `ChainMode::Frozen` would refuse an unpinned companion
+tag that no local index was ever meant to hold (issue #293). `--offline` is a separate
+question and is gated by the patch tier before any view is built.
+
 **Silence principle.** If something is locally committed, resolving it makes no network request and
 reveals nothing about remote state — no drift warning, no drift error, no comparison. Remote data
 fetched during a genuine first-resolve contributes ONLY the missing entry; everything else
@@ -116,7 +138,7 @@ The enum exists because the trait used to conflate query and update — a cache 
 |--------|-------------|------------------------|----------------------|----------------------|
 | `Full` | `new` / `from_chained*` | write | grow | write |
 | `NoTag` | `new_lock_scoped` (update family) | write | skip | write |
-| `ReadOnly` | `read_only_view` (inspect) / `remote_view` (update check) | **skip** (`fetch_dispatch_only`, no stage) | skip | skip |
+| `ReadOnly` | `read_only_view` (inspect, patch-companion pull + read) / `remote_view` (update check, companion resolve) | **skip** (`fetch_dispatch_only`, no stage) | skip | skip |
 
 `ReadOnly` is the only policy that persists **nothing** into the permanent index — a read-only `ocx package inspect` resolves content-addressed (index → blobs → source) and warms the GC-able blob cache (`stage_leaf_manifest`, `stage_chain_blobs`, config-blob `fetch_blob` all still write `$OCX_HOME/blobs`), but never grows the committed index. Threaded as `IndexImpl::read_only_view` (default = `box_clone`; `ChainedIndex` flips the policy) → `Index::read_only_view` → `PackageManager::read_only_index` / `read_only_view`. The write policy survives `box_clone`. Acceptance: `test/tests/test_inspect_no_index_growth.py`; unit: `chain_refs_tests::read_only_view_resolves_but_writes_no_dispatch_object_or_tag_pointer`. Rationale: the index is deployment-managed and outside GC (`adr_index_indirection.md` B1), so an inspect-time write would be permanent pollution; the blob cache self-cleans on `ocx clean`.
 

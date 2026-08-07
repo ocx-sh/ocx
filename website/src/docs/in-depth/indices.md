@@ -114,6 +114,8 @@ A **later** catalog sync that finds the *remote* root digest has moved past the 
 
 **Naming packages is the only mode. There is no whole-index sync, and that is deliberate.** A remote index floats by definition: packages appear, platforms get added to existing versions, tags move. A local copy is not a mirror of it — it is the set of snapshots you asked for, one deliberate `ocx index update <pkg>` at a time. "Sync everything" has no well-defined meaning against a partially materialized copy: it would either clone a floating remote (making the copy stop being a lock) or re-snapshot whatever subset happens to be present (an arbitrary set nobody chose).
 
+Naming is also *who*: the index pins only packages the user named directly, so a [patch companion][user-patches-pins] — a package a descriptor names on the operator's behalf — pins in its own patch-tier state (`state/patch-companions/`) instead, and never as a local-index entry.
+
 Tag-scoped mode is ideal for lockfile workflows where the local index should hold only explicitly requested tags. Packages not listed are not touched — not their tag pins, and not the `repository` pointer that decides which registry the package is fetched from — and nothing is fetched about them either: an update requests the named packages' roots and their dispatch objects, and stops.
 
 To ask what the source has now, ask the source: [`ocx index catalog --remote`][cmd-index-catalog] lists what it publishes, [`ocx index list --remote`][cmd-index-list] the tags of one package. Without `--remote` both answer from the local copy — the index you maintain. "Am I behind?" is a question about the remote, so it is asked out loud rather than tracked in local shadow state.
@@ -346,6 +348,7 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 
 <!-- internal -->
 [user-indices]: ../user-guide.md#offline
+[user-patches-pins]: ../user-guide/patches.md#patches-pins
 [in-depth-storage]: ./storage.md
 [in-depth-storage-packages]: ./storage.md#packages
 [in-depth-storage-layers]: ./storage.md#layers

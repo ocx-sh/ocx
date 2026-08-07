@@ -230,8 +230,14 @@ export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
 ```
 
 When set, the compose overlay prefers the snapshot's pinned companion digests over live tag
-lookups, enabling reproducible builds without a network round-trip.
-Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]).
+lookups, enabling reproducible builds without a network round-trip. Pins are per
+`repository:tag`, so one repository named at two tags freezes as two independent companions.
+Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]); a file whose
+format version this `ocx` does not read is refused (exit `65`) with that same remedy.
+
+Adopting a snapshot is a deliberate opt-in: this variable is the only selector, and it is
+independent of [`OCX_FROZEN`](#ocx-frozen) / [`--frozen`][arg-frozen], which scope to the package
+tier. Freezing the patch tier means pointing this variable at a snapshot.
 
 This variable is resolution-affecting and is forwarded to child ocx processes (such as generated
 entrypoint launchers) so they resolve the same frozen companion digests as the parent.
@@ -539,9 +545,11 @@ Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See
 
 ### `OCX_FROZEN` {#ocx-frozen}
 
-When set to a [truthy value](#truthy-values), freezes tag→digest resolution to the local index. A tag already in the local index resolves from cache; a digest-pinned identifier (`repo@sha256:…`, or a tag pinned by `ocx.lock`) still fetches its content over the network. An unpinned tag missing from the local index errors with exit code `81` instead of being fetched and recorded — the guarantee that no unknown version is installed.
+When set to a [truthy value](#truthy-values), freezes tag→digest resolution to the local index. A tag already in the local index resolves from cache; a digest-pinned identifier (`repo@sha256:…`, or a tag pinned by `ocx.lock`) still fetches its content over the network. An unpinned tag missing from the local index errors with exit code `81` instead of being fetched and recorded — the guarantee that no unknown version is installed. Run [`ocx index update`][cmd-index-update] to populate the index first, with this variable unset: recording a new mapping is itself discovery, so a frozen index update is refused (exit `81`).
 
-Unlike [`OCX_OFFLINE`](#ocx-offline), this is **not** a network ban: known and digest-pinned content is still fetched. It only refuses to discover a new tag→digest mapping. Run [`ocx index update`][cmd-index-update] to populate the index first.
+It scopes to the package tier, whose pin is the local index. A patch companion resolves live regardless — patches float by design — and pins in the patch tier's own record (`$OCX_HOME/state/patch-companions/`), advanced by [`ocx patch sync`][cmd-patch-sync] and frozen deliberately with `ocx patch freeze` plus [`OCX_PATCH_SNAPSHOT`](#ocx-patch-snapshot). The managed-configuration tier is likewise unaffected: `ocx config setup` / `ocx config update` behave identically with and without this variable.
+
+Unlike [`OCX_OFFLINE`](#ocx-offline), this is **not** a network ban: known and digest-pinned content is still fetched. It only refuses to discover a new tag→digest mapping.
 
 Equivalent to passing the [`--frozen`][arg-frozen] flag on every invocation; the flag takes precedence. Mutually exclusive with [`OCX_REMOTE`](#ocx-remote) (combining the two is a usage error, exit `64`); combining with [`OCX_OFFLINE`](#ocx-offline) is accepted, with offline taking effect.
 
@@ -712,6 +720,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-remote]: command-line.md#arg-remote
 [cmd-index-update]: command-line.md#index-update
 [cmd-package-announce]: command-line.md#package-announce
+[cmd-patch-sync]: command-line.md#patch-sync
 [cmd-run]: command-line.md#run
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate

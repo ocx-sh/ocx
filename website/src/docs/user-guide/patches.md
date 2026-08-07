@@ -283,17 +283,27 @@ ocx patch freeze
 ```
 
 This resolves every companion and descriptor currently in use and writes
-`patches.snapshot.json` beside `ocx.lock`. Point `OCX_PATCH_SNAPSHOT` at this file to
-make all composition prefer the pinned digests:
+`patches.snapshot.json` beside `ocx.lock` (or beside `$OCX_HOME/ocx.lock` when run with
+[`--global`][cmd-global-flag]). Companions are pinned per `repository:tag`, so a
+descriptor that names one repository at two tags freezes both versions independently.
+
+The file is derived state, not something to hand-edit: it records a format version, and a
+version this `ocx` does not read is refused (exit [`65`][exit-codes]) with the remedy to
+re-run `ocx patch freeze`. Re-freezing is offline and takes no longer than the first run.
+
+Point [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] at the file to make all composition
+prefer the pinned digests:
 
 ```sh
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
 ```
 
-With the snapshot in place, `ocx run` uses the frozen companion digests and skips live
-tag lookups even offline.
+With the snapshot in place, `ocx run` uses the frozen companion digests and skips live tag
+lookups even offline. To return to floating (live) tags, unset the variable.
 
-To return to floating (live) tags, unset `OCX_PATCH_SNAPSHOT`.
+Freezing the patch tier is a deliberate opt-in and is independent of
+[`--frozen`][arg-frozen], which scopes to the package tier: patches float by design, so a
+companion resolves live under that flag exactly as it does without it.
 
 :::tip Float vs freeze
 Leave `OCX_PATCH_SNAPSHOT` unset during development so you always pull the latest
@@ -411,6 +421,24 @@ companion into an optional one. Run `ocx patch sync` while you still have networ
 let the lazy install-time hook do it during `ocx package install`) so every required
 companion is already in the local store before you disconnect.
 
+## Where companion pins live {#patches-pins}
+
+A companion's tag→digest binding is written to `$OCX_HOME/state/patch-companions/`, one
+JSON file per patch-registry repository — never into the [local index][fs-index]
+(`$OCX_HOME/index/`). A companion repository owns **zero bytes** there: no root document,
+and no dispatch object either, so committing an index tree to git never picks one up.
+A companion is a package the descriptor named on the operator's
+behalf, not one you asked for by name, so its binding belongs to the patch tier's own
+state rather than the package-tier pin `ocx index update` maintains. One consequence
+follows directly: [`ocx index update`][cmd-index-update] can never make a companion
+resolvable, and [`--frozen`][arg-frozen] — which freezes that index — does not reach a
+companion at all. Patches float by design.
+
+A companion's pin only ever advances on [`ocx patch sync`][cmd-patch-sync], including for
+a rolling tag the descriptor keeps naming. Composition reads the pin; it never writes one
+back. When a descriptor changes or a new companion should be picked up, sync while online,
+then run `ocx patch freeze` again to capture the result for the next reproducible build.
+
 ## Configuration {#patches-config}
 
 Site administrators configure the patch tier in `config.toml`:
@@ -440,6 +468,10 @@ For the full field reference, see the [`[patches]` configuration section][config
   onto the base package's execution environment.
 - [`[mirrors]` reference][config-mirrors] — the transport-level sibling to the patch tier.
 - [Command reference: `patch`][cmd-patch] — `publish`, `sync`, `freeze`, `test`, `why`.
+- [Command reference: `--frozen`][arg-frozen] — the package tier's freeze, and why it
+  leaves the patch tier floating.
+- [Indices: Local Index][fs-index] — where the package-tier pin `ocx index update`
+  maintains lives, and how it differs from a companion's pin.
 
 <!-- external -->
 [asciinema]: https://asciinema.org/
@@ -477,9 +509,17 @@ For the full field reference, see the [`[patches]` configuration section][config
 <!-- commands -->
 [cmd-patch]: ../reference/command-line.md#patch
 [cmd-patch-why]: ../reference/command-line.md#patch-why
+[cmd-patch-sync]: ../reference/command-line.md#patch-sync
+[cmd-index-update]: ../reference/command-line.md#index-update
 [cmd-run]: ../reference/command-line.md#run
 [cmd-env-root]: ../reference/command-line.md#env-root
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-package-exec]: ../reference/command-line.md#package-exec
 [cmd-package-test]: ../reference/command-line.md#package-test
 [cmd-lock]: ../reference/command-line.md#lock
+[cmd-global-flag]: ../reference/command-line.md#global-flag
+[arg-frozen]: ../reference/command-line.md#arg-frozen
+[exit-codes]: ../reference/command-line.md#exit-codes
+
+<!-- in-depth -->
+[fs-index]: ../in-depth/indices.md#local

@@ -55,7 +55,7 @@ That digest round-trips: re-running `/tmp/ocx self setup 0.9.2@$digest` exits 0 
 When the specified version is already installed, `ocx self setup` is a no-op and exits 0 — the shims and profile blocks are only re-written when their content has drifted.
 
 ::: tip Offline and frozen environments
-A digest-only pin works under `--frozen` when the blobs are cached locally. A tag-only pin under `--frozen` resolves from the local index; the command exits 81 if the tag is absent from the index — run `ocx index update` first.
+A digest-only pin works under `--frozen` when the blobs are cached locally. A tag-only pin under `--frozen` resolves from the local index; the command exits 81 if the tag is absent from the index — run `ocx index update` first, without `--frozen` (an index update is discovery, so a frozen one is refused too).
 :::
 
 ## Project Toolchain {#project}

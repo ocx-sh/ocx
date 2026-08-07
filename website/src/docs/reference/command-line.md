@@ -94,7 +94,19 @@ unpinned tag that is missing from the local index **errors** with exit
 [`81`](#exit-codes) instead of being fetched and recorded — `--frozen`
 guarantees that no unknown (un-pinned) version slips in. To resolve a new tag
 under `--frozen`, populate the local index first with
-[`ocx index update`](#index-update).
+[`ocx index update`](#index-update) — run without the flag, because recording a
+new mapping is itself the discovery a freeze exists to refuse, so a frozen index
+update is rejected with exit [`81`](#exit-codes).
+
+The flag scopes to the **package tier** — the local index is the pin it freezes.
+Patches float by design, so a patch companion resolves live under `--frozen`
+exactly as it does without it, and pins in the patch tier's own state
+(`$OCX_HOME/state/patch-companions/`) rather than the index; freeze the patch
+tier deliberately with [`ocx patch freeze`](#patch-freeze) plus
+[`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot]. The managed-configuration tier is
+likewise unaffected: [`ocx config setup`](#config-setup) and
+[`ocx config update`](#config-update) behave identically with and without the
+flag.
 
 Unlike [`--offline`](#arg-offline), `--frozen` is **not** a network ban: it
 still reaches the registry for known and digest-pinned content. It only refuses
@@ -290,7 +302,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials | Refresh or set registry credentials |
-| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
+| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
 
 **75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
 
@@ -946,6 +958,15 @@ their updated tags.
 **Arguments**
 
 - `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags. At least one is required.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Every named package refreshed. |
+| 64 | No PACKAGE given — there is no "everything" to fall back on. |
+| 81 | [`--offline`](#arg-offline) or [`--frozen`](#arg-frozen) refused the command. Recording a new tag→digest mapping *is* the discovery a freeze forbids, and this is the package tier `--frozen` scopes to — so `index update` refuses in its own right. Re-run it without the flag to move the pin. |
+| *other* | The first failure in request order decides — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
 
 ### `about` {#about}
 
@@ -3596,9 +3617,14 @@ ocx patch <SUBCOMMAND>
 #### `patch freeze` {#patch-freeze}
 
 Resolves every companion and descriptor digest in the active patch overlay and writes
-`patches.snapshot.json` beside `ocx.lock` (or in `$OCX_HOME` under `--global`). Once
-written, set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file path so all
-subsequent composition prefers the pinned digests over live tag lookups.
+`patches.snapshot.json` beside `ocx.lock` (or in `$OCX_HOME` under `--global`).
+
+Set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file's path so all subsequent
+composition prefers the pinned digests over live tag lookups. Adopting a snapshot is a
+deliberate opt-in and is independent of [`--frozen`][arg-frozen], which scopes to the
+package tier: freeze the patch tier by pointing that variable at this file. Companions are
+pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both
+versions independently.
 
 Works offline: only the local object store is consulted.
 
@@ -3623,6 +3649,7 @@ full root-flag reference.
 | Code | Meaning |
 |------|---------|
 | 0 | Snapshot written successfully. |
+| 65 | An existing snapshot on the read path carries a format version this `ocx` does not read — re-run this command to rewrite it. |
 | 74 | I/O error writing the snapshot file. |
 | 78 | No `ocx.lock` found for the project tier (run `ocx lock` first). |
 
