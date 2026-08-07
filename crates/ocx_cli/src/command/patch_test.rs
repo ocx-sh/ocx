@@ -123,10 +123,11 @@ fn build_scratch_manager(
         .with_patches(Some(patches.clone()))
         // Route the guaranteed-local companion / site-patch lookups
         // (`effective_index_store`) through the SAME index home the reused
-        // `local_index` (and thus `pull`) writes tag pointers to. Without this the
-        // manager falls back to the scratch root's empty `index/`, so a
-        // registry-pulled companion's tag pointer — committed to the context's
-        // real home — is invisible to `find_companion_local`, which then reports
+        // `local_index` (and thus `pull`) writes to. Without this the manager
+        // falls back to the scratch root's empty `index/`, so the
+        // digest-addressed dispatch object the pinned companion pull just
+        // persisted into the context's real home is invisible to
+        // `find_companion_local`'s platform-selection step, which then reports
         // the required companion as not found (exit 79).
         .with_index(context.local_index().index_store().clone())
 }

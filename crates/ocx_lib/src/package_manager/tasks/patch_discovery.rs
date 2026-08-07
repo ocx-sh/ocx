@@ -148,6 +148,24 @@ impl PatchTagMap {
         locked.write(&map).await
     }
 
+    /// Atomically record `tag` → `digest` **only if `tag` has no entry yet**,
+    /// reporting whether the write happened.
+    ///
+    /// One exclusive lock spans the read and the write, so two concurrent
+    /// fill-ins cannot both decide the key is absent. A key that is already
+    /// present keeps its value: this is for filling a gap, never for advancing
+    /// a binding (that is a sync's job).
+    pub async fn write_tag_if_absent(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<bool> {
+        let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
+        let mut map = locked.read().await?.unwrap_or_default();
+        if map.contains_key(tag) {
+            return Ok(false);
+        }
+        map.insert(tag.to_string(), digest.to_string());
+        locked.write(&map).await?;
+        Ok(true)
+    }
+
     /// Read the discovery state for the given tag-store path.
     ///
     /// - Path absent → [`PatchDiscoveryState::NeverLooked`].
@@ -656,6 +674,17 @@ impl PackageManager {
                                 companion: companion_id,
                                 source: Box::new(kind),
                             });
+                        } else if matches!(
+                            kind,
+                            PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
+                        ) {
+                            // Fail-open, benign: an optional companion with no pin
+                            // is the steady state of every offline build. A warning
+                            // here would fire on every single invocation.
+                            log::debug!(
+                                "patch discovery: optional companion '{}' is unpinned and offline mode may not resolve it; skipping",
+                                companion_id
+                            );
                         } else {
                             // Fail-open: optional companion failed → warn and continue.
                             log::warn!(
@@ -699,13 +728,13 @@ impl PackageManager {
     ///
     /// - **Pin hit** ([`PatchDiscoveryMode::Lazy`] only) — pull the recorded
     ///   digest directly. No tag resolution at all, so a steady-state install
-    ///   is one lookup cheaper AND cannot drift.
-    /// - **No pin, or [`PatchDiscoveryMode::Sync`]** — resolve the tag through a
-    ///   view that writes nothing into the local index, pull the resulting
-    ///   digest pinned, and record the pin on success. Sync resolves through
-    ///   [`oci::index::Index::remote_view`] (live, `ReadOnly`) because the
-    ///   whole point of a sync is to see a tag that moved upstream; the
-    ///   already-cached local answer would make it a no-op.
+    ///   is one lookup cheaper AND cannot drift. A pin that came from the
+    ///   active snapshot rather than the record is written back
+    ///   ([`backfill_companion_pin`](Self::backfill_companion_pin)) so freeze
+    ///   and garbage collection can still see it.
+    /// - **No pin, or [`PatchDiscoveryMode::Sync`]** — resolve the tag through
+    ///   [`oci::index::Index::remote_view`] (live, `ReadOnly`), pull the
+    ///   resulting digest pinned, and record the pin on success.
     ///
     /// The recorded digest is the TOP manifest digest (image index where the
     /// companion is multi-platform) — platform-independent, so compose's own
@@ -744,7 +773,8 @@ impl PackageManager {
         // neither can be changed back to the ambient manager in isolation.
         let store_only = self.read_only_view();
 
-        // Pin hit (lazy only): pull the recorded digest, no tag resolution.
+        // Pin hit: pull the recorded digest, no tag resolution. `Sync` skips
+        // this — its whole point is seeing the tag move.
         if mode == PatchDiscoveryMode::Lazy
             && let Some(digest) = self
                 .companion_pin(companion_id)
@@ -755,22 +785,44 @@ impl PackageManager {
                 "patch companion: '{}' resolved from its recorded pin ({digest})",
                 companion_id
             );
-            return store_only.pull(&companion_id.clone_with_digest(digest), platform).await;
+            let installed = store_only
+                .pull(&companion_id.clone_with_digest(digest.clone()), platform)
+                .await?;
+            self.backfill_companion_pin(companion_id, &digest).await?;
+            return Ok(installed);
         }
 
-        // No pin, or a sync that must see the tag move: resolve through a view
-        // that can never grow the local index, then pull that digest pinned
-        // (a `tag@digest` pull skips tag growth too).
+        // Unpinned and offline: raised HERE rather than left to the resolver
+        // below, whose refusal is the package-tier one — it names `ocx index
+        // update`, and an index update deliberately never writes a companion
+        // pin. The caller's existing required/optional split turns this into
+        // exit 81 for a `required` companion and a debug-level skip for an
+        // optional one.
+        if self.is_offline() {
+            return Err(PackageErrorKind::PatchDiscovery(
+                crate::patch::PatchError::PolicyBlocked {
+                    identifier: Box::new(companion_id.clone()),
+                },
+            ));
+        }
+
+        // No pin, or a sync that must see the tag move: resolve LIVE through
+        // `remote_view` (`ChainMode::Remote` + `LocalWritePolicy::ReadOnly`),
+        // then pull that digest pinned (a `tag@digest` pull skips tag growth
+        // too).
         //
-        // Sync resolves LIVE (`remote_view` — `ChainMode::Remote` +
-        // `LocalWritePolicy::ReadOnly`): the ambient chain answers a known tag
-        // from the local index first, which is exactly the stale answer a sync
-        // exists to replace. It still cannot move a package-tier pin.
-        let resolver = match mode {
-            PatchDiscoveryMode::Lazy => self.read_only_index(),
-            PatchDiscoveryMode::Sync => self.index().remote_view(),
-        };
-        let top_digest = resolver
+        // The view is deliberately mode-INDEPENDENT. Patches float by design:
+        // `--frozen` scopes to the package tier, so a companion must resolve
+        // even when the ambient chain is `ChainMode::Frozen` — routing this
+        // through the ambient chain is what made `ocx --frozen config setup`
+        // fail to deliver its payload's companions (issue #293). The ambient
+        // chain would also answer a known tag from the local index first,
+        // which is the stale answer a sync exists to replace. `ReadOnly` keeps
+        // it incapable of moving a package-tier pin either way; `--offline` is
+        // gated above, before any view is built.
+        let top_digest = self
+            .index()
+            .remote_view()
             .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Resolve)
             .await
             .map_err(PackageErrorKind::Internal)?
@@ -791,6 +843,53 @@ impl PackageManager {
         .await
         .map_err(PackageErrorKind::Internal)?;
         Ok(installed)
+    }
+
+    /// Record a companion pin the active [`PatchSnapshot`](crate::patch::PatchSnapshot)
+    /// supplied, when the patch tier has no record of its own for that tag.
+    ///
+    /// A machine that only ever installs under a snapshot — a cold CI runner
+    /// with a committed `patches.snapshot.json` — never reaches the resolve
+    /// that writes the record, yet the record is what `ocx patch freeze` and
+    /// record-scoped garbage collection read. Left empty, a freeze there
+    /// replaces the good snapshot with `companions: {}` and an `ocx clean`
+    /// collects the package the next frozen build composes.
+    ///
+    /// Fill-in only, never an overwrite: a recorded digest is the machine's
+    /// LIVE binding and an `ocx patch sync` is the only thing allowed to
+    /// advance it. Writing the snapshot's digest over a synced one would make
+    /// a snapshot-driven install roll the machine back.
+    ///
+    /// The digest recorded here is the snapshot's, which pins the PLATFORM
+    /// manifest where the record normally holds the top one. Both read back
+    /// correctly — the readers select a platform only when the manifest at the
+    /// pin turns out to be an image index — and a freeze on this machine
+    /// reproduces the same value.
+    ///
+    /// No-op with no snapshot loaded: the pin then came from the record by
+    /// construction, so there is nothing to fill in and no lock to take.
+    async fn backfill_companion_pin(
+        &self,
+        companion_id: &Identifier,
+        digest: &oci::Digest,
+    ) -> Result<(), PackageErrorKind> {
+        if self.patch_snapshot().is_none() {
+            return Ok(());
+        }
+        let recorded = PatchTagMap::write_tag_if_absent(
+            &self.file_structure().patch_companion_path(companion_id),
+            companion_id.tag_or_latest(),
+            &digest.to_string(),
+        )
+        .await
+        .map_err(PackageErrorKind::Internal)?;
+        if recorded {
+            log::debug!(
+                "patch companion: recorded '{}' at the snapshot's pin ({digest}) — the patch tier had none",
+                companion_id
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1493,6 +1592,51 @@ mod tests {
         );
     }
 
+    /// `write_tag_if_absent` fills a gap and never overwrites a recorded value.
+    ///
+    /// The two halves are the whole contract of a companion-pin backfill: a
+    /// machine with no record of its own gets one, and a machine whose record a
+    /// sync already advanced keeps the advanced digest (a frozen install must
+    /// not roll it back).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_tag_map_write_tag_if_absent_fills_a_gap_but_never_overwrites() {
+        let dir = TempDir::new().unwrap();
+        let path = tags_path(&dir, "patches.corp.com", "certs/ca-bundle");
+        let first = format!("sha256:{}", "1".repeat(64));
+        let second = format!("sha256:{}", "2".repeat(64));
+
+        assert!(
+            PatchTagMap::write_tag_if_absent(&path, "1.0", &first)
+                .await
+                .expect("the first write must succeed"),
+            "an absent tag must be recorded, and the write reported"
+        );
+        assert_eq!(
+            PatchTagMap::read_tag(&path, "1.0").await.unwrap().as_deref(),
+            Some(first.as_str())
+        );
+
+        assert!(
+            !PatchTagMap::write_tag_if_absent(&path, "1.0", &second)
+                .await
+                .expect("the second write must succeed"),
+            "a recorded tag must be left alone, and the no-op reported"
+        );
+        assert_eq!(
+            PatchTagMap::read_tag(&path, "1.0").await.unwrap().as_deref(),
+            Some(first.as_str()),
+            "the recorded digest is the live binding; only a sync may advance it"
+        );
+
+        // Unrelated keys in the same map are untouched by either call.
+        PatchTagMap::write_tag(&path, "2.0", &second).await.unwrap();
+        PatchTagMap::write_tag_if_absent(&path, "1.0", &second).await.unwrap();
+        assert_eq!(
+            PatchTagMap::read_tag(&path, "2.0").await.unwrap().as_deref(),
+            Some(second.as_str())
+        );
+    }
+
     /// `PatchDiscoveryState::NeverLooked` equals itself (PartialEq sanity).
     ///
     /// Ensures the `#[derive(PartialEq)]` is correct and that `NeverLooked !=
@@ -1936,26 +2080,25 @@ mod tests {
 
     // ── Companion pinning ─────────────────────────────────────────────────────
 
-    /// Is this failure the routing policy refusing to resolve an unpinned tag?
+    /// Is this failure the offline guard refusing to resolve an unpinned tag?
     ///
-    /// The observable difference between "answered from the pin" and "resolved
-    /// the tag": on an offline manager a tag resolve raises
-    /// `PolicyResolutionBlocked` before any pull is attempted.
-    fn is_unpinned_resolution_block(kind: &PackageErrorKind) -> bool {
-        let PackageErrorKind::Internal(crate::Error::OciIndex(error)) = kind else {
-            return false;
-        };
-        matches!(error, crate::oci::index::error::Error::PolicyResolutionBlocked { .. })
+    /// The guard sits AFTER the pin-hit path in `install_companion`, so it is
+    /// reachable only by an install that had to go looking for a binding.
+    fn is_unpinned_offline_block(kind: &PackageErrorKind) -> bool {
+        matches!(
+            kind,
+            PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
+        )
     }
 
     /// A companion install pins into patch state — never into the local index —
     /// and a recorded pin then answers a lazy install without resolving the tag.
     ///
-    /// Both halves run against an offline manager, which makes the tag resolve
-    /// observable: it fails with `PolicyResolutionBlocked` before any pull. With
-    /// a pin, lazy mode never reaches that error (it fails later, pulling a
-    /// digest no blob backs); without one it does. Deleting the pin lookup makes
-    /// the first assertion fail.
+    /// The manager is offline, which makes the difference observable: the
+    /// offline guard sits after the pin-hit path, so an install that had to
+    /// resolve raises it, and one answered from the pin skips it entirely
+    /// (failing later, pulling a digest no blob backs). Deleting the pin
+    /// lookup makes the second assertion fail.
     #[tokio::test(flavor = "multi_thread")]
     async fn lazy_discovery_reuses_the_recorded_pin_without_resolving_the_tag() {
         let tmp = TempDir::new().unwrap();
@@ -1963,14 +2106,13 @@ mod tests {
         let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
         let digest = format!("sha256:{}", "a".repeat(64));
 
-        // No pin yet: the install must resolve the tag, which the offline
-        // routing policy refuses.
+        // No pin yet: the install must go looking, which offline refuses.
         let unpinned = manager
             .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
             .await
-            .expect_err("an unpinned companion cannot be installed offline");
+            .expect_err("an unpinned companion cannot be resolved offline");
         assert!(
-            is_unpinned_resolution_block(&unpinned),
+            is_unpinned_offline_block(&unpinned),
             "without a pin the install must go through a tag resolve; got: {unpinned}"
         );
 
@@ -1984,7 +2126,7 @@ mod tests {
             .await
             .expect_err("the pinned digest is not materialized in this empty store");
         assert!(
-            !is_unpinned_resolution_block(&pinned),
+            !is_unpinned_offline_block(&pinned),
             "a recorded pin must be pulled directly, with no tag resolve; got: {pinned}"
         );
 
@@ -2098,6 +2240,43 @@ mod tests {
                 .index
                 .dispatch_object_path(companion_id.registry(), companion_id.repository(), &top_digest)
                 .display()
+        );
+    }
+
+    /// Offline WITHOUT frozen is a companion refusal too, with the companion's
+    /// own remedy.
+    ///
+    /// Falling through to the index resolver here answers with the package-tier
+    /// message ("run `ocx index update` or pin a digest"), and `ocx index
+    /// update` deliberately never writes a companion pin — so the one command
+    /// that could unblock the user is the one the message does not name.
+    /// Reachable through `ocx --offline patch test`, which calls
+    /// `install_companion` directly (lazy discovery short-circuits on offline
+    /// before it ever gets here).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offline_companion_refusal_names_a_command_that_can_pin_it() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
+        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+
+        let error = manager
+            .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
+            .await
+            .expect_err("an unpinned companion cannot be installed offline");
+        let PackageErrorKind::PatchDiscovery(patch_error) = &error else {
+            panic!("an unpinned companion under --offline must be a patch-tier policy block; got: {error}");
+        };
+        let crate::patch::PatchError::PolicyBlocked { identifier } = patch_error else {
+            panic!("an unpinned companion under --offline must be a patch-tier policy block; got: {error}");
+        };
+        assert_eq!(identifier.as_ref(), &companion_id);
+        // The remedy sentence lives on the patch-tier error, which the enclosing
+        // `PackageErrorKind` deliberately does not interpolate — the CLI boundary
+        // walks `source()` exactly once instead of doubling the text.
+        let rendered = patch_error.to_string();
+        assert!(
+            rendered.contains("ocx patch sync") && !rendered.contains("ocx index update"),
+            "the remedy must name the command that pins a companion, not the package-tier one; got: {rendered}"
         );
     }
 

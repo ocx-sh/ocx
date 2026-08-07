@@ -503,6 +503,17 @@ mod tests {
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
+    #[test]
+    fn patch_policy_blocked_maps_to_policy_blocked() {
+        // Patch-tier policy block (offline, companion with no recorded pin) →
+        // PolicyBlocked (81), the same family as the index and project blocks.
+        let id = crate::oci::Identifier::new_registry("certs/ca-bundle", "patches.test");
+        let err = crate::patch::PatchError::PolicyBlocked {
+            identifier: Box::new(id),
+        };
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
     // ── singleflight::Error exit-code classification ─────────────────────────
 
     #[test]

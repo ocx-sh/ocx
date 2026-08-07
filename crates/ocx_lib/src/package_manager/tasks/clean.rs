@@ -365,7 +365,12 @@ impl PackageManager {
         };
 
         let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-        let patch_roots = self.resolve_site_patch_roots(&host_platform).await?;
+        // Retention, not observation: compose resolves a companion (and a
+        // descriptor) snapshot-first, so an active freeze's pins are roots even
+        // after an `ocx patch sync` has advanced the live record past them.
+        let patch_roots = self
+            .resolve_site_patch_roots(&host_platform, super::resolve::PatchRootScope::RecordedAndSnapshot)
+            .await?;
         let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots, &patch_roots).await?;
 
         let targets = garbage_collector.unreachable_objects();

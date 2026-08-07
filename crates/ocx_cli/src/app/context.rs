@@ -290,8 +290,10 @@ impl Context {
         // Resolve the active patch snapshot (if any) from `OCX_PATCH_SNAPSHOT`.
         // Reading happens before manager construction so the snapshot can be
         // threaded in at construction time — mirrors the resolved_patches flow
-        // above. The env var is the sole selector for now; a future
-        // `--patch-snapshot` flag would populate it here first.
+        // above. The env var is the sole selector: adopting a snapshot is a
+        // deliberate opt-in, orthogonal to `--frozen` (which scopes to the
+        // package tier). A future `--patch-snapshot` flag would populate it
+        // here first.
         let patch_snapshot_path = env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
         let patch_snapshot = if let Some(ref path) = patch_snapshot_path {
             ocx_lib::patch::PatchSnapshot::read(path)
@@ -539,10 +541,12 @@ impl Context {
     ///
     /// Carries the invocation's own policy ceiling rather than assuming
     /// `Default`: now that this chain reaches every index-bearing namespace's
-    /// source, a hardcoded `Default` would let `ocx --frozen patch test` with
-    /// an unpinned companion resolve live — dialling the index and then the
-    /// physical host — which is exactly what `--frozen` refuses everywhere
-    /// else (`ocx --frozen pull` on the same identifier exits 81).
+    /// source, a hardcoded `Default` would let `ocx --frozen patch test`
+    /// resolve the BASE off an unindexed tag — dialling the index and then the
+    /// physical host — which is exactly what `--frozen` refuses everywhere else
+    /// (`ocx --frozen pull` on the same identifier exits 81). A companion is a
+    /// different tier and is deliberately unaffected: `install_companion`
+    /// resolves through `Index::remote_view`, which ignores this ceiling.
     pub fn chain_sources(&self) -> (index::ChainMode, Vec<index::Index>) {
         let online_mode = Self::online_chain_mode(self.config_view.frozen, self.config_view.remote);
         Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode)
