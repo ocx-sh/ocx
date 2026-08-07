@@ -71,8 +71,11 @@ pub struct ContextOptions {
     /// reference (`repo@sha256:...`, or a tag pinned by `ocx.lock`) still
     /// fetches its content. But an unpinned tag missing from the local index
     /// errors instead of being fetched and recorded. Run
-    /// `ocx index update` to populate the index first, then resolve under
-    /// `--frozen`. Unlike `--offline`, frozen still reaches the network for
+    /// `ocx index update` without this flag to populate the index first, then
+    /// resolve under `--frozen` - an index update is itself discovery, so a
+    /// frozen one is refused (exit 81). Scoped to packages: patch companions
+    /// and managed configuration are unaffected and still resolve live.
+    /// Unlike `--offline`, frozen still reaches the network for
     /// known/pinned content. Unlike Cargo's `--frozen`, the network is not
     /// disabled; `--offline` alone (which also refuses unpinned tags) matches
     /// Cargo's behavior. Conflicts with `--remote`. Equivalent env var:

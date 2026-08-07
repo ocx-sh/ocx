@@ -11,6 +11,21 @@ pub enum Error {
     #[error("network operation attempted in offline mode")]
     OfflineMode,
 
+    /// A whole verb was refused because its purpose is discovering new
+    /// tag→digest bindings and the active policy forbids that.
+    ///
+    /// Raised by `ocx index update` under `--frozen` — the package tier's own
+    /// discovery verb, and the tier `--frozen` scopes to. `policy` is the
+    /// lowercase flag label, matching
+    /// [`crate::project::error::ProjectErrorKind::PolicyBlocked`].
+    #[error("{operation} discovers new digests and cannot run in {policy} mode; re-run it without --{policy}")]
+    PolicyBlocked {
+        /// The refused verb, written the way a user invokes it.
+        operation: &'static str,
+        /// The lowercase flag label that blocked the verb.
+        policy: &'static str,
+    },
+
     /// A file I/O error with path context.
     ///
     /// The io cause is carried by `#[source]` alone — interpolating it into the
@@ -271,7 +286,7 @@ impl std::error::Error for ArcError {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            Self::OfflineMode => Some(ExitCode::PolicyBlocked),
+            Self::OfflineMode | Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
             // Delegate to the wrapped `LayerLayoutError` via the chain walker so
             // a malformed manifest annotation classifies as `DataError` (65),

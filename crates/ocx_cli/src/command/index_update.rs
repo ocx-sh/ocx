@@ -29,7 +29,28 @@ impl IndexUpdate {
         // collection — never the leaf platform manifest, which is fetched
         // into the machine-global blob store on demand (A3) — so a version
         // choice resolves fully offline afterwards.
-        let oci_index = index::Index::from_remote(context.oci_index()?.clone());
+        // Offline is checked first — the accessor IS the offline gate and
+        // constructs nothing — so `--offline --frozen` keeps reporting the
+        // stricter posture.
+        let remote_index = context.oci_index()?;
+
+        // `--frozen` refuses the package tier's discovery verb — the one verb
+        // the flag scopes to. An index update exists to learn a NEW tag →
+        // digest binding and write it into the local index; a freeze exists to
+        // stop exactly that, so reporting success while moving pins would make
+        // the flag meaningless where it applies most directly. Placed before
+        // any index-source or refresh work so nothing is fetched and no pin can
+        // move. Read straight off the invocation's policy view: the package
+        // manager carries no frozen posture, because no other tier consults one.
+        if context.config_view().frozen {
+            return Err(ocx_lib::Error::PolicyBlocked {
+                operation: "`ocx index update`",
+                policy: "frozen",
+            }
+            .into());
+        }
+
+        let oci_index = index::Index::from_remote(remote_index.clone());
         // Per-namespace static-file index sources, when online. A package in an
         // index-bearing namespace refreshes through the two-hop index path
         // rather than the registry (`adr_index_indirection.md` F5a — kind per
@@ -103,6 +124,10 @@ impl IndexUpdate {
         //   2. The manager is online (is_offline() is false — sync_patches checks
         //      this internally, but we skip the call entirely when offline to avoid
         //      the OfflineMode error allocation overhead).
+        //
+        // `--frozen` needs no condition here: the policy gate at the top of this
+        // function already refused the whole command, so a frozen invocation
+        // never reaches the piggyback.
         //
         // ADR decision: piggyback keeps descriptor metadata fresh after every index
         // refresh without requiring users to remember a separate `ocx patch sync`.
