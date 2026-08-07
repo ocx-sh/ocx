@@ -494,7 +494,9 @@ def test_snapshot_install_records_the_pin_it_adopted(
     assert freeze.returncode == 0, f"setup: patch freeze must succeed:\n{freeze.stderr}"
     snapshot_path = ocx.ocx_home / "patches.snapshot.json"
     snapshot = json.loads(snapshot_path.read_text())
-    pinned_digest = snapshot["companions"].get(f"{registry}/{companion_repo}")
+    # The companions map is keyed by the tag-bearing identifier — one
+    # repository can be named at two tags, and each is its own companion.
+    pinned_digest = snapshot["companions"].get(companion.fq)
     assert pinned_digest is not None, (
         f"setup: the freeze must have pinned the companion; got {snapshot}"
     )

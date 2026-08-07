@@ -124,6 +124,14 @@ pub enum Error {
     /// A digest string could not be parsed.
     #[error(transparent)]
     Digest(#[from] crate::oci::digest::error::DigestError),
+    /// A patch-domain operation failed outside the per-package discovery path
+    /// (which carries its own `PatchError` through `PackageErrorKind`).
+    ///
+    /// Boxed because `PatchError::BlobWriteFailed` carries a `crate::Error`
+    /// back, and the two enums would otherwise be mutually infinite. Same
+    /// shape as [`Self::Package`], including the hand-written `From`.
+    #[error(transparent)]
+    Patch(Box<crate::patch::PatchError>),
 
     /// A dependency graph operation failed.
     #[error(transparent)]
@@ -160,6 +168,12 @@ fn launcher_unsafe_hint(c: char) -> &'static str {
 impl From<crate::package::error::Error> for Error {
     fn from(e: crate::package::error::Error) -> Self {
         Error::Package(Box::new(e))
+    }
+}
+
+impl From<crate::patch::PatchError> for Error {
+    fn from(e: crate::patch::PatchError) -> Self {
+        Error::Patch(Box::new(e))
     }
 }
 
@@ -317,6 +331,7 @@ impl ClassifyExitCode for Error {
             Self::OciIndex(e) => e.classify(),
             Self::FileStructure(e) => e.classify(),
             Self::Digest(e) => e.classify(),
+            Self::Patch(e) => e.as_ref().classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
             Self::Singleflight(e) => e.classify(),

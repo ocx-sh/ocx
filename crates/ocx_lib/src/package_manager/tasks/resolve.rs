@@ -1279,16 +1279,19 @@ impl PackageManager {
     /// else the patch tier's own recorded pin.
     ///
     /// The snapshot wins because it is the explicit freeze
-    /// (`ocx patch freeze` / `OCX_PATCH_SNAPSHOT`); its key is
-    /// `"registry/repository"`, so it pins a repository regardless of tag.
-    /// `Ok(None)` = this companion has no pin, which callers treat as "not
-    /// installed" (the required-fail-closed gate then fires as normal).
+    /// (`ocx patch freeze` / `OCX_PATCH_SNAPSHOT`). Its key is built by
+    /// [`crate::patch::snapshot::companion_key`] — the same helper the freeze
+    /// writes with — so it pins a repository AT A TAG, matching the record's
+    /// own per-tag granularity. `Ok(None)` = this companion has no pin, which
+    /// callers treat as "not installed" (the required-fail-closed gate then
+    /// fires as normal).
     pub(super) async fn companion_pin(&self, companion_id: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
-        if let Some(snapshot) = self.patch_snapshot() {
-            let snapshot_key = format!("{}/{}", companion_id.registry(), companion_id.repository());
-            if let Some(pinned_digest) = snapshot.companions.get(&snapshot_key) {
-                return Ok(Some(pinned_digest.clone()));
-            }
+        if let Some(snapshot) = self.patch_snapshot()
+            && let Some(pinned_digest) = snapshot
+                .companions
+                .get(&crate::patch::snapshot::companion_key(companion_id))
+        {
+            return Ok(Some(pinned_digest.clone()));
         }
         self.companion_pin_recorded(companion_id).await
     }
@@ -2096,9 +2099,12 @@ async fn collect_descriptor_digests(
 /// The snapshot's own companion map is the authority here — not the
 /// descriptor-derived companion set — so a companion whose rule the live
 /// descriptor has since dropped is still retained for the frozen build that
-/// composes it. Keys are `registry/repository`; the split is unambiguous
-/// because an identifier's registry is a bare host authority. The identifier
-/// is deliberately tagless: the digest is the whole binding.
+/// composes it. Keys are decoded by
+/// [`crate::patch::snapshot::companion_key_identifier`], the inverse of the
+/// helper the freeze wrote them with; a key in any other grammar is skipped.
+/// The tag it carries is advisory here — the digest is the whole binding, and
+/// the package store keys on registry + digest — but keeping it means one
+/// repository frozen at two tags seeds both of its digests.
 fn snapshot_companion_roots(manager: &PackageManager, scope: PatchRootScope) -> Vec<(oci::Identifier, oci::Digest)> {
     if scope != PatchRootScope::RecordedAndSnapshot {
         return Vec::new();
@@ -2109,10 +2115,7 @@ fn snapshot_companion_roots(manager: &PackageManager, scope: PatchRootScope) -> 
     snapshot
         .companions
         .iter()
-        .filter_map(|(key, digest)| {
-            let (registry, repository) = key.split_once('/')?;
-            Some((oci::Identifier::new_registry(repository, registry), digest.clone()))
-        })
+        .filter_map(|(key, digest)| Some((crate::patch::snapshot::companion_key_identifier(key)?, digest.clone())))
         .collect()
 }
 
@@ -2146,6 +2149,43 @@ async fn seed_snapshot_descriptor_digests(
     push_descriptor_blob_digests(blob_store, descriptor_id.registry(), pinned, descriptor_digests).await;
 }
 
+/// The reader both companion consumers — compose (`find_companion_local`) and
+/// the GC / freeze root set (`resolve_site_patch_roots`) — resolve a recorded
+/// pin through: strictly local, network-free in every `ChainMode`, and
+/// incapable of writing the local index.
+///
+/// The answer comes from the machine-global blob store, not the index. A
+/// companion install writes nothing under `index/` — not the root tag, not the
+/// dispatch object — so a digest-addressed `Op::Query` reports
+/// `AbsentDispatch` and recovers the image index from `$OCX_HOME/blobs`, where
+/// the pull staged and ref-linked it (`stage_and_link_chain_blobs`,
+/// `ChainRole::Index`). The read is digest-verified there, so nothing is
+/// weakened by the relocation.
+///
+/// Two properties are load-bearing rather than incidental:
+///
+/// - **`read_only_view`.** The blob-store recovery normally self-heals the
+///   image index back into `o/`; on a companion that would re-create the exact
+///   package-tier directory the pin move exists to keep empty, on the first
+///   compose after an install. `LocalWritePolicy::ReadOnly` suppresses it.
+/// - **No sources + `ChainMode::Offline`.** Compose and GC must never reach a
+///   registry, whatever the ambient mode. The local index home is still the
+///   effective (`--index` / `OCX_INDEX`) one: the lookup is digest-addressed
+///   and therefore immutable content, so a dispatch object that happens to be
+///   there — the same image index reached as a package the user DID name — is
+///   a correct, cheaper hit rather than a second source of truth.
+fn companion_manifest_index(manager: &PackageManager) -> oci::index::Index {
+    oci::index::Index::from_chained_with_content_store(
+        oci::index::LocalIndex::new(oci::index::LocalConfig {
+            index_store: manager.effective_index_store(),
+        }),
+        Vec::new(),
+        oci::index::ChainMode::Offline,
+        manager.file_structure().blobs.clone(),
+    )
+    .read_only_view()
+}
+
 /// Resolve one companion top digest to the pinned identifier the package store
 /// keys by, or `None` when it cannot be resolved locally.
 ///
@@ -2157,6 +2197,11 @@ async fn seed_snapshot_descriptor_digests(
 /// - `Manifest::ImageIndex` → select the host-platform child manifest.
 /// - manifest blob absent → fall back to the top digest (correct for a
 ///   single-platform or locally materialized companion).
+///
+/// The result keeps `companion_id`'s advisory tag. Package-store lookup ignores
+/// it (`PackageStore::path` keys on registry + digest), but `ocx patch freeze`
+/// reads this same set and keys its snapshot per tag — one repository named at
+/// two tags is two companions, and a tagless pin would collapse them.
 async fn resolve_companion_pinned(
     local_index: &oci::index::Index,
     companion_id: &oci::Identifier,
@@ -2169,8 +2214,11 @@ async fn resolve_companion_pinned(
         digest: oci::Digest,
         companion_id: &oci::Identifier,
     ) -> Option<oci::PinnedIdentifier> {
-        let digest_only_id = oci::Identifier::new_registry(repository, registry).clone_with_digest(digest);
-        oci::PinnedIdentifier::try_from(digest_only_id)
+        let mut pinned_id = oci::Identifier::new_registry(repository, registry);
+        if let Some(tag) = companion_id.tag() {
+            pinned_id = pinned_id.clone_with_tag(tag);
+        }
+        oci::PinnedIdentifier::try_from(pinned_id.clone_with_digest(digest))
             .inspect_err(|_| {
                 log::debug!(
                     "resolve-site-patch-roots: could not pin companion '{}'; skipping",
@@ -2288,43 +2336,6 @@ async fn push_descriptor_blob_digests(
             );
         }
     }
-}
-
-/// The reader both companion consumers — compose (`find_companion_local`) and
-/// the GC / freeze root set (`resolve_site_patch_roots`) — resolve a recorded
-/// pin through: strictly local, network-free in every `ChainMode`, and
-/// incapable of writing the local index.
-///
-/// The answer comes from the machine-global blob store, not the index. A
-/// companion install writes nothing under `index/` — not the root tag, not the
-/// dispatch object — so a digest-addressed `Op::Query` reports
-/// `AbsentDispatch` and recovers the image index from `$OCX_HOME/blobs`, where
-/// the pull staged and ref-linked it (`stage_and_link_chain_blobs`,
-/// `ChainRole::Index`). The read is digest-verified there, so nothing is
-/// weakened by the relocation.
-///
-/// Two properties are load-bearing rather than incidental:
-///
-/// - **`read_only_view`.** The blob-store recovery normally self-heals the
-///   image index back into `o/`; on a companion that would re-create the exact
-///   package-tier directory the pin move exists to keep empty, on the first
-///   compose after an install. `LocalWritePolicy::ReadOnly` suppresses it.
-/// - **No sources + `ChainMode::Offline`.** Compose and GC must never reach a
-///   registry, whatever the ambient mode. The local index home is still the
-///   effective (`--index` / `OCX_INDEX`) one: the lookup is digest-addressed
-///   and therefore immutable content, so a dispatch object that happens to be
-///   there — the same image index reached as a package the user DID name — is
-///   a correct, cheaper hit rather than a second source of truth.
-fn companion_manifest_index(manager: &PackageManager) -> oci::index::Index {
-    oci::index::Index::from_chained_with_content_store(
-        oci::index::LocalIndex::new(oci::index::LocalConfig {
-            index_store: manager.effective_index_store(),
-        }),
-        Vec::new(),
-        oci::index::ChainMode::Offline,
-        manager.file_structure().blobs.clone(),
-    )
-    .read_only_view()
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────
@@ -6007,10 +6018,10 @@ mod phase5a_spec_tests {
         // Seed the companion package in the package store.
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
-        )
-        .unwrap();
+        // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
+        // resolved pin so a freeze can key per tag. Store path is unaffected.
+        let companion_pinned =
+            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6084,9 +6095,13 @@ mod phase5a_spec_tests {
         // The record advanced to v2 (a sync); the snapshot still pins v1.
         let frozen_digest = sha256('c');
         let synced_digest = sha256('d');
+        // A resolved companion root keeps its advisory tag (the freeze keys on
+        // it); the package store still locates it by registry + digest alone.
         let pinned_at = |digest: &Digest| {
             PinnedIdentifier::try_from(
-                Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(digest.clone()),
+                Identifier::new_registry("ca-bundle", PATCH_REGISTRY)
+                    .clone_with_tag("latest")
+                    .clone_with_digest(digest.clone()),
             )
             .unwrap()
         };
@@ -6099,16 +6114,21 @@ mod phase5a_spec_tests {
         // rule was dropped by the same sync that advanced the record. The
         // frozen build still composes it, so GC still has to retain it.
         let dropped_digest = sha256('e');
-        let dropped_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("legacy-ca", PATCH_REGISTRY).clone_with_digest(dropped_digest.clone()),
-        )
-        .unwrap();
+        let dropped_companion = Identifier::new_registry("legacy-ca", PATCH_REGISTRY).clone_with_tag("latest");
+        let dropped_pinned =
+            PinnedIdentifier::try_from(dropped_companion.clone_with_digest(dropped_digest.clone())).unwrap();
 
         let snapshot = crate::patch::PatchSnapshot {
-            version: crate::patch::snapshot::SnapshotVersion::V1,
+            version: crate::patch::snapshot::SnapshotVersion::CURRENT,
             companions: [
-                (format!("{PATCH_REGISTRY}/ca-bundle"), frozen_digest.clone()),
-                (format!("{PATCH_REGISTRY}/legacy-ca"), dropped_digest.clone()),
+                (
+                    crate::patch::snapshot::companion_key(&companion_tag_id),
+                    frozen_digest.clone(),
+                ),
+                (
+                    crate::patch::snapshot::companion_key(&dropped_companion),
+                    dropped_digest.clone(),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -6195,7 +6215,7 @@ mod phase5a_spec_tests {
 
         let global_key = descriptor_source_key(&global_descriptor_id(&patch_config));
         let snapshot = crate::patch::PatchSnapshot {
-            version: crate::patch::snapshot::SnapshotVersion::V1,
+            version: crate::patch::snapshot::SnapshotVersion::CURRENT,
             companions: std::collections::BTreeMap::new(),
             descriptors: [(global_key, frozen_manifest_digest.clone())].into_iter().collect(),
         };
@@ -6264,10 +6284,10 @@ mod phase5a_spec_tests {
         // Seed companion.
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
-        )
-        .unwrap();
+        // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
+        // resolved pin so a freeze can key per tag. Store path is unaffected.
+        let companion_pinned =
+            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6377,10 +6397,10 @@ mod phase5a_spec_tests {
         // Seed a companion package.
         let companion_digest = sha256('6');
         let companion_tag_id = Identifier::new_registry("ca-certs", PATCH_REGISTRY).clone_with_tag("v1");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-certs", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
-        )
-        .unwrap();
+        // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
+        // resolved pin so a freeze can key per tag. Store path is unaffected.
+        let companion_pinned =
+            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6508,10 +6528,10 @@ mod phase5a_spec_tests {
         // Companion installed locally.
         let companion_digest = sha256('c');
         let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
-        )
-        .unwrap();
+        // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
+        // resolved pin so a freeze can key per tag. Store path is unaffected.
+        let companion_pinned =
+            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6688,14 +6708,16 @@ mod phase5b_spec_tests {
         // Build a snapshot that pins the companion to digest B AND the global
         // descriptor to its frozen manifest digest (so the frozen descriptor is
         // the one that names the companion under the snapshot).
-        let companion_key = format!("{PATCH_REGISTRY}/ca-bundle");
         let mut companions_map = BTreeMap::new();
-        companions_map.insert(companion_key, snap_digest.clone());
+        companions_map.insert(
+            crate::patch::snapshot::companion_key(&companion_id),
+            snap_digest.clone(),
+        );
         let global_id = super::super::patch_discovery::global_descriptor_id(&patch_config);
         let mut descriptors_map = BTreeMap::new();
         descriptors_map.insert(super::descriptor_source_key(&global_id), global_manifest_digest);
         let snapshot = PatchSnapshot {
-            version: SnapshotVersion::V1,
+            version: SnapshotVersion::CURRENT,
             companions: companions_map,
             descriptors: descriptors_map,
         };
@@ -6783,6 +6805,151 @@ mod phase5b_spec_tests {
         );
     }
 
+    /// A freeze must not collapse a companion repository that the overlay
+    /// composes at TWO tags.
+    ///
+    /// Two tags of one repository are two companions — pinned separately in the
+    /// record, composed separately by the overlay
+    /// (`same_companion_repo_at_two_tags_projects_both_versions`). A snapshot
+    /// keyed by repository alone loses one of them at freeze time, and the
+    /// frozen build then composes the surviving version twice, silently: the
+    /// exact state a freeze exists to prevent.
+    ///
+    /// The whole round trip is exercised — live roots → `PatchSnapshot::from_roots`
+    /// → compose under that snapshot — because the corruption happens at the
+    /// freeze, not at the read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn freeze_round_trip_keeps_both_tags_of_one_companion_repository() {
+        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
+        use crate::oci::Algorithm;
+
+        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let store = manager.file_structure().packages.clone();
+        let blob_store = manager.file_structure().blobs.clone();
+        let tag_store = manager.file_structure().clone();
+
+        // ── One companion repository, two tags, two installs, two values ──────
+        let digest_v1 = sha256('c');
+        let digest_v2 = sha256('d');
+        let companion_v1 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
+        let companion_v2 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
+        for (digest, value) in [(&digest_v1, "one"), (&digest_v2, "two")] {
+            let pinned = PinnedIdentifier::try_from(
+                Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(digest.clone()),
+            )
+            .unwrap();
+            seed_package_with_constant_var(
+                &store,
+                &pinned,
+                &ResolvedPackage::new(),
+                "COMPANION_VER",
+                value,
+                Visibility::INTERFACE,
+            );
+        }
+
+        // The pin record holds BOTH tags; `seed_companion_pin` writes a
+        // single-tag record and the second call would overwrite the first,
+        // since the record path is keyed by repository only.
+        let pin_path = tag_store.patch_companion_path(&companion_v1);
+        std::fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &pin_path,
+            serde_json::to_vec(&serde_json::json!({
+                "1.0.0": digest_v1.to_string(),
+                "2.0.0": digest_v2.to_string(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // ── Global descriptor: catch-all rule → both companion tags, in order ─
+        let layer_bytes = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": [companion_v1.to_string(), companion_v2.to_string()] }]
+        })
+        .to_string();
+        let layer_digest = Algorithm::Sha256.hash(layer_bytes.as_bytes());
+        let manifest_bytes = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{
+                "mediaType": "application/octet-stream",
+                "digest": layer_digest.to_string(),
+                "size": layer_bytes.len()
+            }]
+        })
+        .to_string();
+        let manifest_digest = Algorithm::Sha256.hash(manifest_bytes.as_bytes());
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, manifest_bytes.as_bytes())
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, layer_bytes.as_bytes())
+            .await
+            .unwrap();
+        let global_id = global_descriptor_id(&patch_config);
+        PatchTagMap::write_has_descriptor(
+            &tag_store.patch_descriptor_path(&global_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // An installed base is what makes the catch-all rule contribute
+        // companions to the freeze's root set.
+        let base_id = Identifier::new_registry("alpha", "example.com").clone_with_tag("1.0.0");
+        super::phase5a_spec_tests::seed_installed_base_symlink(&dir, &base_id);
+
+        // ── Freeze: live roots → snapshot ─────────────────────────────────────
+        let roots = manager
+            .resolve_site_patch_roots(&crate::oci::Platform::any(), super::PatchRootScope::Recorded)
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+        assert_eq!(
+            roots.companions.len(),
+            2,
+            "premise: the live root set must already carry both tags, or the freeze \
+             assertion below cannot discriminate; got: {:?}",
+            roots.companions
+        );
+
+        let snapshot = PatchSnapshot::from_roots(&roots);
+        assert_eq!(
+            snapshot.companions.len(),
+            2,
+            "a freeze must record both tags of one companion repository; got: {:?}",
+            snapshot.companions
+        );
+
+        // ── Compose under that snapshot ───────────────────────────────────────
+        let frozen_manager = make_manager(&dir)
+            .with_patches(Some(patch_config.clone()))
+            .with_patch_snapshot(Some(snapshot));
+        let root = seed_root_arc(&frozen_manager.file_structure().packages.clone(), "alpha", 'a');
+        let entries = frozen_manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("frozen resolve_env must succeed");
+
+        let composed: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.key == "COMPANION_VER")
+            .map(|entry| entry.value.as_str())
+            .collect();
+        assert_eq!(
+            composed,
+            vec!["one", "two"],
+            "each tag must compose its OWN frozen digest; a repository-keyed snapshot \
+             makes both tags resolve to whichever one was written last; entries: {entries:?}"
+        );
+    }
+
     /// C8 whole-tier freeze (Codex BLOCK regression): once a snapshot pins the
     /// descriptor source, a post-freeze `ocx patch sync` that ADVANCES the live
     /// descriptor — re-pointing the global tag to a NEW descriptor that names a
@@ -6856,9 +7023,12 @@ mod phase5b_spec_tests {
         let mut descriptors_map = BTreeMap::new();
         descriptors_map.insert(super::descriptor_source_key(&global_id), frozen_manifest);
         let mut companions_map = BTreeMap::new();
-        companions_map.insert(format!("{PATCH_REGISTRY}/ca-bundle"), frozen_digest.clone());
+        companions_map.insert(
+            crate::patch::snapshot::companion_key(&frozen_companion),
+            frozen_digest.clone(),
+        );
         let snapshot = PatchSnapshot {
-            version: SnapshotVersion::V1,
+            version: SnapshotVersion::CURRENT,
             companions: companions_map,
             descriptors: descriptors_map,
         };
@@ -6921,9 +7091,9 @@ mod phase5b_spec_tests {
         let dir = TempDir::new().unwrap();
 
         let mut companions = BTreeMap::new();
-        companions.insert(format!("{PATCH_REGISTRY}/ca-bundle"), sha256('s'));
+        companions.insert(format!("{PATCH_REGISTRY}/ca-bundle:latest"), sha256('s'));
         let snapshot = PatchSnapshot {
-            version: SnapshotVersion::V1,
+            version: SnapshotVersion::CURRENT,
             companions,
             descriptors: BTreeMap::new(),
         };

@@ -40,6 +40,24 @@ pub enum PatchError {
         version: u32,
     },
 
+    /// The `patches.snapshot.json` on disk carries a format version this OCX
+    /// does not read.
+    ///
+    /// Raised by [`PatchSnapshot::read`](crate::patch::PatchSnapshot::read).
+    /// There is deliberately no reader for an older generation: a snapshot is
+    /// derived from local state that `ocx patch freeze` re-resolves offline in
+    /// seconds, so rewriting it is cheaper and less ambiguous than carrying a
+    /// second parse path whose output could disagree with a fresh freeze.
+    #[error("patch snapshot '{path}' has format version {found}, expected {expected}; re-run `ocx patch freeze`")]
+    UnsupportedSnapshotVersion {
+        /// The snapshot file that could not be read.
+        path: String,
+        /// The `version` value found in the file.
+        found: u64,
+        /// The only version this OCX reads and writes.
+        expected: u64,
+    },
+
     /// A network fetch of the `__ocx.patch` manifest or layer blob failed.
     ///
     /// Preserves the full [`crate::oci::client::ClientError`] source chain so
@@ -170,6 +188,7 @@ impl ClassifyExitCode for PatchError {
             // Descriptor shape / version / parse issues = malformed data.
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }
+            | Self::UnsupportedSnapshotVersion { .. }
             | Self::UnexpectedManifest { .. }
             | Self::UnexpectedArtifactType { .. }
             | Self::WrongLayerCount { .. }
