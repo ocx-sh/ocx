@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-08-07
+
+### Added
+
+- Ocx config setup and self setup refresh the managed-config snapshot *(config)*
+- Pin companions in patch state instead of the shared local index *(patch)*
+
+### Documentation
+
+- Setup reconciles the managed tier on every run, not just at adoption *(config)*
+- --frozen is the package tier's freeze, and a companion pins outside the index
+
+### Fixed
+
+- Advance a same-tag companion on sync instead of answering from the stale local pin *(patch)*
+- Companions resolve live under --frozen — frozen scopes to the package tier *(patch)*
+- --frozen refuses index update — the package tier's discovery verb *(index)*
+- Snapshot keys companions by tag so two tags of one repository survive a freeze *(patch)* **BREAKING**
+
 ## [0.5.6] - 2026-08-06
 
 ### Added
@@ -23,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply a patch companion once per env compose, not once per matched base *(package)*
 - Patch test works against path-prefixed registries and local companion archives *(patch)*
 - Compose companion overlays for the requested platform, not the host *(patch)*
+
+### Release
+
+- V0.5.6
 
 ## [0.5.5] - 2026-08-05
 
@@ -855,6 +878,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.5.7]: https://github.com/ocx-sh/ocx/compare/v0.5.6..v0.5.7
 [0.5.6]: https://github.com/ocx-sh/ocx/compare/v0.5.5..v0.5.6
 [0.5.5]: https://github.com/ocx-sh/ocx/compare/v0.5.4..v0.5.5
 [0.5.4]: https://github.com/ocx-sh/ocx/compare/v0.5.3..v0.5.4
