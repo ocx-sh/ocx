@@ -735,18 +735,28 @@ impl IndexStore {
         while let Some(dir) = queue.pop_front() {
             // The dispatch-object CAS dir is always named "o" and always a DIRECT
             // CHILD of a package dir (`p/<ns>/<pkg>/o/…`, module header layout).
-            // A package dir is distinguished from a namespace/package directory
-            // that merely happens to be NAMED "o" by one structural fact: a
-            // package dir always has a sibling root-document file at
-            // `{package-dir}.json` in ITS OWN parent (`root_document_path`) —
-            // e.g. `p/kitware/cmake/` pairs with `p/kitware/cmake.json`. A fixed
-            // depth cannot anchor this: a single-segment repository's package
-            // dir sits one level below `p/`, a two-segment one two levels below.
-            // Checking the sibling instead of counting components holds
-            // regardless of how many repository-path segments precede it, so a
-            // namespace or package literally named "o" (whose OWN sibling
-            // `.json` lives one level further up, not beside itself) is never
-            // pruned.
+            // Two independent facts identify it, and a dir named "o" is pruned
+            // when EITHER holds — neither alone covers every real layout:
+            //
+            // 1. Its parent is a package dir, i.e. a sibling root-document file
+            //    exists at `{package-dir}.json` in that parent
+            //    (`root_document_path`) — `p/kitware/cmake/` pairs with
+            //    `p/kitware/cmake.json`. A fixed depth cannot anchor this: a
+            //    single-segment repository's package dir sits one level below
+            //    `p/`, a two-segment one two levels below.
+            // 2. Its own contents have the CAS shape `<algo>/<hex>.json`
+            //    ([`is_dispatch_object_cas_dir`]). A package can hold dispatch
+            //    objects with NO root document beside them: a `tag@digest` pull
+            //    persists the dispatch chain but commits no tag, which is
+            //    exactly how a patch companion is materialized (its pin is
+            //    patch-tier state, never a local-index tag pointer). Premise 1
+            //    alone would then walk into the CAS and emit an object filename
+            //    as a phantom repository.
+            //
+            // A namespace or package literally named "o" satisfies neither: its
+            // OWN sibling `.json` lives one level further up rather than beside
+            // itself, and it holds root documents rather than digest-named
+            // objects.
             let dir_is_a_package_dir = path_exists_lossy(&dir.with_extension("json")).await;
 
             let mut entries = tokio::fs::read_dir(&dir)
@@ -764,8 +774,8 @@ impl IndexStore {
                     .map_err(|e| crate::error::file_error(&path, e))?;
 
                 if file_type.is_dir() {
-                    let is_dispatch_object_dir =
-                        dir_is_a_package_dir && path.file_name().and_then(|name| name.to_str()) == Some("o");
+                    let is_dispatch_object_dir = path.file_name().and_then(|name| name.to_str()) == Some("o")
+                        && (dir_is_a_package_dir || is_dispatch_object_cas_dir(&path).await);
                     if !is_dispatch_object_dir {
                         queue.push_back(path);
                     }
@@ -820,6 +830,66 @@ impl IndexStore {
             catalog,
         })
     }
+}
+
+/// Whether `dir` has the dispatch-object CAS shape — every child a directory
+/// named after a supported digest algorithm, holding nothing but
+/// `<hex>.json` object files of that algorithm's digest length (A2/A3
+/// `o/<algo>/<hex>.json`).
+///
+/// The shape test exists because the cheaper "does a sibling root document
+/// exist" premise is falsified by a legitimate state: a `tag@digest` pull
+/// persists the dispatch chain without committing a tag, so a package
+/// directory can hold objects and no root document at all. Content, not
+/// position, is then the only thing separating the CAS from a namespace
+/// segment that happens to be named `o`.
+///
+/// An unreadable directory answers `false` — the caller then walks it, which
+/// is the pre-existing, non-destructive behaviour.
+async fn is_dispatch_object_cas_dir(dir: &std::path::Path) -> bool {
+    async fn entries_of(dir: &std::path::Path) -> Option<Vec<tokio::fs::DirEntry>> {
+        let mut reader = tokio::fs::read_dir(dir).await.ok()?;
+        let mut collected = Vec::new();
+        while let Some(entry) = reader.next_entry().await.ok()? {
+            collected.push(entry);
+        }
+        Some(collected)
+    }
+
+    let Some(algorithm_dirs) = entries_of(dir).await else {
+        return false;
+    };
+    // An empty directory is not evidence of anything; leave it to the walk.
+    if algorithm_dirs.is_empty() {
+        return false;
+    }
+
+    for algorithm_dir in algorithm_dirs {
+        let name = algorithm_dir.file_name();
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        let Some(algorithm) = crate::oci::Algorithm::ALL.iter().find(|a| a.prefix() == name) else {
+            return false;
+        };
+        let path = algorithm_dir.path();
+        let Some(objects) = entries_of(&path).await else {
+            return false;
+        };
+        for object in objects {
+            let object_path = object.path();
+            if object_path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return false;
+            }
+            let Some(hex) = object_path.file_stem().and_then(|stem| stem.to_str()) else {
+                return false;
+            };
+            if hex.len() != algorithm.hex_len() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// A root document read from disk: the verbatim bytes (needed for
@@ -2317,6 +2387,57 @@ mod wire_grammar_tests {
         assert!(
             repos.is_empty(),
             "a different source's directory enumeration must never leak in"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_wire_repositories_prunes_a_dispatch_dir_that_has_no_root_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        // A patch companion is pulled `tag@digest`, so the chain persists its
+        // dispatch object but deliberately never commits a root document — a
+        // companion pin is patch-tier state, never a local-index tag pointer.
+        // The package dir therefore has NO sibling `.json`, and a walk that
+        // recognises `o/` only by that sibling descends into the CAS and emits
+        // its object filename as a repository.
+        let dispatch = s.dispatch_object_path("ocx.sh", "ca-bundle", &crate::oci::Algorithm::Sha256.hash(b"payload"));
+        tokio::fs::create_dir_all(dispatch.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&dispatch, b"{}").await.unwrap();
+
+        let repos = s.list_wire_repositories("ocx.sh").await.unwrap();
+        assert!(
+            repos.is_empty(),
+            "a dispatch-object CAS with no root document beside it holds no repositories, got {repos:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_wire_repositories_does_not_prune_a_namespace_named_o_without_a_root_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        // `p/vendor/o/tool.json` — "o" is a NAMESPACE segment here, and
+        // `p/vendor` is a namespace too, so neither dir has a sibling root
+        // document. Only the CAS shape ("<algo>/<hex>.json" all the way down)
+        // separates this from the case above.
+        let namespaced = s.root_document_path("ocx.sh", "vendor/o/tool");
+        tokio::fs::create_dir_all(namespaced.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&namespaced, b"{}").await.unwrap();
+
+        // A namespace whose child directory is named after an algorithm but
+        // holds an ordinary root document, not a digest-named object.
+        let algorithm_named = s.root_document_path("ocx.sh", "other/o/sha256/tool");
+        tokio::fs::create_dir_all(algorithm_named.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&algorithm_named, b"{}").await.unwrap();
+
+        let repos = s.list_wire_repositories("ocx.sh").await.unwrap();
+        assert_eq!(
+            repos,
+            vec!["other/o/sha256/tool".to_string(), "vendor/o/tool".to_string()],
+            "a namespace named \"o\" must survive even without a sibling root document"
         );
     }
 

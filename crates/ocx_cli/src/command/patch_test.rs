@@ -84,14 +84,13 @@ impl PatchTestArgs {
 /// real `$OCX_HOME`'s package/blob store is never mutated by `ocx patch test`.
 /// The local index is a separate, self-contained store outside `FileStructure`
 /// (`adr_index_indirection.md` Decision A) and is deliberately NOT
-/// scratch-isolated for RESOLUTION: it reuses `context.local_index()`, so a
-/// companion pull benefits from (and grows) the same resolved index home every
-/// other command shares.
+/// scratch-isolated: it reuses `context.local_index()`, so a companion pull
+/// benefits from (and grows) the same resolved index home every other
+/// command shares.
 ///
-/// A `--companion-archive` companion is the exception — it is unpublished, so
-/// its tag pointer must not reach the shared home. Those writes go to the
-/// scratch store, registered as the manager's index overlay, which
-/// guaranteed-local companion lookups read before the shared home.
+/// A `--companion-archive` companion never reaches that home at all: its
+/// binding is a patch-tier pin written into the scratch `FileStructure`'s own
+/// `state/patch-companions/`, which is where compose reads it back from.
 fn build_scratch_manager(
     context: &crate::app::Context,
     scratch_root: &std::path::Path,
@@ -120,21 +119,15 @@ fn build_scratch_manager(
     let client: Option<oci::Client> = context.remote_client().ok().cloned();
     let index = Index::from_chained_with_content_store(local_index, sources, mode, file_structure.blobs.clone());
 
-    // The scratch store is the manager's OWN index home: `--companion-archive`
-    // tag pointers are written there and read back from there first. They name
-    // unpublished packages that exist only in this tempdir, so writing them into
-    // the shared home would leave it claiming tags nothing can resolve.
-    let scratch_index_store = file_structure.index.clone();
-
     ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
         .with_patches(Some(patches.clone()))
-        .with_index_overlay(scratch_index_store)
-        // The second leg of those lookups: the SAME index home the reused
-        // `local_index` (and thus `pull`) writes tag pointers to. Without it the
-        // manager would only read the scratch `index/`, so a registry-pulled
-        // companion's tag pointer — committed to the context's real home — is
-        // invisible to `find_companion_local`, which then reports the required
-        // companion as not found (exit 79). Overlay first, this second.
+        // Route the guaranteed-local companion / site-patch lookups
+        // (`effective_index_store`) through the SAME index home the reused
+        // `local_index` (and thus `pull`) writes tag pointers to. Without this the
+        // manager falls back to the scratch root's empty `index/`, so a
+        // registry-pulled companion's tag pointer — committed to the context's
+        // real home — is invisible to `find_companion_local`, which then reports
+        // the required companion as not found (exit 79).
         .with_index(context.local_index().index_store().clone())
 }
 
@@ -391,8 +384,17 @@ async fn materialize_companions(
         if local_companion_keys.contains(&repo_key) {
             continue;
         }
+        // `install_companion` — not a bare `pull` — so the preview resolves and
+        // pins the companion exactly the way production discovery does: the tag
+        // resolves through a view that never grows the local index, and the
+        // digest lands in the SCRATCH store's patch state, which is where the
+        // compose step reads it back from.
         let pull_result = manager
-            .pull(&companion.identifier, platform.clone())
+            .install_companion(
+                &companion.identifier,
+                platform.clone(),
+                ocx_lib::package_manager::PatchDiscoveryMode::Lazy,
+            )
             .await
             .map_err(|kind| ocx_lib::Error::package(companion.identifier.clone(), kind));
         match pull_result {

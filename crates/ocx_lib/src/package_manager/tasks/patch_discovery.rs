@@ -113,16 +113,41 @@ pub enum PatchDiscoveryState {
 
 // ── PatchTagMap helper ────────────────────────────────────────────────────────
 
-/// Atomic read-modify-write helper for the `__ocx.patch` key in a tag-store
-/// JSON file.
+/// Atomic read-modify-write helper for a patch-tier tag→digest JSON file.
 ///
-/// The tag-store file maps tag strings to digest strings
-/// (`BTreeMap<String, String>`). This helper exposes the three-state read
-/// and the atomic write for the `__ocx.patch` key specifically, backed by
-/// [`LockedJsonFile`] to be cross-process safe.
+/// The file maps tag strings to digest strings (`BTreeMap<String, String>`),
+/// backed by [`LockedJsonFile`] so concurrent processes cannot corrupt it. Two
+/// stores share the shape:
+///
+/// - the descriptor discovery record ([`crate::file_structure::FileStructure::patch_descriptor_path`]),
+///   whose single `__ocx.patch` key encodes the three-state
+///   [`PatchDiscoveryState`] — see the `*_descriptor` wrappers;
+/// - the companion pin record ([`crate::file_structure::FileStructure::patch_companion_path`]),
+///   one ordinary tag key per pinned companion tag — see
+///   [`read_tag`](Self::read_tag) / [`write_tag`](Self::write_tag).
 pub struct PatchTagMap;
 
 impl PatchTagMap {
+    /// Read one tag's recorded digest string, or `None` when the file or the
+    /// key is absent.
+    ///
+    /// Uses a shared lock — multiple concurrent readers are safe.
+    pub async fn read_tag(path: &std::path::Path, tag: &str) -> crate::Result<Option<String>> {
+        let Some(mut locked) = LockedJsonFile::<BTreeMap<String, String>>::open_shared(path).await? else {
+            return Ok(None);
+        };
+        Ok(locked.read().await?.unwrap_or_default().get(tag).cloned())
+    }
+
+    /// Atomically record `tag` → `digest`, creating the file (and its parent
+    /// directories) when absent and leaving every other key untouched.
+    pub async fn write_tag(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<()> {
+        let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
+        let mut map = locked.read().await?.unwrap_or_default();
+        map.insert(tag.to_string(), digest.to_string());
+        locked.write(&map).await
+    }
+
     /// Read the discovery state for the given tag-store path.
     ///
     /// - Path absent → [`PatchDiscoveryState::NeverLooked`].
@@ -167,10 +192,7 @@ impl PatchTagMap {
     /// updates) the `__ocx.patch` key with the given manifest digest string,
     /// and writes back.
     pub async fn write_has_descriptor(tags_path: &std::path::Path, manifest_digest: &str) -> crate::Result<()> {
-        let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(tags_path).await?;
-        let mut map = locked.read().await?.unwrap_or_default();
-        map.insert(InternalTag::PATCH_TAG.to_string(), manifest_digest.to_string());
-        locked.write(&map).await
+        Self::write_tag(tags_path, InternalTag::PATCH_TAG, manifest_digest).await
     }
 }
 
@@ -619,7 +641,7 @@ impl PackageManager {
                     );
                 }
                 let companion_id = companion.identifier.clone();
-                match self.install_companion(&companion_id, platform.clone()).await {
+                match self.install_companion(&companion_id, platform.clone(), mode).await {
                     Ok(_) => {
                         installed_count += 1;
                         log::debug!("patch discovery: companion '{}' installed", companion_id);
@@ -667,7 +689,38 @@ impl PackageManager {
         Ok(installed_count)
     }
 
-    /// Install a companion package through the base-install primitive.
+    /// Install a companion package through the base-install primitive, pinning
+    /// it in patch state instead of the shared local index.
+    ///
+    /// A companion is a package the user never named, so its tag→digest
+    /// binding is patch-tier state ([`crate::file_structure::FileStructure::patch_companion_path`]),
+    /// never a package-tier pin in the local index (`subsystem-oci`: a pin
+    /// moves only when named). Two paths:
+    ///
+    /// - **Pin hit** ([`PatchDiscoveryMode::Lazy`] only) — pull the recorded
+    ///   digest directly. No tag resolution at all, so a steady-state install
+    ///   is one lookup cheaper AND cannot drift.
+    /// - **No pin, or [`PatchDiscoveryMode::Sync`]** — resolve the tag through a
+    ///   view that writes nothing into the local index, pull the resulting
+    ///   digest pinned, and record the pin on success. Sync resolves through
+    ///   [`oci::index::Index::remote_view`] (live, `ReadOnly`) because the
+    ///   whole point of a sync is to see a tag that moved upstream; the
+    ///   already-cached local answer would make it a no-op.
+    ///
+    /// The recorded digest is the TOP manifest digest (image index where the
+    /// companion is multi-platform) — platform-independent, so compose's own
+    /// platform selection stays unchanged.
+    ///
+    /// **Both paths pull through [`PackageManager::read_only_view`]**, so a
+    /// companion install leaves the local index at zero bytes. Resolving no
+    /// tag is not enough on its own: a `tag@digest` pull skips the root-tag
+    /// commit but still persists the DISPATCH OBJECT (the image index the
+    /// digest names) into the companion repository's `o/` under
+    /// `LocalWritePolicy::Full`, which is the same package-tier directory the
+    /// pin move was taken out of. The content chain is unaffected — every
+    /// blob still lands in `$OCX_HOME/blobs` and is ref-linked from the
+    /// installed package (`stage_and_link_chain_blobs`), which is where
+    /// compose and garbage collection read it back from.
     ///
     /// This method calls `pull` directly, bypassing
     /// [`discover_and_install_patches`]. This is the recursion guard:
@@ -680,14 +733,56 @@ impl PackageManager {
     ///
     /// The `#[cfg(test)]` module at the bottom of this file contains a test
     /// that verifies a companion install does NOT invoke discovery.
-    pub(super) async fn install_companion(
+    pub async fn install_companion(
         &self,
         companion_id: &Identifier,
         platform: oci::Platform,
+        mode: PatchDiscoveryMode,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        // Pull the companion into the object store (candidate=false, select=false).
+        // Every companion pull runs on a view that cannot write the local
+        // index (see the method doc). Bound once so both paths share it and
+        // neither can be changed back to the ambient manager in isolation.
+        let store_only = self.read_only_view();
+
+        // Pin hit (lazy only): pull the recorded digest, no tag resolution.
+        if mode == PatchDiscoveryMode::Lazy
+            && let Some(digest) = self
+                .companion_pin(companion_id)
+                .await
+                .map_err(PackageErrorKind::Internal)?
+        {
+            log::debug!(
+                "patch companion: '{}' resolved from its recorded pin ({digest})",
+                companion_id
+            );
+            return store_only.pull(&companion_id.clone_with_digest(digest), platform).await;
+        }
+
+        // No pin, or a sync re-checking the tag: resolve through a view that
+        // can never grow the local index, then pull that digest pinned (a
+        // `tag@digest` pull skips tag growth too).
+        let top_digest = self
+            .read_only_index()
+            .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Resolve)
+            .await
+            .map_err(PackageErrorKind::Internal)?
+            .ok_or(PackageErrorKind::NotFound)?;
+
         // No call to discover_and_install_patches — this is the recursion guard.
-        self.pull(companion_id, platform).await
+        let installed = store_only
+            .pull(&companion_id.clone_with_digest(top_digest.clone()), platform)
+            .await?;
+
+        // Record the pin only once the companion is materialized: a pin naming
+        // a digest that was never pulled would compose as "not installed".
+        PatchTagMap::write_tag(
+            &self.file_structure().patch_companion_path(companion_id),
+            companion_id.tag_or_latest(),
+            &top_digest.to_string(),
+        )
+        .await
+        .map_err(PackageErrorKind::Internal)?;
+        Ok(installed)
     }
 }
 
@@ -1826,29 +1921,176 @@ mod tests {
         // `fn(_, _, _) -> _` is the coercion point — if the method does not exist
         // or has a different argument count the cast fails at compile time.
         let _ = PackageManager::discover_and_install_patches as fn(_, _, _) -> _;
-        // `install_companion` takes `self`, `&Identifier`, `Platform`.
-        let _ = PackageManager::install_companion as fn(_, _, _) -> _;
+        // `install_companion` takes `self`, `&Identifier`, `Platform`, `PatchDiscoveryMode`.
+        let _ = PackageManager::install_companion as fn(_, _, _, _) -> _;
         // If both casts compile, the two methods exist as distinct items.
     }
 
-    /// Regression guard: `install_companion` is `pub(super)` — it is NOT a public
-    /// method visible outside the `tasks` module. This ensures companion installs
-    /// cannot be accidentally triggered from the CLI layer without going through
-    /// `discover_and_install_patches`.
+    // ── Companion pinning ─────────────────────────────────────────────────────
+
+    /// Is this failure the routing policy refusing to resolve an unpinned tag?
     ///
-    /// The test is a visibility proof: if `install_companion` were `pub`, the
-    /// function-pointer cast would still compile, but the **body** of this test
-    /// lives inside `mod tests` which is a sibling of `patch_discovery.rs` and
-    /// thus within `pub(super)` scope. The companion path struct
-    /// `PackageManager::install_companion` is accessible here only because `tests`
-    /// is inside `tasks`, which is `super` relative to `patch_discovery`.
+    /// The observable difference between "answered from the pin" and "resolved
+    /// the tag": on an offline manager a tag resolve raises
+    /// `PolicyResolutionBlocked` before any pull is attempted.
+    fn is_unpinned_resolution_block(kind: &PackageErrorKind) -> bool {
+        let PackageErrorKind::Internal(crate::Error::OciIndex(error)) = kind else {
+            return false;
+        };
+        matches!(error, crate::oci::index::error::Error::PolicyResolutionBlocked { .. })
+    }
+
+    /// A companion install pins into patch state — never into the local index —
+    /// and a recorded pin then answers a lazy install without resolving the tag.
     ///
-    /// Traces: DELIVERABLES §2g recursion guard — boundary split.
-    #[test]
-    fn install_companion_accessible_from_tasks_but_not_public() {
-        // This cast compiles because `pub(super)` is visible within `tasks::*`.
-        // If this test were in a sibling crate or CLI, it would NOT compile.
-        let _ = PackageManager::install_companion as fn(_, _, _) -> _;
+    /// Both halves run against an offline manager, which makes the tag resolve
+    /// observable: it fails with `PolicyResolutionBlocked` before any pull. With
+    /// a pin, lazy mode never reaches that error (it fails later, pulling a
+    /// digest no blob backs); without one it does. Deleting the pin lookup makes
+    /// the first assertion fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lazy_discovery_reuses_the_recorded_pin_without_resolving_the_tag() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
+        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let digest = format!("sha256:{}", "a".repeat(64));
+
+        // No pin yet: the install must resolve the tag, which the offline
+        // routing policy refuses.
+        let unpinned = manager
+            .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
+            .await
+            .expect_err("an unpinned companion cannot be installed offline");
+        assert!(
+            is_unpinned_resolution_block(&unpinned),
+            "without a pin the install must go through a tag resolve; got: {unpinned}"
+        );
+
+        // Pinned: the same install answers from the record — no tag resolve.
+        let pin_path = manager.file_structure().patch_companion_path(&companion_id);
+        PatchTagMap::write_tag(&pin_path, "1.0", &digest)
+            .await
+            .expect("pin write");
+        let pinned = manager
+            .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
+            .await
+            .expect_err("the pinned digest is not materialized in this empty store");
+        assert!(
+            !is_unpinned_resolution_block(&pinned),
+            "a recorded pin must be pulled directly, with no tag resolve; got: {pinned}"
+        );
+
+        // A failed install must not rewrite the pin: it is recorded only once
+        // the companion is materialized, so a transient failure keeps the
+        // last-known-good digest.
+        assert_eq!(
+            PatchTagMap::read_tag(&pin_path, "1.0").await.unwrap().as_deref(),
+            Some(digest.as_str()),
+            "a failed companion install must leave the recorded pin intact"
+        );
+    }
+
+    /// A companion pin is patch-tier state: it lands under
+    /// `state/patch-companions/`, and the local index home stays untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn companion_install_pins_into_patch_state_not_the_local_index() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_offline_manager(tmp.path());
+        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let pin_path = manager.file_structure().patch_companion_path(&companion_id);
+
+        assert!(
+            pin_path.starts_with(manager.file_structure().root().join("state").join("patch-companions")),
+            "the companion pin must live in patch state; got: {}",
+            pin_path.display()
+        );
+
+        PatchTagMap::write_tag(&pin_path, "1.0", &format!("sha256:{}", "a".repeat(64)))
+            .await
+            .expect("pin write");
+        assert!(
+            !manager.file_structure().index.root().exists(),
+            "pinning a companion must not create anything in the local index home"
+        );
+    }
+
+    /// Installing a companion leaves the local index at **zero bytes** — the
+    /// absent root document is not the whole contract.
+    ///
+    /// A companion is pulled `tag@digest`, which skips the root-tag commit but
+    /// still writes the DISPATCH OBJECT the digest names into the companion
+    /// repository's own `p/<repo>/o/` under the ambient write policy — the same
+    /// package-tier directory the pin move exists to keep out of. The
+    /// blob-store recovery this fixture drives writes one back the other way,
+    /// by self-heal, so the two producers meet at the one seam the assertion
+    /// covers: the whole index home.
+    ///
+    /// Non-vacuity: nothing would be written by a resolve that simply missed
+    /// either, so the refusal is asserted to name the CHILD digest — reachable
+    /// only after the image index was recovered from `$OCX_HOME/blobs` and
+    /// platform-selected. The pull then fails on the leaf this fixture
+    /// deliberately never seeds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn companion_install_writes_nothing_into_the_local_index_home() {
+        let tmp = TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(tmp.path().to_path_buf());
+        // Production's wiring (`context.rs`) minus any source: the blob store
+        // is attached, so the pinned image index resolves from installed
+        // content with zero network — which is how a companion resolves at all
+        // now that its dispatch object is never written to the index.
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: file_structure.index.clone(),
+            }),
+            vec![],
+            ChainMode::Offline,
+            file_structure.blobs.clone(),
+        );
+        let manager = super::super::super::PackageManager::new(file_structure.clone(), index, None, "localhost:5000");
+
+        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let child_digest = format!("sha256:{}", "b".repeat(64));
+        let image_index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":2,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
+        );
+        let top_digest = oci::Algorithm::Sha256.hash(image_index.as_bytes());
+        file_structure
+            .blobs
+            .write_blob(companion_id.registry(), &top_digest, image_index.as_bytes())
+            .await
+            .expect("seed the companion's image index the way a pull stages it");
+        PatchTagMap::write_tag(
+            &file_structure.patch_companion_path(&companion_id),
+            "1.0",
+            &top_digest.to_string(),
+        )
+        .await
+        .expect("pin write");
+
+        let refusal = manager
+            .install_companion(
+                &companion_id,
+                "linux/amd64".parse().expect("valid platform"),
+                PatchDiscoveryMode::Lazy,
+            )
+            .await
+            .expect_err("the selected leaf is deliberately absent from this store");
+        assert!(
+            refusal.to_string().contains(&child_digest),
+            "the pull must have recovered the image index and selected its linux/amd64 child, \
+             or an empty index proves nothing; got: {refusal}"
+        );
+
+        assert!(
+            !file_structure.index.root().exists(),
+            "a companion install must leave the local index at zero bytes; found {} — \
+             the dispatch object at {} is the usual culprit",
+            file_structure.index.root().display(),
+            file_structure
+                .index
+                .dispatch_object_path(companion_id.registry(), companion_id.repository(), &top_digest)
+                .display()
+        );
     }
 
     /// Regression guard (runtime): `install_companion` DOES NOT write to the
@@ -1902,7 +2144,9 @@ mod tests {
 
         // Invoke install_companion — it will fail (offline + empty store) but must
         // NOT touch the tag store.
-        let result = manager.install_companion(&companion_id, oci::Platform::any()).await;
+        let result = manager
+            .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
+            .await;
         assert!(
             result.is_err(),
             "install_companion on an offline empty manager must fail (expected: not a guard failure)"
@@ -2000,7 +2244,9 @@ mod tests {
 
         // Call install_companion — will fail (no package data in store), but must NOT
         // write any tag-store entries for the companion's patch repos.
-        let result = manager.install_companion(&companion_id, oci::Platform::any()).await;
+        let result = manager
+            .install_companion(&companion_id, oci::Platform::any(), PatchDiscoveryMode::Lazy)
+            .await;
         assert!(result.is_err(), "install_companion must fail (no data in store)");
 
         // Critical: even with a non-offline manager, install_companion must NOT have

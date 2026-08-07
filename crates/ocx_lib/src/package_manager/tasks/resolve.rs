@@ -1148,16 +1148,12 @@ impl PackageManager {
 
                 // Cache miss: resolve and project the companion.
                 //
-                // Resolve the companion to a pinned identifier via `find_plain`.
-                // The companion must already be installed locally (Phase 3 installed it).
-                // If not found, skip optional companions; log a warning.
-                //
-                // When a `PatchSnapshot` is active and contains a pin for this companion,
-                // prefer the snapshot digest over the live tag lookup (opt-in determinism,
-                // Phase 5B ADR C8). The snapshot pin is policy, not truth: if the locally
-                // installed package at the snapshot digest is absent the lookup returns None,
-                // and the required-fail-closed gate fires as normal.
-                let companion_install_info = match self.find_companion_with_snapshot(companion_id, platform).await {
+                // The companion composes at its patch-tier pin — the active
+                // `PatchSnapshot` when one is loaded (opt-in determinism, ADR C8),
+                // else the digest discovery/sync recorded. A pin is policy, not
+                // truth: if the package at that digest is not installed the lookup
+                // returns None and the required-fail-closed gate fires as normal.
+                let companion_install_info = match self.find_companion_local(companion_id, platform).await {
                     Ok(Some(info)) => info,
                     Ok(None) => {
                         // Cache None = genuinely missing, so the required-fail-closed check
@@ -1258,129 +1254,161 @@ impl PackageManager {
         Ok(Some(patch_set))
     }
 
-    /// Look up a companion's installed `InstallInfo` from the local index and
-    /// package store, without contacting the network.
+    /// The digest a companion composes at: the active
+    /// [`PatchSnapshot`](crate::patch::PatchSnapshot) pin when one is loaded,
+    /// else the patch tier's own recorded pin.
     ///
-    /// Resolves the companion tag → platform manifest digest via the local blob
-    /// cache, using platform selection when an image index is present.
-    /// `Op::Query` is strictly local in every [`ChainMode`] (never walks the
-    /// chain, never writes) — this keeps `build_site_patch_set` network-free.
+    /// The snapshot wins because it is the explicit freeze
+    /// (`ocx patch freeze` / `OCX_PATCH_SNAPSHOT`); its key is
+    /// `"registry/repository"`, so it pins a repository regardless of tag.
+    /// `Ok(None)` = this companion has no pin, which callers treat as "not
+    /// installed" (the required-fail-closed gate then fires as normal).
+    pub(super) async fn companion_pin(&self, companion_id: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
+        if let Some(snapshot) = self.patch_snapshot() {
+            let snapshot_key = format!("{}/{}", companion_id.registry(), companion_id.repository());
+            if let Some(pinned_digest) = snapshot.companions.get(&snapshot_key) {
+                return Ok(Some(pinned_digest.clone()));
+            }
+        }
+        self.companion_pin_recorded(companion_id).await
+    }
+
+    /// The patch tier's RECORDED companion pin, ignoring any active snapshot.
+    ///
+    /// `ocx patch freeze` must snapshot live state, so the roots it reads have
+    /// to come from the record — reading through
+    /// [`companion_pin`](Self::companion_pin) would let a freeze re-freeze its
+    /// own snapshot.
+    pub(super) async fn companion_pin_recorded(
+        &self,
+        companion_id: &oci::Identifier,
+    ) -> crate::Result<Option<oci::Digest>> {
+        let path = self.file_structure().patch_companion_path(companion_id);
+        let Some(recorded) = super::patch_discovery::PatchTagMap::read_tag(&path, companion_id.tag_or_latest()).await?
+        else {
+            return Ok(None);
+        };
+        match oci::Digest::try_from(recorded.as_str()) {
+            Ok(digest) => Ok(Some(digest)),
+            Err(error) => {
+                // A malformed record is not a resolution answer — treat the
+                // companion as unpinned so a required one still fails closed.
+                log::warn!(
+                    "site-patch-set: companion pin for '{}' has an invalid digest '{}': {error}; ignoring",
+                    companion_id,
+                    recorded
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Look up a companion's installed `InstallInfo` from the patch-tier pin and
+    /// the package store, without contacting the network.
     ///
     /// ## Resolution algorithm
     ///
-    /// Phase 3 (`pull`) caches the full manifest chain (image index + per-platform
-    /// manifests) in the local blob store and commits the IMAGE INDEX digest to the
-    /// tag store.  The package, however, is stored at the PLATFORM MANIFEST digest.
-    /// Naively looking up the tag-store digest in the package store therefore fails
-    /// for any multi-platform companion.  This method resolves correctly:
+    /// A companion pin records the TOP manifest digest (image index for a
+    /// multi-platform companion, image manifest otherwise); the package,
+    /// however, is stored at the PLATFORM MANIFEST digest. So:
     ///
-    /// 1. Read the tag-store digest (the top-level manifest digest — image index for
-    ///    multi-platform companions, single-platform image manifest otherwise).
+    /// 1. Read the pin ([`companion_pin`](Self::companion_pin) — snapshot ▸
+    ///    record). No pin → the companion was never discovered here; report it
+    ///    as not installed. The local index is deliberately NOT consulted: a
+    ///    companion is never pinned there, so a package-tier tag pointer that
+    ///    happens to exist for the same repository is somebody else's answer.
     /// 2. If the manifest blob at that digest is locally cached, read it and perform
     ///    platform selection:
     ///    - `Manifest::ImageIndex` → select the child manifest matching `platform`,
     ///      returning its digest as the pinned identifier.
-    ///    - `Manifest::Image` → the tag-store digest already IS the platform digest;
+    ///    - `Manifest::Image` → the pinned digest already IS the platform digest;
     ///      use it directly.
-    /// 3. If the manifest blob is absent from the local cache (no pull has occurred
-    ///    since the tag was last indexed), fall back to using the tag-store digest
-    ///    directly and call `find_in_store`.  This handles the single-platform case
-    ///    where the tag-store digest and platform-manifest digest are the same.
+    /// 3. If the manifest blob is absent from the local cache, fall back to using
+    ///    the pinned digest directly and call `find_in_store`. This covers a
+    ///    single-platform companion and a locally materialized one
+    ///    (`ocx patch test --companion-archive`), whose pin already names the
+    ///    platform manifest.
     ///
-    /// Returns `Ok(None)` when the companion is not installed locally.
+    /// Returns `Ok(None)` when the companion is not pinned or not installed locally.
     ///
-    /// Each of the manager's local index stores
-    /// ([`PackageManager::local_lookup_index_stores`]) is tried in order, so a
-    /// manager that writes its own tag pointers into a private overlay (the
-    /// `ocx patch test` scratch store) resolves both those companions and the
-    /// ones recorded in the shared home.
+    /// `platform` is the platform being composed FOR — the caller's `-p`, not
+    /// the host. It is consumed only in step 2's image-index selection; a pin
+    /// that already names a platform manifest leaves nothing to select from.
     async fn find_companion_local(
-        &self,
-        companion_id: &oci::Identifier,
-        platform: &oci::Platform,
-    ) -> crate::Result<Option<InstallInfo>> {
-        for index_store in self.local_lookup_index_stores() {
-            // Build a guaranteed-local index (empty sources → strictly local,
-            // never walks the chain, never contacts the network).
-            //
-            // The companion overlay operates on already-installed state: Phase 3
-            // installed the companion and committed its tag to the local index. The
-            // resolution must be cache-only in EVERY `ChainMode` — in particular it
-            // must NOT use the manager's own `index()`, because under
-            // `ChainMode::Remote` (`--remote`) a tag-addressed `Op::Query` bypasses the
-            // local read and routes to the registry (`ChainedIndex::fetch_manifest_digest`):
-            // that would contact the network from the offline-safe overlay path and
-            // ignore the locally-installed companion tag. Build a fresh `Offline`
-            // index over the store so the lookup is network-free.
-            let local_index = oci::index::Index::from_chained(
-                oci::index::LocalIndex::new(oci::index::LocalConfig { index_store }),
-                Vec::new(),
-                oci::index::ChainMode::Offline,
-            );
-            if let Some(info) =
-                find_companion_in_index(&local_index, &self.file_structure().packages, companion_id, platform).await?
-            {
-                return Ok(Some(info));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Look up a companion's installed `InstallInfo`, preferring a pinned digest
-    /// from the active [`crate::patch::PatchSnapshot`] over the live tag lookup.
-    ///
-    /// When `self.patch_snapshot()` is `Some` and contains a pin for `companion_id`
-    /// (keyed by `"registry/repository"`), the pinned digest is used to construct
-    /// the `PinnedIdentifier` and the package is looked up directly in the store —
-    /// no tag resolution. This is the Phase 5B opt-in determinism mechanism.
-    ///
-    /// Falls back to [`Self::find_companion_local`] when no snapshot is active or
-    /// the snapshot does not contain a pin for this companion. `platform` is
-    /// consumed only on that fallback: a snapshot pin names the platform
-    /// manifest digest outright, so there is no image index left to select from.
-    ///
-    /// # Errors
-    ///
-    /// Propagates errors from the underlying store reads.
-    async fn find_companion_with_snapshot(
         &self,
         companion_id: &oci::Identifier,
         platform: &oci::Platform,
     ) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
 
-        // Check the snapshot for a pinned digest for this companion.
-        // The snapshot key is "registry/repository" (no tag, no digest suffix).
-        if let Some(snapshot) = self.patch_snapshot() {
-            let snapshot_key = format!("{}/{}", companion_id.registry(), companion_id.repository());
-            if let Some(pinned_digest) = snapshot.companions.get(&snapshot_key) {
-                // Build the pinned identifier using the snapshot digest and look up
-                // the package in the local store. The snapshot is policy not truth:
-                // if the package at this digest is not locally installed, return None
-                // (the required-fail-closed gate fires in the caller as normal).
-                let pinned_id = match oci::PinnedIdentifier::try_from(
-                    companion_id.clone_with_digest(pinned_digest.clone()),
-                ) {
-                    Ok(id) => id,
-                    Err(_) => {
-                        // Digest-format error should not occur (snapshot is serialized
-                        // from valid Digest values), but fall back to live lookup if it does.
-                        log::warn!(
-                            "site-patch-set: snapshot pin for '{}' has invalid digest format; falling back to live lookup",
-                            snapshot_key
-                        );
-                        return self.find_companion_local(companion_id, platform).await;
+        // Step 1: the patch tier's own pin — the only binding that decides
+        // which companion version composes. `Ok(None)` = not discovered here.
+        let Some(top_digest) = self.companion_pin(companion_id).await? else {
+            return Ok(None);
+        };
+
+        // Steps 2/3 read the manifest the pin names, digest-addressed and
+        // network-free — see `companion_manifest_index`.
+        let local_index = companion_manifest_index(self);
+
+        // Step 2: attempt to read the top-level manifest blob and perform platform
+        // selection for image-index companions. If the blob is not cached (returns
+        // None — the companion was never pulled on this machine), fall through
+        // to Step 3 which uses the tag-store digest directly.
+        let top_id = companion_id.clone_with_digest(top_digest.clone());
+        if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
+            let pinned_id = match top_manifest {
+                // Single-platform image: tag-store digest IS the platform manifest digest.
+                (digest, oci::Manifest::Image(_)) => {
+                    match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
+                        Ok(id) => id,
+                        Err(_) => return Ok(None),
                     }
-                };
-                let result = find_in_store(&self.file_structure().packages, &pinned_id)
-                    .await
-                    .map_err(crate::Error::from)?;
-                return Ok(result);
-            }
+                }
+                // Multi-platform image index: select the child manifest for the
+                // platform being composed FOR — the caller's `-p`, not the host, or
+                // a companion that ships no host leaf resolves as absent and a
+                // required one fails closed.  The image index blob was cached by
+                // Phase 3 `pull`, so `select` reads it locally.
+                (_, oci::Manifest::ImageIndex(_)) => {
+                    let selected_id = match local_index.select(&top_id, platform, IndexOperation::Query).await? {
+                        SelectResult::Found(id) => id,
+                        SelectResult::NotFound => return Ok(None),
+                        SelectResult::Ambiguous(_) => return Ok(None),
+                        SelectResult::FeatureMismatch { .. } => return Ok(None),
+                    };
+                    match oci::PinnedIdentifier::try_from(selected_id) {
+                        Ok(id) => id,
+                        Err(_) => return Ok(None),
+                    }
+                }
+            };
+            let result = find_in_store(&self.file_structure().packages, &pinned_id)
+                .await
+                .map_err(crate::Error::from)?;
+            return Ok(result);
         }
 
-        // No snapshot pin for this companion — fall back to the live tag lookup.
-        self.find_companion_local(companion_id, platform).await
+        // Step 3 (fallback): manifest blob absent from local cache.
+        //
+        // The pinned digest may already BE the platform manifest digest — the
+        // single-platform case, and the locally materialized one where
+        // `ocx patch test --companion-archive` pinned what `pull_local`
+        // produced. Try `find_in_store` with it: present → that was the case;
+        // absent → the companion is genuinely not installed locally and
+        // `find_in_store` returns `None` → caller treats as missing.
+        let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+        // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
+        // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
+        // impl already extracts the inner error for the `Internal` arm and wraps
+        // others structurally (no `.to_string()` erasure).
+        let result = find_in_store(&self.file_structure().packages, &pinned_id)
+            .await
+            .map_err(crate::Error::from)?;
+        Ok(result)
     }
 
     /// Resolve GC roots from the site-patch tier (strictly offline, no network).
@@ -1415,20 +1443,9 @@ impl PackageManager {
         let blob_store = &file_structure.blobs;
         let symlink_root = file_structure.symlinks.root().to_path_buf();
 
-        // Build a guaranteed-local index (same pattern as find_companion_local)
-        // over the effective (--index / OCX_INDEX redirected) snapshot home so
-        // companion tag → digest resolution reads the same store the main index
-        // uses and is network-free in every ChainMode. The private index overlay
-        // is deliberately not consulted: this feeds GC roots and `patch freeze`
-        // for the real home, and no caller that declares an overlay (only
-        // `ocx patch test`, over a tempdir) ever reaches this path.
-        let local_index = oci::index::Index::from_chained(
-            oci::index::LocalIndex::new(oci::index::LocalConfig {
-                index_store: self.effective_index_store(),
-            }),
-            Vec::new(),
-            oci::index::ChainMode::Offline,
-        );
+        // Same reader `find_companion_local` composes through, so a GC root and
+        // the thing compose resolves are derived from one answer.
+        let local_index = companion_manifest_index(self);
 
         // ── Step 1: Collect installed base identifiers via the shared enumerator. ──
         //
@@ -1514,19 +1531,22 @@ impl PackageManager {
             }
         }
 
-        // ── Step 3: Resolve companion tags → platform-manifest pinned identifiers (local-only). ──
+        // ── Step 3: Resolve companion pins → platform-manifest pinned identifiers (local-only). ──
         //
-        // The tag store records the IMAGE INDEX digest (the top-level manifest from
-        // `index update` or Phase 3 discovery).  The package store, however, keys by
-        // PLATFORM MANIFEST digest.  Resolution algorithm mirrors `find_companion_local`:
+        // The patch tier pins the TOP manifest digest (image index, or image
+        // manifest for a single-platform companion). The package store, however,
+        // keys by PLATFORM MANIFEST digest. Resolution mirrors `find_companion_local`:
         //
-        //   a) Read the tag-store digest (top-level digest) via `fetch_manifest_digest`.
+        //   a) Read the RECORDED pin (`companion_pin_recorded`) — deliberately not
+        //      `companion_pin`: `ocx patch freeze` builds its snapshot from these
+        //      roots, so reading through an active snapshot would let a freeze
+        //      re-freeze its own output instead of recording live state.
         //   b) If the manifest blob at that digest is locally cached, read it and
         //      perform platform selection for image-index companions (multi-platform case).
-        //      For single-platform companions (`Manifest::Image`), the tag-store digest
+        //      For single-platform companions (`Manifest::Image`), the pinned digest
         //      already IS the platform manifest digest.
-        //   c) If the blob is absent (no pull since last `index update`), fall back to
-        //      the tag-store digest directly (correct for single-platform companions).
+        //   c) If the blob is absent, fall back to the pinned digest directly
+        //      (correct for single-platform and locally materialized companions).
         //
         // This is required for both GC root correctness and `patch freeze` snapshot
         // accuracy: the pinned identifier must match the path at which the package was
@@ -1538,22 +1558,19 @@ impl PackageManager {
         companion_set.dedup_by_key(|id| id.to_string());
 
         'companion: for companion_id in &companion_set {
-            // Step a: read the tag-store digest.
-            let top_digest = match local_index
-                .fetch_manifest_digest(companion_id, oci::index::IndexOperation::Query)
-                .await
-            {
+            // Step a: read the recorded patch-tier pin.
+            let top_digest = match self.companion_pin_recorded(companion_id).await {
                 Ok(Some(d)) => d,
                 Ok(None) => {
                     log::debug!(
-                        "resolve-site-patch-roots: companion '{}' not in local index; skipping",
+                        "resolve-site-patch-roots: companion '{}' has no patch-tier pin; skipping",
                         companion_id
                     );
                     continue;
                 }
                 Err(error) => {
                     log::debug!(
-                        "resolve-site-patch-roots: error querying local index for companion '{}': {error}; skipping",
+                        "resolve-site-patch-roots: error reading the patch pin for companion '{}': {error}; skipping",
                         companion_id
                     );
                     continue;
@@ -1786,6 +1803,15 @@ async fn load_descriptor_for_id(
     }
 }
 
+/// The host platform, the way every ambient (no `-p`) compose path resolves it.
+///
+/// Test call sites pass this to `resolve_env` so the companion selection they
+/// exercise is the one production performs on the same host.
+#[cfg(test)]
+fn host_platform() -> oci::Platform {
+    oci::Platform::current().unwrap_or_else(oci::Platform::any)
+}
+
 /// Load a descriptor honouring an active freeze snapshot (C8 whole-tier
 /// determinism).
 ///
@@ -1798,98 +1824,6 @@ async fn load_descriptor_for_id(
 /// sync` that publishes a new descriptor cannot change which companions a frozen
 /// build composes. When `snapshot` is `None`, the live tag-store load applies
 /// (the tier floats), via [`load_descriptor_for_id`].
-/// Resolve a companion through one guaranteed-local index, per the algorithm
-/// documented on [`PackageManager::find_companion_local`] — the caller owns the
-/// store order, this owns the tag → platform-manifest → package-store walk.
-///
-/// Returns `Ok(None)` when this index does not resolve the companion's tag, or
-/// resolves it to a package that is not in `packages`.
-async fn find_companion_in_index(
-    local_index: &oci::index::Index,
-    packages: &crate::file_structure::PackageStore,
-    companion_id: &oci::Identifier,
-    platform: &oci::Platform,
-) -> crate::Result<Option<InstallInfo>> {
-    use super::common::find_in_store;
-
-    // Step 1: resolve the tag → top-level digest via the local index.
-    // `fetch_manifest_digest` reads only the root document — no blob store access.
-    // On miss → companion not in this local index → not installed.
-    let Some(top_digest) = local_index
-        .fetch_manifest_digest(companion_id, IndexOperation::Query)
-        .await?
-    else {
-        return Ok(None);
-    };
-
-    // Step 2: attempt to read the top-level manifest blob and perform platform
-    // selection for image-index companions. If the blob is not cached (returns
-    // None — no pull has happened since the last `index update`), fall through
-    // to Step 3 which uses the tag-store digest directly.
-    let top_id = companion_id.clone_with_digest(top_digest.clone());
-    if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
-        let pinned_id = match top_manifest {
-            // Single-platform image: tag-store digest IS the platform manifest digest.
-            (digest, oci::Manifest::Image(_)) => {
-                match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
-                    Ok(id) => id,
-                    Err(_) => return Ok(None),
-                }
-            }
-            // Multi-platform image index: select the child manifest for the
-            // platform being composed FOR — the caller's `-p`, not the host, or a
-            // companion that ships no host leaf resolves as absent and a required
-            // one fails closed.  The image index blob was cached by Phase 3
-            // `pull`, so `select` reads it locally.
-            (_, oci::Manifest::ImageIndex(_)) => {
-                let selected_id = match local_index.select(&top_id, platform, IndexOperation::Query).await? {
-                    SelectResult::Found(id) => id,
-                    SelectResult::NotFound => return Ok(None),
-                    SelectResult::Ambiguous(_) => return Ok(None),
-                    SelectResult::FeatureMismatch { .. } => return Ok(None),
-                };
-                match oci::PinnedIdentifier::try_from(selected_id) {
-                    Ok(id) => id,
-                    Err(_) => return Ok(None),
-                }
-            }
-        };
-        let result = find_in_store(packages, &pinned_id).await.map_err(crate::Error::from)?;
-        return Ok(result);
-    }
-
-    // Step 3 (fallback): manifest blob absent from local cache.
-    //
-    // This happens when the tag was indexed (`index update`) but the full
-    // manifest chain was never pulled (no install since the index update).
-    // In this case the tag-store digest and the platform-manifest digest
-    // may differ (for multi-platform companions after `index update` alone).
-    // However, for single-platform companions the tag-store digest IS the
-    // platform manifest digest. Try `find_in_store` with the tag-store digest:
-    // if the package is there it was a single-platform install; if not, the
-    // companion is genuinely not installed locally and `find_in_store` returns
-    // `None` → caller treats as missing.
-    let pinned_id = match oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
-        Ok(id) => id,
-        Err(_) => return Ok(None),
-    };
-    // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
-    // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
-    // impl already extracts the inner error for the `Internal` arm and wraps
-    // others structurally (no `.to_string()` erasure).
-    let result = find_in_store(packages, &pinned_id).await.map_err(crate::Error::from)?;
-    Ok(result)
-}
-
-/// The host platform, the way every ambient (no `-p`) compose path resolves it.
-///
-/// Test call sites pass this to `resolve_env` so the companion selection they
-/// exercise is the one production performs on the same host.
-#[cfg(test)]
-fn host_platform() -> oci::Platform {
-    oci::Platform::current().unwrap_or_else(oci::Platform::any)
-}
-
 async fn load_descriptor_frozen_or_live(
     blob_store: &crate::file_structure::BlobStore,
     registry: &str,
@@ -2213,6 +2147,43 @@ async fn collect_descriptor_digests(
     }
 
     Ok((Some(descriptor), Some(manifest_digest)))
+}
+
+/// The reader both companion consumers — compose (`find_companion_local`) and
+/// the GC / freeze root set (`resolve_site_patch_roots`) — resolve a recorded
+/// pin through: strictly local, network-free in every `ChainMode`, and
+/// incapable of writing the local index.
+///
+/// The answer comes from the machine-global blob store, not the index. A
+/// companion install writes nothing under `index/` — not the root tag, not the
+/// dispatch object — so a digest-addressed `Op::Query` reports
+/// `AbsentDispatch` and recovers the image index from `$OCX_HOME/blobs`, where
+/// the pull staged and ref-linked it (`stage_and_link_chain_blobs`,
+/// `ChainRole::Index`). The read is digest-verified there, so nothing is
+/// weakened by the relocation.
+///
+/// Two properties are load-bearing rather than incidental:
+///
+/// - **`read_only_view`.** The blob-store recovery normally self-heals the
+///   image index back into `o/`; on a companion that would re-create the exact
+///   package-tier directory the pin move exists to keep empty, on the first
+///   compose after an install. `LocalWritePolicy::ReadOnly` suppresses it.
+/// - **No sources + `ChainMode::Offline`.** Compose and GC must never reach a
+///   registry, whatever the ambient mode. The local index home is still the
+///   effective (`--index` / `OCX_INDEX`) one: the lookup is digest-addressed
+///   and therefore immutable content, so a dispatch object that happens to be
+///   there — the same image index reached as a package the user DID name — is
+///   a correct, cheaper hit rather than a second source of truth.
+fn companion_manifest_index(manager: &PackageManager) -> oci::index::Index {
+    oci::index::Index::from_chained_with_content_store(
+        oci::index::LocalIndex::new(oci::index::LocalConfig {
+            index_store: manager.effective_index_store(),
+        }),
+        Vec::new(),
+        oci::index::ChainMode::Offline,
+        manager.file_structure().blobs.clone(),
+    )
+    .read_only_view()
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────
@@ -2587,14 +2558,22 @@ mod phase4_spec_tests {
         }
     }
 
-    /// Seed a companion's root-document tag pointer in the wire grammar
-    /// (`adr_index_indirection.md` A2 — a DERIVED, OCX-authored root: a
-    /// locally-materialized companion is never a published-index entry) that
-    /// `LocalIndex::resolve_dispatch`/`ChainedIndex::fetch_manifest_digest`
-    /// expect.
+    /// Seed the patch tier's companion pin (tag → digest) the way a discovery
+    /// or `ocx patch sync` records it, so `find_companion_local` resolves the
+    /// companion without any index or network access.
+    pub(super) fn seed_companion_pin(file_structure: &FileStructure, companion_tag_id: &Identifier, digest: &Digest) {
+        let pin_path = file_structure.patch_companion_path(companion_tag_id);
+        std::fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
+        let record = serde_json::json!({ companion_tag_id.tag_or_latest(): digest.to_string() });
+        std::fs::write(&pin_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    /// Seed a companion's root-document tag pointer in the local index's wire
+    /// grammar (`adr_index_indirection.md` A2) — the PACKAGE-tier pin.
     ///
-    /// Tests use this helper so `find_companion_local` can resolve the
-    /// tag → digest through the public `Index` wrapper without error.
+    /// Used only to prove compose ignores it: a companion composes at its
+    /// patch-tier pin, never at whatever the shared local index happens to say
+    /// about the same repository.
     pub(super) fn write_companion_root_document(
         file_structure: &FileStructure,
         companion_tag_id: &Identifier,
@@ -2614,6 +2593,58 @@ mod phase4_spec_tests {
             }
         });
         std::fs::write(&root_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    }
+
+    /// Clean break: a companion composes at its PATCH-tier pin only. A tag
+    /// pointer for the same repository in the shared local index — written by
+    /// any `ocx index update` naming that repository — is somebody else's
+    /// answer and must not resolve the companion.
+    ///
+    /// The two halves share one fixture: without the pin the lookup must miss
+    /// even though the index names the very digest the package is stored at;
+    /// adding the pin then resolves it, so the miss cannot be a broken fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compose_ignores_a_stale_local_index_tag() {
+        let dir = TempDir::new().unwrap();
+        let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
+        let file_structure = manager.file_structure().clone();
+
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &file_structure.packages,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "CA_BUNDLE",
+            "/etc/ssl/certs/bundle.crt",
+            Visibility::INTERFACE,
+        );
+
+        // Package-tier pin only — the pre-fix source of truth.
+        write_companion_root_document(&file_structure, &companion_tag_id, &companion_digest);
+        assert!(
+            manager
+                .find_companion_local(&companion_tag_id, &super::host_platform())
+                .await
+                .expect("lookup must not error")
+                .is_none(),
+            "a local-index tag pointer must not resolve a companion — the patch tier owns that binding"
+        );
+
+        // Patch-tier pin — the only binding that composes.
+        seed_companion_pin(&file_structure, &companion_tag_id, &companion_digest);
+        assert!(
+            manager
+                .find_companion_local(&companion_tag_id, &super::host_platform())
+                .await
+                .expect("lookup must not error")
+                .is_some(),
+            "the same fixture must resolve once the patch tier pins it (proves the miss above is the pin, not the fixture)"
+        );
     }
 
     /// Write a minimal on-disk package directory (metadata.json + resolve.json).
@@ -3046,7 +3077,7 @@ mod phase4_spec_tests {
         // Write companion's root-document tag entry in the wire grammar so
         // find_companion_local (via Index::fetch_manifest_digest / Op::Query)
         // can resolve the tag → digest without a schema mismatch error.
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion ────────────────────────────
         let descriptor_json = serde_json::json!({
@@ -3197,7 +3228,7 @@ mod phase4_spec_tests {
             "once",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: catch-all rule → the one companion ──────────────
         let descriptor_json = serde_json::json!({
@@ -3354,22 +3385,17 @@ mod phase4_spec_tests {
             Visibility::INTERFACE,
         );
 
-        // Both tags share one repository, so the root document must carry BOTH
-        // tag → digest entries at once — `write_companion_root_document` writes a
-        // single-tag document and a second call would overwrite the first tag's
-        // entry, since the root-document path is keyed by repository only.
-        let registry = companion_tag_id_v1.registry();
-        let repository = companion_tag_id_v1.repository();
-        let root_path = tag_store.index.root_document_path(registry, repository);
-        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
-        let root_doc = serde_json::json!({
-            "repository": format!("oci://{registry}/{repository}"),
-            "tags": {
-                "1.0.0": { "content": companion_digest_v1.to_string(), "observed": "2026-07-18T00:00:00Z" },
-                "2.0.0": { "content": companion_digest_v2.to_string(), "observed": "2026-07-18T00:00:00Z" },
-            }
+        // Both tags share one repository, so the companion pin record must carry
+        // BOTH tag → digest entries at once — `seed_companion_pin` writes a
+        // single-tag record and a second call would overwrite the first, since
+        // the pin path is keyed by repository only.
+        let pin_path = tag_store.patch_companion_path(&companion_tag_id_v1);
+        std::fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
+        let pin_record = serde_json::json!({
+            "1.0.0": companion_digest_v1.to_string(),
+            "2.0.0": companion_digest_v2.to_string(),
         });
-        std::fs::write(&root_path, serde_json::to_vec(&root_doc).unwrap()).unwrap();
+        std::fs::write(&pin_path, serde_json::to_vec(&pin_record).unwrap()).unwrap();
 
         // ── Global descriptor: catch-all rule → both companion tags, in order ──
         let descriptor_json = serde_json::json!({
@@ -3515,7 +3541,7 @@ mod phase4_spec_tests {
             "present",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule matches ONLY the private dep, not the root ──
         let descriptor_json = serde_json::json!({
@@ -3779,7 +3805,7 @@ mod phase4_spec_tests {
         // Write companion's root-document tag entry in the wire grammar so
         // find_companion_local (via Index::fetch_manifest_digest / Op::Query)
         // resolves the tag → digest without a schema mismatch error.
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion (the private-only companion). ─
         let descriptor_json = serde_json::json!({
@@ -4129,7 +4155,7 @@ mod phase4_spec_tests {
                 "companion",
                 Visibility::INTERFACE,
             );
-            write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+            seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
             // Package-specific descriptor for this root → its own companion.
             let descriptor_json = serde_json::json!({
@@ -4428,7 +4454,7 @@ mod phase4_spec_tests {
             "global_cert",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &global_companion_tag_id, &global_companion_digest);
+        seed_companion_pin(&tag_store, &global_companion_tag_id, &global_companion_digest);
 
         // ── Pkg-specific companion: CERT_FILE=pkg_cert ────────────────────────
         let pkg_companion_digest = sha256('b');
@@ -4445,7 +4471,7 @@ mod phase4_spec_tests {
             "pkg_cert",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &pkg_companion_tag_id, &pkg_companion_digest);
+        seed_companion_pin(&tag_store, &pkg_companion_tag_id, &pkg_companion_digest);
 
         // ── Helper: write a descriptor blob and return manifest digest ─────────
         let write_descriptor_blob = |companion_tag: &Identifier| {
@@ -4633,7 +4659,7 @@ mod phase4_spec_tests {
 
         // Companion's root-document tag entry in the wire grammar.
         {
-            write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+            seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
         }
 
         // ── Root: declares PATH = "/root/bin" (interface, Path modifier). ──────
@@ -5159,7 +5185,7 @@ mod phase4_spec_tests {
         // `fetch_manifest_digest(Op::Query)` parses it correctly, returns
         // `Ok(Some(digest))`, then `find_in_store` returns `Ok(None)` (not
         // installed), and the required-fail-closed arm fires.
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
         // NOTE: deliberately NOT seeding the package dir — companion is not installed.
 
         // Global descriptor: rule "*" → required companion.
@@ -5277,7 +5303,7 @@ mod phase4_spec_tests {
 
         // Write the companion's root document in the correct envelope format.
         // This is the on-disk shape produced by a real Phase 3 install.
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // ── Global descriptor: rule "*" → companion ────────────────────────────
         let descriptor_json = serde_json::json!({
@@ -5467,7 +5493,7 @@ mod phase4_spec_tests {
             );
         }
 
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         let descriptor_json = serde_json::json!({
             "version": 1,
@@ -5680,7 +5706,7 @@ mod phase5a_spec_tests {
 
     use super::{
         super::patch_discovery::{PatchTagMap, global_descriptor_id},
-        phase4_spec_tests::{seed_package_with_constant_var, write_companion_root_document},
+        phase4_spec_tests::{seed_companion_pin, seed_package_with_constant_var},
     };
 
     const REGISTRY: &str = "example.com";
@@ -5853,7 +5879,7 @@ mod phase5a_spec_tests {
         );
 
         // Write companion root-document tag entry in the wire grammar `LocalIndex` understands.
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed the global descriptor referencing the companion.
         let (manifest_digest, layer_digest) =
@@ -5937,7 +5963,7 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs/bundle.crt",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed global descriptor.
         seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
@@ -6050,7 +6076,7 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs",
             crate::package::metadata::visibility::Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // Seed a descriptor with a scoped rule matching `example.com/cmake:*`.
         // This rule must ONLY fire when the base identifier is correctly
@@ -6181,7 +6207,7 @@ mod phase5a_spec_tests {
             "/etc/ssl/certs/bundle.crt",
             crate::package::metadata::visibility::Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_tag_id, &companion_digest);
+        seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
 
         // Global descriptor with a SCOPED port-registry rule (not catch-all).
         {
@@ -6265,7 +6291,7 @@ mod phase5b_spec_tests {
     };
 
     use super::{
-        phase4_spec_tests::{seed_package_with_constant_var, seed_root_arc, write_companion_root_document},
+        phase4_spec_tests::{seed_companion_pin, seed_package_with_constant_var, seed_root_arc},
         phase5a_spec_tests::{make_manager, seed_global_descriptor_with_companion, sha256, test_patch_config},
     };
 
@@ -6324,7 +6350,7 @@ mod phase5b_spec_tests {
             "live_value",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_id, &live_digest);
+        seed_companion_pin(&tag_store, &companion_id, &live_digest);
 
         // Snapshot companion: package at digest B carries snapshot_value.
         let snap_pinned = PinnedIdentifier::try_from(
@@ -6420,7 +6446,7 @@ mod phase5b_spec_tests {
             "live_value",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &companion_id, &live_digest);
+        seed_companion_pin(&tag_store, &companion_id, &live_digest);
 
         seed_global_descriptor_with_companion(&dir, &patch_config, &companion_id).await;
 
@@ -6479,7 +6505,7 @@ mod phase5b_spec_tests {
             "frozen",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &frozen_companion, &frozen_digest);
+        seed_companion_pin(&tag_store, &frozen_companion, &frozen_digest);
 
         // Advanced companion `ca-bundle-v2` at digest dC2 → SNAP_VAR=advanced.
         let advanced_companion = Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_tag("latest");
@@ -6496,7 +6522,7 @@ mod phase5b_spec_tests {
             "advanced",
             Visibility::INTERFACE,
         );
-        write_companion_root_document(&tag_store, &advanced_companion, &advanced_digest);
+        seed_companion_pin(&tag_store, &advanced_companion, &advanced_digest);
 
         // Freeze: descriptor M1 names the frozen companion. This is the global tag
         // target captured by `ocx patch freeze`.
