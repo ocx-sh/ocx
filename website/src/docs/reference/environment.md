@@ -387,7 +387,7 @@ See [`[managed]`][config-managed] for the full tier semantics and [`ocx config u
 
 ### `OCX_NO_CONFIG_REFRESH` {#ocx-no-config-refresh}
 
-When set to a [truthy value](#truthy-values), disables the background refresh tick for the [`[managed]`][config-managed] configuration tier — both the `apply` and `notify` [`refresh`][config-managed-refresh] postures are silenced. An explicit [`ocx config update`][cmd-config-update] still runs and still updates the snapshot; only the automatic per-command probe is suppressed.
+When set to a [truthy value](#truthy-values), disables the background refresh tick for the [`[managed]`][config-managed] configuration tier — both the `apply` and `notify` [`refresh`][config-managed-refresh] postures are silenced. An explicit [`ocx config update`][cmd-config-update] still runs and still updates the snapshot; only the automatic per-command probe is suppressed. It does not gate the setup-time re-sync either: [`ocx self setup`][cmd-self-setup] and [`ocx config setup`][cmd-config-setup] still reconcile an already-adopted seed on every invocation regardless of this variable — use [`--offline`](#ocx-offline) to skip that re-sync instead.
 
 ```sh
 export OCX_NO_CONFIG_REFRESH=1
