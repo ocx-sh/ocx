@@ -482,7 +482,7 @@ Background refresh posture, checked at most once per [`interval`](#keys-managed-
 | `notify` (default) | Drift prints a stderr advisory ("run `ocx config update`"); content is not fetched by the tick. |
 | `manual` | The background tick is skipped entirely; only an explicit [`ocx config update`][cmd-config-update] refreshes the snapshot. |
 
-[`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] kills the background tick regardless of `refresh`; an explicit `ocx config update` still works.
+[`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] kills the background tick regardless of `refresh`; an explicit [`ocx config update`][cmd-config-update] still works — and so does the reconciling re-sync [`ocx self setup`][cmd-self-setup] and [`ocx config setup`][cmd-config-setup] run against an already-adopted seed on every invocation. This variable governs the background tick only; use [`--offline`][arg-offline] to skip the setup-time re-sync instead.
 
 **Activation conditions.** The tick this posture governs only runs when *all* of the following hold: stderr is a terminal, the process is not running inside CI (`CI` unset), the invocation is not offline ([`--offline`][arg-offline]/[`OCX_OFFLINE`][env-offline]), the tier is not paused ([`ocx config update --pause`][cmd-config-update]), and the [`interval`](#keys-managed-interval) throttle window has elapsed. Any one of those failing skips the tick outright — so `refresh = "apply"` never auto-converges a CI runner or another headless host; those hosts converge only through an explicit [`ocx config update`][cmd-config-update].
 
@@ -524,7 +524,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
 | [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read |
-| [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] | None | Kill switch for the [`[managed]`](#keys-managed) background refresh tick only; explicit `ocx config update` still works |
+| [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] | None | Kill switch for the [`[managed]`](#keys-managed) background refresh tick only; explicit `ocx config update`, and the setup-time re-sync `ocx self setup` / `ocx config setup` run against an already-adopted seed, still work |
 | [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |

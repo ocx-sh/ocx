@@ -857,7 +857,7 @@ A machine that needs only the configuration — an automation host or CI image w
 
 <<< @/_scripts/user-guide/config-setup.sh{sh}
 
-A bare re-run of either command — no `--managed-config` flag at all — re-resolves and re-syncs whatever source is already active (the env override if one is set, otherwise the existing seed), so it also repairs a wiped or mismatched snapshot without repeating the onboarding command above.
+A bare re-run of either command — no `--managed-config` flag at all — re-resolves and re-syncs whatever source is already active (the env override if one is set, otherwise the existing seed). This is not just a repair path for a wiped or mismatched snapshot: against a healthy, already-adopted seed it re-checks the registry every time and pulls forward a newer published config without a separate `ocx config update`. That re-sync is best-effort once a snapshot already exists — a fetch failure warns and keeps what is on disk (exit 0) rather than failing the setup — while a wiped or mismatched snapshot still hard-fails on a fetch error, the same as first adoption.
 
 CI runners skip the seed entirely — set the org-level environment variable and sync once at the top of the job:
 
@@ -899,14 +899,16 @@ A host that needs to step off the fleet's floating tag temporarily has two lever
 
 <<< @/_scripts/user-guide/managed-config-rollout.sh{sh}
 
-A pause affects only the background tick — required-gate enforcement and explicit updates keep working — and any explicit `ocx config update` without `--pause` clears it. `ocx config update --check --format json` reports the full local state (source, digest, tag, drift, pause window, pin), which is the fleet-visibility story: OCX is deliberately pull-based and console-free, so "what is this host running?" is answered by that one command in your existing inventory tooling.
+A pause holds both the background tick and the setup-time re-sync — [`ocx self setup`][cmd-self-setup] and [`ocx config setup`][cmd-config-setup] also skip refreshing an already-adopted seed while a pause is in force. Required-gate enforcement and an explicit `ocx config update` keep working regardless, and any explicit update without `--pause` clears it. `ocx config update --check --format json` reports the full local state (source, digest, tag, drift, pause window, pin), which is the fleet-visibility story: OCX is deliberately pull-based and console-free, so "what is this host running?" is answered by that one command in your existing inventory tooling.
+
+The rollback above is not durable by itself: the seed still tracks the fleet's floating tag, so the next setup re-sync or `refresh = "apply"` tick moves the host forward again once it runs. `--pause` holds that off temporarily; a digest-pinned `source` is the permanent version — content-addressed, so nothing can drift it forward at all.
 
 ::: warning No downgrade monotonicity
 A managed-config snapshot accepts any digest change the registry reports, including a rollback to older content — the same as any tag-based OCI pull. There is no built-in check that a new digest is "newer" than the one already cached. For byte-exact reproducibility, or to rule out an accidental rollback entirely, pin `source` to a digest instead of a tag: `internal.company.com/ocx-config@sha256:…`.
 :::
 
 ::: warning CI caches must not skip the sync
-If your CI caches `$OCX_HOME` across jobs, the cached snapshot is whatever some earlier job synced — keep the explicit `ocx config update` step in the job so a poisoned or stale cache entry is always reconciled against the registry before any tool resolution happens. The identity gate refuses a snapshot recorded for a different source outright, but only a sync brings a stale same-source snapshot forward.
+If your CI caches `$OCX_HOME` across jobs, the cached snapshot is whatever some earlier job synced — keep an explicit sync step in the job so a poisoned or stale cache entry is always reconciled against the registry before any tool resolution happens. `ocx config update`, and a re-run of [`ocx config setup`][cmd-config-setup] or [`ocx self setup --managed-config`][cmd-self-setup] against the seed already adopted into the cached `$OCX_HOME`, all reconcile it — pick whichever one the job already runs; nothing extra is required on top. The identity gate refuses a snapshot recorded for a different source outright, but only a sync brings a stale same-source snapshot forward, and that sync is best-effort (a registry blip keeps the stale entry rather than failing the job) — use `ocx config update` directly where a stale sync must fail the job instead of being tolerated.
 :::
 
 ### Rolling out an incompatible change {#managed-config-incompatible}

@@ -1862,7 +1862,7 @@ ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--f
 | `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
 | `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
-| `--managed-config REF` | — | Adopt (or clear) the corporate [managed-config][config-managed] tier. `REF` is resolved as an OCI reference, synchronously fetched and persisted, then the `[managed]` seed fence in `config.toml` is written only on success — a fetch failure leaves no partial state. Pass `--managed-config ""` to clear an existing seed and delete the snapshot. Omitting the flag does not skip resolution: it falls back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed, and re-syncs (self-heals) whichever one resolves — so a bare re-run repairs a wiped or mismatched snapshot without repeating the full onboarding command. | *(resolved: env, then existing seed)* |
+| `--managed-config REF` | — | Adopt (or clear) the corporate [managed-config][config-managed] tier. `REF` is resolved as an OCI reference, synchronously fetched and persisted, then the `[managed]` seed fence in `config.toml` is written only on success — a fetch failure leaves no partial state. Pass `--managed-config ""` to clear an existing seed and delete the snapshot. Omitting the flag does not skip resolution: it falls back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed. Every run reconciles whichever source resolves — a wiped or mismatched snapshot self-heals (hard-fail on a fetch error, same as first adoption), and an already-adopted seed is re-synced to whatever the registry serves now, so a newer published config is picked up without a separate [`ocx config update`](#config-update). That re-sync is best-effort once a matching snapshot already exists on disk: a fetch failure warns on stderr and keeps the existing snapshot (exit 0) instead of failing the run. | *(resolved: env, then existing seed)* |
 | `-h`, `--help` | | Print help information. | — |
 
 **Version grammar**
@@ -1940,11 +1940,14 @@ Root-level `status` values:
 | Value | Carries `digest`? | Meaning |
 |-------|---|---------|
 | `not_configured` | No | No source resolved from `--managed-config`, [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], or an existing seed. |
-| `already_adopted` | Yes | The resolved ref matches the existing seed AND a matching snapshot is on disk; no re-fetch. The digest is the existing snapshot's verified digest. A wiped or mismatched snapshot self-heals instead: the run re-fetches and reports `adopted`. |
-| `adopted` | Yes | A new or changed ref was fetched, persisted, and the seed fence written. |
+| `already_adopted` | Yes | The resolved ref matches the existing seed AND a matching snapshot is on disk. Either the registry was checked and still serves the same content (verified, not assumed), or the check was skipped outright — a digest-pinned seed (content-addressed, cannot drift), `--offline`, or an in-force [`config update --pause`](#config-update). The digest is the existing snapshot's digest. A wiped or mismatched snapshot self-heals instead: the run re-fetches and reports `adopted`. |
+| `adopted` | Yes | A new or changed ref was fetched, persisted, and the seed fence written. Also covers self-heal of a wiped or mismatched snapshot behind a fence that was already current. |
+| `refreshed` | Yes (+ `previous_digest`) | The resolved ref matched the existing seed, but the registry now serves newer content than the on-disk snapshot: the snapshot was replaced in place — the fence itself is untouched, only rewritten on an `adopted` transition. `digest` is the new content; `previous_digest` is what the snapshot carried going in. |
+| `refresh_unavailable` | Yes (+ `reason`) | The re-sync of an already-adopted seed could not reach the registry. The existing snapshot is kept and the run still exits 0 — `reason` carries the fetch error, and the same message is written to stderr as a warning. Re-run, or run [`ocx config update`](#config-update) directly, to retry. |
 | `cleared` | No | `--managed-config ""` removed the seed fence and deleted the snapshot. |
 | `dirty` | No | The `[managed]` fence carries user edits; left untouched without `--force` — drives root `status: skipped` (exit 82). |
-| `would_adopt` | No | `--dry-run`: an adopt or re-adopt would run, but nothing was fetched or written. |
+| `would_adopt` | No | `--dry-run`: a first adopt, a self-heal of a wiped or mismatched snapshot, or a clear would run, but nothing was fetched or written. |
+| `would_refresh` | Yes | `--dry-run` against an already-adopted seed: a re-sync would run, but nothing was fetched or written — dry-run never touches the network, so this does not confirm the registry actually has newer content. |
 
 ::: warning `jq .status` returns the root discriminant, not the bootstrap status
 `jq .status` on a `self setup --format json` result returns `completed`, `no_op`, `skipped`, or `migrated` — the overall run outcome. The bootstrap-specific values (`pulled`, `already_present`, `would_pull`) are nested one level deeper under `bootstrap.status`. Use `jq .bootstrap.status` to inspect the binary install step.
@@ -1991,6 +1994,8 @@ digest=$(echo "$result" | jq -r '.bootstrap.digest // empty')  # sha256:<hex>, o
 | 80 | Authentication failed while syncing a `--managed-config` snapshot. |
 | 81 | A policy (`--offline` or `--frozen`) blocked resolution and the version was not cached locally. |
 | 82 | A managed activation block — a shell profile fence or the `[managed]` config fence — carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
+
+Where codes 65, 69, 74, 79, and 80 above concern the `[managed]` tier, they apply to the fetch that establishes the seed — first adoption, self-heal of a wiped or mismatched snapshot, or an explicit clear; the same codes also arise from the bootstrap phase (installing the pinned binary), independent of managed config. The re-sync of an *already-adopted* seed is best-effort instead: a failed re-sync *fetch* (or a published payload that fails validation) reports `managed_config.status: "refresh_unavailable"` and still exits 0, rather than failing the whole run — a failure while *writing* the refreshed snapshot to disk still errors (74), since the on-disk state may no longer be the retained one.
 
 **Examples**
 
@@ -3847,8 +3852,17 @@ The command resolves its source with the same precedence as
 flag, then [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing
 `[managed]` seed — and runs the identical adoption sequence: synchronously fetch and
 persist the snapshot **first**, then write the `[managed]` seed fence in
-`$OCX_HOME/config.toml` only on success. A fetch failure leaves no partial state. A bare
-re-run re-adopts the configured seed, so a wiped or mismatched snapshot self-heals.
+`$OCX_HOME/config.toml` only on success. A fetch failure during first adoption, or while
+self-healing a wiped or mismatched snapshot, leaves no partial state and fails the
+command.
+
+A bare re-run against an already-adopted seed reconciles it every time, not just once at
+onboarding: the source is re-fetched, and a newer digest replaces the snapshot in place
+(`refreshed`) while unchanged content just confirms it (`already_adopted`, now verified
+rather than assumed). That re-sync is best-effort — a fetch failure warns on stderr,
+keeps the existing snapshot, and still exits 0 (`refresh_unavailable`); first adoption,
+the self-heal case above, and a failure writing the refreshed snapshot to disk stay
+hard-fail.
 
 Unlike `ocx self setup` — where an unresolved source is a no-op (setup has other phases
 to run) — a bare `ocx config setup` with nothing configured at any of the three levels is
@@ -3871,14 +3885,14 @@ ocx config setup [--managed-config REF] [--dry-run] [--force]
 
 **Output** — the same `managed_config` entry [`ocx self setup`][cmd-self-setup] reports
 (`{"managed_config":{"status":"adopted","digest":"sha256:…"}}`), so fleet tooling parses
-both commands with one schema. Statuses: `adopted`, `already_adopted`, `cleared`,
-`dirty`, `would_adopt`.
+both commands with one schema. Statuses: `adopted`, `already_adopted`, `refreshed`,
+`refresh_unavailable`, `cleared`, `dirty`, `would_adopt`, `would_refresh`.
 
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
-| 0 | Adopted, already adopted, cleared, or `--dry-run` reported. |
+| 0 | Adopted, already adopted, refreshed, cleared, or `--dry-run` reported — including a re-sync of an already-adopted seed that could not reach the registry (`refresh_unavailable`; the existing snapshot is kept). |
 | 64 | Nothing to set up — no `--managed-config`, no `OCX_MANAGED_CONFIG`, no existing seed. |
 | 65 | The fetched managed-config package is malformed — digest mismatch, no `any/any` entry, missing `config.toml`, over 64 KiB, or invalid TOML. |
 | 69 | Registry unreachable while fetching the snapshot. |
@@ -3888,12 +3902,21 @@ both commands with one schema. Statuses: `adopted`, `already_adopted`, `cleared`
 | 80 | Authentication failed while fetching the snapshot. |
 | 82 | The `[managed]` fence carries user edits and `--force` was not passed. Nothing was touched. |
 
+Codes 65, 69, 74, 78, 79, and 80 apply to the fetch that establishes the seed — first
+adoption or self-heal of a wiped or mismatched snapshot. The re-sync of an
+already-adopted seed is best-effort instead: a failed re-sync reports
+`refresh_unavailable` and still exits 0.
+
 ::: tip CI recipe
-`ocx config setup --managed-config <ref>` persists the seed, so every later `ocx`
-invocation on that machine resolves the managed tier with no further env plumbing. For
-ephemeral runners where persisting is pointless, the env-var pairing
-(`OCX_MANAGED_CONFIG=… ocx config update`) works without writing a seed — see
-[`OCX_MANAGED_CONFIG`][env-ocx-managed-config].
+`ocx config setup --managed-config <ref>` persists the seed and reconciles it on every
+invocation — a job that re-runs `config setup` each time picks up newly published
+content without a separate [`ocx config update`](#config-update) step, and a failed
+re-sync keeps the last-known-good snapshot rather than failing the job. For ephemeral
+runners where persisting is pointless, the env-var pairing (`OCX_MANAGED_CONFIG=… ocx
+config update`) works without writing a seed — see
+[`OCX_MANAGED_CONFIG`][env-ocx-managed-config]. Use `ocx config update` directly
+whenever a stale or unreachable snapshot must fail the job instead of being silently
+tolerated.
 :::
 
 #### `config test` {#config-test}
@@ -4035,8 +4058,9 @@ anything. Offline (or any fetch failure) degrades to a local-state-only report. 
 never modifies the pause file.
 
 The tier is adopted by [`ocx self setup --managed-config <ref>`][cmd-self-setup] or by
-setting [`OCX_MANAGED_CONFIG`][env-ocx-managed-config]; `ocx config update` is the only
-command that fetches the package after that first adoption. See
+setting [`OCX_MANAGED_CONFIG`][env-ocx-managed-config]; re-running either setup command
+also refreshes the snapshot, but `ocx config update` is the surface for explicit version
+pins, rollback, and `--pause`/`--resume`. See
 [`[managed]`][config-managed] for the full tier schema and the
 [managed-configuration walkthrough][user-guide-managed-config] for onboarding, rollout,
 and CI recipes.
