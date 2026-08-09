@@ -20,7 +20,17 @@ docker_credential = { path = "external/docker_credential" }
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+# Size-tuned: measured 33.4 MB -> 18.6 MB binary, 12.6 MB -> 7.7 MB archive.
+# `opt-level = "s"` carries the win (-6.9 MB on its own) by stopping LLVM's
+# aggressive inlining/unrolling across a 304-crate monomorphized graph; `"z"`
+# buys 1.4 MB more but costs 28% on the compress+hash path instead of 9%.
+# `panic = "abort"` would save a further 3.1 MB and is deliberately NOT set:
+# the 13 `resume_unwind(join_err.into_panic())` sites propagate spawned-task
+# panics, and abort removes that mechanism *silently* — it compiles clean.
+# Release link time roughly doubles (96 s -> 187 s); only the release job pays.
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
 # Symbols are useless in release assets (user backtraces are unsymbolized
 # anyway) and cost ~9 MB binary / ~1.7 MB archive. cargo-auditable's .dep-v0
 # section survives a symbol strip.
