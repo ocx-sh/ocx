@@ -22,6 +22,3 @@ LICENSE-THIRD-PARTY.md -text
 
 # OCX lock files
 ocx.lock merge=union
-
-# OCX index snapshot (collapsed in PR diffs)
-.ocx/index/** linguist-generated
