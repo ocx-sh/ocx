@@ -7,5 +7,5 @@
 set -euo pipefail
 
 # region cast
-ocx package exec "$PKG_NODEJS" "$PKG_BUN" -- bun --version
+ocx package exec "$PKG_NODEJS_NODE" "$PKG_OVEN_SH_BUN" -- bun --version
 # endregion cast

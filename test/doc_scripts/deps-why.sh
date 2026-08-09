@@ -5,5 +5,5 @@
 # doc: user-guide/deps-why
 set -euo pipefail
 # region cast
-ocx package deps --why "$PKG_NODEJS" "$PKG_WEBAPP"
+ocx package deps --why "$PKG_NODEJS_NODE" "$PKG_ACME_WEBAPP"
 # endregion cast

@@ -12,5 +12,5 @@ set -euo pipefail
 # region cast
 export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
 ocx config update
-ocx package install "$PKG_CMAKE"
+ocx package install "$PKG_KITWARE_CMAKE"
 # endregion cast

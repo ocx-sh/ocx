@@ -84,7 +84,7 @@ To switch between already-installed versions, or to remove the active pointer wi
 :::
 
 ::: tip Use `--current` paths in shell profiles and IDE settings
-Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx package install --select corretto:25`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
+Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx package install --select amazon/corretto:25`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
 
 See [path resolution][path-resolution] in the user guide for the full comparison of object-store, candidate, and current paths.
 :::
@@ -124,7 +124,7 @@ Populate that global toolchain with [`ocx --global add`][user-guide-global-add] 
 ::: details Composing environments from multiple packages
 Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are prepended to any existing value; `constant` variables replace it entirely. The result is a complete, composed environment with no manual merging.
 
-`nodejs:24` contributes its `bin/` to `PATH`; `bun:1.3` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
+`nodejs/node:24` contributes its `bin/` to `PATH`; `oven-sh/bun:1.3` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
 
 <<< @/_scripts/getting-started/env-multi.sh{sh}
 

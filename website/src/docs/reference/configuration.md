@@ -88,7 +88,7 @@ Global settings for the registry subsystem.
 **Default**: `"ocx.sh"`  
 **Overridden by**: [`OCX_DEFAULT_REGISTRY`][env-default-registry] environment variable
 
-The default registry used for bare package identifiers — those without an explicit registry prefix. When you write `cmake:3.28`, OCX expands it to `<default>/cmake:3.28`.
+The default registry used for bare package identifiers — those without an explicit registry prefix. When you write `kitware/cmake:3.28`, OCX expands it to `<default>/cmake:3.28`.
 
 `default` is always a literal identifier prefix — the same string used as a [`[registries.<name>]`](#keys-registries) table key. OCX never dereferences it through any other field; every `[registries.<name>]` key is an identifier prefix, always.
 
@@ -426,12 +426,12 @@ A project can opt a specific base package out of the user-scope or project-scope
 tier by adding a `[package."<id>"]` table with `no-patches = true` to `ocx.toml`:
 
 ```toml
-[package."ocx.sh/cmake:3.28"]
+[package."ocx.sh/kitware/cmake:3.28"]
 no-patches = true
 ```
 
 The match is by canonical `registry/repository` — tag and digest are stripped, so the
-opt-out is version-independent: it follows every tag of `ocx.sh/cmake`, not just `3.28`.
+opt-out is version-independent: it follows every tag of `ocx.sh/kitware/cmake`, not just `3.28`.
 
 A system-required tier is never skipped by `no-patches`, regardless of which surface below
 resolved the opt-out.

@@ -7,5 +7,5 @@
 set -euo pipefail
 
 # region cast
-ocx package install "$PKG_UV"
+ocx package install "$PKG_ASTRAL_SH_UV"
 # endregion cast

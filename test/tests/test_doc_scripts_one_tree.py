@@ -173,7 +173,7 @@ def _meta_for(slug: str, tmp: Path) -> object:
         f"# doc: {slug}\n"
         "set -euo pipefail\n"
         "# region cast\n"
-        'ocx package install "$PKG_UV"\n'
+        'ocx package install "$PKG_ASTRAL_SH_UV"\n'
         "# endregion cast\n"
     )
     return parse_doc_header(src)
@@ -266,8 +266,8 @@ def test_eqt_residual_getting_started_env_region_shape() -> None:
     assert meta.doc == "getting-started/env"
     region = _extract_region_lines(meta)
     assert region == [
-        'ocx package install "$PKG_CORRETTO"',
-        'ocx package env "$PKG_CORRETTO"',
+        'ocx package install "$PKG_AMAZON_CORRETTO"',
+        'ocx package env "$PKG_AMAZON_CORRETTO"',
     ], (
         "getting-started/env region drifted from the converged "
         f"install-then-env shape EQ-T pinned: {region}"

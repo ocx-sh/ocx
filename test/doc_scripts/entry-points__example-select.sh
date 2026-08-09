@@ -7,19 +7,19 @@ set -euo pipefail
 
 # region cast
 # Install the first (primary) version and select it.
-ocx package install --select "$PKG_CORRETTO"
+ocx package install --select "$PKG_AMAZON_CORRETTO"
 # endregion cast
 
 # Install the second version (no --select yet).
 # The tag for the second version pushed by the multi-version setup is 25.0.0.
-ocx package install "$REPO_CORRETTO:25.0.0"
+ocx package install "$REPO_AMAZON_CORRETTO:25.0.0"
 
 # Selecting the new version re-points current; no dotfile re-sourcing needed.
-ocx package select "$REPO_CORRETTO:25.0.0"
+ocx package select "$REPO_AMAZON_CORRETTO:25.0.0"
 
 # Verify current now points at the new version — which --current with the
 # versioned identifier resolves through the current symlink to the candidate path.
-current="$(ocx package which --current "$REPO_CORRETTO:25.0.0")"
+current="$(ocx package which --current "$REPO_AMAZON_CORRETTO:25.0.0")"
 [[ "$current" == *"25"* ]] || {
     echo "expected current to point at 25.x, got: $current" >&2
     exit 1

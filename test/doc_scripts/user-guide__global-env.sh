@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # region cast
-ocx --global add "$PKG_CMAKE"
+ocx --global add "$PKG_KITWARE_CMAKE"
 ocx --global env
 ocx --format json --global env
 ocx --global env --shell=bash

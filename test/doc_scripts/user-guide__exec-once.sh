@@ -5,4 +5,4 @@
 # description: Execute a package on demand without creating a persistent candidate symlink.
 set -euo pipefail
 
-ocx package exec "$PKG_CMAKE" -- cmake --version
+ocx package exec "$PKG_KITWARE_CMAKE" -- cmake --version

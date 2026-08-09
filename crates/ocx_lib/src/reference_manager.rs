@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn name_for_path_is_deterministic_and_16_hex_chars() {
-        let path = Path::new("/home/user/.ocx/symlinks/ocx.sh/cmake/candidates/3.28");
+        let path = Path::new("/home/user/.ocx/symlinks/ocx.sh/kitware/cmake/candidates/3.28");
         let name = ReferenceManager::name_for_path(path);
         assert_eq!(name, ReferenceManager::name_for_path(path));
         assert_eq!(name.len(), 16);

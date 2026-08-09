@@ -7,10 +7,10 @@
 set -euo pipefail
 
 # region cast
-ocx package install "$PKG_UV"
-ocx package which --candidate "$PKG_UV"
+ocx package install "$PKG_ASTRAL_SH_UV"
+ocx package which --candidate "$PKG_ASTRAL_SH_UV"
 # endregion cast
-candidate="$(ocx package which --candidate "$PKG_UV")"
+candidate="$(ocx package which --candidate "$PKG_ASTRAL_SH_UV")"
 [[ -n "$candidate" ]] || {
     echo "expected a candidate path" >&2
     exit 1

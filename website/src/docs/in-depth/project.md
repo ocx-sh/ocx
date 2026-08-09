@@ -13,14 +13,14 @@ A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-loc
 
 ```toml
 [tools]
-cmake    = "ocx.sh/cmake:3.28"
-ripgrep  = "ocx.sh/ripgrep:14"
+cmake    = "ocx.sh/kitware/cmake:3.28"
+ripgrep  = "ocx.sh/ripgrep/ripgrep:14"
 mytool   = "ghcr.io/acme/mytool:1.0"
 ```
 
 Each value is `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected at parse time so the file is unambiguous regardless of which registry the user has configured as a default. The binding name on the left is independent of the repository path — `mytool = "ghcr.io/acme/mytool:1.0"` is fine and lets internal projects rename tools without touching the registry.
 
-A registry-qualified entry without a tag — `cmake = "ocx.sh/cmake"` — defaults to `:latest` at parse time, the same convention `docker pull` and OCI tooling apply to bare repository references. Digest-pinned entries (`tool = "ghcr.io/acme/tool@sha256:…"`) keep their canonical pin and never get a tag injected.
+A registry-qualified entry without a tag — `cmake = "ocx.sh/kitware/cmake"` — defaults to `:latest` at parse time, the same convention `docker pull` and OCI tooling apply to bare repository references. Digest-pinned entries (`tool = "ghcr.io/acme/tool@sha256:…"`) keep their canonical pin and never get a tag injected.
 
 The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor auto-completion. With `taplo` installed and an `ocx.toml` open in [Helix][helix], [VSCode][vscode-taplo], or [Neovim][neovim-taplo-lsp], unknown fields surface as red squiggles and tool names complete as you type.
 
@@ -53,7 +53,7 @@ generated_at = "2026-04-19T00:00:00Z"
 [[tool]]
 name = "cmake"
 group = "default"
-repository = "ocx.sh/cmake"           # registry/repo only — no tag, no digest
+repository = "ocx.sh/kitware/cmake"           # registry/repo only — no tag, no digest
 
 [tool.platforms]
 "linux/amd64"  = "sha256:<leaf-amd64>"
@@ -175,7 +175,7 @@ SOURCE_DATE_EPOCH = "1700000000"
 
 Two groups may declare different bindings whose installed packages happen to ship a binary with the same filename. The group listed **last** in `-g` order controls which binary appears first in PATH.
 
-Concrete example: `[tools]` declares `cmake = "ocx.sh/cmake:3.28"` (ships `cmake`). `[group.ci]` declares `toolchain = "ocx.sh/some-toolchain:1"` (also ships a `cmake` binary). Running:
+Concrete example: `[tools]` declares `cmake = "ocx.sh/kitware/cmake:3.28"` (ships `cmake`). `[group.ci]` declares `toolchain = "ocx.sh/some-toolchain:1"` (also ships a `cmake` binary). Running:
 
 ```shell
 ocx run -g default,ci -- cmake --version
@@ -213,14 +213,14 @@ Not every contributor needs every tool. CI needs `shellcheck` and `shfmt`; the r
 
 ```toml
 [tools]
-cmake = "ocx.sh/cmake:3.28"
+cmake = "ocx.sh/kitware/cmake:3.28"
 
 [group.ci.tools]
-shellcheck = "ocx.sh/shellcheck:0.11"
-shfmt      = "ocx.sh/shfmt:3.7"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
+shfmt      = "ocx.sh/shfmt/shfmt:3.7"
 
 [group.release.tools]
-goreleaser = "ocx.sh/goreleaser:2.0"
+goreleaser = "ocx.sh/goreleaser/goreleaser:2.0"
 ```
 
 The top-level `[tools]` table is the implicit `default` group. Each named `[group.<name>]` holds exactly two optional sub-tables: `tools`, which adds to the default group's bindings, and `env` (see [Project and group `[env]`](#running-project-env)). A tool binding declared directly under `[group.<name>]` — outside its `tools` sub-table — is a parse error naming the group. `[group.default]` is reserved and produces a parse error regardless of contents — there is no ambiguity between "implicit default" and "named default."
@@ -239,10 +239,10 @@ The same binding name may appear in the default `[tools]` table and in any named
 
 ```toml
 [tools]
-shfmt = "ocx.sh/shfmt:3.7"       # workstation default
+shfmt = "ocx.sh/shfmt/shfmt:3.7"       # workstation default
 
 [group.ci.tools]
-shfmt = "ocx.sh/shfmt:3.13"      # CI: pinned to a newer build
+shfmt = "ocx.sh/shfmt/shfmt:3.13"      # CI: pinned to a newer build
 ```
 
 When a binding name is unambiguous (present in exactly one group), [`ocx remove shfmt`][cmd-remove] finds it automatically. When the same name exists in multiple groups, pass `--group` to disambiguate:

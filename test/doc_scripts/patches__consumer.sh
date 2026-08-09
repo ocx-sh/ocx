@@ -13,6 +13,6 @@ set -euo pipefail
 
 # region cast
 ocx patch sync
-ocx package env "$PKG_CMAKE" --show-patches
-ocx package exec "$PKG_CMAKE" -- cmake --version
+ocx package env "$PKG_KITWARE_CMAKE" --show-patches
+ocx package exec "$PKG_KITWARE_CMAKE" -- cmake --version
 # endregion cast

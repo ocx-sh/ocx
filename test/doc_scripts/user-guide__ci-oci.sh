@@ -6,12 +6,12 @@
 set -euo pipefail
 
 # region cast
-ocx package pull "$PKG_CMAKE"
-ocx package env "$PKG_CMAKE"
+ocx package pull "$PKG_KITWARE_CMAKE"
+ocx package env "$PKG_KITWARE_CMAKE"
 # endregion cast
 
 # Verification — outside the displayed region (drift-gated, never shown/cast).
-env_out="$(ocx package env "$PKG_CMAKE")"
+env_out="$(ocx package env "$PKG_KITWARE_CMAKE")"
 [[ -n "$env_out" ]] || {
     echo "ERROR: ocx package env returned empty output" >&2
     exit 1

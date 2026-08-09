@@ -41,7 +41,7 @@ Every `PATH` prepend OCX emits is **idempotent with move-to-front semantics**. R
 The emitted shell statements are **self-contained**: they depend on no `ocx` process, no guard variable, and no helper function. That makes them safe to capture into a profile —
 
 ```sh
-ocx package env cmake --shell bash >> ~/.bashrc
+ocx package env kitware/cmake --shell bash >> ~/.bashrc
 ```
 
 — where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx package exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).

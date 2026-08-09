@@ -11,7 +11,7 @@ Bundle vs. depend is the first question. Bundling means shipping the dependency'
 
 Reach for a declared dependency when at least one of these is true:
 
-- **The dependency is large or commonly needed.** Bundling [Node.js][nodejs] inside every [npm][npm]-tool wrapper would mean re-shipping the same ~30 MB `node-vXX.x.x-linux-x64.tar.xz` (or ~57 MB Gzip equivalent) per tool. A declared `ocx.sh/nodejs:24` dependency means one cached install across all tools that pin the same digest.
+- **The dependency is large or commonly needed.** Bundling [Node.js][nodejs] inside every [npm][npm]-tool wrapper would mean re-shipping the same ~30 MB `node-vXX.x.x-linux-x64.tar.xz` (or ~57 MB Gzip equivalent) per tool. A declared `ocx.sh/nodejs/node:24` dependency means one cached install across all tools that pin the same digest.
 - **You need a specific version of someone else's tool.** Wrapping [`terraform`][terraform] to add organisation defaults means pinning the upstream `terraform` build — a declared dependency captures that pin in metadata, so consumers can audit it without unpacking your archive.
 - **Your tool genuinely runs the dependency at runtime.** A wrapper that shells out to [`cmake`][cmake] needs `cmake` on disk in a known place — `${deps.cmake.installPath}` provides that.
 
@@ -26,7 +26,7 @@ You do not write that digest by hand. In the `metadata.json` sidecar you author,
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/cmake:3.28", "visibility": "public" }
+    { "identifier": "ocx.sh/kitware/cmake:3.28", "visibility": "public" }
   ]
 }
 ```
@@ -36,7 +36,7 @@ You do not write that digest by hand. In the `metadata.json` sidecar you author,
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/cmake:3.28@sha256:a1b2c3d4e5f6...", "visibility": "public" }
+    { "identifier": "ocx.sh/kitware/cmake:3.28@sha256:a1b2c3d4e5f6...", "visibility": "public" }
   ]
 }
 ```
@@ -53,7 +53,7 @@ A package built with [`ocx package create --platform any`][cmd-package-create] �
 
 ## When You Need a `name` Override {#name-field}
 
-By default, the placeholder `${deps.NAME.installPath}` derives `NAME` from the last path segment of the OCI repository — `ocx.sh/cmake` becomes `cmake`, `ocx.sh/myorg/cmake` becomes `cmake`. That collides whenever two dependencies share that final segment, or when the segment is awkward to type (`my-very-long-tool-name`). The optional `name` field overrides the lookup key:
+By default, the placeholder `${deps.NAME.installPath}` derives `NAME` from the last path segment of the OCI repository — `ocx.sh/kitware/cmake` becomes `cmake`, `ocx.sh/myorg/cmake` becomes `cmake`. That collides whenever two dependencies share that final segment, or when the segment is awkward to type (`my-very-long-tool-name`). The optional `name` field overrides the lookup key:
 
 ```json
 {

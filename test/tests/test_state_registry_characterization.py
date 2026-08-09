@@ -115,7 +115,7 @@ def test_dependencies_setup_characterization(ocx: OcxRunner, tmp_path: Path) -> 
     registry = ocx.registry
 
     # Dict keys.
-    assert set(result.keys()) == {"nodejs", "bun", "webapp"}, (
+    assert set(result.keys()) == {"nodejs/node", "oven-sh/bun", "acme/webapp"}, (
         f"dependencies setup dict keys changed: {sorted(result.keys())}"
     )
 

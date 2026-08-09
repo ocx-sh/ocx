@@ -6,9 +6,9 @@
 set -euo pipefail
 
 # region cast
-ocx --global add "$PKG_CMAKE"
-ocx --global add "$PKG_UV"
+ocx --global add "$PKG_KITWARE_CMAKE"
+ocx --global add "$PKG_ASTRAL_SH_UV"
 # endregion cast
-ocx --global remove "$REPO_CMAKE"
+ocx --global remove "$REPO_KITWARE_CMAKE"
 ocx --global lock
 ocx --global update

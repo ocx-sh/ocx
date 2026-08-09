@@ -6,8 +6,8 @@
 # description: Pass multiple packages to merge their environments in declaration order.
 set -euo pipefail
 
-ocx package install "$PKG_NODEJS"
-ocx package install "$PKG_BUN"
+ocx package install "$PKG_NODEJS_NODE"
+ocx package install "$PKG_OVEN_SH_BUN"
 # region cast
-ocx package env "$PKG_NODEJS" "$PKG_BUN"
+ocx package env "$PKG_NODEJS_NODE" "$PKG_OVEN_SH_BUN"
 # endregion cast

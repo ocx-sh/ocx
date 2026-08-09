@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from src.helpers import env_key
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -57,9 +58,9 @@ class StateProvider(Protocol):
       returns ``{PKG_<KEY>: <canonical_short_ref>}`` derived from the
       provider's declared package names.  No ``provision()`` / ``setup()``
       call may occur inside this method.  KEY derivation mirrors
-      ``_build_script_env_from_packages`` (``display_name.upper().replace
-      ("-", "_")``).  Values are canonical short refs (e.g. ``"uv:0.10"``),
-      never UUID-prefixed actual repo names.
+      ``_build_script_env_from_packages`` (``helpers.env_key``).  Values are
+      canonical short refs (e.g. ``"astral-sh/uv:0.10"``), never UUID-prefixed
+      actual repo names.
     """
 
     packages: dict[str, PackageInfo]
@@ -78,7 +79,7 @@ class StateProvider(Protocol):
         Variables emitted (SP3):
         - Per-package: ``PKG_<KEY>``, ``FQ_<KEY>``, ``REPO_<KEY>``,
           ``TAG_<KEY>``, ``MARKER_<KEY>``, ``HOME_KEY_<KEY>``
-          (KEY = uppercased, hyphens replaced with underscores).
+          (KEY = uppercased, `/` and `-` folded to underscores).
         - Runner-level: ``OCX``, ``OCX_HOME``, ``REGISTRY``,
           ``SCENARIO_TMP``.
         """
@@ -92,11 +93,11 @@ class StateProvider(Protocol):
         class/instance attribute or equivalent static surface) without
         calling ``provision()`` / ``setup()`` or performing any I/O.
 
-        KEY derivation: ``display_name.upper().replace("-", "_")``, matching
+        KEY derivation: ``helpers.env_key`` (folds ``/`` and ``-``), matching
         ``_build_script_env_from_packages`` exactly so the rendered token
         namespace is identical to the runtime ``$PKG_*`` namespace.
 
-        Values are canonical short refs (e.g. ``"uv:0.10"``), never the
+        Values are canonical short refs (e.g. ``"astral-sh/uv:0.10"``), never the
         SP7 UUID-prefixed actual repo names (which do not exist statically).
 
         Returns ``{}`` for providers with no declared packages.
@@ -147,7 +148,7 @@ def _build_script_env_from_packages(
 
     Mirrors Scenario.script_env() exactly (SP3):
       - Per-package: PKG_<KEY>, FQ_<KEY>, REPO_<KEY>, TAG_<KEY>,
-        MARKER_<KEY>, HOME_KEY_<KEY>  (KEY = upper, hyphens → underscores)
+        MARKER_<KEY>, HOME_KEY_<KEY>  (KEY = helpers.env_key(display_name))
       - Runner-level: OCX, OCX_HOME, REGISTRY, SCENARIO_TMP, PATH
     """
     env: dict[str, str] = ocx.env.copy()
@@ -158,13 +159,13 @@ def _build_script_env_from_packages(
     env["REGISTRY"] = ocx.registry
     env["SCENARIO_TMP"] = str(tmp_path)
     for display_name, pkg in packages.items():
-        upper = display_name.upper().replace("-", "_")
+        upper = env_key(display_name)
         env[f"PKG_{upper}"] = pkg.short
         env[f"FQ_{upper}"] = pkg.fq
         env[f"REPO_{upper}"] = pkg.repo
         env[f"TAG_{upper}"] = pkg.tag
         env[f"MARKER_{upper}"] = pkg.marker
-        env[f"HOME_KEY_{upper}"] = pkg.repo.upper().replace("-", "_") + "_HOME"
+        env[f"HOME_KEY_{upper}"] = env_key(pkg.repo) + "_HOME"
     return env
 
 
@@ -207,54 +208,54 @@ def _build_display_maps(
 DECLARED_PACKAGES: dict[str, dict[str, str]] = {
     # ---- setup family (recordings.setups.SETUPS) ----
     "setup:basic": {
-        "uv": "uv:0.10.0",
+        "astral-sh/uv": "astral-sh/uv:0.10.0",
     },
     "setup:multi-version": {
         # versions[0].short — "first version wins" (DE6 guards ordering)
-        "corretto": "corretto:21.0.0",
+        "amazon/corretto": "amazon/corretto:21.0.0",
     },
     "setup:full-catalog": {
-        "uv": "uv:0.10.0",
-        "cmake": "cmake:4.2.0",
-        "corretto": "corretto:21.0.0",
-        "ocx": "ocx:0.1.0",
-        "nodejs": "nodejs:24.0.0",
-        "bun": "bun:1.3.0",
+        "astral-sh/uv": "astral-sh/uv:0.10.0",
+        "kitware/cmake": "kitware/cmake:4.2.0",
+        "amazon/corretto": "amazon/corretto:21.0.0",
+        "ocx/cli": "ocx/cli:0.1.0",
+        "nodejs/node": "nodejs/node:24.0.0",
+        "oven-sh/bun": "oven-sh/bun:1.3.0",
     },
     "setup:variants": {
         # versions[0].short — "first version wins" (DE6 guards ordering)
-        "python": "python:pgo.lto-3.13.0",
+        "astral-sh/python-build-standalone": "astral-sh/python-build-standalone:3.13.14",
     },
     "setup:dependencies": {
-        "nodejs": "nodejs:24.0.0",
-        "bun": "bun:1.3.0",
-        "webapp": "webapp:2.0.0",
+        "nodejs/node": "nodejs/node:24.0.0",
+        "oven-sh/bun": "oven-sh/bun:1.3.0",
+        "acme/webapp": "acme/webapp:2.0.0",
     },
     "setup:deps-visibility": {
-        "nodejs": "nodejs:24.0.0",
-        "bun": "bun:1.3.0",
-        "templates": "templates:1.0.0",
-        "server": "server:1.0.0",
-        "renderer": "renderer:1.0.0",
-        "webapp": "webapp:2.0.0",
+        "nodejs/node": "nodejs/node:24.0.0",
+        "oven-sh/bun": "oven-sh/bun:1.3.0",
+        "acme/templates": "acme/templates:1.0.0",
+        "acme/server": "acme/server:1.0.0",
+        "acme/renderer": "acme/renderer:1.0.0",
+        "acme/webapp": "acme/webapp:2.0.0",
     },
     "setup:publisher": {
         # publisher exposes display name "mytool" with stub tag "display"
-        "mytool": "mytool:display",
+        "acme/mytool": "acme/mytool:display",
     },
     "setup:patches-consumer": {
-        "cmake": "cmake:4.2.0",
-        "corp-ca": "corp-ca:1.0.0",
+        "kitware/cmake": "kitware/cmake:4.2.0",
+        "corp/ca": "corp/ca:1.0.0",
     },
     "setup:patches-maintainer": {
-        "mytool": "mytool:1.0.0",
-        "corp-ca": "corp-ca:1.0.0",
+        "acme/mytool": "acme/mytool:1.0.0",
+        "corp/ca": "corp/ca:1.0.0",
     },
     "setup:managed-config-onboard": {
-        "self": "ocx-self:0.0.1",
+        "self": "ocx/cli:0.0.1",
     },
     "setup:managed-config-ci": {
-        "cmake": "cmake:3.28",
+        "kitware/cmake": "kitware/cmake:3.28",
     },
     # ---- scenario family (src.scenarios.SCENARIOS) ----
     "scenario:BasicPackage": {
@@ -297,7 +298,7 @@ def _project_declared_display_env(state_key: str) -> dict[str, str]:
       ``ocx index list``, version-qualified refs ``"$REPO_X:25.0.0"``, etc.
 
     ``<KEY>`` derivation matches ``_build_script_env_from_packages`` exactly
-    (``display_name.upper().replace("-", "_")``) so the rendered token
+    (both call ``helpers.env_key``) so the rendered token
     namespace equals the runtime ``$PKG_*`` / ``$REPO_*`` namespace.  Both
     forms are static (no provision/I/O — DE4); ``$FQ_*`` / ``$TAG_*`` /
     ``$MARKER_*`` / ``$HOME_KEY_*`` and runner vars stay non-renderable
@@ -309,7 +310,7 @@ def _project_declared_display_env(state_key: str) -> dict[str, str]:
     pkg_map = DECLARED_PACKAGES.get(state_key, {})
     out: dict[str, str] = {}
     for display_name, short_ref in pkg_map.items():
-        key = display_name.upper().replace("-", "_")
+        key = env_key(display_name)
         out[f"PKG_{key}"] = short_ref
         out[f"REPO_{key}"] = short_ref.rsplit(":", 1)[0]
     return out

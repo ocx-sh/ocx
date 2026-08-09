@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add "$PKG_CMAKE"
-ocx add -g ci "$PKG_UV"
+ocx add "$PKG_KITWARE_CMAKE"
+ocx add -g ci "$PKG_ASTRAL_SH_UV"
 ocx run -g all -- cmake --version
 # endregion cast

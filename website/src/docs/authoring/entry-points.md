@@ -71,7 +71,7 @@ A meta-package that exposes a tool from a dependency without re-bundling it — 
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/cmake:3.28@sha256:abc...", "name": "cmake", "visibility": "public" }
+    { "identifier": "ocx.sh/kitware/cmake:3.28@sha256:abc...", "name": "cmake", "visibility": "public" }
   ],
   "env": [
     { "key": "PATH", "type": "path", "value": "${deps.cmake.installPath}/bin", "visibility": "private" }

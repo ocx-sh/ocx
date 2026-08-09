@@ -33,7 +33,7 @@ Tags follow the [Docker official images][docker-official] convention: version pr
 All rolling tags — including the full `X.Y.Z` version tags — are re-pointed by a weekly rebuild that refreshes the base image, so security fixes in Debian or Alpine reach the images without waiting for the next ocx release. Only the latest release is rebuilt; older versions keep their tags on the base they shipped with.
 
 ::: info Silent rebuilds, like the official images
-This is the [Docker official images][docker-official] model: `python:3.13-slim` also moves to a new digest when Debian patches something, without a Python release. A version tag means "this ocx version on the *current* base", not a frozen artifact.
+This is the [Docker official images][docker-official] model: `python:3.13-slim` on Docker Hub also moves to a new digest when Debian patches something, without a Python release. A version tag means "this ocx version on the *current* base", not a frozen artifact.
 :::
 
 ::: tip Reproducible builds pin the stamped tag or a digest
@@ -78,7 +78,7 @@ Swap in [`ocx --frozen pull`][arg-frozen] to close that gap. Frozen freezes tag�
 `--frozen pull` still reaches the registry for the digest-pinned blobs. For a build with no network at all, vendor a warm `OCX_HOME` into the build context — a directory populated by an earlier [`ocx pull`][cmd-pull] — and run the pull under [`--offline`][arg-offline], which resolves entirely from that local store and never touches the network.
 :::
 
-Resolving a bare tag like `cmake:3` deterministically *without* a lockfile — the [GitHub Actions][github-actions] and [Bazel][bazel] case — is a different tool: bundle a frozen index snapshot and point ocx at it with [`OCX_INDEX`][env-ocx-index]. See [Bundled Snapshots][indices-indepth].
+Resolving a bare tag like `kitware/cmake:3` deterministically *without* a lockfile — the [GitHub Actions][github-actions] and [Bazel][bazel] case — is a different tool: bundle a frozen index snapshot and point ocx at it with [`OCX_INDEX`][env-ocx-index]. See [Bundled Snapshots][indices-indepth].
 
 ## Private Registries {#build-auth}
 
@@ -103,8 +103,8 @@ To bootstrap a few tools in a Dockerfile without an application project, the sam
 ```toml
 # ocx.toml
 [tools]
-shellcheck = "ocx.sh/shellcheck:0.10"
-shfmt = "ocx.sh/shfmt:3"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.10"
+shfmt = "ocx.sh/shfmt/shfmt:3"
 ```
 
 Run [`ocx lock`][cmd-lock] locally, commit both files, and the [project toolchain pattern](#project-toolchain) applies unchanged — `ocx run -- <cmd>` puts the tools on `PATH` for exactly that command. A more direct global-install story for Dockerfiles (persistent `PATH` without a project) is planned.

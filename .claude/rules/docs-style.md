@@ -71,7 +71,7 @@ Be exactly correct. Nuances that came up:
 
 - **OCI tags are mutable.** Never imply tag is "frozen" or "pinned" absolute. `_build` suffix is publisher *convention*, not enforced by registry.
 - **"Pinned until index refresh" applies to ALL tags equally.** Distinction between rolling and build-tagged is what happens *after* refresh: rolling tags advance, build-tagged conventionally stay same. Table column should be "After index refresh", not "Resolves to".
-- **Content-addressed = universally lockable.** Any package pin with digest (`cmake@sha256:abc…`), bypass tags and indexes. Make clear in locking docs before describing convenient options.
+- **Content-addressed = universally lockable.** Any package pin with digest (`kitware/cmake@sha256:abc…`), bypass tags and indexes. Make clear in locking docs before describing convenient options.
 - **Cascade is convention, not enforced.** Publishers maintain manually. `ocx package push --cascade` automates, but not guaranteed at registry level.
 
 ---

@@ -117,7 +117,7 @@ ocx package describe \
   --description "A small example tool" \
   --keywords cli,linting \
   mytool
-ocx package info mytool
+ocx package info acme/mytool
 ```
 
 <Terminal src="/casts/authoring/package-describe.cast" title="Attaching package descriptions and reading them back" collapsed />

@@ -24,9 +24,9 @@ def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[Pa
          "visibility": "public"},
     ]
     return {
-        "uv": [
+        "astral-sh/uv": [
             make_package(
-                ocx, f"{prefix}uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                ocx, f"{prefix}astral-sh/uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
                 outputs={"uv": {"--version": "uv 0.10.10"}},
             ),
         ],
@@ -42,9 +42,9 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
          "visibility": "public"},
     ]
     return {
-        "corretto": [
+        "amazon/corretto": [
             make_package(
-                ocx, f"{prefix}corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
@@ -53,7 +53,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
                 )}},
             ),
             make_package(
-                ocx, f"{prefix}corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
@@ -96,15 +96,15 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
          "visibility": "public"},
     ]
     return {
-        "uv": [
+        "astral-sh/uv": [
             make_package(
-                ocx, f"{prefix}uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                ocx, f"{prefix}astral-sh/uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
                 outputs={"uv": {"--version": "uv 0.10.10"}},
             ),
         ],
-        "cmake": [
+        "kitware/cmake": [
             make_package(
-                ocx, f"{prefix}cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
+                ocx, f"{prefix}kitware/cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
                 outputs={"cmake": {"--version": (
                     "cmake version 4.2.3\n"
                     "\n"
@@ -112,9 +112,9 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
                 )}},
             ),
         ],
-        "corretto": [
+        "amazon/corretto": [
             make_package(
-                ocx, f"{prefix}corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
@@ -123,7 +123,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
                 )}},
             ),
             make_package(
-                ocx, f"{prefix}corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
@@ -132,21 +132,21 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
                 )}},
             ),
         ],
-        "ocx": [
+        "ocx/cli": [
             make_package(
-                ocx, f"{prefix}ocx", "0.1.0", tmp_path, bins=["ocx"], env=ocx_env,
+                ocx, f"{prefix}ocx/cli", "0.1.0", tmp_path, bins=["ocx"], env=ocx_env,
                 outputs={"ocx": {"--version": "ocx 0.1.0"}},
             ),
         ],
-        "nodejs": [
+        "nodejs/node": [
             make_package(
-                ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+                ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
                 outputs={"node": {"--version": "v24.14.0"}},
             ),
         ],
-        "bun": [
+        "oven-sh/bun": [
             make_package(
-                ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+                ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
                 outputs={"bun": {"--version": "1.3.10"}},
             ),
         ],
@@ -162,21 +162,20 @@ def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list
          "visibility": "public"},
     ]
     return {
-        "python": [
+        "astral-sh/python-build-standalone": [
+            # The real package publishes exactly one variant prefix — `slim` —
+            # alongside the unprefixed default build. Inventing `debug` /
+            # `pgo.lto` / `freethreaded` here taught a tag grammar no reader
+            # could reproduce against ocx.sh.
             make_package(
-                ocx, f"{prefix}python", "pgo.lto-3.13.0", tmp_path / "pgo-lto",
+                ocx, f"{prefix}astral-sh/python-build-standalone", "3.13.14", tmp_path / "default",
                 bins=["python3"], env=python_env,
-                outputs={"python3": {"--version": "Python 3.13.4"}},
+                outputs={"python3": {"--version": "Python 3.13.14"}},
             ),
             make_package(
-                ocx, f"{prefix}python", "debug-3.13.0", tmp_path / "debug",
+                ocx, f"{prefix}astral-sh/python-build-standalone", "slim-3.13.14", tmp_path / "slim",
                 bins=["python3"], env=python_env, new=False,
-                outputs={"python3": {"--version": "Python 3.13.4 (debug)"}},
-            ),
-            make_package(
-                ocx, f"{prefix}python", "freethreaded-3.13.0", tmp_path / "freethreaded",
-                bins=["python3"], env=python_env, new=False,
-                outputs={"python3": {"--version": "Python 3.13.4 (freethreaded)"}},
+                outputs={"python3": {"--version": "Python 3.13.14"}},
             ),
         ],
     }
@@ -209,11 +208,11 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     ]
 
     nodejs = make_package(
-        ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+        ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
         outputs={"node": {"--version": "v24.14.0"}},
     )
     bun = make_package(
-        ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+        ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
         outputs={"bun": {"--version": "1.3.10"}},
     )
 
@@ -223,15 +222,15 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     bun_dep = {"identifier": f"{bun.fq}@{bun_digest}"}
 
     webapp = make_package(
-        ocx, f"{prefix}webapp", "2.0.0", tmp_path, bins=["serve"],
+        ocx, f"{prefix}acme/webapp", "2.0.0", tmp_path, bins=["serve"],
         env=webapp_env, dependencies=[node_dep, bun_dep],
         outputs={"serve": {"--version": "webapp 2.0.0"}},
     )
 
     return {
-        "nodejs": [nodejs],
-        "bun": [bun],
-        "webapp": [webapp],
+        "nodejs/node": [nodejs],
+        "oven-sh/bun": [bun],
+        "acme/webapp": [webapp],
     }
 
 
@@ -274,15 +273,15 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
 
     # Leaf packages (no deps of their own)
     nodejs = make_package(
-        ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+        ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
         outputs={"node": {"--version": "v24.14.0"}},
     )
     bun = make_package(
-        ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+        ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
         outputs={"bun": {"--version": "1.3.10"}},
     )
     templates = make_package(
-        ocx, f"{prefix}templates", "1.0.0", tmp_path, bins=["tpl"],
+        ocx, f"{prefix}acme/templates", "1.0.0", tmp_path, bins=["tpl"],
         outputs={"tpl": {"--version": "templates 1.0.0"}},
     )
 
@@ -292,12 +291,12 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
 
     # Intermediate packages (depend on nodejs)
     server = make_package(
-        ocx, f"{prefix}server", "1.0.0", tmp_path, bins=["server"], env=path_env,
+        ocx, f"{prefix}acme/server", "1.0.0", tmp_path, bins=["server"], env=path_env,
         dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"server": {"--version": "server 1.0.0"}},
     )
     renderer = make_package(
-        ocx, f"{prefix}renderer", "1.0.0", tmp_path, bins=["render"], env=path_env,
+        ocx, f"{prefix}acme/renderer", "1.0.0", tmp_path, bins=["render"], env=path_env,
         dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"render": {"--version": "renderer 1.0.0"}},
     )
@@ -307,7 +306,7 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
 
     # Root: webapp depends on server (public), bun (public), renderer (private)
     webapp = make_package(
-        ocx, f"{prefix}webapp", "2.0.0", tmp_path, bins=["serve"],
+        ocx, f"{prefix}acme/webapp", "2.0.0", tmp_path, bins=["serve"],
         env=path_env + [{"key": "APP_HOME", "type": "constant", "value": "${installPath}",
                           "visibility": "public"}],
         dependencies=[
@@ -323,12 +322,12 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     ocx.run("package", "install", "--select", webapp.short)
 
     return {
-        "nodejs": [nodejs],
-        "bun": [bun],
-        "templates": [templates],
-        "server": [server],
-        "renderer": [renderer],
-        "webapp": [webapp],
+        "nodejs/node": [nodejs],
+        "oven-sh/bun": [bun],
+        "acme/templates": [templates],
+        "acme/server": [server],
+        "acme/renderer": [renderer],
+        "acme/webapp": [webapp],
     }
 
 
@@ -353,7 +352,7 @@ def publisher(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
     actual repository name (used when commands run) gets sanitised back to
     ``mytool`` in the rendered cast.
     """
-    actual_repo = f"{prefix}mytool"
+    actual_repo = f"{prefix}acme/mytool"
 
     # v1 source tree
     build = tmp_path / "build" / "bin"
@@ -400,7 +399,7 @@ def publisher(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
     # Stub PackageInfo: triggers display-name → actual-repo rewriting in
     # test_recordings.py. Tag is irrelevant — only ``repo`` is consulted.
     return {
-        "mytool": [
+        "acme/mytool": [
             PackageInfo(
                 repo=actual_repo,
                 tag="display",
@@ -440,7 +439,7 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
          "visibility": "interface"},
     ]
     cmake = make_package(
-        ocx, f"{prefix}cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
+        ocx, f"{prefix}kitware/cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
         outputs={"cmake": {"--version": (
             "cmake version 4.2.3\n"
             "\n"
@@ -453,7 +452,7 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
     # platform fan-out resolves it on each ship target without needing a
     # per-platform republish.
     companion = make_package(
-        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env, platform="any",
+        ocx, f"{prefix}corp/ca", "1.0.0", tmp_path, bins=[], env=companion_env, platform="any",
     )
 
     # Configure the [patches] tier in the data-dir config; the recorder shell
@@ -485,7 +484,7 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
     }))
     ocx.run("patch", "publish", "--descriptor", str(descriptor), cmake.fq, format=None)
 
-    return {"cmake": [cmake], "corp-ca": [companion]}
+    return {"kitware/cmake": [cmake], "corp/ca": [companion]}
 
 
 def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
@@ -524,11 +523,11 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
          "visibility": "interface"},
     ]
     mytool = make_package(
-        ocx, f"{prefix}mytool", "1.0.0", tmp_path, bins=["mytool"], env=base_env,
+        ocx, f"{prefix}acme/mytool", "1.0.0", tmp_path, bins=["mytool"], env=base_env,
         outputs={"mytool": {"--version": "mytool 1.0.0"}},
     )
     companion = make_package(
-        ocx, f"{prefix}corp-ca", "1.0.0", tmp_path, bins=[], env=companion_env,
+        ocx, f"{prefix}corp/ca", "1.0.0", tmp_path, bins=[], env=companion_env,
     )
 
     # Bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2).
@@ -597,7 +596,7 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
         "rules": [{"match": "*", "packages": [preview_identifier], "required": True}],
     }, indent=2))
 
-    return {"mytool": [mytool], "corp-ca": [companion]}
+    return {"acme/mytool": [mytool], "corp/ca": [companion]}
 
 
 def _alias_managed_config_host(ocx: OcxRunner, path_prefix: str) -> None:
@@ -630,7 +629,7 @@ def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> 
     ``--managed-config`` ref matches what an operator actually types.
     """
     self_pkg = make_package(
-        ocx, f"{prefix}ocx-self", "0.0.1", tmp_path,
+        ocx, f"{prefix}ocx/cli", "0.0.1", tmp_path,
         new=True, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
     )
@@ -658,7 +657,7 @@ def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[
          "visibility": "public"},
     ]
     cmake = make_package(
-        ocx, f"{prefix}cmake", "3.28", tmp_path, bins=["cmake"], env=cmake_env,
+        ocx, f"{prefix}kitware/cmake", "3.28", tmp_path, bins=["cmake"], env=cmake_env,
         outputs={"cmake": {"--version": (
             "cmake version 3.28.3\n"
             "\n"
@@ -673,7 +672,7 @@ def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[
     )
     _alias_managed_config_host(ocx, path_prefix)
 
-    return {"cmake": [cmake]}
+    return {"kitware/cmake": [cmake]}
 
 
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]

@@ -15,7 +15,7 @@ The basic flow is one command:
 
 OCX downloads the package, verifies its [SHA-256 digest][in-depth-storage-packages], and stores it in the [content-addressed package store][in-depth-storage-packages] under `~/.ocx/packages/`. A [candidate symlink][in-depth-storage-symlinks] (`candidates/3.28`) is created so the version is reachable by name.
 
-Multiple versions coexist — installing `cmake:3.30` next to `cmake:3.28` adds a second candidate; nothing is overwritten. The [content-addressed layout][in-depth-storage-packages] dedups identical builds automatically: if `cmake:3.28` and `cmake:latest` resolve to the same digest, they share one directory on disk.
+Multiple versions coexist — installing `kitware/cmake:3.30` next to `kitware/cmake:3.28` adds a second candidate; nothing is overwritten. The [content-addressed layout][in-depth-storage-packages] dedups identical builds automatically: if `kitware/cmake:3.28` and `kitware/cmake:latest` resolve to the same digest, they share one directory on disk.
 
 To run a tool *once* without keeping it installed, skip the install step entirely:
 
@@ -156,21 +156,21 @@ A single OCX identifier covers what / which version / how built / which platform
 
 | Tag | Meaning | Resolves to after refresh |
 |---|---|---|
-| `cmake:3.28.1_20260216120000` | Specific build, do not re-push | Same build (publisher convention) |
-| `cmake:3.28.1` | Rolling patch | Latest 3.28.1 build |
-| `cmake:3.28` | Rolling minor | Latest 3.28.x build |
-| `cmake:3` | Rolling major | Latest 3.x build |
-| `cmake:latest` | Floating | Latest release |
+| `kitware/cmake:3.28.1_20260216120000` | Specific build, do not re-push | Same build (publisher convention) |
+| `kitware/cmake:3.28.1` | Rolling patch | Latest 3.28.1 build |
+| `kitware/cmake:3.28` | Rolling minor | Latest 3.28.x build |
+| `kitware/cmake:3` | Rolling major | Latest 3.x build |
+| `kitware/cmake:latest` | Floating | Latest release |
 
-For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-versioning-variants]: `python:debug-3.12`. For *exact reproducibility regardless of any tag*, use a digest: `cmake@sha256:abc123…`. Platform is auto-detected; override with `-p, --platform` only for cross-arch installs.
+For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-versioning-variants]: `astral-sh/python-build-standalone:debug-3.12`. For *exact reproducibility regardless of any tag*, use a digest: `kitware/cmake@sha256:abc123…`. Platform is auto-detected; override with `-p, --platform` only for cross-arch installs.
 
 On Linux, platform detection also identifies the libc family: OCX probes the host's dynamic linker once at startup and selects among glibc-tagged, musl-tagged, and untagged entries accordingly. A package that ships distinct glibc and musl builds under one tag co-locates them in the same image index; OCX picks the right one automatically. Run [`ocx about`][cmd-about] to inspect the detected libc and supported-platform set. For verbose build context including the host row, run [`ocx version -v`][cmd-version]. See [libc Differentiation][authoring-libc] for the publisher side of this workflow.
 
-`ocx index list cmake --variants` shows available variants without downloading anything.
+`ocx index list kitware/cmake --variants` shows available variants without downloading anything.
 
 <Terminal src="/casts/user-guide/variants.cast" title="Working with variants" collapsed />
 
-[`ocx package deselect cmake`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate; pass `--purge` to remove the binary too if no other reference holds it.
+[`ocx package deselect cmake`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate; pass `--purge` to remove the binary too if no other reference holds it.
 
 ::: tip Learn more
 [Versioning In Depth][in-depth-versioning] — full tag hierarchy, cascade mechanics, OCI tag char rules, `_build` suffix convention, OCI Image Index multi-platform spec.
@@ -181,9 +181,11 @@ On Linux, platform detection also identifies the libc family: OCX probes the hos
 
 The repository half of an [identifier][oci-identifier] is a path, not a single word — `registry/namespace…/name`. OCX uses this to separate what it ships from what it mirrors.
 
-Mirrored upstream tools sit at the registry root under their common name: `cmake`, `shellcheck`, `uv`. OCX's own first-party binaries live under the reserved `ocx/` namespace — the CLI is `ocx/cli`, the mirror tool is `ocx/mirror`. The namespace *is* the provenance: a root name is an upstream tool OCX repackaged; an `ocx/` name is OCX itself.
+Every package on `ocx.sh` is exactly two segments: a namespace and a name. Mirrored upstream tools take the namespace of the project that publishes them upstream — `kitware/cmake`, `astral-sh/uv`, `oven-sh/bun`, `go-task/task`. OCX's own first-party binaries live under the reserved `ocx/` namespace: the CLI is `ocx/cli`, the mirror tool is `ocx/mirror`. The namespace *is* the provenance — it names who stands behind the bits upstream, and an `ocx/` name is OCX itself.
 
-Slash-nested names are ordinary OCI repositories — `ocx package install ocx/mirror:1` resolves exactly like `ocx package install cmake:3.28`. Anyone publishing to their own registry can group packages the same way; the convention is OCX's, the mechanism is the registry's.
+The two segments are not decoration. The [index][in-depth-indices] addresses a package at `p/<namespace>/<name>.json`, so a single-segment name has nowhere on `ocx.sh` for its entry to live and cannot be published or announced there. On a registry you control the shape is yours to choose — the requirement belongs to the `ocx.sh` index, not to OCI.
+
+Slash-nested names are ordinary OCI repositories — `ocx package install ocx/mirror:1` resolves exactly like `ocx package install kitware/cmake:3.28`. The extra segment reaches the filesystem too: a repository is two directories under the [symlink farm][in-depth-storage-symlinks], `symlinks/ocx.sh/kitware/cmake/`, not one.
 
 ## Embed a stable path in your IDE or shell {#stable-paths}
 
@@ -199,15 +201,15 @@ Both symlink modes target the [package root][in-depth-storage-packages] directly
 
 ```jsonc
 // .vscode/settings.json — path survives every upgrade
-{ "cmake.cmakePath": "~/.ocx/symlinks/ocx.sh/cmake/current/content/bin/cmake" }
+{ "cmake.cmakePath": "~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake" }
 ```
 
 ```sh
 # ~/.bashrc — always resolves to the selected version
-export PATH="$HOME/.ocx/symlinks/ocx.sh/cmake/current/content/bin:$PATH"
+export PATH="$HOME/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin:$PATH"
 ```
 
-When `ocx package install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
+When `ocx package install --select kitware/cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
 :::tip Prefer `ocx env` for shells
 The hand-written `export PATH=…/current/content/bin` above is an escape hatch for tools that cannot evaluate shell at startup (IDEs, JSON config files). For interactive shells and project envs, prefer [`ocx env`][cmd-env-root] (toolchain-tier) or [`ocx package env`][cmd-package-env] (per-package) — they compose the full env, not just `PATH`, and stay forward-compatible if the package adds new env entries on upgrade.
@@ -265,7 +267,7 @@ Pull the package; OCX [resolves the closure transitively][in-depth-dependencies-
 
 <<< @/_scripts/user-guide/deps-pull.sh{sh}
 
-If `webapp:2.0` declares dependencies on `nodejs:24` and `bun:1.3`, all three packages end up in the [package store][in-depth-storage-packages]. Only `webapp:2.0` is the explicit install — the dependencies are stored but not surfaced as top-level installs.
+If `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`, all three packages end up in the [package store][in-depth-storage-packages]. Only `acme/webapp:2.0` is the explicit install — the dependencies are stored but not surfaced as top-level installs.
 
 To actually *run* the package with its dependency environments configured, use [`ocx package exec`][cmd-package-exec]:
 
@@ -304,7 +306,7 @@ If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to 
 
 Reproducibility in OCX has three levels, each stricter than the last.
 
-**Pin the digest.** The strongest lock: `cmake@sha256:abc123…` bypasses [tag resolution][in-depth-indices] entirely. The bytes are content-addressed; the digest *is* the binary. Every package can be pinned this way — no lockfiles, no registry queries, just the hash.
+**Pin the digest.** The strongest lock: `kitware/cmake@sha256:abc123…` bypasses [tag resolution][in-depth-indices] entirely. The bytes are content-addressed; the digest *is* the binary. Every package can be pinned this way — no lockfiles, no registry queries, just the hash.
 
 **Pin the index.** The next-strongest determinism — and the one most users want — is to freeze the [local index][in-depth-indices-local]'s entry for a tag. It resolves to whatever digest was recorded at the last [`ocx index update`][cmd-index-update]; that mapping does not change until you refresh. A CI runner that never refreshes its index gets the same binary on every run, even if the registry re-pushes the tag. This is version-*choice* determinism, not `ocx.lock`: a lock already records the exact digest it pinned and never reads the index back to confirm it.
 
@@ -405,8 +407,8 @@ A committed `ocx.toml` plus its sibling `ocx.lock` does. The pair makes "the too
 ```toml
 # ocx.toml
 [tools]
-cmake      = "ocx.sh/cmake:3.28"
-shellcheck = "ocx.sh/shellcheck:0.11"
+cmake      = "ocx.sh/kitware/cmake:3.28"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
 ```
 
 Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected so the file is unambiguous regardless of any default-registry config. The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor autocompletion.
@@ -445,13 +447,13 @@ CI needs `shellcheck` and `shfmt`; a release pipeline needs `goreleaser`; daily 
 
 ```toml
 [tools]
-cmake = "ocx.sh/cmake:3.28"
+cmake = "ocx.sh/kitware/cmake:3.28"
 
 [group.ci.tools]
-shellcheck = "ocx.sh/shellcheck:0.11"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
 
 [group.release.tools]
-goreleaser = "ocx.sh/goreleaser:2.0"
+goreleaser = "ocx.sh/goreleaser/goreleaser:2.0"
 ```
 
 <<< @/_scripts/user-guide/project-groups.sh{sh}
@@ -729,11 +731,11 @@ Anything the copy is missing fails closed instead of reaching the network: [`--o
 [`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package:
 
 - **Bare identifier** (e.g., `cmake`) — downloads every tag.
-- **Tagged identifier** (e.g., `cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
+- **Tagged identifier** (e.g., `kitware/cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
 
 To refresh a whole registry rather than one package, [`ocx index sync <REGISTRY>`][cmd-index-sync] refreshes every package that registry's own catalog lists, each as if named bare.
 
-On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local index has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
+On a fresh machine, [`ocx package install kitware/cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local index has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
 
 ### Packages published through `index.ocx.sh` {#offline-public-index}
 
@@ -764,7 +766,7 @@ A plain string, as above, redirects every kind of traffic OCX sends that host. A
 
 ### Relation to the default registry {#mirrors-default-registry}
 
-[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a bare identifier (e.g. `cmake:3.28` → `ocx.sh/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure a `[mirrors]` entry for `ocx.sh`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
+[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a registry-less identifier (e.g. `kitware/cmake:3.28` → `ocx.sh/kitware/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure a `[mirrors]` entry for `ocx.sh`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
 
 Pinning `ocx.sh` at a mirror's **registry** endpoint carries one deliberate side effect: it suppresses the [compiled-in index][config-registries-index] for that namespace, which then resolves as a plain OCI registry through the mirror. That is the point — a site that routes `ocx.sh` to its own artifact manager should not start dialling `index.ocx.sh`, a host it never allow-listed. OCX logs a warning naming the namespace it dropped, because the index's digest verification and yank gate go with it. To keep the verified index path *and* pin the physical registry, name the index explicitly; a written `index` outranks the compiled-in one and is never suppressed.
 
@@ -787,7 +789,7 @@ OCX derives every on-disk path — blob store, package store, local index, symli
 
 ### Unpinned tags and the trust model {#mirrors-trust}
 
-When you install a package with an unpinned tag (e.g. `cmake:3.28`), OCX trusts the mirror's tag→digest resolution the same way it would trust the origin registry's. The mirror could, in principle, map the tag to different content. After resolution, OCX verifies the blob digest against the manifest — a tampered blob is rejected. But the manifest itself came from the mirror's tag resolution.
+When you install a package with an unpinned tag (e.g. `kitware/cmake:3.28`), OCX trusts the mirror's tag→digest resolution the same way it would trust the origin registry's. The mirror could, in principle, map the tag to different content. After resolution, OCX verifies the blob digest against the manifest — a tampered blob is rejected. But the manifest itself came from the mirror's tag resolution.
 
 For tamper-proof installs, pin with [`ocx lock`][cmd-lock]: once a digest is recorded in `ocx.lock`, the tag is never re-resolved and the mirror cannot substitute a different manifest undetected.
 
@@ -981,7 +983,7 @@ When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture comm
 
 ## Remove and clean up {#cleanup}
 
-[`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
+[`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
 
 [`ocx clean`][cmd-clean] sweeps the entire store — packages with no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package are removed in a single pass, along with any layers and blobs that become unreachable.
 

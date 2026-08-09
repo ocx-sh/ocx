@@ -124,7 +124,7 @@ From the user's perspective, once the shell is open, `cmake --build .` resolves 
 When two or more packages in the interface surface declare the same entrypoint name, the install error reports all of them. The collision surfaces on stderr as a single line in the standard `thiserror` `Display` form:
 
 ```text
-error: entrypoint name collision: 'cmake' declared by 3 packages: ocx.sh/cmake-extras:1.0@sha256:aaa..., ocx.sh/cmake-wrapper:1.0@sha256:bbb..., ocx.sh/cmake:3.28@sha256:ccc...; deselect one before selecting another
+error: entrypoint name collision: 'cmake' declared by 3 packages: ocx.sh/cmake-extras:1.0@sha256:aaa..., ocx.sh/cmake-wrapper:1.0@sha256:bbb..., ocx.sh/kitware/cmake:3.28@sha256:ccc...; deselect one before selecting another
 ```
 
 The line has three parts:

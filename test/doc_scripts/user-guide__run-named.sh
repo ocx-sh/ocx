@@ -8,6 +8,8 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add "$PKG_CMAKE"
-ocx run "$REPO_CMAKE" -- cmake --version
+ocx add "$PKG_KITWARE_CMAKE"
+# `ocx add` names the binding after the repository basename, so a two-segment
+# identifier still binds as `cmake` — the binding name is what `ocx run` takes.
+ocx run cmake -- cmake --version
 # endregion cast

@@ -6,5 +6,5 @@
 set -euo pipefail
 # region cast
 ocx index catalog
-ocx index list "$REPO_CORRETTO"
+ocx index list "$REPO_AMAZON_CORRETTO"
 # endregion cast

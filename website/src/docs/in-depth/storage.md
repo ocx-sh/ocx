@@ -88,7 +88,7 @@ When OCX installs a package, the actual files land in `packages/`. The critical 
 
 This <Tooltip term="content-addressed layout">A storage scheme where every item's address is derived from a cryptographic hash of its contents. The same bytes always map to the same address — accidental duplication is impossible and silent corruption is detectable.</Tooltip> has two consequences:
 
-- **Automatic deduplication.** If `cmake:3.28` and `cmake:latest` resolve to the same binary build, they share one directory on disk. Storage scales with the number of *distinct builds*, not the number of tags that reference them.
+- **Automatic deduplication.** If `kitware/cmake:3.28` and `kitware/cmake:latest` resolve to the same binary build, they share one directory on disk. Storage scales with the number of *distinct builds*, not the number of tags that reference them.
 - **Immutability.** A path under `sha256/<shard>/` never changes its contents — safe to reference directly from scripts or cache layers that need a known, stable binary.
 
 ::: info Similar to the Nix store and Git objects
@@ -106,7 +106,7 @@ Packages that declare no entrypoints never get an `entrypoints/` directory. See 
 The `refs/symlinks/` subdirectory inside each package tracks every install symlink that currently points to it. That directory is the GC root signal — [`ocx clean`][cmd-clean] starts a reachability walk from every package with a live `refs/symlinks/` entry and follows forward-refs through all three tiers.
 
 ::: details How back-references work
-When `ocx package install cmake:3.28` creates the symlink `symlinks/…/cmake/candidates/3.28 → packages/…/sha256/ab/c123…/` (the package root, not `content/` — consumers traverse `<symlink>/content` themselves), it simultaneously writes a back-reference entry inside the package's `refs/symlinks/` directory. Removing the symlink via [`ocx package uninstall`][cmd-uninstall] removes that back-reference entry. [`ocx clean`][cmd-clean] then builds a reachability graph across all three tiers: packages with live `refs/symlinks/` entries (and any profile content-mode references) are roots, and a single BFS pass follows each package's forward-refs in `refs/deps/`, `refs/layers/`, and `refs/blobs/`. Packages, layers, and blobs that remain unreachable across all three tiers are deleted in one sweep.
+When `ocx package install kitware/cmake:3.28` creates the symlink `symlinks/…/kitware/cmake/candidates/3.28 → packages/…/sha256/ab/c123…/` (the package root, not `content/` — consumers traverse `<symlink>/content` themselves), it simultaneously writes a back-reference entry inside the package's `refs/symlinks/` directory. Removing the symlink via [`ocx package uninstall`][cmd-uninstall] removes that back-reference entry. [`ocx clean`][cmd-clean] then builds a reachability graph across all three tiers: packages with live `refs/symlinks/` entries (and any profile content-mode references) are roots, and a single BFS pass follows each package's forward-refs in `refs/deps/`, `refs/layers/`, and `refs/blobs/`. Packages, layers, and blobs that remain unreachable across all three tiers are deleted in one sweep.
 :::
 
 A dependency is protected by the liveness of its dependents, not by a back-reference inside itself: when OCX installs a package with dependencies, it records each dependency as a forward-ref inside the dependent package's `refs/deps/` directory, pointing at the dependency's `content/`. Nothing is written into the dependency's own `refs/symlinks/`. The same `ocx clean` sweep that removes the last dependent therefore also collects the now-unreachable dependency.
@@ -140,13 +140,13 @@ When you call [`ocx package push`][cmd-package-push], every positional argument 
 
 ```shell
 # Two-layer package: shared base + package-specific top
-ocx package push -p linux/amd64 mytool:1.2.3 base.tar.gz tool.tar.gz
+ocx package push -p linux/amd64 acme/mytool:1.2.3 base.tar.gz tool.tar.gz
 
 # Re-publish with the base layer reused by digest — no re-upload.
 # The digest ref must spell out the original archive extension
 # (`.tar.gz` / `.tgz` / `.tar.xz` / `.txz`) — OCI blob HEADs do not
 # carry the media type, so OCX refuses to guess.
-ocx package push -p linux/amd64 mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
+ocx package push -p linux/amd64 acme/mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 
 The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
@@ -171,7 +171,7 @@ Reusing a layer by digest works only when that blob already lives in the **targe
 
 ## Index {#index}
 
-When you run `ocx package install cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local index and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. Unlike the other stores on this page, the index's home is not fixed to `$OCX_HOME` — [`--index` / `OCX_INDEX`][env-ocx-index] can point it at an entirely different collection, defaulting to `index/` when neither is set.
+When you run `ocx package install kitware/cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local index and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. Unlike the other stores on this page, the index's home is not fixed to `$OCX_HOME` — [`--index` / `OCX_INDEX`][env-ocx-index] can point it at an entirely different collection, defaulting to `index/` when neither is set.
 
 <Tree>
   <Node name="~/.ocx/index/" icon="🏷️" open>
@@ -203,19 +203,22 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. Tha
 <Tree>
   <Node name="~/.ocx/symlinks/" icon="🔀" open>
     <Node name="{registry}/" icon="📁" open-icon="📂" open>
-      <Node name="{repo}/" icon="📁" open-icon="📂" open>
-        <Node name="current" icon="➡️" open>
-          <Description>active package root — set by ocx package select</Description>
-          <Node name="content/" icon="📂" />
-          <Node name="entrypoints/" icon="🚀" />
-          <Node name="metadata.json" icon="📋" />
-        </Node>
-        <Node name="candidates/" icon="📁" open-icon="📂" open>
-          <Node name="3.28" icon="➡️">
-            <Description>pinned package root — created by ocx package install cmake:3.28</Description>
+      <Node name="{namespace}/" icon="📁" open-icon="📂" open>
+        <Description>a repository is two segments, so it is two directories — <code>kitware/</code> then <code>cmake/</code></Description>
+        <Node name="{package}/" icon="📁" open-icon="📂" open>
+          <Node name="current" icon="➡️" open>
+            <Description>active package root — set by ocx package select</Description>
+            <Node name="content/" icon="📂" />
+            <Node name="entrypoints/" icon="🚀" />
+            <Node name="metadata.json" icon="📋" />
           </Node>
-          <Node name="3.30" icon="➡️">
-            <Description>pinned package root — created by ocx package install cmake:3.30</Description>
+          <Node name="candidates/" icon="📁" open-icon="📂" open>
+            <Node name="3.28" icon="➡️">
+              <Description>pinned package root — created by ocx package install kitware/cmake:3.28</Description>
+            </Node>
+            <Node name="3.30" icon="➡️">
+              <Description>pinned package root — created by ocx package install kitware/cmake:3.30</Description>
+            </Node>
           </Node>
         </Node>
       </Node>

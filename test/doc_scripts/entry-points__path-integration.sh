@@ -5,11 +5,11 @@
 # description: Install a package with --select and inspect the env it contributes to PATH.
 set -euo pipefail
 
-ocx package install --select "$PKG_UV"
+ocx package install --select "$PKG_ASTRAL_SH_UV"
 
 # Verify the current symlink was created (--select happened during install).
-ocx package which --current "$PKG_UV" >/dev/null
+ocx package which --current "$PKG_ASTRAL_SH_UV" >/dev/null
 
 # Print the resolved env for the installed package (the eval-safe form).
 # This is the per-package equivalent of shell profile activation.
-ocx package env --shell=bash "$PKG_UV" >/dev/null
+ocx package env --shell=bash "$PKG_ASTRAL_SH_UV" >/dev/null

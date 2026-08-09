@@ -66,10 +66,31 @@ def _canonical_proj(packages: dict[str, PackageInfo]) -> dict[str, str]:
     declared == this)."""
     out: dict[str, str] = {}
     for k, p in packages.items():
-        key = k.upper().replace("-", "_")
+        # The fold is spelled out rather than importing `helpers.env_key`: this is
+        # the oracle, so it must state the intended rule independently — sharing
+        # the implementation would let a wrong fold satisfy both sides.
+        key = k.upper().replace("/", "_").replace("-", "_")
         out[f"PKG_{key}"] = _SP7_PREFIX.sub("", p.short)
         out[f"REPO_{key}"] = _SP7_PREFIX.sub("", p.repo)
     return out
+
+
+def test_env_key_folds_the_namespace_separator() -> None:
+    """A namespaced display name must yield a key a shell can actually name.
+
+    `kitware/cmake` used to fold to `PKG_KITWARE/CMAKE` — not a legal variable
+    name, so every `$PKG_*` / `$REPO_*` reference in a doc script silently
+    expanded to nothing once the surface went two-segment.
+    """
+    from src.helpers import env_key
+
+    assert env_key("kitware/cmake") == "KITWARE_CMAKE"
+    assert env_key("astral-sh/uv") == "ASTRAL_SH_UV"
+    assert env_key("cmake") == "CMAKE", "single-segment names keep folding as before"
+
+    for name in ("kitware/cmake", "astral-sh/uv", "go-task/task"):
+        key = env_key(name)
+        assert key.replace("_", "").isalnum(), f"{key!r} is not a nameable env var"
 
 # Shell scenarios + registry I/O are Linux/macOS only; parity with
 # test_scenarios_smoke.py (see .claude/rules/subsystem-tests.md "Platform Split").
@@ -250,7 +271,7 @@ def test_sp2_dependencies_packages_keys_post_provision(
     assert isinstance(provider.packages, dict), (
         f"provider.packages is {type(provider.packages)}, expected dict"
     )
-    assert set(provider.packages.keys()) == {"nodejs", "bun", "webapp"}, (
+    assert set(provider.packages.keys()) == {"nodejs/node", "oven-sh/bun", "acme/webapp"}, (
         f"setup:dependencies packages keys: {sorted(provider.packages.keys())}"
     )
     for display_name, pkg in provider.packages.items():
@@ -319,7 +340,7 @@ def test_sp3_setup_dependencies_script_env_contains_per_package_vars(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """SP3: setup:dependencies.script_env() (SetupAdapter MUST synthesize the
-    Scenario projection) contains PKG_NODEJS, PKG_BUN, PKG_WEBAPP and the
+    Scenario projection) contains PKG_NODEJS_NODE, PKG_OVEN_SH_BUN, PKG_ACME_WEBAPP and the
     runner-level vars OCX, OCX_HOME, REGISTRY.
 
     KEY derivation rule: display name uppercased, hyphens → underscores.
@@ -332,7 +353,7 @@ def test_sp3_setup_dependencies_script_env_contains_per_package_vars(
     env = provider.script_env()
     assert isinstance(env, dict)
 
-    per_pkg_vars = ["PKG_NODEJS", "PKG_BUN", "PKG_WEBAPP"]
+    per_pkg_vars = ["PKG_NODEJS_NODE", "PKG_OVEN_SH_BUN", "PKG_ACME_WEBAPP"]
     runner_vars = ["OCX", "OCX_HOME", "REGISTRY"]
 
     for var in per_pkg_vars + runner_vars:
@@ -606,16 +627,16 @@ def test_sp7_two_provisions_of_setup_basic_use_distinct_prefixes(
     provider_a.provision(ocx, tmp_a)
     provider_b.provision(ocx, tmp_b)
 
-    # Both must have a "uv" package (the basic setup canonical package).
-    assert "uv" in provider_a.packages, (
+    # Both must have the canonical basic-setup package.
+    assert "astral-sh/uv" in provider_a.packages, (
         "SP7: setup:basic provision A must have a 'uv' package"
     )
-    assert "uv" in provider_b.packages, (
+    assert "astral-sh/uv" in provider_b.packages, (
         "SP7: setup:basic provision B must have a 'uv' package"
     )
 
-    pkg_a = provider_a.packages["uv"]
-    pkg_b = provider_b.packages["uv"]
+    pkg_a = provider_a.packages["astral-sh/uv"]
+    pkg_b = provider_b.packages["astral-sh/uv"]
 
     # Each provision uses a unique prefix → actual repo names must differ.
     assert pkg_a.repo != pkg_b.repo, (
@@ -633,16 +654,16 @@ def test_sp7_two_provisions_of_setup_basic_use_distinct_prefixes(
         f"A={sorted(provider_a.packages.keys())}, B={sorted(provider_b.packages.keys())}"
     )
 
-    # $PKG_UV env var format is display-name–derived (prefix-agnostic):
+    # $PKG_ASTRAL_SH_UV env var format is display-name–derived (prefix-agnostic):
     # its *key* must be present in both envs (same display name).
     env_a = provider_a.script_env()
     env_b = provider_b.script_env()
-    assert "PKG_UV" in env_a, "SP7: provision A env missing PKG_UV"
-    assert "PKG_UV" in env_b, "SP7: provision B env missing PKG_UV"
+    assert "PKG_ASTRAL_SH_UV" in env_a, "SP7: provision A env missing PKG_ASTRAL_SH_UV"
+    assert "PKG_ASTRAL_SH_UV" in env_b, "SP7: provision B env missing PKG_ASTRAL_SH_UV"
     # Values must differ (actual repo name embedded in short/fq value).
-    assert env_a["PKG_UV"] != env_b["PKG_UV"], (
-        f"SP7: PKG_UV values must differ between provisions; "
-        f"both got {env_a['PKG_UV']!r}"
+    assert env_a["PKG_ASTRAL_SH_UV"] != env_b["PKG_ASTRAL_SH_UV"], (
+        f"SP7: PKG_ASTRAL_SH_UV values must differ between provisions; "
+        f"both got {env_a['PKG_ASTRAL_SH_UV']!r}"
     )
 
 
@@ -881,7 +902,7 @@ def test_de2_declared_display_env_returns_dict_without_provision() -> None:
     ref) or REPO_<KEY> (→ bare repo name) — no $, no FQ_*/TAG_*/MARKER_*
     (LDR 2026-05-17).  Values are canonical (e.g. 'uv:0.10' / 'uv').
 
-    setup:basic declares a 'uv' package → PKG_UV key expected.
+    setup:basic declares a 'uv' package → PKG_ASTRAL_SH_UV key expected.
 
     Expected to FAIL now (NotImplementedError until Implement phase).
 

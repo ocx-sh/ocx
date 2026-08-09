@@ -63,7 +63,7 @@ Single acceptance test:
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v
 ```
 
-Lint tooling setup (one-off): `task ocx:index-update` populates `.ocx/index/` for every tool in `ocx.toml`; first `direnv allow` (or `task` invocation) materializes the symlinks under `~/.ocx/`.
+Lint tooling setup (one-off): first `direnv allow` (or `task` invocation) materializes the symlinks under `~/.ocx/`. The toolchain resolves from `ocx.lock` alone — this repository keeps no committed index copy, and tool bumps go through `ocx add` / `ocx lock`.
 
 ## Architecture
 

@@ -1,11 +1,11 @@
 [tools]
-actionlint = "ocx.sh/actionlint:latest"
-bun = "ocx.sh/bun:1"
-git-cliff = "ocx.sh/git-cliff:2"
-go-task = "ocx.sh/go-task:3"
-lychee = "ocx.sh/lychee:0"
-shellcheck = "ocx.sh/shellcheck:0.11"
-shfmt = "ocx.sh/shfmt:3"
-uv = "ocx.sh/uv:0"
+actionlint = "ocx.sh/actionlint/actionlint:latest"
+bun = "ocx.sh/oven-sh/bun:1"
+git-cliff = "ocx.sh/git-cliff/git-cliff:2"
+go-task = "ocx.sh/go-task/task:3"
+lychee = "ocx.sh/lychee/lychee:0"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
+shfmt = "ocx.sh/shfmt/shfmt:3"
+uv = "ocx.sh/astral-sh/uv:0"
 
 [group]

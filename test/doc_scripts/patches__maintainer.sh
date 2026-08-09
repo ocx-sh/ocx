@@ -17,8 +17,8 @@ cd "$SCENARIO_TMP"
 # it only reads what discovery has already cached locally.
 
 # region cast
-ocx patch test --descriptor descriptor.json "$PKG_MYTOOL"
-ocx patch publish --descriptor descriptor.json "$PKG_MYTOOL"
-ocx package install "$PKG_MYTOOL"
+ocx patch test --descriptor descriptor.json "$PKG_ACME_MYTOOL"
+ocx patch publish --descriptor descriptor.json "$PKG_ACME_MYTOOL"
+ocx package install "$PKG_ACME_MYTOOL"
 ocx --global patch freeze
 # endregion cast

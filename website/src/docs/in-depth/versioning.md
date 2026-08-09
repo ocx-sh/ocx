@@ -5,7 +5,7 @@ outline: deep
 
 Every binary package has three dimensions: *what it is*, *which version*, and *which platform build*. Most ecosystems handle these separately — apt with [arch suffixes and ports mirrors][apt-ports], pip with [platform-encoded wheel filenames][pep-491], Bazel rules with [hand-curated URL matrices][toolchains-llvm] — and leave the coordination to the consumer.
 
-OCX collapses all three dimensions into a single identifier. `cmake:3.28` resolves the right binary for the current machine, verifies it cryptographically, and installs it — without flags, name suffixes, or mirror configuration. This page explains *how* tags, variants, and platforms compose under the hood. The user-facing surface — pick a tag, pin a digest, override platform — lives in the [Versioning section of the user guide][user-versioning].
+OCX collapses all three dimensions into a single identifier. `kitware/cmake:3.28` resolves the right binary for the current machine, verifies it cryptographically, and installs it — without flags, name suffixes, or mirror configuration. This page explains *how* tags, variants, and platforms compose under the hood. The user-facing surface — pick a tag, pin a digest, override platform — lives in the [Versioning section of the user guide][user-versioning].
 
 ## Tags {#tags}
 
@@ -24,16 +24,16 @@ The `_build` suffix — typically a UTC timestamp like `_20260216120000` — sig
 ::: tip Why `_` instead of semver's `+`?
 The [OCI Distribution Specification][oci-dist-tag] restricts tags to `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}` — the `+` character is not allowed. OCX uses `_` as the build separator so every version string is a valid OCI tag by construction. This follows the same convention adopted by [Helm][helm-oci] for OCI-stored charts.
 
-If you type `+` out of habit (e.g., `cmake:3.28.1+20260216`), OCX accepts it and normalizes to `_` automatically. See [Build Separator][faq-build-separator] in the FAQ for the full rationale.
+If you type `+` out of habit (e.g., `kitware/cmake:3.28.1+20260216`), OCX accepts it and normalizes to `_` automatically. See [Build Separator][faq-build-separator] in the FAQ for the full rationale.
 :::
 
 | Tag | Publisher's intent | After index refresh |
 |---|---|---|
-| `cmake:3.28.1_20260216120000` | Do not re-push | Same build (by publisher convention) |
-| `cmake:3.28.1` | Rolling patch | Latest build of 3.28.1 |
-| `cmake:3.28` | Rolling minor | Latest 3.28.x build |
-| `cmake:3` | Rolling major | Latest stable 3.x build |
-| `cmake:latest` | Floating | Latest release |
+| `kitware/cmake:3.28.1_20260216120000` | Do not re-push | Same build (by publisher convention) |
+| `kitware/cmake:3.28.1` | Rolling patch | Latest build of 3.28.1 |
+| `kitware/cmake:3.28` | Rolling minor | Latest 3.28.x build |
+| `kitware/cmake:3` | Rolling major | Latest stable 3.x build |
+| `kitware/cmake:latest` | Floating | Latest release |
 
 ::: warning OCI tags are not immutable
 Any tag — including build-tagged ones — can be overwritten by the publisher. Two mechanisms protect installs regardless of what the registry does later:
@@ -41,7 +41,7 @@ Any tag — including build-tagged ones — can be overwritten by the publisher.
 - **[Local index][in-depth-indices] snapshot.** The tag → digest mapping only changes when [`ocx index update`][cmd-index-update] runs. The snapshot is yours until you decide to refresh it.
 - **[Content-addressed package store][in-depth-storage-packages].** Once a binary is installed, it lives at a path derived from its SHA-256 digest. The tag used to install it is irrelevant — the bytes are permanent.
 
-For absolute reproducibility without any index, reference the digest directly: `cmake@sha256:abc123…`
+For absolute reproducibility without any index, reference the digest directly: `kitware/cmake@sha256:abc123…`
 :::
 
 ## Variants {#variants}
@@ -54,15 +54,15 @@ Without variant support, publishers create separate packages (`python-pgo`, `pyt
 [Docker Hub][docker-images] encodes variants as tag suffixes (`python:3.12-slim`), but this creates a parsing ambiguity with [semver][semver] prereleases — `3.12-alpha` and `3.12-slim` are syntactically indistinguishable. [Concourse CI][concourse-registry]'s registry image resource documents this explicitly, resorting to a heuristic: only `alpha`, `beta`, and `rc` are treated as prereleases, everything else is a variant suffix. OCX avoids this ambiguity entirely with a variant-*prefix* format.
 :::
 
-OCX uses a <Tooltip term="variant-prefix format">The variant name comes before the version, separated by a hyphen: `debug-3.12.5`. Because variants start with a letter and versions start with a digit, the boundary is always unambiguous. Variant names match `[a-z][a-z0-9.]*` — lowercase letters, digits, and dots only.</Tooltip> convention. The default variant's tags carry no prefix — `python:3.12` resolves the same build as `python:pgo.lto-3.12` when `pgo.lto` is the default.
+OCX uses a <Tooltip term="variant-prefix format">The variant name comes before the version, separated by a hyphen: `debug-3.12.5`. Because variants start with a letter and versions start with a digit, the boundary is always unambiguous. Variant names match `[a-z][a-z0-9.]*` — lowercase letters, digits, and dots only.</Tooltip> convention. The default variant's tags carry no prefix — `astral-sh/python-build-standalone:3.12` resolves the same build as `astral-sh/python-build-standalone:pgo.lto-3.12` when `pgo.lto` is the default.
 
 | Tag | Meaning |
 |---|---|
-| `python:3.12` | Default variant at version 3.12 |
-| `python:debug-3.12` | Debug variant at version 3.12 |
-| `python:debug-3` | Latest version of the debug variant in the 3.x series |
-| `python:debug` | Latest version of the debug variant |
-| `python:latest` | Latest version of the default variant |
+| `astral-sh/python-build-standalone:3.12` | Default variant at version 3.12 |
+| `astral-sh/python-build-standalone:debug-3.12` | Debug variant at version 3.12 |
+| `astral-sh/python-build-standalone:debug-3` | Latest version of the debug variant in the 3.x series |
+| `astral-sh/python-build-standalone:debug` | Latest version of the debug variant |
+| `astral-sh/python-build-standalone:latest` | Latest version of the default variant |
 
 Rolling tags cascade within their variant track: `debug-3.12.5` cascades to `debug-3.12` → `debug-3` → `debug`. Variants never cross — publishing a new `debug` build never updates `pgo.lto` or the default variant's tags. See [Cascades](#cascades) for the full cascade model.
 
@@ -74,7 +74,7 @@ For the default variant, cascading also produces unadorned alias tags: publishin
 
 ## Cascades {#cascades}
 
-Publishers are expected to maintain the full tag hierarchy. When `cmake:3.28.1_20260216120000` is released, all rolling ancestors are re-pointed — but only if this is genuinely the latest at each specificity level:
+Publishers are expected to maintain the full tag hierarchy. When `kitware/cmake:3.28.1_20260216120000` is released, all rolling ancestors are re-pointed — but only if this is genuinely the latest at each specificity level:
 
 ```
 cmake:latest                  ← rolling — updated
@@ -88,7 +88,7 @@ cmake:3.28.1                  ← rolling — updated
 cmake:3.28.1_20260216120000   ← source of truth
 ```
 
-Publishing `cmake:3.27.5_20260217` would update `cmake:3.27` but not `cmake:3` or `cmake:latest` — the `3.28.x` series is still ahead. Rolling tags only advance, never regress.
+Publishing `kitware/cmake:3.27.5_20260217` would update `kitware/cmake:3.27` but not `kitware/cmake:3` or `kitware/cmake:latest` — the `3.28.x` series is still ahead. Rolling tags only advance, never regress.
 
 This is a publishing convention, not a guarantee enforced by the registry. Publishers must maintain the cascade manually — or have OCX do it for them.
 
@@ -98,7 +98,7 @@ Cascades operate within a single variant track. Publishing `debug-3.28.1` update
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically: publish one build and let OCX re-point all rolling ancestors in a single command.
 :::
 
-Because cascading is a publishing convention rather than a registry-enforced rule, the chain above can also drift silently. A transient registry error partway through a cascade push can leave one alias level un-repointed — `cmake:3` still points at last week's build even though `cmake:3.28.1` published successfully as a newer version at that level — and nothing about ordinary resolution notices, because a rolling tag that resolves to *some* valid manifest looks the same whether or not it is the *latest* one.
+Because cascading is a publishing convention rather than a registry-enforced rule, the chain above can also drift silently. A transient registry error partway through a cascade push can leave one alias level un-repointed — `kitware/cmake:3` still points at last week's build even though `kitware/cmake:3.28.1` published successfully as a newer version at that level — and nothing about ordinary resolution notices, because a rolling tag that resolves to *some* valid manifest looks the same whether or not it is the *latest* one.
 
 [`ocx package cascade check`][cmd-package-cascade-check] closes that gap by re-deriving what every alias tag *should* point to — not from the push that maybe updated it, but as a fold over every version currently published: for a given alias and platform, the expected build is the highest version under that alias which publishes the platform at all. Diffing the registry's actual tags against that fold finds exactly the aliases a swallowed push error left behind. [`ocx package cascade repair`][cmd-package-cascade-repair] rewrites the affected alias indexes to match.
 
@@ -136,7 +136,7 @@ OCX matches all declared fields when selecting among manifest entries, through t
 
 ## Locking {#locking}
 
-The most direct lock is a digest: `cmake@sha256:abc123…` bypasses the [local index][in-depth-indices] entirely and identifies an exact binary regardless of what any tag points to. Because all installed bytes are content-addressed, every package can be pinned this way — no lockfiles, no registry queries, just the hash.
+The most direct lock is a digest: `kitware/cmake@sha256:abc123…` bypasses the [local index][in-depth-indices] entirely and identifies an exact binary regardless of what any tag points to. Because all installed bytes are content-addressed, every package can be pinned this way — no lockfiles, no registry queries, just the hash.
 
 For most use cases, the [local index snapshot][in-depth-indices] already provides the lock. Tags resolve to the digest recorded at last update, and that mapping does not change until [`ocx index update`][cmd-index-update] runs. A CI runner that never updates its local index gets the same binary on every run.
 

@@ -349,7 +349,7 @@ history; the leaf manifest digest is not.
       "visibility": "private"
     },
     {
-      "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1...",
+      "identifier": "ocx.sh/kitware/cmake:3.28@sha256:f6e5d4c3b2a1...",
       "name": "cmake"
     }
   ]

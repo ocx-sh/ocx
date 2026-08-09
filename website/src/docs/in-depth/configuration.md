@@ -54,7 +54,7 @@ When set, the specified file layers at the top of the file-tier chain. If the fi
 To disable an ambient `OCX_CONFIG` for a single invocation without unsetting it (common when it is exported from a shell profile), set it to the empty string:
 
 ```sh
-OCX_CONFIG= ocx package install cmake:3.28
+OCX_CONFIG= ocx package install kitware/cmake:3.28
 ```
 
 Empty is the escape hatch — `OCX_CONFIG` set to empty string is treated as unset, not as an error.
@@ -163,7 +163,7 @@ Teams hosting packages on an internal or private registry can set it as the defa
 default = "registry.company.com"
 ```
 
-Any package without an explicit registry prefix — `cmake:3.28`, `myapp:1.0` — resolves to `registry.company.com`. Whether to put this in the user tier (`~/.config/ocx/config.toml`) or the OCX home tier (`~/.ocx/config.toml`) depends on whether the setting should travel with the data when `$OCX_HOME` is relocated.
+Any package without an explicit registry prefix — `kitware/cmake:3.28`, `acme/myapp:1.0` — resolves to `registry.company.com`. Whether to put this in the user tier (`~/.config/ocx/config.toml`) or the OCX home tier (`~/.ocx/config.toml`) depends on whether the setting should travel with the data when `$OCX_HOME` is relocated.
 
 ### Docker image with system-wide config {#examples-docker}
 

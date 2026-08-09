@@ -6,10 +6,10 @@
 set -euo pipefail
 
 # region cast
-ocx package install "$PKG_CMAKE"
-ocx package select "$PKG_CMAKE"
-ocx package exec "$PKG_CMAKE" -- cmake --version
-ocx package env "$PKG_CMAKE"
+ocx package install "$PKG_KITWARE_CMAKE"
+ocx package select "$PKG_KITWARE_CMAKE"
+ocx package exec "$PKG_KITWARE_CMAKE" -- cmake --version
+ocx package env "$PKG_KITWARE_CMAKE"
 # endregion cast
-ocx package deselect "$REPO_CMAKE"
-ocx package uninstall "$PKG_CMAKE"
+ocx package deselect "$REPO_KITWARE_CMAKE"
+ocx package uninstall "$PKG_KITWARE_CMAKE"

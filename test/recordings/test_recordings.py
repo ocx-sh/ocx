@@ -113,7 +113,7 @@ def test_record(
 
     # Canonical display map (PKG_<KEY> -> clean short, e.g. "webapp:2.0.0") so
     # the *displayed* cast text shows the reader-facing form, not literal
-    # `$PKG_WEBAPP`.  Same source the publish render uses (declared_display_env
+    # `$PKG_ACME_WEBAPP`.  Same source the publish render uses (declared_display_env
     # / RN3) — keeps cast and rendered snippet visually consistent.
     declared = provider.declared_display_env()
 

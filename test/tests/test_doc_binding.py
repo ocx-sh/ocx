@@ -310,7 +310,7 @@ def test_rn5b_fixture_injection_catches_violation(tmp_path: Path) -> None:
     triggers a violation in the static check.
 
     This test verifies that the check catches what it claims to catch — a
-    script with ``$FQ_UV`` in its body (a still-non-renderable fixture
+    script with ``$FQ_ASTRAL_SH_UV`` in its body (a still-non-renderable fixture
     prefix; LDR 2026-05-17 made REPO_ renderable, FQ_/TAG_/MARKER_/HOME_KEY_
     remain banned) must produce at least one RN5b violation.
 
@@ -326,7 +326,7 @@ def test_rn5b_fixture_injection_catches_violation(tmp_path: Path) -> None:
             # title: RN5b fixture injection test
             set -euo pipefail
 
-            ocx package install "$FQ_UV"
+            ocx package install "$FQ_ASTRAL_SH_UV"
             """
         )
     )
@@ -335,12 +335,12 @@ def test_rn5b_fixture_injection_catches_violation(tmp_path: Path) -> None:
     violations = _find_rn5b_violations(bad_script)
 
     assert len(violations) >= 1, (
-        "RN5b/fixture: injecting $FQ_UV into a displayed script must produce "
+        "RN5b/fixture: injecting $FQ_ASTRAL_SH_UV into a displayed script must produce "
         "at least one RN5b violation; got 0"
     )
     var_names = [v for _, v in violations]
-    assert any("FQ_UV" in v for v in var_names), (
-        f"RN5b/fixture: expected FQ_UV in violations; got {var_names!r}"
+    assert any("FQ_ASTRAL_SH_UV" in v for v in var_names), (
+        f"RN5b/fixture: expected FQ_ASTRAL_SH_UV in violations; got {var_names!r}"
     )
 
 

@@ -21,7 +21,7 @@ The grammar is fully unambiguous: `.` separates components, `-` introduces a pre
 [Helm][helm-oci] adopted the same `+` → `_` normalization when it moved chart distribution to OCI registries. See [helm/helm#10250][helm-issue] for the original discussion.
 :::
 
-**Tolerant input:** typing `+` works and auto-normalizes to `_`. For example, `ocx package install cmake:3.28.1+20260216` installs the tag `3.28.1_20260216`. This normalization happens at the earliest boundary — the identifier parser — so all downstream code sees `_` only.
+**Tolerant input:** typing `+` works and auto-normalizes to `_`. For example, `ocx package install kitware/cmake:3.28.1+20260216` installs the tag `3.28.1_20260216`. This normalization happens at the earliest boundary — the identifier parser — so all downstream code sees `_` only.
 
 See [Versioning][ug-versioning] in the user guide for the full tag hierarchy and cascade behavior.
 
@@ -64,7 +64,7 @@ A digest-only pin works under `--frozen` when the blobs are cached locally. A ta
 
 **Short rule:** if you have an `ocx.toml`, use [`ocx run`][cmd-run]; if you do not, use [`ocx package exec`][cmd-package-exec].
 
-[`ocx package exec`][cmd-package-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
+[`ocx package exec`][cmd-package-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/kitware/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
 
 [`ocx run`][cmd-run] is the project-tier command — its symbols are binding names declared in `ocx.toml` (e.g. `cmake`, `shellcheck`). It resolves those names through `ocx.lock`, auto-installs missing packages, composes the declared environment, and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
 
@@ -118,7 +118,7 @@ Forcing a glibc binary onto a musl host via gcompat would work most of the time,
 
 The predictable rule — "ld.so tells the truth about what it is" — means every install is either correct or fails with a clear feature mismatch error. It never silently installs a binary that might or might not work.
 
-**If you specifically need the glibc binary on a gcompat host**, pass `--platform` with an explicit `+libc.glibc` feature tag — e.g. `ocx package install mytool:1.0.0 --platform linux/amd64+libc.glibc`. This forces selection of the `libc.glibc`-tagged manifest entry — it is a real override, not a bypass. The resulting binary runs only if your gcompat installation covers the glibc symbols that binary calls. Binaries that call glibc functions not in gcompat's subset fail at runtime with a symbol-lookup error. This is an escape hatch for the cases where you know the specific binary works — for example, cross-fetching to bundle elsewhere — not a general workaround. OCX installs the binary; whether `ld.so` loads it is between the binary and your gcompat version.
+**If you specifically need the glibc binary on a gcompat host**, pass `--platform` with an explicit `+libc.glibc` feature tag — e.g. `ocx package install acme/mytool:1.0.0 --platform linux/amd64+libc.glibc`. This forces selection of the `libc.glibc`-tagged manifest entry — it is a real override, not a bypass. The resulting binary runs only if your gcompat installation covers the glibc symbols that binary calls. Binaries that call glibc functions not in gcompat's subset fail at runtime with a symbol-lookup error. This is an escape hatch for the cases where you know the specific binary works — for example, cross-fetching to bundle elsewhere — not a general workaround. OCX installs the binary; whether `ld.so` loads it is between the binary and your gcompat version.
 
 **The recommended path** is to publish a fully static build alongside the glibc and musl builds. A static binary carries no `os.features` declaration and matches every Linux host — gcompat or not, musl or glibc. See [libc Differentiation — Static binaries][authoring-libc-static] in the multi-platform authoring guide.
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
-from src.helpers import make_package
+from src.helpers import env_key, make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
@@ -122,15 +122,16 @@ class Scenario:
         env["REGISTRY"] = self.ocx.registry
         env["SCENARIO_TMP"] = str(self.tmp_path)
         for key, pkg in self.packages.items():
-            upper = key.upper().replace("-", "_")
+            upper = env_key(key)
             env[f"PKG_{upper}"] = pkg.short
             env[f"FQ_{upper}"] = pkg.fq
             env[f"REPO_{upper}"] = pkg.repo
             env[f"TAG_{upper}"] = pkg.tag
             env[f"MARKER_{upper}"] = pkg.marker
             # Env-var name make_package injects per package (e.g. "FOO_BAR_HOME"
-            # for repo "foo-bar"). Scripts use this to grep for transitive deps.
-            env[f"HOME_KEY_{upper}"] = pkg.repo.upper().replace("-", "_") + "_HOME"
+            # for repo "foo-bar", "KITWARE_CMAKE_HOME" for "kitware/cmake").
+            # Scripts use this to grep for transitive deps.
+            env[f"HOME_KEY_{upper}"] = env_key(pkg.repo) + "_HOME"
         if extra:
             env.update(extra)
         return env

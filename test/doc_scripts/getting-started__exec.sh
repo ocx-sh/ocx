@@ -7,5 +7,5 @@
 set -euo pipefail
 
 # region cast
-ocx package exec "$PKG_UV" -- uv --version
+ocx package exec "$PKG_ASTRAL_SH_UV" -- uv --version
 # endregion cast

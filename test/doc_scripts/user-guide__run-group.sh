@@ -8,6 +8,6 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add -g ci "$PKG_UV"
+ocx add -g ci "$PKG_ASTRAL_SH_UV"
 ocx run -g ci -- uv --version
 # endregion cast

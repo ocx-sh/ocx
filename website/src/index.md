@@ -108,7 +108,7 @@ One command installs and activates a package. Switch versions instantly. Every i
 
 Think `docker pull` — but for standalone binaries. You name the package, OCI multi-platform manifests resolve the right build for your OS and architecture. No platform conditionals, no filename guessing, no architecture mapping tables.
 
-Write `ocx add uv:0.10` once. It works on your Mac, your CI runner's Linux, and your colleague's Windows machine — the tools you already use, distributed the way containers taught us.
+Write `ocx add astral-sh/uv:0.10` once. It works on your Mac, your CI runner's Linux, and your colleague's Windows machine — the tools you already use, distributed the way containers taught us.
 
   </template>
 
@@ -130,7 +130,7 @@ Compose multiple packages in a single invocation. Each one contributes its varia
 <FeatureSection title="Content-Addressed and Deduplicated" flip>
   <template #text>
 
-Every object in the store is identified by its SHA-256 digest — a cryptographic fingerprint of its contents. If `uv:0.10` and `uv:latest` resolve to the same build, they share one directory on disk. Storage scales with distinct builds, not with the number of tags pointing at them.
+Every object in the store is identified by its SHA-256 digest — a cryptographic fingerprint of its contents. If `astral-sh/uv:0.10` and `astral-sh/uv:latest` resolve to the same build, they share one directory on disk. Storage scales with distinct builds, not with the number of tags pointing at them.
 
 This also means verification is built in. A path under `sha256:…/` never changes its contents. Pin any package to a digest and you have a lockfile-free guarantee — no registry queries, no index lookups, just the hash.
 

@@ -328,7 +328,7 @@ published declaration (`name_segments` — `index.ocx.sh` serves `2`, restating 
 | Foreign registry | `Outside`, **no I/O** (runs first) |
 | No declaration, or a name it satisfies | `Authoritative`, no root fetch |
 | Declared inexpressible, root **found** | `Authoritative` — the root overrules the declaration |
-| Declared inexpressible, root **404** | `Outside` — the flat-`ocx.sh/go-task` case |
+| Declared inexpressible, root **404** | `Outside` — any single-segment `ocx.sh/<tool>`, now that the fleet and this repo's own toolchain are two-segment |
 | Declared inexpressible, root fetch **errors** | `Authoritative`, fail-closed |
 
 The declaration must never stop the client *asking*: it is an unsigned, CDN-cacheable integer on the

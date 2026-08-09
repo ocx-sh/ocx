@@ -3,13 +3,13 @@ outline: deep
 ---
 # Multi-Platform Packages
 
-Most binary tools ship per-platform builds — different bytes for Linux/amd64, Linux/arm64, Darwin/arm64, Windows/amd64. The naive distribution approach is one tag per platform: `mytool:1.0.0-linux-amd64`, `mytool:1.0.0-darwin-arm64`. That works, but it pushes the platform-resolution problem onto every consumer's install script. OCX uses [OCI Image Indexes][oci-image-index] instead — one tag, multiple manifests, OCX picks the right one at install time based on the consumer's platform.
+Most binary tools ship per-platform builds — different bytes for Linux/amd64, Linux/arm64, Darwin/arm64, Windows/amd64. The naive distribution approach is one tag per platform: `acme/mytool:1.0.0-linux-amd64`, `acme/mytool:1.0.0-darwin-arm64`. That works, but it pushes the platform-resolution problem onto every consumer's install script. OCX uses [OCI Image Indexes][oci-image-index] instead — one tag, multiple manifests, OCX picks the right one at install time based on the consumer's platform.
 
 This page covers the publisher view: how to assemble a multi-platform package, how `ocx package push` builds the index, and the digest-stability properties you can rely on.
 
 ## One Tag, Many Manifests {#concept}
 
-An [OCI Image Index][oci-image-index] is a manifest of manifests — a single descriptor that points at one image manifest per platform. When a consumer runs `ocx package install mytool:1.0.0`, OCX fetches the index, finds the manifest matching the consumer's platform, and pulls only that manifest's layers. No conditional logic in install scripts, no platform-suffixed tags to keep in sync.
+An [OCI Image Index][oci-image-index] is a manifest of manifests — a single descriptor that points at one image manifest per platform. When a consumer runs `ocx package install acme/mytool:1.0.0`, OCX fetches the index, finds the manifest matching the consumer's platform, and pulls only that manifest's layers. No conditional logic in install scripts, no platform-suffixed tags to keep in sync.
 
 The publisher equivalent of "build for amd64, then arm64, then push the index" collapses to: push each platform separately under the same tag, and OCX assembles the index for you. When [`ocx package push`][cmd-package-push] sees a tag that already has a manifest, it merges the new platform into the existing index rather than replacing it. (`--new` on the first push tells the cascade resolver to skip that lookup; everywhere else it is a no-op.)
 
@@ -25,11 +25,11 @@ The hand-publishing flow (the [`ocx_mirror`][mirror-pipeline] tool runs the same
 ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 ocx package create build -i mytool:1.0.0 -p linux/arm64 -m metadata.json -o .
 
-ocx package push -n -c -p linux/amd64 -i mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
-ocx package push    -c -p linux/arm64 -i mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
+ocx package push -n -c -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
+ocx package push    -c -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
 ```
 
-After both pushes, `mytool:1.0.0` resolves to an image index with two platform descriptors, and any rolling aliases (`1.0`, `1`, `latest`) point at the same index digest. A consumer on Linux/arm64 fetches only the Linux/arm64 manifest's layers; an amd64 Linux runner fetches only the amd64 manifest's layers. Add `-p darwin/arm64`, `-p darwin/amd64`, or `-p windows/amd64` the same way for the rest of the matrix.
+After both pushes, `acme/mytool:1.0.0` resolves to an image index with two platform descriptors, and any rolling aliases (`1.0`, `1`, `latest`) point at the same index digest. A consumer on Linux/arm64 fetches only the Linux/arm64 manifest's layers; an amd64 Linux runner fetches only the amd64 manifest's layers. Add `-p darwin/arm64`, `-p darwin/amd64`, or `-p windows/amd64` the same way for the rest of the matrix.
 
 <Terminal src="/casts/authoring/package-multi-platform.cast" title="Publishing a multi-platform package" collapsed />
 
@@ -69,7 +69,7 @@ If your tool ships both a glibc build and a musl build, you can publish both und
 
 ### Auto-resolution {#libc-auto-resolution}
 
-When a package index carries both a `libc.glibc` entry and a `libc.musl` entry under the same tag, consumers need no special flags. `ocx package install mytool:1.0.0` detects the host's libc family at startup, then applies subset matching: the entry whose `os.features` are a subset of the host's detected features wins. A pure glibc host (Ubuntu, Fedora, Debian) picks the glibc build; a pure musl host ([Alpine Linux][alpine]) picks the musl build.
+When a package index carries both a `libc.glibc` entry and a `libc.musl` entry under the same tag, consumers need no special flags. `ocx package install acme/mytool:1.0.0` detects the host's libc family at startup, then applies subset matching: the entry whose `os.features` are a subset of the host's detected features wins. A pure glibc host (Ubuntu, Fedora, Debian) picks the glibc build; a pure musl host ([Alpine Linux][alpine]) picks the musl build.
 
 A host that provides both loaders — for example, Ubuntu with [`musl-tools`][musl-tools] installed, or a multi-target CI runner — advertises `["libc.glibc", "libc.musl"]` as its feature set. Both the `libc.glibc` entry and the `libc.musl` entry match the host's features, and each declares exactly one `os_features` value, so their specificity is equal. Equal-specificity matches produce `SelectResult::Ambiguous`, so install fails (exit [`65`][exit-codes]) with an ambiguous-selection error that lists the conflicting variants. Disambiguate by passing `--platform linux/amd64+libc.glibc` or `--platform linux/amd64+libc.musl`.
 
@@ -118,8 +118,8 @@ After mirroring, the published image index carries the `os.features` array in ea
 Hand-driven publishers (not using the mirror tool) declare the same `os_features` directly on [`ocx package push`][cmd-package-push]'s `--platform` value — append `+libc.glibc` or `+libc.musl` to the standard `os/arch` value, following [the Per-Platform Push Pattern](#pattern):
 
 ```sh
-ocx package push -n -c -p linux/amd64+libc.glibc -i mytool:1.0.0 mytool-1.0.0-linux-amd64-glibc.tar.xz
-ocx package push    -c -p linux/amd64+libc.musl  -i mytool:1.0.0 mytool-1.0.0-linux-amd64-musl.tar.xz
+ocx package push -n -c -p linux/amd64+libc.glibc -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-glibc.tar.xz
+ocx package push    -c -p linux/amd64+libc.musl  -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-musl.tar.xz
 ```
 
 Both pushes share the same tag and `(os, arch)`, so they merge into the same image index as two entries differing only in `os_features` — the same result the mirror YAML's object form produces.
@@ -142,7 +142,7 @@ An empty `os_features` set is a subset of every host's features, so the entry ma
 
 ### How OCX selects at install time {#libc-selection}
 
-When a consumer runs `ocx package install mytool:1.0.0` on a Linux host, OCX detects the libc family in two stages: *discover, then identify*. It first **discovers** where the host's dynamic loaders live — it reads the [`PT_INTERP`][pt-interp] (the embedded interpreter path) from an ordered allowlist of system binaries (`/usr/bin/env`, `/bin/sh`, `/bin/ls`), probing each in turn and stopping at the first that yields an interpreter path; that path names the host's exact native loader wherever it sits. It then scans the canonical loader directories for any additional loaders. It then **identifies** each discovered loader by its `--version` banner. It enumerates **all** libc families the host provides — a host may advertise more than one (e.g. glibc plus musl on a machine that has `musl-tools` installed). Detection is a one-time probe cached for the process lifetime.
+When a consumer runs `ocx package install acme/mytool:1.0.0` on a Linux host, OCX detects the libc family in two stages: *discover, then identify*. It first **discovers** where the host's dynamic loaders live — it reads the [`PT_INTERP`][pt-interp] (the embedded interpreter path) from an ordered allowlist of system binaries (`/usr/bin/env`, `/bin/sh`, `/bin/ls`), probing each in turn and stopping at the first that yields an interpreter path; that path names the host's exact native loader wherever it sits. It then scans the canonical loader directories for any additional loaders. It then **identifies** each discovered loader by its `--version` banner. It enumerates **all** libc families the host provides — a host may advertise more than one (e.g. glibc plus musl on a machine that has `musl-tools` installed). Detection is a one-time probe cached for the process lifetime.
 
 Reading the loader path off a present binary rather than guessing fixed paths is what lets detection work on hosts that put the loader somewhere non-standard. [Gentoo Prefix][gentoo-prefix], Homebrew-on-Linux, and custom sysroots all resolve libc-aware. [NixOS][nixos] resolves libc-aware when [nix-ld][nix-ld] is active (nix-ld installs an FHS shim at the canonical loader path, which the probe picks up normally); without nix-ld, the probe binaries on NixOS are statically linked and carry no `PT_INTERP`, so detection falls back to an empty set — install then matches only entries with no `os_features`, and you can override with `--platform`.
 
@@ -176,7 +176,7 @@ A package built once with `--platform any` — a shell script, a Python entry po
 An `any`-targeted package performs no platform-specific resolution of its own — nothing about it varies by host — so it can only depend on dependencies that themselves offer an `any` manifest. This falls straight out of the [compatibility relation][reference-platforms-compatibility]: an `any` requirement is satisfied only by an `any` offer.
 
 ```json
-{ "dependencies": [{ "identifier": "ocx.sh/mytool:1.0" }] }
+{ "dependencies": [{ "identifier": "ocx.sh/acme/mytool:1.0" }] }
 ```
 
 `ocx package create --platform any` resolves this the same way it resolves a concrete platform: a single manifest digest, bare on the identifier:
@@ -184,12 +184,12 @@ An `any`-targeted package performs no platform-specific resolution of its own �
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/mytool:1.0@sha256:aaaa..." }
+    { "identifier": "ocx.sh/acme/mytool:1.0@sha256:aaaa..." }
   ]
 }
 ```
 
-If `ocx.sh/mytool:1.0` ships only platform-specific manifests (`linux/amd64`, `darwin/arm64`, and so on) with no `any` build, `create` fails with exit 65, naming the dependency and listing what it does offer. There is no partial coverage to derive — a platform-agnostic package either can lean on a platform-agnostic dependency, or it cannot depend on that package at all under `--platform any`.
+If `ocx.sh/acme/mytool:1.0` ships only platform-specific manifests (`linux/amd64`, `darwin/arm64`, and so on) with no `any` build, `create` fails with exit 65, naming the dependency and listing what it does offer. There is no partial coverage to derive — a platform-agnostic package either can lean on a platform-agnostic dependency, or it cannot depend on that package at all under `--platform any`.
 
 ### Digest Pins Under `--platform any` {#dependency-platforms-digest-pin-prohibition}
 
@@ -207,7 +207,7 @@ Concrete-targeted bundles are unaffected by either check: a direct digest pin is
 
 ### Snapshot Semantics {#dependency-platforms-snapshot}
 
-A pin is a snapshot of the dependency's platform coverage at the moment `create` (or `push`, for the provenance check above) ran, not a live query. If `ocx.sh/mytool:1.0`'s publisher later adds an `any` manifest where none existed before, your already-published package does not retroactively pick it up — re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
+A pin is a snapshot of the dependency's platform coverage at the moment `create` (or `push`, for the provenance check above) ran, not a live query. If `ocx.sh/acme/mytool:1.0`'s publisher later adds an `any` manifest where none existed before, your already-published package does not retroactively pick it up — re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
 
 ## See Also {#see-also}
 

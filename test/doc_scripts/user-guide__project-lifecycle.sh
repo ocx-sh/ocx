@@ -8,9 +8,9 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add "$PKG_CMAKE"
+ocx add "$PKG_KITWARE_CMAKE"
 ocx lock
 ocx pull
 ocx run -- cmake --version
 # endregion cast
-ocx remove "$REPO_CMAKE"
+ocx remove "$REPO_KITWARE_CMAKE"

@@ -3,12 +3,12 @@ outline: deep
 ---
 # Indices
 
-OCI tags are mutable. The [OCI Distribution Specification][oci-dist-tag] defines tags as registry-side aliases that can be re-pointed at any moment — `cmake:3` today may resolve to a different digest after the next patch release. Choosing a version by tag — a devcontainer parameter, a Gradle property, a bare CLI argument — needs to resolve to the same digest every time you make that same choice, on your laptop, on CI, and on a machine that has never talked to the registry before.
+OCI tags are mutable. The [OCI Distribution Specification][oci-dist-tag] defines tags as registry-side aliases that can be re-pointed at any moment — `kitware/cmake:3` today may resolve to a different digest after the next patch release. Choosing a version by tag — a devcontainer parameter, a Gradle property, a bare CLI argument — needs to resolve to the same digest every time you make that same choice, on your laptop, on CI, and on a machine that has never talked to the registry before.
 
 OCX solves this with a local index: a directory holding a local copy of registry resolution data that only changes when explicitly refreshed. This page explains what an index actually is — one wire format, copied or generated in different places — how the local copy resolves without a network round trip, and how OCX resolves packages published through the [`index.ocx.sh`][index-ocx-sh] public index. The user-facing surface — when to refresh, offline mode, `--remote` — lives in the [Indices section of the user guide][user-indices].
 
 :::info An index resolves versions, not `ocx.lock`
-An index answers one question: which versions of a package exist, and for a chosen version, which platform-manifest digest and physical registry location it points to. It never appears in `ocx.lock` resolution — a lock already records the exact platform-manifest digest it pinned (see [Locking][in-depth-versioning-locking]), so resolving a lock reads that digest straight off disk and fetches it, without consulting any index. What an index buys is free *version choice*: something that names a tag rather than a digest — a devcontainer feature parameter, a Gradle property, a bare `ocx package install cmake:3.28` — still needs to resolve deterministically and offline, which is exactly the gap a [shipped index copy](#bundled) closes.
+An index answers one question: which versions of a package exist, and for a chosen version, which platform-manifest digest and physical registry location it points to. It never appears in `ocx.lock` resolution — a lock already records the exact platform-manifest digest it pinned (see [Locking][in-depth-versioning-locking]), so resolving a lock reads that digest straight off disk and fetches it, without consulting any index. What an index buys is free *version choice*: something that names a tag rather than a digest — a devcontainer feature parameter, a Gradle property, a bare `ocx package install kitware/cmake:3.28` — still needs to resolve deterministically and offline, which is exactly the gap a [shipped index copy](#bundled) closes.
 :::
 
 ## One format, many copies {#format}
@@ -31,7 +31,7 @@ The remote index is also the data source for [`ocx index update`][cmd-index-upda
 
 ## Local Index {#local}
 
-The local index reads from a self-contained collection under [`$OCX_HOME`][env-ocx-home] — one subtree per source, each independently resolvable with no network. Resolving `cmake:3` reads the `ocx.sh` (or whichever registry's) subtree and verifies a digest locally; nothing is fetched over the network unless the requested tag is missing.
+The local index reads from a self-contained collection under [`$OCX_HOME`][env-ocx-home] — one subtree per source, each independently resolvable with no network. Resolving `kitware/cmake:3` reads the `ocx.sh` (or whichever registry's) subtree and verifies a digest locally; nothing is fetched over the network unless the requested tag is missing.
 
 The home is resolved in order:
 
@@ -45,7 +45,7 @@ The home is a **collection**, not a single index: `$OCX_HOME/index/ocx.sh/`, `$O
 
 OCX never writes a lock file inside the collection itself, wherever it lives. Cross-process locks for an index update are always homed under the machine-global `$OCX_HOME/locks`, keyed by the guarded directory's own identity — so a redirected or git-committed `.ocx/index/` copy only ever changes when `ocx` actually writes new data into it, never picks up a stray lock sidecar `git status` would flag.
 
-**The local index is never updated automatically.** You decide when a source's subtree changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `cmake:3` map to the digest current at last update, not whatever the registry serves today. That is true even for a tag you have never asked for before: resolving a brand-new identifier *grows* the copy with a new root and dispatch object, but re-resolving one already on disk never silently *refreshes* it under the default mode. An explicit [`ocx index update`][cmd-index-update] is the deliberate way to move it; a [`--remote`][arg-remote] resolve of that tag is the other, since — unlike a `--remote` *query* — it re-fetches and rewrites the local copy for the tag it touches (see [Active Index](#active)).
+**The local index is never updated automatically.** You decide when a source's subtree changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `kitware/cmake:3` map to the digest current at last update, not whatever the registry serves today. That is true even for a tag you have never asked for before: resolving a brand-new identifier *grows* the copy with a new root and dispatch object, but re-resolving one already on disk never silently *refreshes* it under the default mode. An explicit [`ocx index update`][cmd-index-update] is the deliberate way to move it; a [`--remote`][arg-remote] resolve of that tag is the other, since — unlike a `--remote` *query* — it re-fetches and rewrites the local copy for the tag it touches (see [Active Index](#active)).
 
 "Explicit" means *named*. An update moves the packages you list and nothing else — never a package as a side effect of moving another, and there is no *implicit* whole-index sync to move them all at once ([`ocx index sync`][cmd-index-sync] is the explicit one — see [Update modes](#update-modes)). That covers the `repository` field too — the pointer deciding which physical registry a package is fetched from is part of what a copy pins, not a detail refreshed in passing. And resolution stays silent about all of it: once something is committed locally, resolving it makes no network request and tells you nothing about the remote, because there is nothing it could act on. Updates surface where you asked for them — [`ocx index catalog --remote`][cmd-index-catalog] — never as a warning from a command that was doing something else.
 
@@ -135,7 +135,7 @@ A **later** catalog sync that finds the *remote* root digest has moved past the 
 
 [`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package from its remote source:
 
-- **Tagged identifier** (e.g., `cmake:3.28`) — adopts that one tag. Every sibling pin, and the `repository` pointer, stay exactly as committed. A tagged update is a statement about one version.
+- **Tagged identifier** (e.g., `kitware/cmake:3.28`) — adopts that one tag. Every sibling pin, and the `repository` pointer, stay exactly as committed. A tagged update is a statement about one version.
 - **Bare identifier** (e.g., `cmake`) — adopts every tag the source currently lists, plus the package-level fields. Naming the package with no tag is the sanctioned point to take a routing migration: you asked about the package, so the package's own pointer moves.
 
 **An update never deletes.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and entries the remote dropped are never removed.
@@ -164,7 +164,7 @@ To ask what the source has now, ask the source: [`ocx index catalog --remote`][c
 
 ### Fresh-machine fallback {#fresh-machine}
 
-On a fresh machine, [`ocx index update`][cmd-index-update] does not need to run before the first [`ocx package install cmake:3.28`][cmd-package-install]. When the local index has no entry for a requested tag, [`ocx package install`][cmd-package-install] transparently resolves that single tag against the configured remote, writes the dispatch object, root, and catalog entry, and proceeds with the install. Subsequent commands — including [`--offline`][arg-offline] — then work from the cached entry without touching the network.
+On a fresh machine, [`ocx index update`][cmd-index-update] does not need to run before the first [`ocx package install kitware/cmake:3.28`][cmd-package-install]. When the local index has no entry for a requested tag, [`ocx package install`][cmd-package-install] transparently resolves that single tag against the configured remote, writes the dispatch object, root, and catalog entry, and proceeds with the install. Subsequent commands — including [`--offline`][arg-offline] — then work from the cached entry without touching the network.
 
 Refreshing an already-cached tag or discovering every tag for a repository is still the job of [`ocx index update`][cmd-index-update]; the fallback only covers the specific tag being installed.
 
@@ -316,7 +316,7 @@ The active index controls tag and manifest resolution only. The [package store][
 
 ## Shipped copies {#bundled}
 
-A local index subtree is small — root documents and dispatch objects only, no layer archives, no binaries — small enough to ship *inside* a tool release. [Bazel Rules][bazel-rules], [GitHub Actions][github-actions-docs], and [DevContainer Features][devcontainer-features] can bundle a frozen copy at release time and set [`OCX_INDEX`][env-ocx-index] (or pass [`--index`][arg-index]) to point OCX at it. Consumers write `cmake:3` and the bundled copy resolves it deterministically — with zero network dependence and zero dependence on any other machine-global state — while the [package store][in-depth-storage-packages] and [install symlinks][in-depth-storage-symlinks] stay in `OCX_HOME` as usual.
+A local index subtree is small — root documents and dispatch objects only, no layer archives, no binaries — small enough to ship *inside* a tool release. [Bazel Rules][bazel-rules], [GitHub Actions][github-actions-docs], and [DevContainer Features][devcontainer-features] can bundle a frozen copy at release time and set [`OCX_INDEX`][env-ocx-index] (or pass [`--index`][arg-index]) to point OCX at it. Consumers write `kitware/cmake:3` and the bundled copy resolves it deterministically — with zero network dependence and zero dependence on any other machine-global state — while the [package store][in-depth-storage-packages] and [install symlinks][in-depth-storage-symlinks] stay in `OCX_HOME` as usual.
 
 This produces a two-level pin on *version choice*, not on `ocx.lock` — a devcontainer feature or a GitHub Action has no lock file of its own, so this index-level pin is the only determinism it gets: the tool version pins the bundled index copy, which pins the resolved binary. A version bump to the action or rule — proposed automatically by [Dependabot][dependabot] or [Renovate][renovate] — advances the bundled copy. Users get the updated binary with no config changes.
 
@@ -327,7 +327,7 @@ This produces a two-level pin on *version choice*, not on `ocx.lock` — a devco
     version: "3.28"                       # human-readable tag, no platform conditions
 ```
 
-`@v2.1.0` pins everything end-to-end. `@v2` follows minor releases — as the maintainer ships updated index copies, `cmake:3.28` may resolve to a newer build when the action version changes. No SHA256 lists, no `if: runner.os == 'Linux'` conditionals.
+`@v2.1.0` pins everything end-to-end. `@v2` follows minor releases — as the maintainer ships updated index copies, `kitware/cmake:3.28` may resolve to a newer build when the action version changes. No SHA256 lists, no `if: runner.os == 'Linux'` conditionals.
 :::
 
 The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] — one `filename → checksum` entry per `version × os × arch` — is clear: a version bump means editing one rule version, not a dictionary.
@@ -366,7 +366,7 @@ logical id (ocx.sh/<ns>/<pkg>[:tag])
 { "format_version": 1, "name_segments": 2 }
 ```
 
-`name_segments` is the slash-separated segment count a package name must have *within* the namespace. `index.ocx.sh` publishes `2`: its root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so `ocx.sh/kitware/cmake` is expressible and `ocx.sh/go-task` is not — there is no path in the wire layout where a root for a flat name could live.
+`name_segments` is the slash-separated segment count a package name must have *within* the namespace. `index.ocx.sh` publishes `2`: its root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so `ocx.sh/kitware/cmake` is expressible and `ocx.sh/go-task/task` is not — there is no path in the wire layout where a root for a flat name could live.
 
 The declaration decides what a **missing root means**, never whether OCX asks for one. OCX still requests the root for a name of the declared-impossible shape: if the index serves one, the index has an opinion about that name and stays authoritative for it, declaration or not. Only when the root is genuinely absent does the declaration take effect — the miss falls through to a plain OCI registry reference instead of stopping the chain. That is the index operator's published statement, not a guess the client makes; nothing about it is inferred from the URL shape or the name itself.
 
@@ -463,7 +463,7 @@ Four OCX commands share the `update` verb. Each refreshes exactly one record, an
 
 A fifth command belongs to the family without carrying the verb: [`ocx index sync`][cmd-index-sync] refreshes the same record `ocx index update` does, over a whole registry's catalog rather than a named list of packages.
 
-`ocx update` never writes a **tag pointer** into the local index — `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`, content-addressed and pinning nothing, so that write moves no tag. Re-resolving a project's pinned tools therefore does not change what `cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
+`ocx update` never writes a **tag pointer** into the local index — `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`, content-addressed and pinning nothing, so that write moves no tag. Re-resolving a project's pinned tools therefore does not change what `kitware/cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
 
 ## See Also
 

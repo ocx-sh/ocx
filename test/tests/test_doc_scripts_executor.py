@@ -98,9 +98,9 @@ def test_ex1_ex2_setup_basic_provisions_and_exits_zero(
     ocx: OcxRunner,
     tmp_path: Path,
 ) -> None:
-    """EX1/EX2: # state: setup:basic provisions uv; body using $PKG_UV exits 0.
+    """EX1/EX2: # state: setup:basic provisions uv; body using $PKG_ASTRAL_SH_UV exits 0.
 
-    The script installs the package exposed by $PKG_UV and checks it with
+    The script installs the package exposed by $PKG_ASTRAL_SH_UV and checks it with
     'ocx package which'.  On exit 0 run_doc_script must return without raising.
     """
     script = _write_script(
@@ -110,8 +110,8 @@ def test_ex1_ex2_setup_basic_provisions_and_exits_zero(
         #!/usr/bin/env bash
         # state: setup:basic
         set -euo pipefail
-        ocx package install --select "$PKG_UV"
-        ocx package which "$REPO_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         """,
     )
     # Must not raise
@@ -122,18 +122,18 @@ def test_ex6_no_state_header_defaults_to_setup_basic(
     ocx: OcxRunner,
     tmp_path: Path,
 ) -> None:
-    """EX6: absent # state: uses setup:basic; $PKG_UV is available."""
+    """EX6: absent # state: uses setup:basic; $PKG_ASTRAL_SH_UV is available."""
     script = _write_script(
         tmp_path,
         "test_ex6.sh",
         """\
         #!/usr/bin/env bash
         set -euo pipefail
-        ocx package install --select "$PKG_UV"
-        ocx package which "$REPO_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         """,
     )
-    # Must not raise — default state provides $PKG_UV and $REPO_UV
+    # Must not raise — default state provides $PKG_ASTRAL_SH_UV and $REPO_ASTRAL_SH_UV
     run_doc_script(script, ocx, tmp_path)
 
 
@@ -150,7 +150,7 @@ def test_ex10_drift_gate_runs_raw_body_under_sp7(
     ``t_<8hex>_<repo>``).  The honest tested guarantee is DE6-canonical
     equivalence (gated by ``test_state_providers``/DE6), not byte-identity.
 
-    This test pins the contract: ``$PKG_UV`` at runtime carries the SP7
+    This test pins the contract: ``$PKG_ASTRAL_SH_UV`` at runtime carries the SP7
     isolation prefix (proving it was NOT substituted) yet the body still
     runs green (proving raw execution under script_env resolves correctly).
     """
@@ -160,11 +160,11 @@ def test_ex10_drift_gate_runs_raw_body_under_sp7(
         r"""        #!/usr/bin/env bash
         # state: setup:basic
         set -euo pipefail
-        if [[ ! "$PKG_UV" =~ ^[ts]_[0-9a-f]{8}_ ]]; then
-          echo "EX10: expected SP7-prefixed \$PKG_UV (raw exec), got: $PKG_UV" >&2
+        if [[ ! "$PKG_ASTRAL_SH_UV" =~ ^[ts]_[0-9a-f]{8}_ ]]; then
+          echo "EX10: expected SP7-prefixed \$PKG_ASTRAL_SH_UV (raw exec), got: $PKG_ASTRAL_SH_UV" >&2
           exit 1
         fi
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         """,
     )
     # Must not raise: raw body executes under SP7-prefixed script_env.
@@ -371,12 +371,12 @@ def test_ex8_cast_true_runs_as_normal_acceptance(
         set -euo pipefail
 
         # region cast
-        ocx package install --select "$PKG_UV"
-        ocx package which "$REPO_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         # endregion cast
 
         # assertion outside cast region — must run in drift gate
-        ocx package which "$REPO_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         """,
     )
 
@@ -503,8 +503,8 @@ def test_dg3_all_pass_fixture_is_green(
         # doc: dg3/green
         # description: All-pass case for DG3 contract proof
         set -euo pipefail
-        ocx package install --select "$PKG_UV"
-        ocx package which "$REPO_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         """,
     )
 

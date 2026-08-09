@@ -18,7 +18,7 @@ The fastest way to find out whether a package works is to push it and install it
 The argument shape mirrors [`ocx package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then an optional `--platform`. Like `push`, `--platform` defaults to the platform [`ocx package create`][cmd-package-create] recorded in the metadata sidecar; pass it explicitly only to assert it matches (a mismatch is rejected).
 
 ```sh
-ocx package test -i mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool --version
+ocx package test -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool --version
 ```
 
 The `--` separator marks the end of package arguments and the start of the command to run. Everything after `--` is passed verbatim to the child process. If you need to run scripted assertions instead of a single command, use `--script` instead of `--` — the two forms are mutually exclusive.
@@ -50,10 +50,10 @@ The identifier must be in tag form — `repo:tag` or `registry/repo:tag`. An exp
 
 ```sh
 # good
-ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz -- true
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0 mytool.tar.xz -- true
 
 # bad — digest rejected
-ocx package test -p linux/amd64 -i mytool:1.0.0@sha256:abc… mytool.tar.xz -- true
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0@sha256:abc… mytool.tar.xz -- true
 ```
 
 ## Keeping the build dir for inspection {#keep}
@@ -61,7 +61,7 @@ ocx package test -p linux/amd64 -i mytool:1.0.0@sha256:abc… mytool.tar.xz -- t
 When a command fails you often want to inspect the materialized layout — check which files landed where, whether entrypoints were generated, whether `resolve.json` is correct. Pass `--keep` to preserve the temp directory. OCX prints its path to stderr just before executing the command:
 
 ```sh
-ocx package test -p linux/amd64 --keep -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+ocx package test -p linux/amd64 --keep -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
 # stderr: kept at /home/user/.ocx/temp/test/test-a1b2c3d4
 ```
 
@@ -72,7 +72,7 @@ The directory persists whether the command succeeds or fails. Without `--keep`, 
 `--output DIR` materializes the package to a directory you control instead of an auto-managed temp dir. The directory must not exist or must be empty — OCX creates it.
 
 ```sh
-ocx package test -p linux/amd64 --output ./build -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+ocx package test -p linux/amd64 --output ./build -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
 ```
 
 The directory is never deleted by OCX. `--output` implies keep — omitting `--keep` is fine, combining them is an error.
@@ -90,7 +90,7 @@ On Windows, `--output` must point to a directory under `$OCX_HOME/`. Placing the
 By default, `ocx package test` composes the interface surface — the env vars marked `public` or `interface` that consumers see. To compose the private surface (what the package sees when its own launchers run), pass `--self`:
 
 ```sh
-ocx package test -p linux/amd64 --self -i mytool:1.0.0 mytool.tar.xz \
+ocx package test -p linux/amd64 --self -i acme/mytool:1.0.0 mytool.tar.xz \
   -- sh -c 'echo $MY_PRIVATE_VAR'
 ```
 
@@ -101,7 +101,7 @@ The `--self` flag mirrors the same flag on [`ocx package exec`][cmd-exec] and [`
 By default the composed env inherits the parent shell's variables. Pass `--clean` to strip everything except the `OCX_*` config keys and the package-declared vars:
 
 ```sh
-ocx package test -p linux/amd64 --clean -i mytool:1.0.0 mytool.tar.xz \
+ocx package test -p linux/amd64 --clean -i acme/mytool:1.0.0 mytool.tar.xz \
   -- sh -c 'env | sort'
 ```
 
@@ -113,7 +113,7 @@ Layer arguments can be file paths or digest references, exactly like [`ocx packa
 
 ```sh
 # base layer already in registry; only the top layer is local
-ocx package test -p linux/amd64 -i mytool:1.0.1 \
+ocx package test -p linux/amd64 -i acme/mytool:1.0.1 \
   sha256:<hex>.tar.xz ./newtool.tar.xz -- mytool --version
 ```
 
@@ -129,16 +129,16 @@ A typical authoring session looks like this:
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 
 # 2. Test it locally — no registry involved.
-ocx package test -i mytool:1.0.0 \
+ocx package test -i acme/mytool:1.0.0 \
   mytool-1.0.0.tar.xz -- mytool --version
 
 # 3. Something wrong? Keep the dir and inspect.
-ocx package test --keep -i mytool:1.0.0 \
+ocx package test --keep -i acme/mytool:1.0.0 \
   mytool-1.0.0.tar.xz -- mytool --version
 ls "$HOME/.ocx/temp/test/"*/
 
 # 4. Happy with it? Push.
-ocx package push -n -i mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -n -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
 <Terminal src="/casts/authoring/package-test.cast" title="Testing a package locally before pushing" collapsed />
@@ -157,11 +157,11 @@ The `-- CMD` form works well when the package ships its own test runner. Tool pa
 
 ```sh
 # Read script from a file
-ocx package test -p linux/amd64 -i shfmt:3.8.0 shfmt.tar.xz --script smoke.star
+ocx package test -p linux/amd64 -i shfmt/shfmt:3.8.0 shfmt.tar.xz --script smoke.star
 
 # Read script source from stdin (the value `-` means stdin)
 printf 'r = ocx.run("shfmt", "--version")\nexpect.ok(r)\n' \
-  | ocx package test -p linux/amd64 -i shfmt:3.8.0 shfmt.tar.xz --script -
+  | ocx package test -p linux/amd64 -i shfmt/shfmt:3.8.0 shfmt.tar.xz --script -
 ```
 
 `--script` and `-- CMD` are mutually exclusive. Supplying both exits with code 64. Supplying neither exits with code 64.
@@ -248,7 +248,7 @@ Re-entrant `ocx` invocations are refused in v1. `ocx.run("ocx", ...)` exits with
 Pass `--format json` to get a structured envelope alongside the exit code:
 
 ```sh
-ocx package test -p linux/amd64 -i shfmt:3.8.0 shfmt.tar.xz \
+ocx package test -p linux/amd64 -i shfmt/shfmt:3.8.0 shfmt.tar.xz \
   --script smoke.star --format json
 ```
 

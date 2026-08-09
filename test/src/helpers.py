@@ -20,6 +20,19 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
+
+def env_key(name: str) -> str:
+    """Fold a package display name or repository into an env-var key fragment.
+
+    Namespaced names (`kitware/cmake`) are the norm now, so the separator has to
+    fold like any other: `PKG_KITWARE_CMAKE`, not the `PKG_KITWARE/CMAKE` that a
+    shell cannot name. Callers that derive the runtime `$PKG_*` / `$REPO_*`
+    namespace and the ones that render the *declared* namespace must agree
+    exactly — DE6 compares them — so both go through here rather than repeating
+    the fold.
+    """
+    return name.upper().replace("/", "_").replace("-", "_")
+
 # Sentinel distinguishing "caller passed nothing" from "caller passed None" /
 # an explicit list for `make_package(binaries=...)`. The wire format
 # deliberately gives `Option<Binaries>` absent (undeclared) and `Some([])`
@@ -301,7 +314,7 @@ def make_package(
 
     # Write metadata
     metadata_path = tmp_path / f"metadata-{fname_slug}-{tag}.json"
-    home_key = repo.upper().replace("/", "_").replace("-", "_") + "_HOME"
+    home_key = env_key(repo) + "_HOME"
     # Default env is tagged ``"visibility": "public"`` so the per-entry
     # filter under ``ExecMode::Consumer`` (the default since the v2 flip)
     # admits PATH and {REPO}_HOME — matching the in-tree bare-binary mirror

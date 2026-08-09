@@ -5,4 +5,4 @@
 # description: Download a package into the content-addressed store and create a candidate symlink.
 set -euo pipefail
 
-ocx package install "$PKG_CMAKE"
+ocx package install "$PKG_KITWARE_CMAKE"

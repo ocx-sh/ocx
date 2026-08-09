@@ -5,4 +5,4 @@
 # description: Download a package and all its declared dependencies into the object store.
 set -euo pipefail
 
-ocx package pull "$PKG_WEBAPP"
+ocx package pull "$PKG_ACME_WEBAPP"

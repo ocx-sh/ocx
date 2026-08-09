@@ -17,7 +17,7 @@ cd "$SCENARIO_TMP"
 # registry.
 
 # region cast
-ocx patch test --descriptor descriptor.json "$PKG_MYTOOL"
-ocx patch test --descriptor descriptor.json "$PKG_MYTOOL" -- mytool --version
-ocx patch test --descriptor descriptor-preview.json --companion-archive preview-companion.tar.xz "$PKG_MYTOOL"
+ocx patch test --descriptor descriptor.json "$PKG_ACME_MYTOOL"
+ocx patch test --descriptor descriptor.json "$PKG_ACME_MYTOOL" -- mytool --version
+ocx patch test --descriptor descriptor-preview.json --companion-archive preview-companion.tar.xz "$PKG_ACME_MYTOOL"
 # endregion cast

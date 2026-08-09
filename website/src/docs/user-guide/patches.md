@@ -367,7 +367,7 @@ A project can opt a specific base package out of the patch tier by adding `no-pa
 true` to the project's `ocx.toml`:
 
 ```toml
-[package."ocx.sh/cmake:3.28"]
+[package."ocx.sh/kitware/cmake:3.28"]
 no-patches = true
 ```
 

@@ -5,5 +5,5 @@
 # description: Install a specific version and set it as current with package select.
 set -euo pipefail
 
-ocx package install "$PKG_CMAKE"
-ocx package select "$PKG_CMAKE"
+ocx package install "$PKG_KITWARE_CMAKE"
+ocx package select "$PKG_KITWARE_CMAKE"

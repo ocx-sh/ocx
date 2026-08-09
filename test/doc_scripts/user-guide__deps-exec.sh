@@ -6,11 +6,11 @@
 set -euo pipefail
 
 # region cast
-ocx package exec "$PKG_WEBAPP" -- serve --version
+ocx package exec "$PKG_ACME_WEBAPP" -- serve --version
 # endregion cast
 
 # Verification — outside the displayed region (drift-gated, never shown/cast).
-out="$(ocx package exec "$PKG_WEBAPP" -- serve --version)"
+out="$(ocx package exec "$PKG_ACME_WEBAPP" -- serve --version)"
 [[ -n "$out" ]] || {
     echo "ERROR: ocx package exec returned empty output" >&2
     exit 1

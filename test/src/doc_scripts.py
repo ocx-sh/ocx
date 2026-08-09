@@ -468,11 +468,11 @@ def substitute_renderable(text: str, display_env: dict[str, str]) -> str:
 
     - For every ``name`` in *display_env* (longest first, so ``PKG_FOO_BAR``
       is replaced before ``PKG_FOO``), replace ``${name}`` (brace form,
-      unambiguous — ``${PKG_UV}x`` → ``uv:0.10x``) and the **word-boundary**
+      unambiguous — ``${PKG_ASTRAL_SH_UV}x`` → ``uv:0.10x``) and the **word-boundary**
       bare form ``$name`` *not* followed by ``[A-Za-z0-9_]`` with the value.
       Surrounding double quotes are adjacent literal text and are preserved
-      verbatim (``"$PKG_UV"`` → ``"uv:0.10"``; ``$PKG_UV`` → ``uv:0.10``).
-      The bare form is word-boundary correct: with only ``PKG_UV`` declared,
+      verbatim (``"$PKG_ASTRAL_SH_UV"`` → ``"uv:0.10"``; ``$PKG_ASTRAL_SH_UV`` → ``uv:0.10``).
+      The bare form is word-boundary correct: with only ``PKG_ASTRAL_SH_UV`` declared,
       ``$PKG_UVX`` and ``$PKG_UV_2`` are left verbatim (no prefix-substring
       false substitution).  Literal text substitution, not shell-semantics.
     - Non-renderable ``$VAR`` (anything not a *display_env* key) is left
@@ -497,8 +497,8 @@ def substitute_renderable(text: str, display_env: dict[str, str]) -> str:
         return text
     # Longest-name-first so ``PKG_FOO_BAR`` is tried before ``PKG_FOO``; the
     # brace form consumes ``${...}`` exactly while the bare form is guarded by
-    # a trailing ``(?![A-Za-z0-9_])`` negative lookahead so ``$PKG_UV`` does
-    # not match the ``PKG_UV`` prefix inside ``$PKG_UVX`` / ``$PKG_UV_2``.
+    # a trailing ``(?![A-Za-z0-9_])`` negative lookahead so ``$PKG_ASTRAL_SH_UV`` does
+    # not match the ``PKG_ASTRAL_SH_UV`` prefix inside ``$PKG_UVX`` / ``$PKG_UV_2``.
     names = sorted(display_env, key=len, reverse=True)
     alternation = "|".join(re.escape(n) for n in names)
     pattern = re.compile(

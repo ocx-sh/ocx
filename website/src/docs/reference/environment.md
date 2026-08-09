@@ -386,7 +386,7 @@ For CI, pair the env var with an explicit sync step — resolving the tier never
 ```sh
 export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
 ocx config update
-ocx package install cmake:3.28
+ocx package install kitware/cmake:3.28
 ```
 
 See [`[managed]`][config-managed] for the full tier semantics and [`ocx config update`][cmd-config-update] for the sync command.

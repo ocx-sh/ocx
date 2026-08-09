@@ -32,12 +32,12 @@ A pin is a snapshot of the publisher's platform coverage at the moment `create` 
 When you pull or install a package that declares dependencies, OCX fetches every required package transitively — dependencies of dependencies, and so on — and stores them in the [package store][in-depth-storage-packages]. The process is fully automatic and requires no extra flags:
 
 ```shell
-ocx package pull webapp:2.0
+ocx package pull acme/webapp:2.0
 ```
 
-If `webapp:2.0` declares dependencies on `nodejs:24` and `bun:1.3`, all three packages end up in the package store. Only `webapp:2.0` is the package you explicitly requested — the dependencies are implementation details, fetched and stored but not surfaced as top-level installs.
+If `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`, all three packages end up in the package store. Only `acme/webapp:2.0` is the package you explicitly requested — the dependencies are implementation details, fetched and stored but not surfaced as top-level installs.
 
-Each declared dependency is identified by digest, so the publisher's recorded graph is the complete truth. Two builds of `webapp:2.0` that pin different `nodejs` digests resolve to *different* dependency closures even if the surface tag (`nodejs:24`) is the same.
+Each declared dependency is identified by digest, so the publisher's recorded graph is the complete truth. Two builds of `acme/webapp:2.0` that pin different `nodejs` digests resolve to *different* dependency closures even if the surface tag (`nodejs/node:24`) is the same.
 
 ::: info Resolution is publisher-provided, not solved
 [Nix derivations][nix] take the same approach: every input is pinned by hash, and the store is content-addressed. There are no version ranges — the exact input is determined at build time. [Go modules][go-modules] use Minimum Version Selection with a `go.sum` integrity file — deterministic, but with a resolution algorithm. [Homebrew][homebrew] uses floating name-only dependencies with no pinning at all.

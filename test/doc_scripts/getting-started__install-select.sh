@@ -7,6 +7,6 @@
 set -euo pipefail
 
 # region cast
-ocx package install --select "$PKG_CORRETTO"
-ocx package which --current "$PKG_CORRETTO"
+ocx package install --select "$PKG_AMAZON_CORRETTO"
+ocx package which --current "$PKG_AMAZON_CORRETTO"
 # endregion cast

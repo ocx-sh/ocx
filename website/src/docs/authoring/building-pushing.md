@@ -60,7 +60,7 @@ Building with `--platform any` pins the same way as a concrete platform — a si
 
 ## Cascading Rolling Tags {#cascade}
 
-Most publishers ship versioned releases (`1.0.0`, `1.0.1`) and want users to pin against rolling aliases (`1.0`, `1`, `latest`) without maintaining the alias graph by hand. The `--cascade` flag does that bookkeeping at push time: when you push `mytool:1.0.1`, OCX consults the existing tags and re-points each ancestor (`1.0`, `1`, `latest`) to the new digest — but only when the new tag is genuinely the latest at that specificity level. Push a backport `0.9.5` after `1.0.1` is live and `--cascade` won't touch `latest`, because `1.0.1` is still the newer release.
+Most publishers ship versioned releases (`1.0.0`, `1.0.1`) and want users to pin against rolling aliases (`1.0`, `1`, `latest`) without maintaining the alias graph by hand. The `--cascade` flag does that bookkeeping at push time: when you push `acme/mytool:1.0.1`, OCX consults the existing tags and re-points each ancestor (`1.0`, `1`, `latest`) to the new digest — but only when the new tag is genuinely the latest at that specificity level. Push a backport `0.9.5` after `1.0.1` is live and `--cascade` won't touch `latest`, because `1.0.1` is still the newer release.
 
 Cascade is a publisher convention, not a registry-enforced rule. The registry sees only tag-to-digest writes; OCX synthesises the alias semantics on top. Cascade decisions are evaluated per platform — a backport that is the latest for `linux/amd64` but trails the head on `darwin/arm64` will only re-point the rolling tags it actually leads on. The full alias model lives in [versioning in depth → cascades][in-depth-versioning-cascades].
 

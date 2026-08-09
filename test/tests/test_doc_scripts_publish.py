@@ -1153,7 +1153,7 @@ def test_rn1_region_present_yields_only_region_body() -> None:
         set -euo pipefail
 
         # region cast
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         ocx package which uv
         # endregion cast
 
@@ -1168,7 +1168,7 @@ def test_rn1_region_present_yields_only_region_body() -> None:
     result = render_display(
         script_text,
         cast_region=cast_region,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn1/test",
     )
 
@@ -1219,7 +1219,7 @@ def test_rn1_region_body_leading_trailing_blank_lines_trimmed() -> None:
 
         # region cast
 
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
 
         # endregion cast
         """
@@ -1230,7 +1230,7 @@ def test_rn1_region_body_leading_trailing_blank_lines_trimmed() -> None:
     result = render_display(
         script_text,
         cast_region=cast_region,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn1/blanktrim",
     )
 
@@ -1271,7 +1271,7 @@ def test_rn2_no_region_strips_shebang_header_and_set_e() -> None:
         set -euo pipefail
 
         # This is a plain comment (kept)
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         out="$(ocx package which uv)"
         [[ -n "$out" ]] || exit 1
         """
@@ -1280,7 +1280,7 @@ def test_rn2_no_region_strips_shebang_header_and_set_e() -> None:
     result = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn2/test",
     )
 
@@ -1324,13 +1324,13 @@ def test_rn2_set_e_variants_stripped() -> None:
             # doc: rn2/set-variant
             {set_variant}
 
-            ocx package install "$PKG_UV"
+            ocx package install "$PKG_ASTRAL_SH_UV"
             """
         )
         result = render_display(
             script_text,
             cast_region=None,
-            display_env={"PKG_UV": "uv:0.10"},
+            display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
             slug="rn2/set-variant",
         )
         assert set_variant not in result, (
@@ -1359,38 +1359,38 @@ def test_rn3_display_env_substitution_forms() -> None:
         # doc: rn3/test
         set -euo pipefail
 
-        ocx package install $PKG_UV
-        ocx package install ${PKG_UV}
-        ocx package install "$PKG_UV"
-        ocx package install "${PKG_UV}"
+        ocx package install $PKG_ASTRAL_SH_UV
+        ocx package install ${PKG_ASTRAL_SH_UV}
+        ocx package install "$PKG_ASTRAL_SH_UV"
+        ocx package install "${PKG_ASTRAL_SH_UV}"
         """
     )
 
     result = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn3/test",
     )
 
     # All four forms must be substituted.
     assert "ocx package install uv:0.10" in result, (
-        "RN3: '$PKG_UV' (bare) must be substituted"
+        "RN3: '$PKG_ASTRAL_SH_UV' (bare) must be substituted"
     )
     assert "ocx package install uv:0.10\n" in result or "uv:0.10" in result, (
-        "RN3: '${PKG_UV}' must be substituted"
+        "RN3: '${PKG_ASTRAL_SH_UV}' must be substituted"
     )
     # Quoted forms: quotes preserved, value substituted.
     assert '"uv:0.10"' in result, (
-        "RN3: '\"$PKG_UV\"' must become '\"uv:0.10\"' (quotes preserved)"
+        "RN3: '\"$PKG_ASTRAL_SH_UV\"' must become '\"uv:0.10\"' (quotes preserved)"
     )
 
     # Original var references must not remain.
-    assert "$PKG_UV" not in result, (
-        "RN3: no $PKG_UV references must remain after substitution"
+    assert "$PKG_ASTRAL_SH_UV" not in result, (
+        "RN3: no $PKG_ASTRAL_SH_UV references must remain after substitution"
     )
-    assert "${PKG_UV}" not in result, (
-        "RN3: no ${PKG_UV} references must remain after substitution"
+    assert "${PKG_ASTRAL_SH_UV}" not in result, (
+        "RN3: no ${PKG_ASTRAL_SH_UV} references must remain after substitution"
     )
 
 
@@ -1409,20 +1409,20 @@ def test_rn3_single_quoted_var_still_substituted() -> None:
         # doc: rn3/singlequote
         set -euo pipefail
 
-        echo 'install $PKG_UV'
+        echo 'install $PKG_ASTRAL_SH_UV'
         """
     )
 
     result = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn3/singlequote",
     )
 
-    # RN3 is text substitution: $PKG_UV replaced even inside single quotes.
-    assert "$PKG_UV" not in result, (
-        "RN3/single-quote: $PKG_UV inside single quotes must still be substituted"
+    # RN3 is text substitution: $PKG_ASTRAL_SH_UV replaced even inside single quotes.
+    assert "$PKG_ASTRAL_SH_UV" not in result, (
+        "RN3/single-quote: $PKG_ASTRAL_SH_UV inside single quotes must still be substituted"
     )
     assert "uv:0.10" in result, (
         "RN3/single-quote: substituted value must appear in output"
@@ -1439,53 +1439,53 @@ def test_rn3_no_prefix_false_substitution() -> None:
 
     Covers four cases:
 
-    1. ``${PKG_UV}x`` → ``uv:0.10x``  (brace form: exact match → correct).
-    2. ``$PKG_UVX`` with only ``PKG_UV`` declared → left verbatim
-       (word-boundary: the bare form must not match the ``PKG_UV`` prefix
+    1. ``${PKG_ASTRAL_SH_UV}x`` → ``uv:0.10x``  (brace form: exact match → correct).
+    2. ``$PKG_UVX`` with only ``PKG_ASTRAL_SH_UV`` declared → left verbatim
+       (word-boundary: the bare form must not match the ``PKG_ASTRAL_SH_UV`` prefix
        inside ``$PKG_UVX``).
-    3. ``$PKG_UV_2`` with only ``PKG_UV`` declared → left verbatim
+    3. ``$PKG_UV_2`` with only ``PKG_ASTRAL_SH_UV`` declared → left verbatim
        (word-boundary: ``_`` is a name char, so ``$PKG_UV_2`` is a distinct
        undeclared name).
-    4. When both ``PKG_UV`` and ``PKG_UV_2`` are declared, longest-first
+    4. When both ``PKG_ASTRAL_SH_UV`` and ``PKG_UV_2`` are declared, longest-first
        ordering correctly replaces both.
 
     The substitution is word-boundary correct: the bare form is matched as
     ``$NAME(?![A-Za-z0-9_])`` and the brace form as ``${NAME}``, so a declared
     name that is a prefix of an undeclared reference never partially
-    substitutes (no ``$PKG_UV`` → ``uv:0.10`` bleed inside ``$PKG_UVX``).
+    substitutes (no ``$PKG_ASTRAL_SH_UV`` → ``uv:0.10`` bleed inside ``$PKG_UVX``).
 
     Contract reference: §6e RN3 (longest-name-first / no-false-substitution).
     """
     from src.doc_scripts import substitute_renderable
 
-    display_env = {"PKG_UV": "uv:0.10"}
+    display_env = {"PKG_ASTRAL_SH_UV": "uv:0.10"}
 
-    # Case 1 — brace form: ${PKG_UV}x → uv:0.10x (correct behaviour, must pass)
-    brace_result = substitute_renderable("cmd ${PKG_UV}x end", display_env)
+    # Case 1 — brace form: ${PKG_ASTRAL_SH_UV}x → uv:0.10x (correct behaviour, must pass)
+    brace_result = substitute_renderable("cmd ${PKG_ASTRAL_SH_UV}x end", display_env)
     assert brace_result == "cmd uv:0.10x end", (
-        f"A8/RN3: ${{PKG_UV}}x must substitute the braced ref and leave 'x' adjacent; "
+        f"A8/RN3: ${{PKG_ASTRAL_SH_UV}}x must substitute the braced ref and leave 'x' adjacent; "
         f"got {brace_result!r}"
     )
 
-    # Case 2 — bare $PKG_UVX must NOT be replaced (only PKG_UV declared)
+    # Case 2 — bare $PKG_UVX must NOT be replaced (only PKG_ASTRAL_SH_UV declared)
     bare_extended_result = substitute_renderable("cmd $PKG_UVX end", display_env)
     assert bare_extended_result == "cmd $PKG_UVX end", (
-        f"A8/RN3: $PKG_UVX must be left verbatim — the declared PKG_UV must not "
+        f"A8/RN3: $PKG_UVX must be left verbatim — the declared PKG_ASTRAL_SH_UV must not "
         f"prefix-match inside the undeclared $PKG_UVX; got {bare_extended_result!r}"
     )
 
-    # Case 3 — bare $PKG_UV_2 must NOT be replaced (only PKG_UV declared)
+    # Case 3 — bare $PKG_UV_2 must NOT be replaced (only PKG_ASTRAL_SH_UV declared)
     bare_suffix_result = substitute_renderable("cmd $PKG_UV_2 end", display_env)
     assert bare_suffix_result == "cmd $PKG_UV_2 end", (
         f"A8/RN3: $PKG_UV_2 must be left verbatim — '_' is a name char so it is a "
-        f"distinct undeclared name, not a PKG_UV suffix; got {bare_suffix_result!r}"
+        f"distinct undeclared name, not a PKG_ASTRAL_SH_UV suffix; got {bare_suffix_result!r}"
     )
 
     # Case 4 — when both are declared, longest-first replaces both correctly
-    display_env_both = {"PKG_UV": "uv:0.10", "PKG_UV_2": "uv2:0.11"}
-    multi_result = substitute_renderable("cmd $PKG_UV and $PKG_UV_2 end", display_env_both)
+    display_env_both = {"PKG_ASTRAL_SH_UV": "uv:0.10", "PKG_UV_2": "uv2:0.11"}
+    multi_result = substitute_renderable("cmd $PKG_ASTRAL_SH_UV and $PKG_UV_2 end", display_env_both)
     assert multi_result == "cmd uv:0.10 and uv2:0.11 end", (
-        f"A8/RN3: when both PKG_UV and PKG_UV_2 are declared, longest-first ordering "
+        f"A8/RN3: when both PKG_ASTRAL_SH_UV and PKG_UV_2 are declared, longest-first ordering "
         f"must replace both correctly; got {multi_result!r}"
     )
 
@@ -1586,7 +1586,7 @@ def test_rn5_repo_var_raises_render_error() -> None:
 
     Contract reference: §6e RN5 (fixture namespace definition).
     """
-    for var_name in ("REPO_UV", "FQ_UV", "TAG_UV", "MARKER_X", "HOME_KEY_X"):
+    for var_name in ("REPO_ASTRAL_SH_UV", "FQ_ASTRAL_SH_UV", "TAG_ASTRAL_SH_UV", "MARKER_X", "HOME_KEY_X"):
         script_text = textwrap.dedent(
             f"""\
             #!/usr/bin/env bash
@@ -1659,7 +1659,7 @@ def test_rn5_declared_pkg_key_does_not_raise() -> None:
         # doc: rn5/declared
         set -euo pipefail
 
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         """
     )
 
@@ -1667,12 +1667,12 @@ def test_rn5_declared_pkg_key_does_not_raise() -> None:
     result = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn5/declared",
     )
 
     assert "uv:0.10" in result, (
-        "RN5/declared: declared PKG_UV must be substituted, not errored"
+        "RN5/declared: declared PKG_ASTRAL_SH_UV must be substituted, not errored"
     )
 
 
@@ -1699,14 +1699,14 @@ def test_rn6_no_disclaimer_header() -> None:
         # doc: rn6/test
         set -euo pipefail
 
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         """
     )
 
     result = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn6/test",
     )
 
@@ -1721,7 +1721,7 @@ def test_rn6_no_disclaimer_header() -> None:
         f"RN6: first line must be the substituted body command; got "
         f"{first_line!r}"
     )
-    assert "$PKG_UV" not in result, "RN3: renderable var must be substituted"
+    assert "$PKG_ASTRAL_SH_UV" not in result, "RN3: renderable var must be substituted"
 
 
 # ===========================================================================
@@ -1746,7 +1746,7 @@ def test_rn7_render_display_is_pure_and_idempotent() -> None:
         set -euo pipefail
 
         # Plain comment preserved
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         out=$(ocx package which uv)
         """
     )
@@ -1754,13 +1754,13 @@ def test_rn7_render_display_is_pure_and_idempotent() -> None:
     first = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn7/test",
     )
     second = render_display(
         script_text,
         cast_region=None,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn7/test",
     )
 
@@ -1785,7 +1785,7 @@ def test_rn7_idempotency_with_region() -> None:
         set -euo pipefail
 
         # region cast
-        ocx package install "$PKG_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
         # endregion cast
 
         [[ "$(ocx package which uv)" ]] || exit 1
@@ -1796,13 +1796,13 @@ def test_rn7_idempotency_with_region() -> None:
     first = render_display(
         script_text,
         cast_region=cast_region,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn7/region",
     )
     second = render_display(
         script_text,
         cast_region=cast_region,
-        display_env={"PKG_UV": "uv:0.10"},
+        display_env={"PKG_ASTRAL_SH_UV": "uv:0.10"},
         slug="rn7/region",
     )
 
@@ -1819,11 +1819,11 @@ def test_rn7_idempotency_with_region() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        'ocx package install "$PKG_UV"\n',
-        "ocx index list $REPO_CORRETTO\n",
+        'ocx package install "$PKG_ASTRAL_SH_UV"\n',
+        "ocx index list $REPO_AMAZON_CORRETTO\n",
         '"${PKG_FOO_BAR}" and $PKG_FOO and ${REPO_X}\n',
         "no vars here; $HOME and $(date) and $REGISTRY untouched\n",
-        "'$PKG_UV' single-quoted still substituted\n",
+        "'$PKG_ASTRAL_SH_UV' single-quoted still substituted\n",
         "",
     ],
 )
@@ -1836,10 +1836,10 @@ def test_substitute_renderable_parity(text: str) -> None:
     "display ⊆ tested" invariant breaks silently.
     """
     env = {
-        "PKG_UV": "uv:0.10",
+        "PKG_ASTRAL_SH_UV": "uv:0.10",
         "PKG_FOO": "foo:1",
         "PKG_FOO_BAR": "foobar:2",
-        "REPO_CORRETTO": "corretto",
+        "REPO_AMAZON_CORRETTO": "corretto",
         "REPO_X": "x",
     }
     assert substitute_renderable(text, env) == _substitute_renderable(text, env), (
@@ -1867,8 +1867,8 @@ def test_display_is_substring_of_tested_render() -> None:
         set -euo pipefail
 
         # region cast
-        ocx package install "$PKG_UV"
-        ocx index list "$REPO_UV"
+        ocx package install "$PKG_ASTRAL_SH_UV"
+        ocx index list "$REPO_ASTRAL_SH_UV"
         # endregion cast
 
         out="$(ocx package exec uv -- uv --version)"
@@ -1877,7 +1877,7 @@ def test_display_is_substring_of_tested_render() -> None:
     )
     # "# region cast" line 7, "# endregion cast" line 10.
     cast_region = (7, 10)
-    display_env = {"PKG_UV": "uv:0.10", "REPO_UV": "uv"}
+    display_env = {"PKG_ASTRAL_SH_UV": "uv:0.10", "REPO_ASTRAL_SH_UV": "uv"}
 
     display = render_display(
         script_text,

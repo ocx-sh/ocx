@@ -145,7 +145,7 @@ def test_ca1_cast_false_returns_none_and_writes_no_file(tmp_path: Path) -> None:
         #!/usr/bin/env bash
         # state: setup:basic
         # cast: false
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         """,
     )
     meta = parse_doc_header(script)
@@ -178,7 +178,7 @@ def test_ca1_cast_absent_returns_none_and_writes_no_file(tmp_path: Path) -> None
         """\
         #!/usr/bin/env bash
         # state: setup:basic
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         """,
     )
     meta = parse_doc_header(script)
@@ -223,10 +223,10 @@ def test_ca2_cast_true_with_doc_slug_writes_nested_slug_cast(tmp_path: Path) -> 
         # title: Install and select
         set -euo pipefail
         # region cast
-        ocx package install --select "$PKG_UV"
-        ocx package which "$REPO_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
+        ocx package which "$REPO_ASTRAL_SH_UV"
         # endregion cast
-        out=$(ocx package exec "$PKG_UV" -- uv --version)
+        out=$(ocx package exec "$PKG_ASTRAL_SH_UV" -- uv --version)
         [[ "$out" == *"uv"* ]] || exit 1
         """,
     )
@@ -273,7 +273,7 @@ def test_ca2_cast_true_without_doc_writes_stem_named_cast(tmp_path: Path) -> Non
         # cast: true
         # title: Demo only cast
         # region cast
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         # endregion cast
         """,
     )
@@ -319,7 +319,7 @@ def test_ca2_slug_multi_segment_nested_dirs(tmp_path: Path) -> None:
         # doc: user-guide/env/compose
         # cast: true
         # region cast
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         # endregion cast
         """,
     )
@@ -405,7 +405,7 @@ def test_ca4_cast_layer_calls_provider_display_map(tmp_path: Path) -> None:
         # doc: user-guide/env-compose
         # cast: true
         # region cast
-        ocx package install --select "$PKG_UV"
+        ocx package install --select "$PKG_ASTRAL_SH_UV"
         # endregion cast
         """,
     )
@@ -601,7 +601,7 @@ def test_ca5_set_euo_pipefail_not_sent_to_recorder(tmp_path: Path) -> None:
         ocx package install --select uv
         # endregion cast
 
-        [[ -n "$PKG_UV" ]] || exit 1
+        [[ -n "$PKG_ASTRAL_SH_UV" ]] || exit 1
         """,
     )
     meta = parse_doc_header(script)
@@ -696,7 +696,7 @@ def test_ca5_assertion_scaffolding_not_sent_to_recorder(tmp_path: Path) -> None:
         ocx package install --select uv
         # endregion cast
 
-        [[ -n "$PKG_UV" ]] || { echo "PKG_UV not set" >&2; exit 1; }
+        [[ -n "$PKG_ASTRAL_SH_UV" ]] || { echo "PKG_ASTRAL_SH_UV not set" >&2; exit 1; }
         """,
     )
     meta = parse_doc_header(script)

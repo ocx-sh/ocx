@@ -21,14 +21,14 @@ That matters because [layer reuse][in-depth-storage-layers] hinges on digest equ
 
 ```sh
 ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -n -p linux/amd64 -m metadata.json mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -n -p linux/amd64 -m metadata.json acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 
 # Record the layer digest. The on-disk archive is the same blob the registry stores,
 # so a local sha256 matches the layer digest the registry will hold.
 BASE_DIGEST=$(sha256sum mytool-1.0.0.tar.xz | awk '{print $1}')
 
 # Later releases reuse the layer by digest — no re-bundle, no re-upload.
-ocx package push -p linux/amd64 -m metadata.json mytool:1.0.1 sha256:${BASE_DIGEST}.tar.xz
+ocx package push -p linux/amd64 -m metadata.json acme/mytool:1.0.1 sha256:${BASE_DIGEST}.tar.xz
 ```
 
 The `sha256:<hex>.<ext>` form on [`ocx package push`][cmd-package-push] is the supported way to point a new manifest at a layer that already lives in the target registry. See [Reusing layers across packages][authoring-layer-reuse] for the full pattern, including multi-layer packages with a stable base and a per-release top layer.

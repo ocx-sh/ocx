@@ -241,7 +241,7 @@ Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file. Th
 
 ```sh
 ocx --global add ripgrep:14      # correct
-ocx add --global ripgrep:14      # error: unknown flag
+ocx add --global ripgrep/ripgrep:14      # error: unknown flag
 ```
 
 When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `env`.
@@ -313,7 +313,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 Scripts can `case $?` on these stable values:
 
 ```shell
-ocx package install cmake:3.28
+ocx package install kitware/cmake:3.28
 case $? in
     0)  echo "installed" ;;
     64) echo "usage error; check flags" ;;
@@ -374,8 +374,8 @@ Multiple identifiers may be given in one invocation. They are staged together an
 The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same tool in different contexts:
 
 ```shell
-ocx add shfmt:3.13              # adds to default [tools]
-ocx add --group ci shfmt:3.13   # also legal — coexists in [group.ci]
+ocx add shfmt/shfmt:3.13              # adds to default [tools]
+ocx add --group ci shfmt/shfmt:3.13   # also legal — coexists in [group.ci]
 ```
 
 **Usage**
@@ -386,7 +386,7 @@ ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 
 **Arguments**
 
-- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
+- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/kitware/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/kitware/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
 
 **Options**
 
@@ -420,7 +420,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 
 #### Binding names {#add-binding-names}
 
-Without `NAME=`, the binding key is the repository basename — `ocx add ocx.sh/cmake:3.28` binds under `cmake`. Two tools that share a basename in different namespaces collide under that default: `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists".
+Without `NAME=`, the binding key is the repository basename — `ocx add ocx.sh/kitware/cmake:3.28` binds under `cmake`. Two tools that share a basename in different namespaces collide under that default: `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists".
 
 Prefix either identifier with an explicit `NAME=` to bind it under a distinct key instead:
 
@@ -535,7 +535,7 @@ not expanded again:
 ```
 myapp:1.0 (sha256:aaa1b2c3…)
 ├── ocx.sh/java:21 (sha256:bbb4e5f6…)
-└── ocx.sh/cmake:3.28 (sha256:ccc7d8e9…)
+└── ocx.sh/kitware/cmake:3.28 (sha256:ccc7d8e9…)
     └── ocx.sh/gcc:13 (sha256:ddd0a1b2…)
 ```
 
@@ -544,7 +544,7 @@ myapp:1.0 (sha256:aaa1b2c3…)
 ```
 Package            Digest
 ocx.sh/gcc:13      sha256:ddd0a1b2…
-ocx.sh/cmake:3.28  sha256:ccc7d8e9…
+ocx.sh/kitware/cmake:3.28  sha256:ccc7d8e9…
 ocx.sh/java:21     sha256:bbb4e5f6…
 myapp:1.0          sha256:aaa1b2c3…
 ```
@@ -552,7 +552,7 @@ myapp:1.0          sha256:aaa1b2c3…
 **`--why`** traces all paths from roots to a specific dependency:
 
 ```
-myapp:1.0 → ocx.sh/cmake:3.28 → ocx.sh/gcc:13
+myapp:1.0 → ocx.sh/kitware/cmake:3.28 → ocx.sh/gcc:13
 ```
 
 ### `deselect` {#deselect}
@@ -789,7 +789,7 @@ ocx package which [OPTIONS] <PACKAGE>...
 Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
+cmake_root=$(ocx package which --candidate --format json kitware/cmake:3.28 | jq -r '.["kitware/cmake:3.28"]')
 ```
 :::
 
@@ -873,7 +873,7 @@ ocx direnv export [OPTIONS]
 ocx index catalog [OPTIONS] [REGISTRY...]
 ```
 
-Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local index. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local index. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/kitware/cmake`).
 
 **Arguments**
 
@@ -930,9 +930,9 @@ other store or network access. The manifest bytes and layers themselves are cont
 on demand from the registry when actually installed.
 
 `<PACKAGE>...` names what gets refreshed, and at least one is required. A tagged identifier (e.g.,
-`cmake:3.28`) records only that tag — the remote tag listing is skipped entirely, which is ideal for
-lockfile workflows where the local index should contain only explicitly requested tags. A bare
-identifier (e.g., `cmake`) records every tag the source currently lists.
+`kitware/cmake:3.28`) records only that tag — the remote tag listing is skipped entirely, which is
+ideal for lockfile workflows where the local index should contain only explicitly requested tags. A
+bare identifier (e.g., `kitware/cmake`) records every tag the source currently lists.
 
 **Only the packages you name are touched, and nothing else is fetched.** A package left out keeps
 every tag pin and its `repository` pointer exactly as committed, even when the source has moved on.
@@ -1210,7 +1210,7 @@ Honors the global [`--format`][arg-format] and [`--project`][arg-project] / [`--
     "default": {
       "tools": {
         "go-task": {
-          "declared": "ocx.sh/go-task:3",
+          "declared": "ocx.sh/go-task/task:3",
           "platforms": {
             "linux/amd64": "sha256:fcfad8…",
             "darwin/arm64": "sha256:7ab019…"
@@ -1298,16 +1298,16 @@ The same envelope [`ocx package inspect`](#package-inspect) emits. Default — t
   "packages": [
     {
       "name": "shellcheck",
-      "identifier": "ocx.sh/shellcheck:0.11",
+      "identifier": "ocx.sh/shellcheck/shellcheck:0.11",
       "candidates": [
         {
           "digest": "sha256:5238fe…",
-          "pinned": "ocx.sh/shellcheck:0.11@sha256:5238fe…",
+          "pinned": "ocx.sh/shellcheck/shellcheck:0.11@sha256:5238fe…",
           "platform": "linux/amd64"
         },
         {
           "digest": "sha256:7ab019…",
-          "pinned": "ocx.sh/shellcheck:0.11@sha256:7ab019…",
+          "pinned": "ocx.sh/shellcheck/shellcheck:0.11@sha256:7ab019…",
           "platform": "darwin/arm64"
         }
       ]
@@ -1329,8 +1329,8 @@ The same envelope [`ocx package inspect`](#package-inspect) emits. Default — t
   "packages": [
     {
       "name": "shellcheck",
-      "identifier": "ocx.sh/shellcheck:0.11",
-      "pinned_identifier": "ocx.sh/shellcheck:0.11@sha256:5238fe…",
+      "identifier": "ocx.sh/shellcheck/shellcheck:0.11",
+      "pinned_identifier": "ocx.sh/shellcheck/shellcheck:0.11@sha256:5238fe…",
       "pinned_digest": "sha256:5238fe…",
       "metadata": { "…": "…" },
       "layers": [ { "digest": "sha256:…", "media_type": "…", "size": 4051232 } ],
@@ -1852,7 +1852,7 @@ See [Project Toolchain In Depth → Running tools][in-depth-project-running] for
 
 Removes one or more tool bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tools.
 
-Each argument accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). An identifier form is reduced to the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. A binding added under an explicit name ([`ocx add glab=ocx.sh/gitlab/cli`](#add-binding-names)) is matched only by that name — remove it with `ocx remove glab`, not its identifier. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
+Each argument accepts either a bare binding name (`cmake`), a name with a tag (`kitware/cmake:3.28`), or a fully-qualified identifier (`ocx.sh/kitware/cmake:3.28`). An identifier form is reduced to the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. A binding added under an explicit name ([`ocx add glab=ocx.sh/gitlab/cli`](#add-binding-names)) is matched only by that name — remove it with `ocx remove glab`, not its identifier. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
 
 When the same binding name appears in more than one group (e.g. in both `[tools]` and `[group.ci]`), `ocx remove` cannot determine which entry to drop and exits with code 64. Pass `--group` to make the target group explicit:
 
@@ -1870,7 +1870,7 @@ ocx remove [OPTIONS] <IDENTIFIER>...
 
 **Arguments**
 
-- `<IDENTIFIER>...`: One or more binding names or fully-qualified identifiers to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`). A binding added under an explicit [`NAME=`](#add-binding-names) is addressed by that name only.
+- `<IDENTIFIER>...`: One or more binding names or fully-qualified identifiers to remove (e.g. `cmake`, `kitware/cmake:3.28`, or `ocx.sh/kitware/cmake:3.28`). A binding added under an explicit [`NAME=`](#add-binding-names) is addressed by that name only.
 
 **Options**
 
@@ -3003,9 +3003,9 @@ ocx package push [OPTIONS] <LAYERS>...
 
 **Options**
 
-- `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`. Omit it to publish under the identifier the [build receipt](#package-create-receipt) beside the bundle recorded; with neither, exit 64.
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `kitware/cmake:3.28.1_20260216120000`. Omit it to publish under the identifier the [build receipt](#package-create-receipt) beside the bundle recorded; with neither, exit 64.
 - `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Omit it to publish for the platform the [build receipt](#package-create-receipt) beside the bundle recorded; a value given here is used as given, and the receipt is not consulted for it. With neither, exit 64. Every dependency is projected for this platform (see the gate table above).
-- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
+- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
@@ -3019,12 +3019,12 @@ Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to 
 
 ```shell
 # Push a fresh base + tool combination
-ocx package push -p linux/amd64 -i mytool:1.0.0 base.tar.gz tool.tar.gz
+ocx package push -p linux/amd64 -i acme/mytool:1.0.0 base.tar.gz tool.tar.gz
 
 # Reuse the same base by digest in a later release.
 # The digest is the full 64-char sha256 hex written verbatim —
 # the ellipsis is shown here only to keep the example short.
-ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.gz
+ocx package push -p linux/amd64 -i acme/mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 :::
 
@@ -3066,7 +3066,7 @@ All three fields are optional, input order is free, and each may appear on its o
 ```shell
 # base.tar.gz ships wrapped in a `1.2.3/` directory; strip it and relocate the
 # remainder under `share/`. tool.tar.gz keeps the default (root, no strip).
-ocx package push -p linux/amd64 -i mytool:1.0.0 \
+ocx package push -p linux/amd64 -i acme/mytool:1.0.0 \
   base.tar.gz:strip=1,prefix=share \
   tool.tar.gz
 ```
@@ -3133,23 +3133,23 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... --script <PATH|
 
 ```shell
 # Run the binary in its composed env (trailing-command form).
-ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
 
 # Run a Starlark test script against the package.
-ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script smoke.star
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0 mytool.tar.xz --script smoke.star
 
 # Read a Starlark script from stdin.
 printf 'r = ocx.run("mytool", "--version")\nexpect.ok(r)\n' \
-  | ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script -
+  | ocx package test -p linux/amd64 -i acme/mytool:1.0.0 mytool.tar.xz --script -
 
 # Keep the temp dir for inspection on failure.
-ocx package test -p linux/amd64 --keep -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+ocx package test -p linux/amd64 --keep -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
 
 # Materialize to a named directory.
-ocx package test -p linux/amd64 --output ./build -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+ocx package test -p linux/amd64 --output ./build -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
 
 # Explicit metadata path + digest base layer.
-ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.1 \
+ocx package test -p linux/amd64 -m metadata.json -i acme/mytool:1.0.1 \
   sha256:<hex>.tar.xz ./newtool.tar.xz -- mytool --version
 ```
 
@@ -3399,7 +3399,7 @@ ocx --format json package inspect mytool:1.0.0 othertool:2.0.0 \
   | jq '.packages[] | select(.name == "othertool:2.0.0")'
 
 # Inspect one platform child by digest (same repo, online or cached).
-ocx package inspect mytool@sha256:abc…
+ocx package inspect acme/mytool@sha256:abc…
 
 # Platform-select and include the OCI resolution chain.
 ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq '.packages[0].resolution'
@@ -3671,7 +3671,7 @@ ocx package deselect <PACKAGE>...
 
 Executes a command within the environment of one or more OCI-tier packages.
 
-Identifiers are OCI references (e.g. `cmake:3.28`), resolved through the index and auto-installed when missing. The full reference body — stdin inheritance, process replacement on Unix, exit codes — is in the [`exec`](#exec) section. For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
+Identifiers are OCI references (e.g. `kitware/cmake:3.28`), resolved through the index and auto-installed when missing. The full reference body — stdin inheritance, process replacement on Unix, exit codes — is in the [`exec`](#exec) section. For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
 
 **Usage**
 
@@ -3681,7 +3681,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 **Arguments**
 
-- `<PACKAGES>`: OCI identifiers to resolve (e.g. `cmake:3.28`).
+- `<PACKAGES>`: OCI identifiers to resolve (e.g. `kitware/cmake:3.28`).
 - `<COMMAND>`: The command to execute within the package environment.
 - `[ARGS...]`: Arguments to pass to the command.
 
