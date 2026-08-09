@@ -224,8 +224,6 @@ async fn stage_layers(
     registry: &str,
     coordinator: &PullCoordinator,
 ) -> Result<Vec<oci::Descriptor>, PackageErrorKind> {
-    use crate::MEDIA_TYPE_TAR_GZ;
-
     let fs = mgr.file_structure();
     let mut descriptors = Vec::with_capacity(layers.len());
 
@@ -233,6 +231,28 @@ async fn stage_layers(
         match layer_ref {
             publisher::LayerRef::File { path, layout, .. } => {
                 validate_file_layer(path).await?;
+
+                // Infer media type from extension. An extension with no media
+                // type has no correct answer, so refuse it here rather than
+                // guessing: a guess would label the bytes in the synthesized
+                // manifest with a compression they do not use, and `package
+                // push` refuses the same input (`client.rs`), so guessing makes
+                // this pre-push gate pass what push rejects. Checked before the
+                // read so a doomed archive is never loaded into memory.
+                let media_type = crate::media_type_from_path(path).ok_or_else(|| {
+                    let accepted: Vec<String> = publisher::ArchiveMediaType::ALL
+                        .iter()
+                        .flat_map(|archive| archive.extensions().iter().map(|extension| format!(".{extension}")))
+                        .collect();
+                    PackageErrorKind::Internal(
+                        crate::oci::client::error::ClientError::InvalidManifest(format!(
+                            "layer archive at '{}' has no recognized extension; use one of {}",
+                            path.display(),
+                            accepted.join(", ")
+                        ))
+                        .into(),
+                    )
+                })?;
 
                 // Read + hash the archive in one pass.
                 let (bytes, digest) = oci::Algorithm::Sha256
@@ -249,9 +269,6 @@ async fn stage_layers(
                         .into(),
                     )
                 })?;
-
-                // Infer media type from extension.
-                let media_type = crate::media_type_from_path(path).unwrap_or(MEDIA_TYPE_TAR_GZ);
 
                 // Stage raw bytes to blobs/ so refs/blobs/ links are valid.
                 stage_blob_bytes(fs, registry, &bytes, &digest, coordinator).await?;
@@ -549,11 +566,10 @@ mod tests {
         package_manager::PackageManager,
     };
 
-    // Consumed only by tests gated `#[cfg(unix)]` / `#[cfg(not(target_os = "windows"))]`
-    // — on Windows neither test compiles, so guard the imports to match.
+    // Consumed only by `file_layer_exceeding_size_cap_errors`, gated
+    // `#[cfg(not(target_os = "windows"))]` — guard the import to match.
     #[cfg(not(target_os = "windows"))]
     use super::MAX_FILE_LAYER_BYTES;
-    #[cfg(not(target_os = "windows"))]
     use crate::package_manager::error::PackageErrorKind;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -975,6 +991,64 @@ mod tests {
         match result.unwrap_err() {
             PackageErrorKind::Internal(_) => {}
             other => panic!("expected Internal error for oversized file layer, got: {other:?}"),
+        }
+    }
+
+    // ── file_layer_with_unknown_extension_rejected ───────────────────────────
+    //
+    // `ocx package test ./x.zip` must refuse exactly what `ocx package push
+    // ./x.zip` refuses. `media_type_from_path` answers `None` for every
+    // extension that has no correct media type (`.zip`, bare `.tar`), so the
+    // former `unwrap_or(MEDIA_TYPE_TAR_GZ)` fallback could only ever be wrong:
+    // it labelled those bytes `application/vnd.oci.image.layer.v1.tar+gzip` in
+    // the synthesized manifest. Extraction dispatches on the file extension,
+    // never on the media type, so the mislabel stayed invisible and `test` —
+    // the pre-push gate — passed input `push` rejects with "unsupported
+    // archive" (`oci/client.rs`).
+    //
+    // The fixture is a VALID zip: before the fix this pull ran to completion
+    // and produced the mislabelled manifest, so the test cannot pass for the
+    // unrelated reason of a corrupt archive failing extraction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_layer_with_unknown_extension_rejected() {
+        let (root_dir, mgr) = setup_offline_manager();
+        let info = fixture_info("zip-layer-tool");
+
+        let source = root_dir.path().join("zip-src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("hello.txt"), b"hello").unwrap();
+        let archive_path = root_dir.path().join("layer.zip");
+        let mut archive = crate::archive::Archive::create(&archive_path).await.unwrap();
+        archive.add_file("hello.txt", source.join("hello.txt")).await.unwrap();
+        archive.finish().await.unwrap();
+
+        let layers = [crate::publisher::LayerRef::File {
+            path: archive_path.clone(),
+            layout: oci::LayerLayoutSpec::default(),
+            mount_from: None,
+        }];
+        let error = mgr
+            .pull_local(info, &layers, None)
+            .await
+            .expect_err("a layer whose extension names no media type must be refused, not labelled tar+gzip");
+
+        // `Internal(OciClient(InvalidManifest))` — the same error kind (and
+        // therefore the same exit code 65) `package push` raises for this input.
+        let message = match error {
+            PackageErrorKind::Internal(crate::Error::OciClient(ref client_error)) => client_error.to_string(),
+            other => {
+                panic!("expected Internal(OciClient(InvalidManifest)) for an unknown layer extension, got: {other:?}")
+            }
+        };
+        assert!(
+            message.contains(&archive_path.display().to_string()),
+            "the refusal must name the offending path; got: {message}"
+        );
+        for extension in [".tar.gz", ".tar.xz", ".tar.zst"] {
+            assert!(
+                message.contains(extension),
+                "the refusal must list the accepted extensions (missing {extension}); got: {message}"
+            );
         }
     }
 
