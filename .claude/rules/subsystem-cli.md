@@ -196,9 +196,11 @@ helpers in `conventions.rs` (`resolve_ci_arg`, `export_ci`).
   `--export-file` or stdout. No path channel: `PATH` and every path var are
   flattened (prepend package values to existing, join with `PATH_SEPARATOR`).
 
-## `ContextOptions.format` — `Option<Format>` (single format authority)
+## `ContextOptions.format` — flattened `options::Format` (single format authority)
 
-`ContextOptions.format` is `Option<options::Format>`. The single `Api::new` call site in `Context::try_init` applies `.unwrap_or(Format::Plain)`. This is the **only** place a format default is decided. **No subcommand declares its own `--format` or builds its own `Api`** — `ocx env` and `ocx package env` report through `context.api()` exactly like every other command (handshake §3 amended 2026-05-19: format is a context-only concern; the former env-specific `None → Json` divergence was removed).
+`ContextOptions.format` is a flattened `options::Format` group (`options/format.rs`) carrying `--format` plus its `--json` shorthand, resolved to `options::FormatMode` by `Format::mode()`. The single `Api::new` call site in `ContextOptions::build_api` calls it. That is the **only** place a format is decided; the two flags are private to the group, so nothing else can read them individually. **No subcommand declares its own `--format`/`--json` or builds its own `Api`** — `ocx env` and `ocx package env` report through `context.api()` exactly like every other command (handshake §3 amended 2026-05-19: format is a context-only concern; the former env-specific `None → Json` divergence was removed).
+
+`--json` and `--format` are mutually `overrides_with` — POSIX last-wins in **both** directions, same idiom as the boolean toggles below. They are two spellings of one value, not an on/off pair, so combining them is not an error and either overrides the other. `conflicts_with` was rejected: it makes plain unexpressible when `--json` is injected from outside the command line (a shell alias or wrapper), since the user then has no way to override it back.
 
 ## Context Struct
 

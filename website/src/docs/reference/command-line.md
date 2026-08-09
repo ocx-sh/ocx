@@ -30,6 +30,10 @@ Supported formats are:
 
 The available data depends on the command being executed.
 
+### `--json` {#arg-json}
+
+Shorthand for `--format json`. Combining it with [`--format`](#arg-format) is not an error — the last one on the command line wins, in both directions. So `ocx --json --format plain` prints plain text, which keeps plain reachable when `--json` comes from a shell alias or wrapper script rather than from you.
+
 ### `--offline` {#arg-offline}
 
 Disables all network access for this invocation. Tag→digest resolution must

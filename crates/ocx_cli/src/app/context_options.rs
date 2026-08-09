@@ -83,12 +83,8 @@ pub struct ContextOptions {
     #[arg(long, conflicts_with = "remote", default_value_t = env::flag(env::keys::OCX_FROZEN, false))]
     pub frozen: bool,
 
-    /// Output format for stdout reports: `plain` (default) or `json`.
-    ///
-    /// Applies to every command; there is no per-command `--format`. The
-    /// `--shell[=NAME]` output of `env` / `package env` is unaffected.
-    #[arg(long, value_enum, value_name = "FORMAT")]
-    pub format: Option<options::Format>,
+    #[clap(flatten)]
+    pub format: options::Format,
 
     /// Suppress stdout report output (errors and progress on stderr remain).
     ///
@@ -150,7 +146,7 @@ impl ContextOptions {
     pub fn build_api(&self, color_config: ColorModeConfig) -> api::Api {
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let data = DataInterface::new(printer);
-        api::Api::new(self.format.unwrap_or(options::Format::Plain), data, self.quiet)
+        api::Api::new(self.format.mode(), data, self.quiet)
     }
 
     /// Builds the resolution-affecting policy snapshot forwarded to child ocx
@@ -187,5 +183,30 @@ impl ContextOptions {
             // (managed-config phase 4). The parser tier starts empty.
             managed_config_source: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_json(args: &[&str]) -> bool {
+        ContextOptions::try_parse_from(args)
+            .expect("args parse")
+            .build_api(ColorModeConfig {
+                stdout: false,
+                stderr: false,
+            })
+            .is_json()
+    }
+
+    /// The flattened `Format` group reaches the `Api` the context builds —
+    /// the wiring `options::format`'s own tests cannot see. Resolution
+    /// semantics are covered there.
+    #[test]
+    fn build_api_honors_the_flattened_format_group() {
+        assert!(!is_json(&["ocx"]), "default is plain");
+        assert!(is_json(&["ocx", "--json"]));
+        assert!(is_json(&["ocx", "--format", "json"]));
     }
 }
