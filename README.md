@@ -22,14 +22,14 @@ Install pre-built tools with a single command, switch versions instantly, and ru
 curl -fsSL https://setup.ocx.sh/sh | sh
 
 # Install a package
-ocx package install cmake:4
+ocx package install kitware/cmake:4
 
 # Run with a clean environment
-ocx package exec cmake:4 -- cmake --version
+ocx package exec kitware/cmake:4 -- cmake --version
 
 # Switch versions
-ocx package install cmake:3 --select
-ocx package select cmake:4    # switch back
+ocx package install kitware/cmake:3 --select
+ocx package select kitware/cmake:4    # switch back
 ```
 
 See the [Getting Started guide][getting-started] for more.
