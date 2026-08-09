@@ -20,7 +20,7 @@ pub use completion::Completion;
 pub use compression_level::CompressionLevel;
 pub use content_path::ContentPath;
 pub use env_override::EnvOverride;
-pub use format::Format;
+pub use format::{Format, FormatMode};
 pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
 pub use platform::PlatformOption;

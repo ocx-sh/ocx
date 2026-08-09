@@ -30,6 +30,10 @@ Supported formats are:
 
 The available data depends on the command being executed.
 
+### `--json` {#arg-json}
+
+Shorthand for `--format json`. Conflicts with [`--format`](#arg-format) — pass one or the other, not both.
+
 ### `--offline` {#arg-offline}
 
 Disables all network access for this invocation. Tag→digest resolution must

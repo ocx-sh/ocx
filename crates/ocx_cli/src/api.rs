@@ -29,13 +29,13 @@ pub trait Printable: serde::Serialize {
 
 #[derive(Clone)]
 pub struct Api {
-    format: options::Format,
+    format: options::FormatMode,
     data: DataInterface,
     quiet: bool,
 }
 
 impl Api {
-    pub fn new(format: options::Format, data: DataInterface, quiet: bool) -> Self {
+    pub fn new(format: options::FormatMode, data: DataInterface, quiet: bool) -> Self {
         Self { format, data, quiet }
     }
 
@@ -51,14 +51,14 @@ impl Api {
             return Ok(());
         }
         match self.format {
-            options::Format::Json => item.print_json(&self.data)?,
-            options::Format::Plain => item.print_plain(&self.data),
+            options::FormatMode::Json => item.print_json(&self.data)?,
+            options::FormatMode::Plain => item.print_plain(&self.data),
         }
         Ok(())
     }
 
     pub fn is_json(&self) -> bool {
-        matches!(self.format, options::Format::Json)
+        matches!(self.format, options::FormatMode::Json)
     }
 }
 
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn report_skips_render_when_quiet() {
         let api = Api::new(
-            options::Format::Plain,
+            options::FormatMode::Plain,
             DataInterface::new(Printer::new(false, false)),
             true,
         );
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn report_renders_plain_when_not_quiet() {
         let api = Api::new(
-            options::Format::Plain,
+            options::FormatMode::Plain,
             DataInterface::new(Printer::new(false, false)),
             false,
         );
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn report_skips_json_when_quiet() {
         let api = Api::new(
-            options::Format::Json,
+            options::FormatMode::Json,
             DataInterface::new(Printer::new(false, false)),
             true,
         );
