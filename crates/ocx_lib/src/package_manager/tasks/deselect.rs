@@ -38,7 +38,11 @@ impl PackageManager {
         };
 
         if removed_current.is_none() {
-            log::warn!(
+            // Debug, not warn: absence is the ordinary state (nothing but an
+            // explicit `ocx package select` creates `current`), and the CLI
+            // reports it as `RemovedStatus::Absent` for a direct deselect.
+            // Matches the sibling branch in `tasks/uninstall.rs`.
+            log::debug!(
                 "Package '{}' has no current symlink at '{}' — nothing to deselect.",
                 package,
                 current_path.display(),

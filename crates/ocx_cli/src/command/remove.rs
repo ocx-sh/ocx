@@ -173,10 +173,10 @@ impl Remove {
                 .uninstall_all(&install_identifiers, false, false)
                 .await;
 
-            // Global-tier symmetry: `ocx --global add` sets the `current`
-            // selection so the offline login exporter (`ocx --global env`)
-            // sees the tool; `ocx --global remove` must clear it so the
-            // exporter stops showing a tool that left the global toolchain.
+            // Global-tier symmetry: `add` is symlink-free (it materialises via
+            // `pull_all`), so `current` exists here only when the user set it
+            // with an explicit `ocx package select`. Clear it anyway, so a
+            // hand-anchored tool does not outlive the binding that named it.
             // `current` is keyed by registry/repository only — strip the
             // tag/digest (matches `resolve_global_current_env`'s lookup and
             // `deselect`'s tag-less requirement). Project tier never touches

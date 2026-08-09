@@ -881,3 +881,40 @@ def test_global_partial_mutator_fail_closed_message_not_project_only(
         "fail-closed remedy must still name the `ocx lock` reconcile verb; "
         f"stderr:\n{add_b.stderr}\nstdout:\n{add_b.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Removing an ordinary binding is quiet (ocx-sh/ocx#274)
+# ---------------------------------------------------------------------------
+
+
+def test_global_remove_emits_no_warning_for_ordinary_binding(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx --global remove` must not WARN about an absent candidate/current
+    symlink.
+
+    `add` materialises through ``pull_all`` and deliberately creates neither a
+    candidate nor a ``current`` symlink (ADR D5 amended 2026-05-19), so
+    ``remove``'s best-effort teardown finds both absent for EVERY ordinary
+    binding. Warning there fires on the happy path and tells the user nothing
+    (ocx-sh/ocx#274) — the absence is debug-level.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"baseline --global add must succeed; rc={add.returncode}\n"
+        f"stderr:\n{add.stderr}"
+    )
+
+    remove = _run_cmd(ocx, tmp_path, "--global", "remove", fq)
+    assert remove.returncode == EXIT_SUCCESS, (
+        f"--global remove must succeed; rc={remove.returncode}\n"
+        f"stderr:\n{remove.stderr}"
+    )
+    assert "WARN" not in remove.stderr, (
+        "removing an ordinary global binding must be quiet — the absent "
+        f"candidate/current symlinks are the normal state; stderr:\n{remove.stderr}"
+    )

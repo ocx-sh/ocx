@@ -175,7 +175,11 @@ async fn uninstall_symlinks(
         rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
         path
     } else {
-        log::warn!(
+        // Debug, not warn: `ocx add` materialises through `pull_all` and never
+        // creates a candidate symlink, so `ocx remove`'s best-effort teardown
+        // hits this on every ordinary binding. The CLI already reports the
+        // no-op as `RemovedStatus::Absent` where a user asked for it directly.
+        log::debug!(
             "Package '{}' has no installed candidate at '{}' — nothing to uninstall.",
             package,
             candidate_path.display(),
