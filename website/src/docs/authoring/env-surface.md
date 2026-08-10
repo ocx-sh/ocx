@@ -45,14 +45,17 @@ Some variables are neither a directory list nor a single value — they are a fl
 
 `JDK_JAVA_OPTIONS` does not have this problem: [the JVM launcher itself defines a quote grammar][jdk-java-options] — single or double quotes wrap an argument containing whitespace, and the launcher strips the pair before use. A publisher who needs a space in a contribution quotes it the same way they would on a command line; OCX's dedup never parses list elements, so a quoted value passes through the fold intact. The quoting is the JVM's own — not something `list` or its `separator` need to account for.
 
-## Templates and Dependency Paths {#templates}
+## Interpolation Tokens {#templates}
 
-Two placeholders are available inside any env `value` template, resolved at exec time when `ocx package exec` or `ocx env` composes the package's environment:
+An env `value` cannot hardcode an install path. Content-addressed storage puts the same package at a different path on every machine, and even a version bump on one machine moves it. `${...}` tokens are how a `value` names "wherever OCX put me," or "wherever my dependency landed," without knowing either path at authoring time.
 
-- `${installPath}` resolves to the absolute path of the package's own `content/` directory.
-- `${deps.NAME.installPath}` resolves to a declared dependency's `content/` directory, where `NAME` is the last path segment of the dependency's OCI repository or its explicit `name` field.
+Four bodies are recognized. The install-path ones take an optional `:native`/`:posix` [render modifier][reference-env-render] that controls path-separator rendering only; `${self.env.KEY}` takes none, because OCX cannot know whether the referenced variable holds a path:
 
-The second placeholder is the publisher's escape hatch for declaring "I need to find my dependency's files." A wrapper package that bundles a configuration generator and points at its dependency's binary uses `${deps.cmake.installPath}/bin/cmake-gen` to keep the path stable across registry layouts:
+- `${installPath}` (and its exact alias `${self.installPath}`) — this package's own `content/` directory. Takes a modifier.
+- `${self.env.KEY}` — the resolved value of this package's own `KEY` var, declared earlier in the same `env` array. No modifier; render at the declaring var instead.
+- `${deps.NAME.installPath}` — a declared dependency's `content/` directory, where `NAME` is the last path segment of the dependency's OCI repository or its explicit `name` field. Takes a modifier.
+
+`${deps.NAME.installPath}` is the publisher's escape hatch for declaring "I need to find my dependency's files." A wrapper package that bundles a configuration generator and points at its dependency's binary uses `${deps.cmake.installPath}/bin/cmake-gen` to keep the path stable across registry layouts:
 
 ```json
 {
@@ -62,7 +65,13 @@ The second placeholder is the publisher's escape hatch for declaring "I need to 
 }
 ```
 
-OCX validates every `${deps.*}` reference both locally during `ocx package create --metadata <file>` (no network needed) and again during `ocx package push` — a typo gets caught before the manifest reaches the registry. Only `${installPath}` and `${deps.NAME.installPath}` are recognized; any other `${...}` token is rejected at publish time.
+`${...}` is a closed namespace: every occurrence must parse as one of the four bodies above, or OCX refuses it rather than passing it through. That matters the moment a `value` needs to ship another tool's own `${...}` syntax verbatim — [devcontainer.json variables][devcontainer-vars] use the identical `${...}` shape for `${workspaceFolder}` and `${localEnv:VAR}`, and OCX would otherwise try to resolve them as its own tokens and refuse the whole value. Write `$${` to emit a literal `${` — `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`. This is the only escape.
+
+OCX validates every reference both locally during `ocx package create --metadata <file>` (no network needed) and again during `ocx package push` — a typo gets caught before the manifest reaches the registry. See [Interpolation Tokens][reference-env-interpolation] in the metadata reference for the full grammar and the exact refusal a bad token produces.
+
+::: tip A `${self.env.KEY}` chain has a byte ceiling
+Each `${self.env.KEY}` substitutes the referenced var's already-resolved value, so a chain that repeats a reference doubles with every hop it crosses. A resolved value is capped at 64 KiB — a chain that would push one var's resolved value past that cap is refused, exit 65, at composition time, rather than allowed to keep growing on every consumer that resolves it.
+:::
 
 ## Choosing Visibility {#visibility}
 
@@ -162,11 +171,14 @@ If your package declares [`entrypoints`][authoring-entry-points], consumers reac
 [node-21575]: https://github.com/nodejs/node/issues/21575
 [godebug-doc]: https://go.dev/doc/godebug
 [env-filter]: https://docs.rs/env_filter/latest/env_filter/
+[devcontainer-vars]: https://containers.dev/implementors/json_reference/
 
 <!-- reference -->
 [reference-env]: ../reference/metadata.md#env
 [reference-env-list-separator]: ../reference/metadata.md#env-list-separator
 [reference-deps-visibility]: ../reference/metadata.md#dependencies-visibility
+[reference-env-interpolation]: ../reference/metadata.md#env-interpolation
+[reference-env-render]: ../reference/metadata.md#env-interpolation-render
 
 <!-- in-depth -->
 [in-depth-environments]: ../in-depth/environments.md

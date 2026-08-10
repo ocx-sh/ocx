@@ -95,10 +95,22 @@ At exec time the composer applies a surface gate:
 
 A dep whose effective visibility from the root is `sealed` contributes nothing to either surface. A dep with effective visibility `public` contributes to both surfaces.
 
-The gate applies only to **whether** a dep contributes. When a dep does contribute, only its own **interface-tagged** `env` entries (`public` and `interface` on the `Var.visibility` field) cross the dep edge into the consumer's surface. `private` entries of a dep are always the dep's own internal matter and are never forwarded, regardless of edge visibility.
+The gate applies only to **whether** a dep contributes. When a dep does contribute, only its own **interface-tagged** `env` entries (`public` and `interface` on the `Var.visibility` field) cross the dep edge into the consumer's surface. A `private` **entry** of a dep never crosses an edge on its own — but its resolved **value** can, if one of the dep's own interface-tagged vars references it via [`${self.env.KEY}`][env-composition-self-referencing]. That token reads a resolved value regardless of the referenced key's own visibility, so a dep publisher who wants a private var's value to stay genuinely internal must not let any crossing var of the same package reference it.
 
 ::: details Why does the dep contribute only its interface vars, not its full private surface?
-Each package has two surfaces, and they are orthogonal. The edge visibility (`Visibility` on the `Dependency` entry) controls whether a dep's env is **accessible at all** from the root's perspective. But what arrives is always the dep's **outward-facing** interface — its `public` and `interface` env entries — not the dep's internal runtime environment. The dep's `private` entries are for the dep's own launchers; they never cross edges. This matches the CMake model exactly: a `PUBLIC` dependency forwards its `INTERFACE` headers to consumers, not its `PRIVATE` build flags.
+Each package has two surfaces, and they are orthogonal. The edge visibility (`Visibility` on the `Dependency` entry) controls whether a dep's env is **accessible at all** from the root's perspective. But what arrives is always the dep's **outward-facing** interface — its `public` and `interface` env entries — not the dep's internal runtime environment. A `private` entry is for the dep's own launchers and never crosses an edge as an entry in its own right; a crossing entry's own value, however, can embed an earlier private var's resolved value through `${self.env.KEY}` (see above). This matches the CMake model exactly: a `PUBLIC` dependency forwards its `INTERFACE` headers to consumers, not its `PRIVATE` build flags.
+:::
+
+::: warning A template fault anywhere in a package's `env` can fail the whole composition
+`${self.env.KEY}` reading a resolved value regardless of visibility (above) means OCX must
+resolve **every** declared var in a package — `private`, `interface`, and `public` alike —
+before it knows which ones the active surface actually needs; it cannot skip resolving a var
+just because that var itself is about to be filtered out by the edge filter above. A malformed
+template, a `required` [`path`][metadata-env-path] that does not exist on disk, or an
+unresolvable `${self.env.KEY}` reference on any var — including one this surface will not itself
+emit — fails the whole composition with exit 65, whether the affected package is the root or a
+transitive dep. See [Self-Referencing Values][env-composition-self-referencing] for the full
+resolve-then-gate rule.
 :::
 
 ## Last-Wins Scalar Semantics {#last-wins}
@@ -258,8 +270,10 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [metadata-entry-visibility]: ../reference/metadata.md#env-entry-visibility
 [metadata-dep-visibility]: ../reference/metadata.md#dependencies-visibility
 [metadata-env-list]: ../reference/metadata.md#env-list
+[metadata-env-path]: ../reference/metadata.md#env-path
 [visibility-through-edge]: ../reference/metadata.md#dependencies-through-edge
 [visibility-merge]: ../reference/metadata.md#dependencies-merge
+[env-composition-self-referencing]: ../reference/env-composition.md#self-referencing
 
 <!-- authoring -->
 [authoring-env-surface-lists]: ../authoring/env-surface.md#lists

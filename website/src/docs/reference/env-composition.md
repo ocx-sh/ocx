@@ -130,6 +130,37 @@ The `--self` flag on `package env`, `package exec`, `package test`, and `package
 
 Generated launchers force `self_view = true` internally; they do not expose `--self` to callers.
 
+## Self-Referencing Values {#self-referencing}
+
+A package's `env` values can reference each other, not just `${installPath}`. `${self.env.KEY}` resolves to the resolved value of this package's own earlier-declared `KEY` var, so a computed path or value is named once and reused instead of repeated in every `value` template that needs it — the same reuse an earlier [GitHub Actions][github-actions-docs] step's output, or a [Bazel][bazel-rules] `--define`, gives a workflow, applied to one package's own metadata.
+
+```json
+{
+  "env": [
+    { "key": "TOOL_HOME", "type": "constant", "value": "${self.installPath}/sdk" },
+    { "key": "TOOL_CFG",  "type": "constant", "value": "${self.env.TOOL_HOME}/etc" },
+    { "key": "TOOL_BIN",  "type": "path",     "value": "${self.env.TOOL_HOME}/bin" }
+  ]
+}
+```
+
+`TOOL_CFG` and `TOOL_BIN` both build on `TOOL_HOME` without repeating `${self.installPath}/sdk`. If the SDK subdirectory ever moves, one edit to `TOOL_HOME` propagates to every var built from it.
+
+`${self.env.KEY}` may only reference a `KEY` declared **strictly earlier** in the same package's `env` array — a forward or self reference, or a reference to a key declared twice, is refused at publish time (see [`self.env`][metadata-env-self-env] on the metadata reference for the full resolution rules and the generator-order hazard). It resolves to `KEY`'s **resolved** value, not its unexpanded template, and resolution is **surface-independent**: it reads the same bytes regardless of `KEY`'s own [visibility](#visibility-surfaces) or which surface (`--self` on or off) is being composed. It is legal only in `env` values, never in entry-point `args`. See [Interpolation Tokens][metadata-env-interpolation] for the full token grammar shared by both.
+
+::: warning A template fault anywhere in a package's `env` can fail the whole composition
+Surface-independent resolution (above) means OCX cannot resolve only the vars a surface is
+about to emit — a `public` var's `${self.env.KEY}` might name a `private` `KEY`, so every
+declared var, regardless of its own visibility, is resolved before the composer decides what
+crosses. A malformed template, a `required` [`path`][metadata-env-path] that does not exist on
+disk, or an unresolvable `${self.env.KEY}` reference on any var — including one that will not
+itself be emitted on the surface in play — fails the whole composition with exit 65. This holds
+for [`ocx env`][cmd-env-root] / [`ocx package env`][cmd-package-env] and [`ocx run`][cmd-run] /
+[`ocx package exec`][cmd-package-exec] alike, on either surface: a package's own metadata either
+resolves in full or the composition refuses, independent of who is asking or which surface they
+asked for.
+:::
+
 ## Composition Order {#composition-order}
 
 When multiple packages contribute to an environment (via `ocx run -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
@@ -246,6 +277,9 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 <!-- reference -->
 [metadata-env-list]: ./metadata.md#env-list
 [metadata-env-list-separator]: ./metadata.md#env-list-separator
+[metadata-env-interpolation]: ./metadata.md#env-interpolation
+[metadata-env-self-env]: ./metadata.md#env-interpolation-self-env
+[metadata-env-path]: ./metadata.md#env-path
 
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain
