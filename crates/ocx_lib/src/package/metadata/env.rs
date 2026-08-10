@@ -13,6 +13,26 @@ pub mod path;
 pub mod resolver;
 pub mod var;
 
+/// A package's declared environment variables, in **declaration order**.
+///
+/// # The order is semantic, not incidental
+///
+/// `variables` is the JSON array exactly as authored: nothing in the metadata
+/// tree sorts it, and every reader — [`IntoIterator`], the composer, the
+/// validators — walks it in that order. So "declared strictly earlier" is a
+/// well-defined, stable property of the document, which is what lets
+/// `${self.env.KEY}` scope itself to earlier vars with no graph, no topological
+/// sort and no cycle detector: a back-edge is unrepresentable.
+///
+/// Order was already load-bearing before that: the composer pushes entries in
+/// declaration order and its documented PATH invariant (the last entry pushed
+/// ends up first) makes the order observable in the resolved `PATH`.
+///
+/// **Generator hazard.** Building this array from an unordered map — a Go
+/// `map`, a Java `HashMap`, a Python `set` — emits an order that varies run to
+/// run, so a package using `${self.env.X}` publishes on some runs and fails on
+/// others with no change to the generator's input. Emit `env` from an ordered
+/// structure.
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     variables: Vec<var::Var>,

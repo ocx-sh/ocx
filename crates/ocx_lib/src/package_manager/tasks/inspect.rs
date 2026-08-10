@@ -1524,20 +1524,23 @@ mod spec_tests {
     // boundary; these unit tests pin the kind the task layer must surface.
 
     /// Default mode against a flat image manifest whose config blob holds
-    /// structurally-invalid metadata must surface `PackageErrorKind::Internal`
+    /// structurally-unreadable metadata must surface `PackageErrorKind::Internal`
     /// (the metadata-validation-failure path documented for `inspect`).
-    /// Mirrors the `common.rs` `load_object_data_rejects_invalid_metadata`
-    /// pattern: an env entry references an undeclared dependency, so
-    /// `ValidMetadata::try_from` rejects it at the ingress boundary.
+    ///
+    /// Inverted with D14: the fault used to be an env entry referencing an
+    /// undeclared dependency, which `inspect` no longer refuses — inspecting a
+    /// package is exactly the read path that must keep working when a value
+    /// would not resolve. The fault is now a modifier `type` this binary cannot
+    /// interpret, the class `ValidMetadata::try_from` still rejects at ingress.
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_malformed_metadata_is_internal() {
-        const BAD_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"constant","value":"${deps.missing.installPath}/x","visibility":"public"}],"entrypoints":{}}"#;
+        const BAD_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"frobnicate","value":"x","visibility":"public"}],"entrypoints":{}}"#;
 
         let dir = TempDir::new().unwrap();
         let config_digest = Algorithm::Sha256.hash(BAD_METADATA_JSON.as_bytes());
-        // The image manifest's config descriptor advertises the structurally
-        // invalid metadata blob's length so the media-type/size gate passes
-        // and validation is the failing step.
+        // The image manifest's config descriptor advertises the unreadable
+        // metadata blob's length so the media-type/size gate passes and
+        // validation is the failing step.
         let manifest_json = format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
             size = BAD_METADATA_JSON.len(),
@@ -1562,6 +1565,81 @@ mod spec_tests {
         assert!(
             matches!(err, PackageErrorKind::Internal(_)),
             "malformed metadata must surface Internal (→ DataError/65), got {err:?}"
+        );
+    }
+
+    /// D14 / C-036 (unit legs), both sides asserted over **one** document.
+    ///
+    /// `inspect` is on the read-only side of D14's table: a token this binary
+    /// does not recognise must not stop anyone looking at the package, and the
+    /// stored value is shown verbatim because there is no resolved value to
+    /// show and OCX invents none. The compose leg on the *same* value must
+    /// still refuse — a read-only success with no failing sibling proves
+    /// nothing, and a refusal that fires everywhere is indistinguishable from
+    /// one that fires nowhere.
+    ///
+    /// This is the leg the stub could not keep.
+    /// `inspect_default_malformed_metadata_is_internal` above kept its name and
+    /// had its fixture swapped to a structurally unreadable document, which
+    /// correctly preserves *that* contract but no longer pins the D14
+    /// inversion: on `main` the fixture below is refused by
+    /// `ValidMetadata::try_from` on every ingress path, inspect included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inspect_default_unrecognised_token_is_shown_verbatim_though_composing_it_refuses() {
+        const TOKEN_VALUE: &str = "${workspaceFolder}/bin";
+        const TOKEN_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"TOOL_DIR","type":"constant","value":"${workspaceFolder}/bin","visibility":"public"}],"entrypoints":{}}"#;
+
+        let dir = TempDir::new().unwrap();
+        let config_digest = Algorithm::Sha256.hash(TOKEN_METADATA_JSON.as_bytes());
+        let manifest_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
+            size = TOKEN_METADATA_JSON.len(),
+        );
+        let source = FakeManifestSource::default()
+            .with(TAG, manifest_json.as_bytes())
+            .with_blob(&config_digest.to_string(), TOKEN_METADATA_JSON.as_bytes());
+
+        let mgr = make_manager(&dir, source);
+        let result = mgr
+            .inspect(
+                &tagged_id(),
+                oci::Platform::any(),
+                InspectOptions {
+                    resolve: false,
+                    closure: false,
+                },
+            )
+            .await
+            .expect("a token this binary does not recognise must not stop a read-only inspect");
+
+        let InspectResult::Manifest { metadata, .. } = result else {
+            panic!("expected Manifest, got {result:?}");
+        };
+        let values: Vec<&str> = metadata
+            .env()
+            .expect("env")
+            .into_iter()
+            .filter_map(|var| var.value())
+            .collect();
+        assert_eq!(
+            values,
+            vec![TOKEN_VALUE],
+            "the stored template must be shown verbatim, unannotated"
+        );
+
+        // The failing sibling, on the same value: refusal is scoped to
+        // resolution, so everything that composes still refuses.
+        let contexts = std::collections::HashMap::new();
+        let error = crate::package::metadata::template::TemplateResolver::new(dir.path(), &contexts)
+            .resolve(TOKEN_VALUE)
+            .expect_err("composing the same value must refuse");
+        assert!(
+            matches!(
+                &error,
+                crate::package::metadata::template::TemplateError::UnknownToken { token, .. }
+                    if token == "${workspaceFolder}"
+            ),
+            "the compose refusal must name the token verbatim, got: {error}"
         );
     }
 

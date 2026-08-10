@@ -107,10 +107,13 @@ pub async fn identifier_for_symlink(
 /// follow symlinks, making this safe for both direct object paths and install
 /// symlinks.
 ///
-/// Metadata is validated via [`metadata::ValidMetadata`] before being returned
-/// — every on-disk metadata blob the package_manager loads goes through the
-/// same validation as a publish-time blob, so consumers operate on metadata
-/// that is structurally and semantically well-formed.
+/// Metadata is checked for *structural readability* via
+/// [`metadata::ValidMetadata`] before being returned. That is deliberately
+/// weaker than the publish gate (D14): a consumption path never refuses a
+/// document because one of its tokens is unrecognised, so metadata written by a
+/// newer ocx still loads and still shows. The refusal moves to the operation
+/// that needs the value — `TemplateResolver::resolve` cannot produce bytes for
+/// a token it does not recognise.
 pub async fn load_object_data(
     objects: &PackageStore,
     content_path: &Path,
@@ -204,9 +207,11 @@ pub async fn load_config_metadata(
 
     let raw: metadata::Metadata = serde_json::from_slice(&bytes)
         .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
-    // Reject malformed metadata at the ingress boundary — refuse to write
-    // unvalidated metadata to disk so the consumption-side validation never
-    // has to deal with publisher-side bugs after the fact.
+    // Reject structurally unreadable metadata at the ingress boundary — a
+    // modifier type this binary cannot interpret, a `list` entry violating the
+    // separator contract. Not the token checks: those left this layer with D14,
+    // because a fetch refusing a token it does not recognise would make an ocx
+    // unable to even *show* a package a newer ocx published.
     metadata::ValidMetadata::try_from(raw).map_err(PackageErrorKind::Internal)
 }
 
@@ -705,6 +710,7 @@ pub fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target
 mod tests {
     use crate::file_structure::{FileStructure, PackageStore};
     use crate::oci;
+    use crate::package::metadata;
     use crate::package::resolved_package::ResolvedPackage;
     use crate::prelude::SerdeExt as _;
 
@@ -756,45 +762,63 @@ mod tests {
         }
     }
 
-    /// Writes valid + resolve.json under a fake content path, then writes a
-    /// metadata.json that references an undeclared dep — `load_object_data`
-    /// must reject it instead of returning a half-formed `InstallInfo`.
-    #[tokio::test]
-    async fn load_object_data_rejects_invalid_metadata_at_consumption() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let store_root = tempdir.path().join("packages");
+    /// Writes `resolve.json` plus a `metadata.json` under a fake content path
+    /// and returns what `load_object_data` makes of it.
+    async fn load_object_data_for(
+        tempdir: &std::path::Path,
+        digest_byte: &str,
+        metadata_json: &str,
+    ) -> Result<(metadata::Metadata, ResolvedPackage), crate::Error> {
+        let store_root = tempdir.join("packages");
         std::fs::create_dir_all(&store_root).unwrap();
         let store = PackageStore::new(&store_root);
 
-        let digest_hex: String = "ab".repeat(32);
-        let id =
-            oci::Identifier::new_registry("foo/bar", "example.com").clone_with_digest(oci::Digest::Sha256(digest_hex));
+        let id = oci::Identifier::new_registry("foo/bar", "example.com")
+            .clone_with_digest(oci::Digest::Sha256(digest_byte.repeat(32)));
         let pinned = oci::PinnedIdentifier::try_from(id).unwrap();
 
         let pkg_dir = store.path(&pinned);
-        std::fs::create_dir_all(&pkg_dir).unwrap();
         let content_dir = pkg_dir.join("content");
         std::fs::create_dir_all(&content_dir).unwrap();
 
-        // Bad metadata: env var references `${deps.missing.installPath}` with no
-        // matching declared dep — must trigger ValidMetadata's UnknownDependencyRef.
-        let bad = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","value":"${deps.missing.installPath}/x"}]}"#;
-        std::fs::write(pkg_dir.join("metadata.json"), bad).unwrap();
+        std::fs::write(pkg_dir.join("metadata.json"), metadata_json).unwrap();
         ResolvedPackage::new()
             .write_json(pkg_dir.join("resolve.json"))
             .await
             .unwrap();
 
-        let result = super::load_object_data(&store, &content_dir).await;
-        assert!(result.is_err(), "expected validation failure, got Ok");
-        let err = result.unwrap_err();
+        super::load_object_data(&store, &content_dir).await
+    }
+
+    /// Consumption reads a document it cannot resolve, and refuses one it cannot
+    /// read (D14).
+    ///
+    /// Inverted: an env var naming an undeclared dep used to be rejected here.
+    /// It now loads, because refusing on a *read* path means an ocx meeting
+    /// metadata a newer ocx wrote cannot even list the package — the refusal
+    /// belongs to the operation that asks for the value. What still fails
+    /// closed is a document whose grammar this binary cannot read at all.
+    #[tokio::test]
+    async fn load_object_data_reads_unresolvable_metadata_but_refuses_unreadable_metadata() {
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let unresolvable = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"constant","value":"${deps.missing.installPath}/x"}]}"#;
+        assert!(
+            load_object_data_for(tempdir.path(), "ab", unresolvable).await.is_ok(),
+            "an unresolvable ${{deps.*}} reference must still load — resolution is where it fails"
+        );
+
+        let unreadable = r#"{"type":"bundle","version":1,"env":[{"key":"FOO","type":"frobnicate","value":"x"}]}"#;
+        let err = load_object_data_for(tempdir.path(), "cd", unreadable)
+            .await
+            .expect_err("a modifier type this binary cannot interpret must fail closed");
         // Render the way `main.rs` does: wrapped in `anyhow`, whose `{:#}` walks
         // the `source()` chain. A bare `crate::Error` would print only its top
         // message, which no longer restates its own source.
         let chain = format!("{:#}", anyhow::Error::from(err));
         assert!(
-            chain.contains("missing"),
-            "error chain must mention undeclared dep name 'missing': {chain}"
+            chain.contains("frobnicate"),
+            "error chain must name the unreadable modifier type: {chain}"
         );
     }
 

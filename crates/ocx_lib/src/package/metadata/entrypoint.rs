@@ -124,9 +124,11 @@ pub struct Entrypoint {
     command: Option<EntrypointName>,
 
     /// Fixed leading arguments the generated launcher prepends before the user's
-    /// own arguments. Each element supports `${installPath}` interpolation (the
-    /// package content directory); `${deps.*}` is NOT permitted here. Absent/empty
-    /// serializes to nothing (wire-compatible with the pre-`args` shape).
+    /// own arguments. Each element may carry `${installPath}` — or its alias
+    /// `${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`
+    /// and `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected
+    /// (write `$${` for a literal `${`). Absent/empty serializes to nothing
+    /// (wire-compatible with the pre-`args` shape).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     args: Vec<String>,
 }
@@ -141,9 +143,9 @@ impl Entrypoint {
 
     /// Fixed leading arguments prepended before user-supplied arguments when
     /// the generated launcher dispatches this entrypoint. Each element is one
-    /// argv token; `${installPath}` is interpolated to the package's content
-    /// directory at runtime. Returns an empty slice when no baked args are
-    /// declared.
+    /// argv token; an install-path token is interpolated to the package's
+    /// content directory at runtime. Returns an empty slice when no baked args
+    /// are declared.
     pub fn args(&self) -> &[String] {
         &self.args
     }
@@ -317,7 +319,7 @@ impl schemars::JsonSchema for Entrypoints {
         let value_schema = generator.subschema_for::<Entrypoint>();
         schemars::json_schema!({
             "type": "object",
-            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element supports `${installPath}` interpolation (`${deps.*}` is not permitted in args).",
+            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${installPath}` (or its alias `${self.installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
             "additionalProperties": value_schema,
             "propertyNames": {
                 "pattern": SLUG_PATTERN_STR,

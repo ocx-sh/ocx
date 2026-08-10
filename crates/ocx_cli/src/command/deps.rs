@@ -294,9 +294,12 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
     );
-    // Enforce the ValidMetadata typestate: tampered or invalid metadata is
-    // skipped rather than fed to downstream graph traversal, but the failure
-    // is surfaced as a warning so the user knows a corrupted install exists.
+    // Enforce the ValidMetadata typestate: metadata this binary cannot
+    // structurally read is skipped rather than fed to downstream graph
+    // traversal, but the failure is surfaced as a warning so the user knows
+    // a corrupted install exists. An env token that fails to *resolve* does
+    // not land here (D14) — this command never resolves env values, so an
+    // otherwise-intact install still shows in the tree.
     let raw_metadata = match metadata {
         Ok(m) => m,
         Err(err) => {
@@ -358,40 +361,58 @@ mod tests {
         format!("{:x}", n).repeat(64).chars().take(64).collect()
     }
 
-    /// `load_install_info` must return `None` when `metadata.json` contains metadata
-    /// that fails `ValidMetadata` validation (e.g. an env token referencing a dep name
-    /// absent from the dependency list).
-    #[tokio::test]
-    async fn load_install_info_returns_none_for_invalid_metadata() {
+    /// Writes `metadata.json` + a minimal `resolve.json` beside a content dir
+    /// and returns what `load_install_info` makes of them.
+    ///
+    /// `ResolvedPackage` uses `#[serde(deny_unknown_fields)]` — a `version`
+    /// field here would short-circuit before metadata validation is reached.
+    async fn load_install_info_for(metadata_json: &str) -> Option<InstallInfo> {
         let dir = tempfile::tempdir().expect("create temp dir");
         let content = dir.path().join("content");
         tokio::fs::create_dir_all(&content).await.expect("create content dir");
 
-        // Build metadata that references "ninja" in an env token but declares no such dep.
-        // ValidMetadata::try_from rejects this with an UnknownDependencyRef error.
-        let h = hex(1);
-        let metadata_json = format!(
-            r#"{{"type":"bundle","version":1,"dependencies":[{{"identifier":"ocx.sh/cmake:1@sha256:{h}"}}],"env":[{{"key":"PATH","type":"constant","value":"${{deps.ninja.installPath}}/bin"}}]}}"#
-        );
-        tokio::fs::write(content.with_file_name("metadata.json"), &metadata_json)
+        tokio::fs::write(content.with_file_name("metadata.json"), metadata_json)
             .await
             .expect("write metadata.json");
-
-        // Write a valid resolve.json so the only failure comes from metadata validation.
-        // ResolvedPackage uses #[serde(deny_unknown_fields)] — passing a `version` field
-        // would short-circuit the test before it reaches the ValidMetadata gate.
-        let resolve_json = r#"{"dependencies":[]}"#;
-        tokio::fs::write(content.with_file_name("resolve.json"), resolve_json)
+        tokio::fs::write(content.with_file_name("resolve.json"), r#"{"dependencies":[]}"#)
             .await
             .expect("write resolve.json");
 
-        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{h}").parse().expect("valid identifier");
+        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{}", hex(1))
+            .parse()
+            .expect("valid identifier");
         let pinned = oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
 
-        let result = load_install_info(pinned, content).await;
+        load_install_info(pinned, content).await
+    }
+
+    /// `ocx package deps` shows a tree it cannot resolve, and skips an install
+    /// it cannot read (D14).
+    ///
+    /// Inverted: an env token naming an undeclared dep used to make the whole
+    /// install vanish from the tree with a "corrupted install" warning. Showing
+    /// the dependency graph does not read any env value, so refusing here
+    /// hid a perfectly intact package over a fault the command never touches.
+    /// Structurally unreadable metadata is still skipped.
+    #[tokio::test]
+    async fn load_install_info_reads_unresolvable_metadata_but_skips_unreadable_metadata() {
+        let h = hex(1);
+
+        // References "ninja" in an env token but declares no such dep.
+        let unresolvable = format!(
+            r#"{{"type":"bundle","version":1,"dependencies":[{{"identifier":"ocx.sh/cmake:1@sha256:{h}"}}],"env":[{{"key":"PATH","type":"constant","value":"${{deps.ninja.installPath}}/bin"}}]}}"#
+        );
         assert!(
-            result.is_none(),
-            "load_install_info must return None for invalid metadata"
+            load_install_info_for(&unresolvable).await.is_some(),
+            "an unresolvable ${{deps.*}} reference must not hide the package from the tree"
+        );
+
+        // Declares a modifier type this binary cannot interpret.
+        let unreadable =
+            r#"{"type":"bundle","version":1,"env":[{"key":"PATH","type":"frobnicate","value":"x"}]}"#.to_string();
+        assert!(
+            load_install_info_for(&unreadable).await.is_none(),
+            "metadata this binary cannot read must still be skipped"
         );
     }
 }

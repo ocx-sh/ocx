@@ -16,7 +16,10 @@ use super::entry::Entry;
 use super::list;
 use super::modifier::ModifierKind;
 use super::var::{Modifier, Var};
-use crate::package::metadata::{dependency::DependencyName, template::TemplateResolver};
+use crate::package::metadata::{
+    dependency::DependencyName,
+    template::{SelfEnvScope, TemplateResolver},
+};
 
 /// Resolves package metadata env-var templates against an install path and
 /// a dependency context map.
@@ -36,7 +39,12 @@ impl<'a> EnvResolver<'a> {
         }
     }
 
-    /// Resolves a single `Var` into an [`Entry`].
+    /// Resolves a single `Var` into an [`Entry`] **that the caller is going to
+    /// emit**, so every filesystem and shape assertion runs.
+    ///
+    /// `self_env` is the scope `${self.env.KEY}` resolves against: the entries
+    /// this package's strictly-earlier vars already resolved to, in declaration
+    /// order (D6.1). Pass an empty [`SelfEnvScope`] where none exists.
     ///
     /// Returns `Ok(None)` when the var carries no template value (rare —
     /// captures the existing semantics of `Var::value() -> Option<&str>`).
@@ -45,24 +53,42 @@ impl<'a> EnvResolver<'a> {
     /// # Errors
     ///
     /// - [`crate::package::error::Error::EnvVarInterpolation`] on template
-    ///   resolution failure (unknown dep ref, unknown field, dep not installed).
+    ///   resolution failure (unknown dep ref, unknown field, dep not installed,
+    ///   undefined or ambiguous `${self.env.*}` reference).
     /// - [`crate::package::error::Error::RequiredPathMissing`] when a
     ///   `required` path-modifier resolves to a path that does not exist.
     /// - [`crate::package::error::Error::SeparatorEdgedListValue`] when a
     ///   list-modifier value *resolves* to one edged by its own separator.
-    pub fn resolve(&self, var: &Var) -> crate::Result<Option<Entry>> {
+    pub fn resolve(&self, var: &Var, self_env: &SelfEnvScope<Entry>) -> crate::Result<Option<Entry>> {
+        self.resolve_inner(var, self_env, /* emit_assertions = */ true)
+    }
+
+    /// The one resolution path; `emit_assertions` is D8's split.
+    ///
+    /// Both public entry points route through here, so the only thing that can
+    /// differ between them is which assertions run. The *value* a var resolves
+    /// to is the same either way — which is what lets `${self.env.KEY}` see
+    /// identical bytes whether or not the var it names crosses the surface.
+    fn resolve_inner(
+        &self,
+        var: &Var,
+        self_env: &SelfEnvScope<Entry>,
+        emit_assertions: bool,
+    ) -> crate::Result<Option<Entry>> {
         let Some(template) = var.value() else {
             return Ok(None);
         };
 
-        let resolver = TemplateResolver::new(self.install_path, self.dep_contexts);
-        let mut value =
-            resolver
-                .resolve(template)
-                .map_err(|source| crate::package::error::Error::EnvVarInterpolation {
-                    var_key: var.key.clone(),
-                    source,
-                })?;
+        let resolver = TemplateResolver::new(self.install_path, self.dep_contexts).with_self_env(self_env);
+        let resolved = if emit_assertions {
+            resolver.resolve(template)
+        } else {
+            resolver.resolve_without_existence_checks(template)
+        };
+        let mut value = resolved.map_err(|source| crate::package::error::Error::EnvVarInterpolation {
+            var_key: var.key.clone(),
+            source,
+        })?;
 
         if let Modifier::Path(path_modifier) = &var.modifier {
             let mut path = PathBuf::from(&value);
@@ -91,7 +117,7 @@ impl<'a> EnvResolver<'a> {
             // form, which Windows path APIs handle correctly in all contexts.
             // On POSIX and non-verbatim Windows paths the call is a no-op.
             let path = PathBuf::from(dunce::simplified(&path));
-            if path_modifier.required && !path.exists() {
+            if emit_assertions && path_modifier.required && !path.exists() {
                 return Err(crate::package::error::Error::RequiredPathMissing(path).into());
             }
             value = path.to_string_lossy().to_string();
@@ -106,7 +132,7 @@ impl<'a> EnvResolver<'a> {
             // runs on every load path; the fallback is what the human-facing
             // surfaces authored through.
             let separator = list_modifier.separator.as_deref().unwrap_or(list::DEFAULT_SEPARATOR);
-            if list::is_separator_edged(&value, separator) {
+            if emit_assertions && list::is_separator_edged(&value, separator) {
                 return Err(crate::package::error::Error::SeparatorEdgedListValue {
                     key: var.key.clone(),
                     separator: separator.to_string(),
@@ -129,6 +155,38 @@ impl<'a> EnvResolver<'a> {
                 .expect("a var with a resolvable value template names a known modifier kind"),
             separator,
         }))
+    }
+
+    /// Resolves a single `Var` the caller is **not** going to emit — the value
+    /// only, with every filesystem and shape assertion suppressed.
+    ///
+    /// The composer resolves a package's whole `env` array so that a crossing
+    /// var can reference a non-crossing earlier one (D8), which means vars
+    /// nobody emits now resolve too. The split is stated as a rule, not a list:
+    /// *value resolution always; every filesystem and shape assertion on emit
+    /// only.* Concretely, relative to [`EnvResolver::resolve`] this suppresses
+    /// [`crate::package::error::Error::RequiredPathMissing`] (C-026),
+    /// [`crate::package::error::Error::SeparatorEdgedListValue`] — both
+    /// assertions about a contribution that never joins a fold — and, through
+    /// [`TemplateResolver::resolve_without_existence_checks`],
+    /// [`crate::package::metadata::template::TemplateError::DependencyNotInstalled`]
+    /// (C-027), which would otherwise turn a working install into exit 79 over a
+    /// value nobody reads.
+    ///
+    /// A template *fault* is not suppressed: an unrecognised token or an unknown
+    /// dep reference still fails here, because a package whose own metadata
+    /// cannot resolve is broken regardless of who is looking.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::package::error::Error::EnvVarInterpolation`] on template
+    /// resolution failure.
+    pub fn resolve_without_emit_assertions(
+        &self,
+        var: &Var,
+        self_env: &SelfEnvScope<Entry>,
+    ) -> crate::Result<Option<Entry>> {
+        self.resolve_inner(var, self_env, /* emit_assertions = */ false)
     }
 }
 
@@ -157,6 +215,12 @@ mod tests {
         DependencyName::try_from(s).unwrap()
     }
 
+    /// The `${self.env.KEY}` scope, built the way the composer builds it: the
+    /// entries earlier vars already resolved to, in declaration order.
+    fn scope_of<const N: usize>(declared: [Entry; N]) -> SelfEnvScope<Entry> {
+        declared.into_iter().collect()
+    }
+
     fn constant_var(key: &str, value: &str) -> Var {
         Var::new_constant(key, value)
     }
@@ -180,7 +244,7 @@ mod tests {
         var: &Var,
     ) -> crate::Result<Option<String>> {
         let resolver = EnvResolver::new(install_path, dep_contexts);
-        Ok(resolver.resolve(var)?.map(|entry| entry.value))
+        Ok(resolver.resolve(var, &SelfEnvScope::new())?.map(|entry| entry.value))
     }
 
     /// `${deps.NAME.installPath}` expands against the matching context.
@@ -258,7 +322,9 @@ mod tests {
         );
     }
 
-    /// Unsupported field → `UnknownDependencyField`.
+    /// Unsupported field under a recognised namespace → `UnknownField`, naming
+    /// the namespace as well as the leaf (D12: one variant for every namespace,
+    /// not one per namespace).
     #[test]
     fn unsupported_field_returns_error() {
         let dir = TempDir::new().unwrap();
@@ -270,8 +336,8 @@ mod tests {
         assert!(
             matches!(&err, crate::Error::Package(e) if matches!(e.as_ref(),
                 PackageError::EnvVarInterpolation {
-                    source: TemplateError::UnknownDependencyField { field, .. }, ..
-                } if field == "version"
+                    source: TemplateError::UnknownField { namespace, field, .. }, ..
+                } if field == "version" && namespace == "deps.cmake"
             )),
             "unexpected error: {err}"
         );
@@ -300,17 +366,28 @@ mod tests {
         );
     }
 
-    /// Uppercase NAME is not matched by the lowercase-only regex — token
-    /// passes through as literal text.
+    /// Uppercase NAME fails the anchored `NAME` grammar, and OCX claims every
+    /// `${…}` (D3) — so the token is refused, not emitted as literal text.
+    ///
+    /// Inverted from the pre-grammar behaviour, where an unmatched token
+    /// silently reached the consuming tool as the eight characters
+    /// `${deps.P…}` and failed there instead.
     #[test]
-    fn uppercase_dep_name_not_matched() {
+    fn uppercase_dep_name_is_refused_not_passed_through() {
         let dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
         ctxs.insert(dep_name("python"), ctx(&dir, "python"));
 
         let var = constant_var("X", "${deps.Python.installPath}");
-        let result = resolve(&ctxs, dir.path(), &var).unwrap().unwrap();
-        assert_eq!(result, "${deps.Python.installPath}");
+        let err = resolve(&ctxs, dir.path(), &var).unwrap_err();
+        assert!(
+            matches!(&err, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::UnknownToken { token, .. }, ..
+                } if token == "${deps.Python.installPath}"
+            )),
+            "unexpected error: {err}"
+        );
     }
 
     /// Transitive dep absent from `dep_contexts` → `UnknownDependencyRef`.
@@ -333,6 +410,29 @@ mod tests {
         );
     }
 
+    /// C-006(b) / S-023 — the escape defends against OCX's scanner, not against
+    /// the layers above it. A `path` var whose escaped value resolves to
+    /// literal bytes is still a *relative* path, so the resolver joins it under
+    /// the install path exactly as it would any other relative value.
+    ///
+    /// The sibling leg is C-006(a) in `template.rs`: the same value in a
+    /// `constant` var is byte-identical end to end. Together they pin that what
+    /// the escape produces is ordinary resolved bytes, with no pass-through
+    /// promise attached.
+    #[test]
+    fn an_escaped_foreign_token_in_a_path_var_is_joined_under_the_install_path() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+
+        let var = Var::new_path("TOOL_DIR", "$${workspaceFolder}/x", false);
+        let resolved = resolve(&ctxs, dir.path(), &var).unwrap().unwrap();
+        assert_eq!(
+            resolved,
+            dir.path().join("${workspaceFolder}/x").to_string_lossy(),
+            "an escaped token resolves to a relative value, which a path var joins under the install path"
+        );
+    }
+
     // ── W-4: list values are re-checked after template resolution ─────────
 
     /// The resolved entry carries the separator the fold needs.
@@ -343,7 +443,7 @@ mod tests {
 
         let resolver = EnvResolver::new(dir.path(), &ctxs);
         let entry = resolver
-            .resolve(&list_var("GODEBUG", "gctrace=1", ","))
+            .resolve(&list_var("GODEBUG", "gctrace=1", ","), &SelfEnvScope::new())
             .unwrap()
             .expect("a list var resolves to an entry");
         assert_eq!(entry.kind, ModifierKind::List);
@@ -368,7 +468,10 @@ mod tests {
 
         let resolver = EnvResolver::new(dir.path(), &ctxs);
         let error = resolver
-            .resolve(&list_var("PARTS", "${deps.tool.installPath}", ","))
+            .resolve(
+                &list_var("PARTS", "${deps.tool.installPath}", ","),
+                &SelfEnvScope::new(),
+            )
             .expect_err("a resolved value edged by its separator must be refused");
         let message = error.to_string();
         assert!(message.contains("PARTS"), "must name the var: {message}");
@@ -393,7 +496,10 @@ mod tests {
 
         let resolver = EnvResolver::new(dir.path(), &ctxs);
         let entry = resolver
-            .resolve(&list_var("PARTS", "${deps.tool.installPath}", " "))
+            .resolve(
+                &list_var("PARTS", "${deps.tool.installPath}", " "),
+                &SelfEnvScope::new(),
+            )
             .unwrap()
             .expect("a space separator does not edge this value");
         assert_eq!(entry.value, edged.to_string_lossy());
@@ -479,7 +585,7 @@ mod tests {
 
         let var = Var::new_path("BIN_PATH", "${installPath}/bin", /* required = */ false);
         let resolver = EnvResolver::new(dir.path(), &ctxs);
-        let entry = resolver.resolve(&var).unwrap().unwrap();
+        let entry = resolver.resolve(&var, &SelfEnvScope::new()).unwrap().unwrap();
 
         // The exported value must not start with `\\?\`.
         assert!(
@@ -495,5 +601,226 @@ mod tests {
             "exported path-modifier value must end with 'bin'; got: {:?}",
             entry.value
         );
+    }
+
+    // ── `${self.env.KEY}` reads the referenced var's resolved Entry (D6.2) ────
+
+    /// C-022 — a token-bearing `path` var referenced through `${self.env.*}`
+    /// yields its own single resolved contribution. Never a folded `PATH`:
+    /// folding happens later, against the ambient environment, and would make
+    /// a published artifact's resolution machine-dependent.
+    #[test]
+    fn a_self_env_reference_to_a_token_bearing_path_var_yields_one_contribution() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let contribution = resolver
+            .resolve(&Var::new_path("P", "${installPath}/bin", false), &SelfEnvScope::new())
+            .unwrap()
+            .expect("a path var resolves to an entry");
+        let referencing = resolver
+            .resolve(&constant_var("Q", "${self.env.P}"), &scope_of([contribution.clone()]))
+            .unwrap()
+            .expect("a constant var resolves to an entry");
+
+        assert_eq!(
+            referencing.value, contribution.value,
+            "the reference must yield the referenced var's own resolved contribution"
+        );
+        assert!(
+            contribution.value.starts_with(&*dir.path().to_string_lossy()) && contribution.value.ends_with("bin"),
+            "the contribution must be the install-rooted bin directory: {:?}",
+            contribution.value
+        );
+    }
+
+    /// C-023 — the referenced var's declared **type** decides the bytes, and
+    /// the value alone cannot show it: a bare-relative `path` var is joined
+    /// under the install path before the value is taken, a `constant` with the
+    /// identical value is not.
+    ///
+    /// The two legs are one check: either alone is satisfied by an
+    /// implementation that ignores the type.
+    #[test]
+    fn a_self_env_reference_carries_the_referenced_vars_type_not_just_its_value() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let path_contribution = resolver
+            .resolve(&Var::new_path("P", "bin", false), &SelfEnvScope::new())
+            .unwrap()
+            .expect("a path var resolves to an entry");
+        let via_path = resolver
+            .resolve(
+                &constant_var("VIA_PATH", "${self.env.P}"),
+                &scope_of([path_contribution.clone()]),
+            )
+            .unwrap()
+            .expect("a constant var resolves to an entry");
+
+        let constant_contribution = resolver
+            .resolve(&constant_var("C", "bin"), &SelfEnvScope::new())
+            .unwrap()
+            .expect("a constant var resolves to an entry");
+        let via_constant = resolver
+            .resolve(
+                &constant_var("VIA_CONSTANT", "${self.env.C}"),
+                &scope_of([constant_contribution.clone()]),
+            )
+            .unwrap()
+            .expect("a constant var resolves to an entry");
+
+        assert_eq!(
+            via_constant.value, "bin",
+            "a constant contributes its value verbatim, so the reference does too"
+        );
+        assert_eq!(
+            via_path.value,
+            dir.path().join("bin").to_string_lossy(),
+            "a bare-relative path var contributes an install-rooted path, so the reference does too"
+        );
+        assert_ne!(
+            via_path.value, via_constant.value,
+            "the same authored value under two types must not resolve to the same bytes"
+        );
+    }
+
+    // ── D8's split at the resolver: assertions on emit only ───────────────────
+
+    /// C-026 (resolver leg) — the emitting entry point asserts a `required`
+    /// path exists; the non-emitting one resolves the identical var without
+    /// the assertion.
+    ///
+    /// Both legs are required. The suppressing leg alone passes if the
+    /// existence check is deleted outright; the asserting leg alone says
+    /// nothing about the split.
+    #[test]
+    fn a_missing_required_path_is_asserted_only_where_the_value_is_emitted() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+        let var = Var::new_path("TOOL_DIR", "${installPath}/absent", /* required = */ true);
+
+        let error = resolver
+            .resolve(&var, &SelfEnvScope::new())
+            .expect_err("an emitted required path must be asserted to exist");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(), PackageError::RequiredPathMissing(_))),
+            "unexpected error: {error}"
+        );
+
+        let entry = resolver
+            .resolve_without_emit_assertions(&var, &SelfEnvScope::new())
+            .expect("a value nobody emits must resolve without the existence assertion")
+            .expect("a path var resolves to an entry");
+        assert!(
+            entry.value.ends_with("absent"),
+            "the value must still resolve, only the assertion is suppressed: {:?}",
+            entry.value
+        );
+    }
+
+    /// C-027 (resolver leg) — a declared-but-uninstalled dependency must not
+    /// turn a working install into exit 79 over a value nobody reads. The
+    /// asserting sibling is `dep_not_installed_returns_error` above, over the
+    /// same fixture shape.
+    #[test]
+    fn an_uninstalled_dependency_is_tolerated_where_the_value_is_not_emitted() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("not-there");
+        let mut ctxs = HashMap::new();
+        ctxs.insert(
+            dep_name("cmake"),
+            DependencyContext::path_only(pinned("cmake"), missing.clone()),
+        );
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let entry = resolver
+            .resolve_without_emit_assertions(
+                &constant_var("X", "${deps.cmake.installPath}/bin"),
+                &SelfEnvScope::new(),
+            )
+            .expect("an uninstalled dependency must not fail a value nobody emits")
+            .expect("a constant var resolves to an entry");
+        assert_eq!(entry.value, format!("{}/bin", missing.to_string_lossy()));
+    }
+
+    /// D8 / OQ-3 — the separator edge is a shape assertion about a
+    /// contribution that joins a fold, and a var nobody emits joins none. The
+    /// asserting sibling is
+    /// `a_value_resolving_to_a_separator_edged_one_is_refused` above, over the
+    /// same fixture.
+    #[test]
+    fn a_separator_edged_resolved_value_is_refused_only_where_it_is_emitted() {
+        let dir = TempDir::new().unwrap();
+        let edged = dir.path().join("opts,");
+        std::fs::create_dir(&edged).unwrap();
+        let mut ctxs = HashMap::new();
+        ctxs.insert(
+            dep_name("tool"),
+            DependencyContext::path_only(pinned("tool"), edged.clone()),
+        );
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let entry = resolver
+            .resolve_without_emit_assertions(
+                &list_var("PARTS", "${deps.tool.installPath}", ","),
+                &SelfEnvScope::new(),
+            )
+            .expect("a value nobody folds must not be checked against the fold's flank rule")
+            .expect("a list var resolves to an entry");
+        assert_eq!(entry.value, edged.to_string_lossy());
+    }
+
+    /// D8 — the split suppresses **assertions**, never **faults**. A package
+    /// whose own metadata cannot resolve is broken regardless of who is
+    /// looking, so an unknown dependency reference still fails here.
+    ///
+    /// Without this leg the three suppression tests above are satisfied by a
+    /// `resolve_without_emit_assertions` that returns `Ok` unconditionally.
+    #[test]
+    fn resolving_without_emit_assertions_still_refuses_a_template_fault() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let error = resolver
+            .resolve_without_emit_assertions(
+                &constant_var("X", "${deps.nonexistent.installPath}"),
+                &SelfEnvScope::new(),
+            )
+            .expect_err("a template fault is not an emit-time assertion");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::UnknownDependencyRef { ref_name, .. }, ..
+                } if ref_name.as_str() == "nonexistent"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The self-env scope reaches the template resolver through the
+    /// non-emitting entry point too — a non-crossing var may itself reference
+    /// an earlier one (D8 resolves the package's *whole* env array).
+    #[test]
+    fn the_self_env_scope_reaches_the_non_emitting_entry_point_as_well() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+
+        let scope = scope_of([Entry {
+            key: "A".to_string(),
+            value: "alpha".to_string(),
+            kind: ModifierKind::Constant,
+            separator: None,
+        }]);
+        let entry = resolver
+            .resolve_without_emit_assertions(&constant_var("B", "${self.env.A}/x"), &scope)
+            .unwrap()
+            .expect("a constant var resolves to an entry");
+        assert_eq!(entry.value, "alpha/x");
     }
 }

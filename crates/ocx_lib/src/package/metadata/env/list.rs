@@ -17,8 +17,8 @@ pub const DEFAULT_SEPARATOR: &str = " ";
 /// variable, with every earlier occurrence of the same contribution removed
 /// first, so re-applying moves the contribution to the back rather than
 /// duplicating it. The consumer resolving duplicates last-wins is what the
-/// direction serves. The `${installPath}` template is replaced with the
-/// package's content directory at resolution time.
+/// direction serves. Interpolation tokens in `value` are replaced at
+/// resolution time.
 ///
 /// The contribution is opaque: ocx never splits it into elements, so a value
 /// carrying the separator is still one contribution.
@@ -41,7 +41,10 @@ pub struct List {
     #[schemars(required)]
     pub separator: Option<String>,
 
-    /// The value template. Use `${installPath}` to reference the package content directory.
+    /// The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's
+    /// content directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the
+    /// resolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to
+    /// pick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.
     pub value: String,
 }
 

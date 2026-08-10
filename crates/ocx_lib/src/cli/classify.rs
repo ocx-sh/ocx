@@ -103,6 +103,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package::error::Error as PackageError;
     use crate::package::libc_lint::LibcLintError;
     use crate::package::metadata::authoring::AuthoringError;
+    use crate::package::metadata::template::TemplateError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::patch::PatchError;
     use crate::project::error::Error as ProjectError;
@@ -162,6 +163,10 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(DependencyPinningError);
     try_downcast!(BinScanError);
     try_downcast!(LibcLintError);
+    // Reached only where a `TemplateError` surfaces bare — `ocx launcher exec`
+    // resolving a baked entrypoint arg. Env-value resolution wraps it in
+    // `PackageError::EnvVarInterpolation`, which delegates to the same impl.
+    try_downcast!(TemplateError);
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
     try_downcast!(SetupError);
@@ -875,6 +880,33 @@ mod tests {
             ExitCode::PolicyBlocked,
             "BinScanError::Scan must delegate classification to its inner crate::Error cause"
         );
+    }
+
+    // ── interpolation template errors ───────────────────────────────────────
+
+    /// A `TemplateError` reaches the classifier bare from one place only:
+    /// `ocx launcher exec` resolving a baked entrypoint arg, where it is
+    /// wrapped in plain `anyhow` context. Env-value resolution instead wraps it
+    /// in `PackageError::EnvVarInterpolation`, whose own `classify()` delegates
+    /// to this same impl — so that path was always correct and this one was
+    /// not, until `TemplateError` joined the ladder. Same defect shape as
+    /// `bin_scan_error_maps_to_data_error` above: a correct `ClassifyExitCode`
+    /// impl the ladder never downcast to, so the ADR's documented 65 came out
+    /// as 1.
+    #[test]
+    fn template_error_maps_to_data_error() {
+        use crate::package::metadata::template::TemplateError;
+
+        let disallowed = TemplateError::DisallowedToken {
+            token: "${deps.cmake.installPath}".to_string(),
+        };
+        assert_eq!(classify(disallowed), ExitCode::DataError);
+
+        let unknown = TemplateError::UnknownToken {
+            token: "${workspaceFolder}".to_string(),
+            hint: crate::package::metadata::template::UnknownTokenHint::Escape,
+        };
+        assert_eq!(classify(unknown), ExitCode::DataError);
     }
 
     // ── announce error classification (design register C13) ─────────────────

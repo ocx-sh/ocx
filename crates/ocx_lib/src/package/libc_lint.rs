@@ -112,7 +112,10 @@ pub fn checks_declared_libc(platform: &Platform) -> bool {
 /// [`LibcLintError::UnrecognizedInterpreter`] /
 /// [`LibcLintError::UnparseableElf`] / [`LibcLintError::Read`] for a file
 /// whose requirement could not be determined (fail-closed — see
-/// [`read_elf_libc`]); [`LibcLintError::Scan`] for a directory-walk failure.
+/// [`read_elf_libc`]); [`LibcLintError::UnresolvableScanScope`] and
+/// [`LibcLintError::ModifierBearingScanScope`] for a `PATH` segment that names
+/// this package and scopes no directory; [`LibcLintError::Scan`] for a
+/// directory-walk failure.
 pub async fn check_declared_libc(
     content_root: &Path,
     metadata: &AuthoringMetadata,
@@ -139,6 +142,13 @@ pub async fn check_declared_libc(
     if !scope.unresolvable.is_empty() {
         return Err(LibcLintError::UnresolvableScanScope {
             values: scope.unresolvable,
+        });
+    }
+    // Same refusal, different cause and therefore a different remedy: the
+    // directory is just as uninspected, but the value's shape is fine.
+    if !scope.modifier_bearing.is_empty() {
+        return Err(LibcLintError::ModifierBearingScanScope {
+            values: scope.modifier_bearing,
         });
     }
 
@@ -186,6 +196,7 @@ pub async fn check_declared_libc(
 }
 
 /// Where the package puts its own content on an interface `PATH`.
+#[derive(Debug)]
 struct ScanScope {
     /// `${installPath}`-relative directories to inspect. Empty means the
     /// package puts nothing of its own on `PATH` — nothing to check.
@@ -193,6 +204,11 @@ struct ScanScope {
     /// Values naming this package's install path in a shape that cannot be
     /// resolved to a directory.
     unresolvable: Vec<String>,
+    /// Values whose *only* obstacle is a render modifier on the install-path
+    /// token. Kept apart from `unresolvable` because the two need different
+    /// remedies: this one has no shape problem at all, and the respelling
+    /// `unresolvable` advises would leave it exactly as unscoped as before.
+    modifier_bearing: Vec<String>,
 }
 
 /// Resolves the lint's scan scope from the metadata alone (no filesystem).
@@ -208,19 +224,17 @@ struct ScanScope {
 /// A `PATH` value is a separator-joined list, so each segment is classified on
 /// its own: `${installPath}/bin:${deps.other.installPath}/bin` contributes
 /// `bin` and ignores the dependency's tree rather than failing whole. Segments
-/// that never name `${installPath}` (`/usr/bin`, a `${deps.*}` tree) are not
-/// this package's to inspect. A bare `${installPath}` is the content root
-/// itself — a legal shape, and one this lint must scan rather than refuse.
+/// that never name this package's install path (`/usr/bin`, a `${deps.*}` tree)
+/// are not this package's to inspect. A bare `${installPath}` is the content
+/// root itself — a legal shape, and one this lint must scan rather than refuse.
 fn resolve_scan_scope(metadata: &AuthoringMetadata) -> ScanScope {
     use crate::package::metadata::env::modifier::Modifier;
-    use crate::package::metadata::template::classify_install_path_rooted_dir;
-    use crate::utility::fs::path::RelativePath;
 
-    const INSTALL_PATH_TOKEN: &str = "${installPath}";
     let AuthoringMetadata::Bundle(bundle) = metadata;
     let mut scope = ScanScope {
         directories: Vec::new(),
         unresolvable: Vec::new(),
+        modifier_bearing: Vec::new(),
     };
     for var in &bundle.env {
         if !var.visibility.has_interface() {
@@ -229,23 +243,169 @@ fn resolve_scan_scope(metadata: &AuthoringMetadata) -> ScanScope {
         let Modifier::Path(path_var) = &var.modifier else {
             continue;
         };
-        // Split on `:` rather than `std::env::split_paths`: the value is
-        // authored for the *target*, and this lint only runs for Linux
-        // targets, so the host's separator is the wrong one to use here.
-        for segment in path_var.value.split(':') {
-            if !segment.contains(INSTALL_PATH_TOKEN) {
-                continue;
-            }
-            if segment == INSTALL_PATH_TOKEN {
-                scope.directories.push(RelativePath::default());
-            } else if let Some(relative) = classify_install_path_rooted_dir(segment) {
-                scope.directories.push(relative);
-            } else {
-                scope.unresolvable.push(segment.to_string());
-            }
+        for segment in path_list_segments(&path_var.value) {
+            classify_path_segment(segment, &mut scope);
         }
     }
     scope
+}
+
+/// Splits a `PATH` value into its separator-joined segments.
+///
+/// Split on `:` rather than `std::env::split_paths`: the value is authored for
+/// the *target*, and this lint only runs for Linux targets, so the host's
+/// separator is the wrong one to use here.
+///
+/// A `:` inside a `${…}` is a render modifier's separator, not a `PATH` one —
+/// `${self.installPath:posix}/bin` is one segment, and a plain `split(':')`
+/// would tear it into `${self.installPath` and `posix}/bin`, neither of which
+/// names this package. That is the fail-open shape the whole lint exists to
+/// avoid. **Which bytes lie inside a `${…}` is
+/// [`crate::package::metadata::template::scanner::scan`]'s answer and never
+/// this module's** (D10): the value is scanned once, and a `:` splits only when
+/// it falls in a [`Segment::Literal`] run. A second rule for `${`/`}` extent
+/// here would be a second recogniser, free to disagree with the one that
+/// decides what actually resolves.
+///
+/// A value the scanner refuses is returned whole, so it reaches
+/// [`classify_path_segment`] as a single unresolvable segment. One
+/// unrecognised token therefore costs the whole value rather than just its own
+/// segment — the fail-closed direction, and the one this lint takes everywhere
+/// else.
+fn path_list_segments(value: &str) -> Vec<&str> {
+    use crate::package::metadata::template::scanner::{Segment, scan};
+
+    let Ok(scanned) = scan(value) else {
+        return vec![value];
+    };
+
+    // Cut on `value` at the offsets the scan reports, so each segment is an
+    // exact subslice of what the publisher wrote — escapes and all — rather
+    // than a re-rendering of it. The offsets are the scanner's own, which is
+    // what makes them right for a fired escape too: that run emits two bytes
+    // out of three, so the pieces' lengths do not sum to the value's and no
+    // cursor kept here could locate them.
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    for piece in &scanned {
+        let Segment::Literal { text, at } = piece else {
+            continue;
+        };
+        for (offset, _) in text.match_indices(':') {
+            let split = at + offset;
+            segments.push(&value[start..split]);
+            start = split + 1;
+        }
+    }
+
+    segments.push(&value[start..]);
+    segments
+}
+
+/// Folds one `PATH` segment into `scope`.
+///
+/// Recognition is [`crate::package::metadata::template::scanner::scan`]'s, not
+/// a substring test: `${installPath}` and `${self.installPath}` are the same
+/// referent (D4), so a textual `contains("${installPath}")` both missed the
+/// alias and matched the escaped `$${installPath}` that renders as literal
+/// text.
+///
+/// Four outcomes, one scan:
+///
+/// - A lone modifier-free install-path token — the content root itself — pushes
+///   [`crate::utility::fs::path::RelativePath::default`] onto `directories`.
+/// - An install-path-rooted directory (via
+///   [`crate::package::metadata::template::classify_install_path_rooted_dir`])
+///   pushes that relative directory.
+/// - A segment whose only obstacle is a render modifier on the install-path
+///   token — `${self.installPath:posix}/bin` — goes to `modifier_bearing`,
+///   decided by [`modifier_is_the_only_obstacle`] over the pieces already
+///   scanned. It scopes no directory either, and is refused just as hard; it is
+///   held apart because the remedy differs, and telling a publisher with a
+///   legal, publish-validated value to respell it would be advice they cannot
+///   act on.
+/// - A segment that names the install path in any other shape — a combined
+///   value, an escaping `<rel>` — goes to `unresolvable`, and so does a segment
+///   whose scan **errors**. That last branch is defensive at the only call site
+///   there is: `ocx package create` runs `validate_for_publish` — which scans
+///   every env value — before [`check_declared_libc`], deliberately, so that a
+///   misspelt token is named as a misspelt token. A value reaching here has
+///   therefore already scanned clean. It is kept because the ordering is
+///   another module's, and because the alternative to recording an unscannable
+///   segment is dropping it.
+/// - A segment naming no install-path token at all contributes nothing.
+fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
+    use crate::package::metadata::template::classify_install_path_rooted_dir;
+    use crate::package::metadata::template::scanner::{Segment, TokenShape, scan};
+    use crate::utility::fs::path::RelativePath;
+
+    let Ok(scanned) = scan(segment) else {
+        scope.unresolvable.push(segment.to_string());
+        return;
+    };
+
+    let names_install_path = scanned
+        .iter()
+        .any(|piece| matches!(piece, Segment::Token(token) if token.shape == TokenShape::InstallPath));
+    if !names_install_path {
+        return;
+    }
+
+    // A lone modifier-free token is the content root itself — a legal shape,
+    // and one this lint must scan rather than refuse or drop.
+    if let [Segment::Token(token)] = scanned.as_slice()
+        && token.modifier.is_none()
+    {
+        scope.directories.push(RelativePath::default());
+        return;
+    }
+
+    if let Some(directory) = classify_install_path_rooted_dir(segment) {
+        scope.directories.push(directory);
+        return;
+    }
+
+    // Names this package and still will not resolve: recorded, never dropped.
+    // Leaving a directory uninspected while reporting success is the failure
+    // mode the whole lint exists to avoid. Which list it lands in decides which
+    // remedy the publisher is handed, and a render modifier — the one obstacle
+    // a value with no shape problem can have — needs a different one.
+    if modifier_is_the_only_obstacle(&scanned) {
+        scope.modifier_bearing.push(segment.to_string());
+    } else {
+        scope.unresolvable.push(segment.to_string());
+    }
+}
+
+/// Whether the only thing keeping an already-scanned segment from classifying
+/// to a directory is a render modifier on its install-path token.
+///
+/// Decided over the segments the caller already scanned: re-reading the text
+/// here would be a second recogniser, free to disagree with the one that
+/// classified it. The two shapes accepted below mirror the two that resolve —
+/// [`crate::package::metadata::template::classify_install_path_rooted_dir`]'s
+/// `[token][/<rel>]`, and [`classify_path_segment`]'s lone-token content root —
+/// with `modifier.is_none()` inverted: drop the modifier and each would scope a
+/// directory. Everything else (an escaping `<rel>`, a combined value, a second
+/// token) is a shape problem the modifier is not to blame for.
+fn modifier_is_the_only_obstacle(scanned: &[crate::package::metadata::template::scanner::Segment<'_>]) -> bool {
+    use crate::package::metadata::template::scanner::{Segment, TokenShape};
+    use crate::utility::fs::path::RelativePath;
+
+    let (token, rest) = match scanned {
+        [Segment::Token(token)] => (token, None),
+        [Segment::Token(token), Segment::Literal { text: rest, .. }] => (token, Some(*rest)),
+        _ => return false,
+    };
+
+    if token.shape != TokenShape::InstallPath || token.modifier.is_none() {
+        return false;
+    }
+
+    rest.is_none_or(|rest| {
+        rest.strip_prefix('/')
+            .is_some_and(|relative| RelativePath::parse(relative).is_ok())
+    })
 }
 
 /// Every regular file under `directories`, resolved against the wildcard top
@@ -351,7 +511,7 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
     // `open_stream` seeks from the start itself, so the four bytes consumed
     // by the magic probe above do not need rewinding.
     let mut object = elf::ElfStream::<elf::endian::AnyEndian, _>::open_stream(file).map_err(unparseable)?;
-    let Some(interp) = object
+    let Some(interpreter_header) = object
         .segments()
         .iter()
         .find(|header| header.p_type == elf::abi::PT_INTERP)
@@ -360,7 +520,7 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
         return Ok(ElfLibc::Static);
     };
 
-    let raw = object.segment_data(&interp).map_err(unparseable)?;
+    let raw = object.segment_data(&interpreter_header).map_err(unparseable)?;
     // The interpreter is a NUL-terminated string filling the segment.
     let interpreter = raw.split(|&byte| byte == 0).next().unwrap_or_default();
     let interpreter = String::from_utf8_lossy(interpreter).into_owned();
@@ -496,11 +656,31 @@ pub enum LibcLintError {
     /// never inspected.
     #[error(
         "cannot resolve which directory {} names, so its files could not be checked against the \
-         declared os.features; write it as `${{installPath}}` or `${{installPath}}/<dir>`",
+         declared os.features; write it as `${{self.installPath}}` or \
+         `${{self.installPath}}/<dir>`",
         values.join(", ")
     )]
     UnresolvableScanScope {
         /// The unresolvable `PATH` segments.
+        values: Vec<String>,
+    },
+    /// A `PATH` segment names this package's install path through a
+    /// modifier-bearing token, which scopes no directory — so that directory's
+    /// files were never inspected.
+    ///
+    /// Sibling of [`LibcLintError::UnresolvableScanScope`], separate because
+    /// the value has no shape problem: `${self.installPath:posix}/bin` is legal
+    /// and publish-validated, and the respelling that message advises would
+    /// leave it just as unscoped. Naming the modifier is what lets the
+    /// publisher act.
+    #[error(
+        "a render modifier leaves {} unscoped, so its files could not be checked against the \
+         declared os.features; write the install-path token without one — `${{self.installPath}}` \
+         or `${{self.installPath}}/<dir>`",
+        values.join(", ")
+    )]
+    ModifierBearingScanScope {
+        /// The modifier-bearing `PATH` segments.
         values: Vec<String>,
     },
     /// Walking the content tree for candidate files failed.
@@ -522,7 +702,8 @@ impl crate::cli::ClassifyExitCode for LibcLintError {
             | Self::AgnosticPlatformClaim { .. }
             | Self::UnparseableElf { .. }
             | Self::UnrecognizedInterpreter { .. }
-            | Self::UnresolvableScanScope { .. } => Some(crate::cli::ExitCode::DataError),
+            | Self::UnresolvableScanScope { .. }
+            | Self::ModifierBearingScanScope { .. } => Some(crate::cli::ExitCode::DataError),
             // A file we could not read is an I/O fault, not bad data.
             Self::Read { .. } => Some(crate::cli::ExitCode::IoError),
             // Delegate to the inner cause via the chain walker.
@@ -601,6 +782,197 @@ mod tests {
             let platform: Platform = spec.parse().expect("parses");
             assert!(!checks_declared_libc(&platform), "{spec} must be out of scope");
         }
+    }
+
+    // ── Scan scope (D10 / C-011) ─────────────────────────────────────────
+
+    /// Authoring metadata carrying exactly one interface `PATH` var, so a scope
+    /// assertion is about the segment classifier and nothing else.
+    fn path_var_metadata(value: &str) -> AuthoringMetadata {
+        serde_json::from_str(&format!(
+            r#"{{"type":"bundle","version":1,"env":[{{"key":"PATH","type":"path","value":"{value}","required":false,"visibility":"interface"}}]}}"#
+        ))
+        .expect("fixture metadata parses")
+    }
+
+    /// `(directories, unresolvable)` for a package whose interface `PATH` is
+    /// `value`. Asserting on the scope *value* rather than on
+    /// `check_declared_libc` returning `Ok` is the discriminating form: a
+    /// correctly-scoped, correctly-declared package and a scope that was never
+    /// resolved both produce "no error".
+    fn scope_of(value: &str) -> (Vec<PathBuf>, Vec<String>) {
+        let scope = resolve_scan_scope(&path_var_metadata(value));
+        (
+            scope
+                .directories
+                .iter()
+                .map(|relative| relative.as_path().to_path_buf())
+                .collect(),
+            scope.unresolvable,
+        )
+    }
+
+    /// C-011 — the scan scope is the same for both spellings of the install
+    /// path, because they are the same referent (D4).
+    ///
+    /// The hazard this closes is fail-open and silent: the recogniser it
+    /// replaces is `segment.contains("${installPath}")`, and `${installPath}` is
+    /// not a substring of `${self.installPath}`, so every segment was skipped,
+    /// the scope came out **empty**, and nothing landed in `unresolvable`
+    /// either. Per the `ScanScope` contract an empty scope means "the package
+    /// puts nothing of its own on `PATH` — nothing to check", so the lint passed
+    /// vacuously and a glibc/musl mismatch would have shipped unnoticed. Both
+    /// halves of the tuple are therefore asserted: an implementation that
+    /// recorded the alias as unresolvable would refuse the package instead, and
+    /// that is a different wrong answer.
+    #[test]
+    fn the_scan_scope_treats_the_self_alias_like_the_bare_install_path_token() {
+        let bare = scope_of("${installPath}/bin");
+        assert_eq!(
+            bare,
+            (vec![PathBuf::from("bin")], Vec::<String>::new()),
+            "the bare spelling scopes to bin with nothing unresolvable"
+        );
+        assert_eq!(
+            scope_of("${self.installPath}/bin"),
+            bare,
+            "the alias must produce an identical scope, not an empty one"
+        );
+    }
+
+    /// C-011 — a `:`-joined value is classified segment by segment: this
+    /// package's directory is scanned, a dependency's tree is not this
+    /// package's to inspect, and neither outcome is `unresolvable`.
+    #[test]
+    fn the_scan_scope_ignores_a_dependency_segment_in_a_joined_path_value() {
+        assert_eq!(
+            scope_of("${self.installPath}/bin:${deps.other.installPath}/bin"),
+            (vec![PathBuf::from("bin")], Vec::<String>::new())
+        );
+    }
+
+    /// A bare install-path token is the content root itself — a legal shape,
+    /// and one the lint must scan rather than refuse or drop.
+    #[test]
+    fn the_scan_scope_reads_a_bare_install_path_token_as_the_content_root() {
+        assert_eq!(
+            scope_of("${self.installPath}"),
+            (vec![PathBuf::from("")], Vec::<String>::new())
+        );
+    }
+
+    /// A shape that names this package's install path and still will not
+    /// resolve is recorded, not dropped: leaving a directory uninspected while
+    /// reporting success is the failure mode the whole lint exists to avoid.
+    ///
+    /// A render modifier is recorded on its own list rather than among the
+    /// unresolvable shapes — the value has no shape problem, and the two lists
+    /// carry different remedies. Both are asserted: an implementation that
+    /// simply stopped recording the modifier case would empty `unresolvable`
+    /// too, and that is the silent drop this contract forbids.
+    #[test]
+    fn the_scan_scope_records_an_install_path_shape_it_cannot_resolve() {
+        let scope = resolve_scan_scope(&path_var_metadata("${self.installPath:posix}/bin"));
+        assert!(scope.directories.is_empty(), "a modifier-bearing token scopes nothing");
+        assert_eq!(
+            scope.modifier_bearing,
+            vec!["${self.installPath:posix}/bin".to_string()],
+            "the segment must be recorded, and as the modifier case it is"
+        );
+        assert!(
+            scope.unresolvable.is_empty(),
+            "the value's shape is fine, so it is not an unresolvable shape"
+        );
+    }
+
+    /// A `:` splits only where the scanner puts it outside a `${…}`, and the
+    /// segments it produces are exact subslices of what the publisher wrote —
+    /// escapes included. `$${installPath}` is literal text and names no token,
+    /// so it scopes nothing; a split that handed on the *rendered* segment
+    /// would hand on `${installPath}/bin` and scope a directory the package
+    /// never put on `PATH`.
+    #[test]
+    fn the_scan_scope_splits_around_an_escaped_delimiter_without_unescaping_it() {
+        assert_eq!(
+            scope_of("$${installPath}/bin:${self.installPath}/lib"),
+            (vec![PathBuf::from("lib")], Vec::<String>::new()),
+            "only the real token scopes; the escaped one is text on both sides of the split"
+        );
+    }
+
+    /// A segment naming no install-path token at all contributes nothing — not
+    /// a directory, and not an `unresolvable` entry. Without this leg the
+    /// contract above cannot tell "recorded because it names us" from "records
+    /// everything".
+    #[test]
+    fn the_scan_scope_ignores_a_segment_that_never_names_this_package() {
+        assert_eq!(
+            scope_of("/usr/bin"),
+            (Vec::<PathBuf>::new(), Vec::<String>::new()),
+            "a foreign absolute path is not this package's to inspect"
+        );
+    }
+
+    // ── Scan-scope refusal messages ──────────────────────────────────────
+
+    /// `${self.installPath:posix}/bin` on a Linux target is a legal,
+    /// publish-validated `PATH` value, and the lint still refuses it —
+    /// correctly, because a modifier-bearing token classifies to no directory
+    /// and reporting "libc verified" over a directory nobody opened is the
+    /// failure this lint exists to prevent. What is wrong is the *message*: the
+    /// publisher is told OCX "cannot resolve which directory this names" and is
+    /// pointed at a respelling, for a value with no shape problem at all. The
+    /// cause is the render modifier, and only naming it lets them act.
+    ///
+    /// Both legs are required. `UnresolvableScanScope` folds several causes into
+    /// one message, so an implementation that blamed the render modifier for
+    /// *every* unresolvable segment would satisfy the first leg while telling a
+    /// root-escaping value something simply untrue.
+    #[tokio::test]
+    async fn a_modifier_bearing_path_segment_is_refused_for_its_modifier_not_as_an_unresolvable_shape() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let linux: Platform = "linux/amd64".parse().expect("platform spec parses");
+        // The scope refusal fires before any candidate file is read, so the two
+        // legs differ only in the `PATH` value under test.
+        let content_root = std::path::Path::new("content-root-never-read");
+
+        let modifier = check_declared_libc(
+            content_root,
+            &path_var_metadata("${self.installPath:posix}/bin"),
+            &linux,
+        )
+        .await
+        .expect_err("a segment that classifies to no directory must still be refused, not scanned past");
+        let modifier_message = modifier.to_string();
+
+        assert!(
+            modifier_message.contains("${self.installPath:posix}/bin"),
+            "the offending value must be named verbatim: {modifier_message}"
+        );
+        assert!(
+            modifier_message.contains("render modifier"),
+            "the publisher must be told the render modifier is what leaves the directory unscoped, \
+             not that OCX cannot work out what their value names: {modifier_message}"
+        );
+        assert_eq!(
+            modifier.classify(),
+            Some(ExitCode::DataError),
+            "a refused publish stays 65; only the message changes"
+        );
+
+        let shape = check_declared_libc(content_root, &path_var_metadata("${installPath}/../etc"), &linux)
+            .await
+            .expect_err("a root-escaping segment must still be refused")
+            .to_string();
+        assert!(
+            shape.contains("${installPath}/../etc"),
+            "the offending value must be named verbatim here too: {shape}"
+        );
+        assert!(
+            !shape.contains("render modifier"),
+            "a value carrying no modifier must not be blamed on one: {shape}"
+        );
     }
 
     // ── Declared-feature decoding ────────────────────────────────────────

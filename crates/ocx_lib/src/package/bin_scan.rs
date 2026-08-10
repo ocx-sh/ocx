@@ -29,9 +29,15 @@ use crate::utility::fs::{DirWalker, WalkDecision};
 pub const BIN_SCAN_WINDOWS_EXTENSIONS: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
 
 /// Scans `content_root` for interface-surface executables declared reachable
-/// via `metadata`'s `${installPath}`-rooted, interface-visible `Path` env
-/// vars, for `platform`'s executable-file convention (Unix exec-bit vs.
-/// Windows extension allowlist).
+/// via `metadata`'s install-path-rooted, interface-visible `Path` env vars, for
+/// `platform`'s executable-file convention (Unix exec-bit vs. Windows extension
+/// allowlist).
+///
+/// "Install-path-rooted" is
+/// [`crate::package::metadata::template::classify_install_path_rooted_dir`]'s
+/// judgement, so `${self.installPath}/bin` is the same scan target as
+/// `${installPath}/bin` (D4) — the two are one referent, not two spellings a
+/// scan may treat differently.
 ///
 /// Returns the plain union of discovered names — **not** yet a validated
 /// [`crate::package::metadata::Binaries`] collection; case-fold-collision

@@ -3096,6 +3096,7 @@ dependencies = [
  "starlark_derive",
  "starlark_map",
  "starlark_syntax",
+ "strsim 0.11.1",
  "symlink",
  "sysinfo",
  "tar",
