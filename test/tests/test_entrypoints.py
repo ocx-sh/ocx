@@ -1041,3 +1041,64 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
         "install must succeed (no collision in interface surface); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Interpolation capability gate — `adr_interpolation_token_grammar.md` C-028
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher invocation test")
+def test_self_env_token_in_baked_args_is_refused_at_runtime(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`${self.env.X}` in an entrypoint `args` element is refused when the
+    launcher runs, and refused as a *capability* fault (C-028).
+
+    Entrypoint args carry no env scope, so `${self.env.*}` and `${deps.*}` are
+    not merely unsatisfiable there — they are not permitted at all. The
+    publish gate refuses such a document, so the runtime leg is reached only
+    through an already-installed package whose `metadata.json` is rewritten in
+    place, the way `test_deps_interpolation.py` reaches its own runtime legs.
+
+    The exit code alone would not separate the outcomes. An implementation
+    that resolved args against an (empty) env scope instead of gating on the
+    capability set also fails — as `UndefinedSelfEnvRef`, naming a missing
+    variable and inviting the publisher to declare one, when the repair is to
+    stop using the token here at all. So the assertion is on the error
+    identity, and rules that wrong-but-also-failing outcome out by name.
+
+    The exit code is 65, the same `DataError` every other interpolation
+    refusal uses. The baked-arg path wraps its `TemplateError` in bare
+    `anyhow` context, so this leg reaches 65 only because `TemplateError` is
+    registered in `classify.rs`'s downcast ladder — before that it exited 1,
+    contradicting the ADR's own error-taxonomy table.
+    """
+    pkg = make_package_with_entrypoints(
+        ocx, unique_repo, tmp_path, entrypoints={"hello": {}}, bins=["hello"],
+    )
+    ocx.plain("package", "install", "--select", pkg.short)
+
+    package_root = Path(ocx.json("package", "which", pkg.short)[pkg.short])
+    metadata_path = package_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["entrypoints"] = {"hello": {"args": ["${self.env.TOOL_HOME}"]}}
+    metadata_path.write_text(json.dumps(metadata))
+
+    result = ocx.run("launcher", "exec", str(package_root), "--", "hello", check=False, format=None)
+
+    assert result.returncode == 65, (
+        f"a disallowed token in baked args must refuse the launch as a data error (65); "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert pkg.marker not in result.stdout, (
+        f"the entrypoint must not have run; stdout:\n{result.stdout}"
+    )
+    assert "token '${self.env.TOOL_HOME}' is not permitted here" in result.stderr, (
+        f"the refusal must be the capability gate (DisallowedToken), naming the token; "
+        f"stderr:\n{result.stderr}"
+    )
+    assert "undefined env var" not in result.stderr, (
+        f"an UndefinedSelfEnvRef here would mean args were resolved against an empty env "
+        f"scope instead of gated on the capability set; stderr:\n{result.stderr}"
+    )

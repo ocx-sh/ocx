@@ -10,15 +10,25 @@ Do NOT assert old 'shell env no-download' semantics against ``package env``.
 """
 from __future__ import annotations
 
+import io
+import json
 import subprocess
+import tarfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, PackageInfo, registry_dir
-from src.helpers import make_package
-from src.registry import fetch_platform_manifest_digest
+from src.helpers import make_package, resolved_metadata_path
+from src.registry import fetch_platform_manifest_digest, push_raw_package
+from src.runner import current_platform
 
 # Exit code for deleted commands
 EXIT_USAGE = 64
+# DataError (sysexits EX_DATAERR) — every interpolation refusal classifies here.
+EXIT_DATA_ERR = 65
 
 
 def test_env_path_contains_bin(
@@ -394,3 +404,444 @@ def test_package_tier_env_flag_rejects_reserved_and_bad_type(
                 f"--env {argument} on `ocx {' '.join(command[:2])}` must exit "
                 f"{EXIT_USAGE}; got {result.returncode}\nstderr:\n{result.stderr}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Interpolation token grammar — `adr_interpolation_token_grammar.md`
+#
+# OCX claims every `${…}` (D3), so a token it does not recognise is an
+# expansion error rather than text passed through. D14 decides *when* that
+# error fires: reading a package never refuses, running or publishing one
+# does. The legs below assert both halves against ONE document — a read-only
+# leg with no failing sibling proves nothing, and a leg that only ever fails
+# is indistinguishable from one that always fails.
+#
+# `ocx env` / `ocx exec` / `ocx install` in the ADR's prose are the OCI-tier
+# spellings `ocx package env` / `package exec` / `package install`: the root
+# forms either take no package (toolchain tier) or no longer exist.
+# ---------------------------------------------------------------------------
+
+# Stands in for "a token published by a newer ocx than this one". OCX has no
+# `workspaceFolder` root and never will — it is VS Code's — so it can never
+# drift into the recognised set and quietly stop exercising the unknown path.
+UNRECOGNISED_TOKEN = "${workspaceFolder}"
+
+
+def _token_document() -> dict:
+    """The one metadata document every D14 leg is asserted against.
+
+    Its single env value carries an unescaped `${workspaceFolder}`. Published
+    it is unrunnable but readable (C-036, C-038); authored it is refused
+    outright (C-037).
+    """
+    return {
+        "type": "bundle",
+        "version": 1,
+        "env": [
+            {
+                "key": "EDITOR_ROOT",
+                "type": "constant",
+                "value": UNRECOGNISED_TOKEN,
+                "visibility": "public",
+            }
+        ],
+    }
+
+
+def _list_tags(registry: str, repo: str) -> set[str]:
+    """Tags the registry holds for ``repo`` — empty when it was never created."""
+    try:
+        with urllib.request.urlopen(f"http://{registry}/v2/{repo}/tags/list", timeout=5) as response:
+            return set(json.loads(response.read()).get("tags") or [])
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return set()
+        raise
+
+
+def _content_tree(tmp_path: Path) -> Path:
+    """A minimal bundleable content tree (one executable under ``bin/``)."""
+    pkg_dir = tmp_path / "token-pkg"
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    script = bin_dir / "app"
+    script.write_text("#!/bin/sh\necho app\n")
+    script.chmod(0o755)
+    return pkg_dir
+
+
+@pytest.fixture
+def published_token_package(ocx: OcxRunner, unique_repo: str) -> str:
+    """Publish `_token_document()` bypassing ocx's own publish gate.
+
+    `ocx package create` / `push` refuse this document (that refusal is
+    C-037's subject), so the fixture writes the wire shape directly — the
+    house pattern `test_metadata_forward_compat.py` uses for metadata a live
+    gate rejects. That is exactly the situation D14 exists for: an artifact
+    minted by an ocx that knew a token this one does not.
+    """
+    layer_buffer = io.BytesIO()
+    with tarfile.open(fileobj=layer_buffer, mode="w:xz") as tar:
+        body = b"#!/bin/sh\necho app\n"
+        info = tarfile.TarInfo(name="bin/app")
+        info.size = len(body)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(body))
+
+    os_name, architecture = current_platform().split("/")
+    push_raw_package(
+        ocx.registry,
+        unique_repo,
+        "1.0.0",
+        _token_document(),
+        layer_buffer.getvalue(),
+        platform=(os_name, architecture),
+    )
+    ocx.plain("index", "update", f"{unique_repo}:1.0.0")
+    return f"{unique_repo}:1.0.0"
+
+
+def test_unrecognised_token_installs_and_inspects_but_refuses_to_compose(
+    ocx: OcxRunner, published_token_package: str
+) -> None:
+    """Looking at a package never becomes impossible because it is too new;
+    running it does (D14, C-036 + C-038, S-026).
+
+    Three legs, one document:
+
+    - `package pull` / `package install` succeed — the token check is off the
+      ingress path, so the object lands on disk (C-038). Without this the
+      read-only leg below would have nothing to read.
+    - `package inspect --resolve` succeeds and echoes the value byte-for-byte
+      (C-036, read side).
+    - `package env` / `package exec` fail with exit 65 naming the token
+      (C-036, run side).
+
+    C-036 also names `ocx package info` on the read side; it is deliberately
+    not asserted here, because no state of this package can make it fail.
+    `package info` reads only the `__ocx.desc` tag and never the metadata, so
+    it exits 0 even for a package that does not exist, and its JSON key is the
+    CLI argument echoed back — both halves of a `rc == 0 and short in output`
+    check hold on every successful invocation regardless. `inspect` is the
+    falsifiable half of the read-side promise, and it is the one asserted.
+    """
+    short = published_token_package
+
+    for read_write in (("package", "pull", short), ("package", "install", short)):
+        result = ocx.run(*read_write, check=False, format=None)
+        assert result.returncode == 0, (
+            f"`ocx {' '.join(read_write)}` must succeed on a package carrying an "
+            f"unrecognised token; got rc={result.returncode}\nstderr:\n{result.stderr}"
+        )
+
+    inspected = ocx.json("package", "inspect", "--resolve", short)
+    values = [entry["value"] for entry in inspected["packages"][0]["metadata"]["env"]]
+    assert values == [UNRECOGNISED_TOKEN], (
+        f"`ocx package inspect` must echo the declared value verbatim — no expansion, "
+        f"no elision; got {values!r}"
+    )
+
+    for composing in (("package", "env", short), ("package", "exec", short, "--", "app")):
+        result = ocx.run(*composing, check=False, format=None)
+        assert result.returncode == EXIT_DATA_ERR, (
+            f"`ocx {' '.join(composing)}` must refuse the unrecognised token with exit "
+            f"{EXIT_DATA_ERR}; got rc={result.returncode}\nstderr:\n{result.stderr}"
+        )
+        assert UNRECOGNISED_TOKEN in result.stderr, (
+            f"the refusal must name the offending token; stderr:\n{result.stderr}"
+        )
+
+
+def test_unrecognised_token_is_refused_before_anything_reaches_the_registry(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx package create` and `ocx package push` refuse the same document
+    the read path tolerates, exit 65, and leave the registry untouched
+    (C-037, S-003, S-027).
+
+    The refusal is the explicit publish gate, not `ValidMetadata::try_from` —
+    which D14 moved off every ingress path, so a gate that was silently
+    dropped would let this document reach a registry and strand every
+    consumer of it.
+
+    `push` is exercised against a sidecar `ocx package create` itself wrote
+    (from a clean document) with only the env value swapped, so the push is
+    rejected for the token and not for a hand-written metadata file the
+    command would refuse anyway.
+    """
+    content = _content_tree(tmp_path)
+    platform = current_platform()
+
+    authored = tmp_path / "authored-metadata.json"
+    authored.write_text(json.dumps(_token_document()))
+    refused_bundle = tmp_path / "refused.tar.xz"
+    created = ocx.run(
+        "package", "create",
+        "-m", str(authored),
+        "-o", str(refused_bundle),
+        "-p", platform,
+        str(content),
+        check=False,
+        format=None,
+    )
+    assert created.returncode == EXIT_DATA_ERR, (
+        f"`ocx package create` must refuse an unrecognised token with exit {EXIT_DATA_ERR}; "
+        f"got rc={created.returncode}\nstderr:\n{created.stderr}"
+    )
+    assert UNRECOGNISED_TOKEN in created.stderr, (
+        f"the refusal must name the offending token; stderr:\n{created.stderr}"
+    )
+    assert not refused_bundle.exists(), (
+        f"a refused `package create` must leave no bundle behind: {refused_bundle}"
+    )
+
+    clean = _token_document()
+    clean["env"][0]["value"] = "no-token-here"
+    clean_path = tmp_path / "clean-metadata.json"
+    clean_path.write_text(json.dumps(clean))
+    bundle = tmp_path / "clean.tar.xz"
+    ocx.plain(
+        "package", "create", "-m", str(clean_path), "-o", str(bundle), "-p", platform, str(content)
+    )
+    sidecar = resolved_metadata_path(bundle)
+    sidecar_document = json.loads(sidecar.read_text())
+    sidecar_document["env"][0]["value"] = UNRECOGNISED_TOKEN
+    sidecar.write_text(json.dumps(sidecar_document))
+
+    repository = f"{unique_repo}_publish_gate"
+    pushed = ocx.run(
+        "package", "push",
+        "-p", platform,
+        "-m", str(sidecar),
+        "-n", "--cascade",
+        "-i", f"{ocx.registry}/{repository}:1.0.0",
+        str(bundle),
+        check=False,
+        format=None,
+    )
+    assert pushed.returncode == EXIT_DATA_ERR, (
+        f"`ocx package push` must refuse an unrecognised token with exit {EXIT_DATA_ERR}; "
+        f"got rc={pushed.returncode}\nstderr:\n{pushed.stderr}"
+    )
+    assert UNRECOGNISED_TOKEN in pushed.stderr, (
+        f"the refusal must name the offending token; stderr:\n{pushed.stderr}"
+    )
+    assert _list_tags(ocx.registry, repository) == set(), (
+        f"a refused push must publish nothing; registry holds "
+        f"{_list_tags(ocx.registry, repository)} under {repository}"
+    )
+
+
+def test_unrecognised_token_in_a_path_var_is_named_before_the_libc_lint_runs(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The publish gate runs ahead of the libc lint, so a misspelt token in a
+    `PATH` value is reported as a misspelt token (`package_create.rs`).
+
+    The refusal above uses a `constant` var, which leaves the lint's scan scope
+    empty — its ordering is unobservable there, and moving the gate below the
+    lint keeps both the exit code and the stderr identical. An **interface**
+    `Path` var is the shape that discriminates: the lint resolves its scan
+    scope out of that same value, an unrecognised token is not a directory it
+    can name, and it lands on `unresolvable`. Both orders exit 65 and both name
+    the offending text, so the assertion that carries the contract is the
+    *absence* of the scan-scope complaint.
+
+    `linux/amd64` explicitly rather than the host platform: the lint is scoped
+    to Linux and `any`, so on a macOS or Windows runner it would early-return
+    and the leg would assert nothing.
+    """
+    content = _content_tree(tmp_path)
+    document = {
+        "type": "bundle",
+        "version": 1,
+        "env": [
+            {
+                "key": "PATH",
+                "type": "path",
+                "value": f"{UNRECOGNISED_TOKEN}/bin",
+                "visibility": "interface",
+            }
+        ],
+    }
+    authored = tmp_path / "path-var-metadata.json"
+    authored.write_text(json.dumps(document))
+    bundle = tmp_path / f"{unique_repo}-path-var.tar.xz"
+
+    created = ocx.run(
+        "package", "create",
+        "-m", str(authored),
+        "-o", str(bundle),
+        "-p", "linux/amd64",
+        str(content),
+        check=False,
+        format=None,
+    )
+
+    assert created.returncode == EXIT_DATA_ERR, (
+        f"`ocx package create` must refuse the token with exit {EXIT_DATA_ERR}; "
+        f"got rc={created.returncode}\nstderr:\n{created.stderr}"
+    )
+    assert UNRECOGNISED_TOKEN in created.stderr, (
+        f"the refusal must name the offending token; stderr:\n{created.stderr}"
+    )
+    assert "cannot resolve which directory" not in created.stderr, (
+        "the publish gate must speak first: a misspelt token reported as an unresolvable "
+        f"scan scope sends the publisher to fix the wrong thing\nstderr:\n{created.stderr}"
+    )
+    assert not bundle.exists(), (
+        f"a refused `package create` must leave no bundle behind: {bundle}"
+    )
+
+
+def test_self_env_reference_resolves_identically_on_both_surfaces(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`${self.env.KEY}` reads the declaring package's own env, so the value a
+    consumer sees never depends on which surface was asked for (C-024).
+
+    The dependency declares a **private** `SEED` and an **interface**
+    `DERIVED = ${self.env.SEED}`. On a dependency edge a carrier crosses on
+    `has_interface()` regardless of the surface, so `DERIVED` crosses both and
+    `SEED` crosses neither — the two runs then differ only in the surface
+    asked for, which is what the contract is about. (At the root the same
+    fixture would collapse: an interface carrier does not cross the private
+    surface at all, leaving nothing to compare.)
+
+    Equality alone is not the check. An implementation resolving
+    `${self.env.SEED}` to the empty string on *both* surfaces satisfies it
+    perfectly, so the agreed value is also asserted literally against `SEED`'s
+    own declared value. The root's private `APP_PRIVATE` is the discriminator
+    that the two invocations really selected different surfaces rather than
+    running the same one twice.
+    """
+    seed_value = "seed-value-from-the-dependency"
+    dependency = make_package(
+        ocx,
+        f"{unique_repo}_dep",
+        "1.0.0",
+        tmp_path,
+        env=[
+            {"key": "SEED", "type": "constant", "value": seed_value, "visibility": "private"},
+            {
+                "key": "DERIVED",
+                "type": "constant",
+                "value": "${self.env.SEED}",
+                "visibility": "interface",
+            },
+        ],
+    )
+    digest = fetch_platform_manifest_digest(ocx.registry, dependency.repo, dependency.tag)
+    application = make_package(
+        ocx,
+        f"{unique_repo}_app",
+        "1.0.0",
+        tmp_path,
+        env=[
+            {
+                "key": "APP_PRIVATE",
+                "type": "constant",
+                "value": "app-private",
+                "visibility": "private",
+            }
+        ],
+        dependencies=[{"identifier": f"{dependency.fq}@{digest}", "visibility": "public"}],
+    )
+    ocx.plain("package", "install", application.short)
+
+    surfaces = {}
+    for flags in ((), ("--self",)):
+        report = ocx.json("package", "env", *flags, application.short)
+        surfaces[flags] = {entry["key"]: entry["value"] for entry in report["entries"]}
+
+    consumer, private = surfaces[()], surfaces[("--self",)]
+    assert "APP_PRIVATE" not in consumer and private.get("APP_PRIVATE") == "app-private", (
+        f"the two runs must select different surfaces, or their agreement proves nothing; "
+        f"consumer={consumer}, private={private}"
+    )
+    assert consumer.get("DERIVED") == private.get("DERIVED"), (
+        f"`${{self.env.SEED}}` must resolve identically on both surfaces; "
+        f"consumer={consumer.get('DERIVED')!r}, private={private.get('DERIVED')!r}"
+    )
+    assert consumer.get("DERIVED") == seed_value, (
+        f"the agreed value must be SEED's own resolved value, not a uniformly degenerate "
+        f"one; got {consumer.get('DERIVED')!r}, expected {seed_value!r}"
+    )
+
+
+def test_self_install_path_alias_resolves_like_the_bare_spelling(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`${self.installPath}` publishes and composes exactly like the bare
+    `${installPath}` it aliases (S-001).
+
+    Both spellings sit in the same document, so the assertion is an equality
+    between two values the same command resolved — a resolver that quietly
+    dropped the alias would leave the two apart.
+    """
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        env=[
+            {
+                "key": "ALIAS_BIN",
+                "type": "constant",
+                "value": "${self.installPath}/bin",
+                "visibility": "public",
+            },
+            {
+                "key": "BARE_BIN",
+                "type": "constant",
+                "value": "${installPath}/bin",
+                "visibility": "public",
+            },
+        ],
+    )
+    ocx.plain("package", "install", pkg.short)
+
+    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["entries"]}
+    assert values["ALIAS_BIN"] == values["BARE_BIN"], (
+        f"`${{self.installPath}}` must resolve identically to `${{installPath}}`; got "
+        f"{values['ALIAS_BIN']!r} vs {values['BARE_BIN']!r}"
+    )
+    assert values["BARE_BIN"].endswith("bin") and "${" not in values["BARE_BIN"], (
+        f"both spellings must have expanded to the content tree; got {values['BARE_BIN']!r}"
+    )
+
+
+def test_escaped_token_publishes_and_composes_as_a_literal(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`$${workspaceFolder}` is the authoring path for a token meant for a
+    downstream consumer: it publishes, and OCX emits the literal
+    `${workspaceFolder}` for that consumer to expand (S-022, D2).
+
+    Failing sibling of
+    `test_unrecognised_token_installs_and_inspects_but_refuses_to_compose`:
+    the same bytes, one escape apart, must be publishable here and refused
+    there — which is what tells a working escape from a resolver that has
+    simply stopped claiming `${…}` at all.
+    """
+    pkg = make_package(
+        ocx,
+        unique_repo,
+        "1.0.0",
+        tmp_path,
+        env=[
+            {
+                "key": "EDITOR_ROOT",
+                "type": "constant",
+                "value": f"${UNRECOGNISED_TOKEN}",
+                "visibility": "public",
+            }
+        ],
+    )
+    ocx.plain("package", "install", pkg.short)
+
+    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["entries"]}
+    assert values["EDITOR_ROOT"] == UNRECOGNISED_TOKEN, (
+        f"the escape must collapse `$${{…}}` to a literal `${{…}}`; got "
+        f"{values['EDITOR_ROOT']!r}, expected {UNRECOGNISED_TOKEN!r}"
+    )
