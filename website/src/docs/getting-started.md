@@ -208,7 +208,7 @@ Environment variables and CLI flags always override config values. For full deta
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init
 [cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-install]: ./reference/command-line.md#package-install
-[cmd-which]: ./reference/command-line.md#package-which
+[cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#package-exec
 [cmd-env]: ./reference/command-line.md#package-env
 [cmd-select]: ./reference/command-line.md#package-select

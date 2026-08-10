@@ -276,7 +276,7 @@ To actually *run* the package with its dependency environments configured, use [
 [`ocx package exec`][cmd-package-exec] [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order before launching the command. [`ocx package env`][cmd-package-env] exports the same composed environment for use in your own shell.
 
 ::: warning install + select does not set up dependency environments
-[`ocx package install --select`][cmd-package-install] creates a [current symlink][in-depth-storage-symlinks] that points at the package's content directory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured — only the package's own files are reachable. For packages with dependencies, always use [`ocx package exec`][cmd-package-exec], or [`ocx package env`][cmd-package-env] / [`ocx env`][cmd-env] to export the full environment first.
+[`ocx package install --select`][cmd-package-install] creates a [current symlink][in-depth-storage-symlinks] that points at the package's content directory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured — only the package's own files are reachable. For packages with dependencies, always use [`ocx package exec`][cmd-package-exec], or [`ocx package env`][cmd-package-env] / [`ocx env`][cmd-env-root] to export the full environment first.
 :::
 
 ### Inspecting the dependency tree
@@ -1148,7 +1148,6 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-package-push]: ./reference/command-line.md#package-push
 [cmd-package-announce]: ./reference/command-line.md#package-announce
 [cmd-deps]: ./reference/command-line.md#deps
-[cmd-env]: ./reference/command-line.md#env
 [cmd-env-root]: ./reference/command-line.md#env-root
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
