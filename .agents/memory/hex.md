@@ -54,3 +54,25 @@ research-axes:
   (CLAUDE.md model policy; matches models.md Rule 4).
 
 ## Memory
+
+- **Active plan (hex-plan, 2026-08-09):**
+  `.claude/state/plans/plan_interpolation_token_grammar.md` — ocx#303, tier high,
+  State `plan-approved`. Design record
+  `.claude/artifacts/adr_interpolation_token_grammar.md`; research
+  `.claude/artifacts/research_interpolation_token_grammar.md`.
+  Next: `/hex-execute .claude/state/plans/plan_interpolation_token_grammar.md`.
+  Review converged at the round-3 cap: panel (spec/architect/SOTA) → 29 fixes → cross-model
+  Codex gate + re-validation → 13 more → final check, one block-tier defect closed.
+  **Then the owner reversed the central decision** (2026-08-09, after review): OCX claims
+  every `${…}`; no foreign-token pass-through, no reserved-root set, `$${…}` the only escape.
+  Reason: pass-through makes OCX's namespace hostage to other tools' vocabularies. Plus D14 —
+  refusal scoped to resolve/publish, read-only paths (incl. `pull`/`install`) stay permissive.
+  ADR + plan rewritten; #221 amended on GitHub. **D14 and the reversal are unreviewed** — the
+  panel ran against the superseded design.
+  **`.claude/state/current_plan.md` deliberately NOT repointed** — it still names
+  `plan_servable_index_snapshot.md`, which is mid-execution with a dirty worktree at
+  `.agents/worktrees/wp8`. Repointing would hijack that run's `/next`. The owner decides
+  which plan owns the pointer.
+- **Note for the next `/hex-init`:** a worker went idle without delivering its report and
+  had to be pulled with `SendMessage`; treat "idle" as "not reported" and pull, do not
+  assume completion.

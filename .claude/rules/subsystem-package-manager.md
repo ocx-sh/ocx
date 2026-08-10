@@ -56,7 +56,7 @@ pub struct PackageManager {
 }
 ```
 
-All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network). There is no frozen posture on the manager: `--frozen` scopes to the package tier and is enforced by the index chain's `ChainMode::Frozen` plus one CLI-level refusal in `ocx index update` (which reads `ContextOptions.frozen` directly).
+All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network). There is no frozen posture on the manager: `--frozen` scopes to the package tier and is enforced by the index chain's `ChainMode::Frozen` plus two CLI-level refusals — `ocx index update` and `ocx index sync`, each reading the invocation's `env::OcxConfigView` (`context.config_view().frozen`, which `ContextOptions.frozen` populates), one gate per command.
 
 ### Patch companions pin in patch state, never the local index
 
@@ -165,7 +165,7 @@ The slug is `to_slug(identifier.to_string())` — replaces all non-alphanumeric 
 
 - **Parallel** (via `JoinSet`): `pull_all`, `install_all` (all three phases), `find_all`, `find_or_install_all`, `inspect_all`, `resolve_all`; `resolve_lock`/`resolve_lock_touched` (project-tier, via `resolve_work`); `inspect`'s `--closure` closure gather (`gather_closure_nodes`, bounded to `CLOSURE_FETCH_CONCURRENCY = 8` concurrent fetches, digest-deduped frontier, results indexed for deterministic ordering)
 - **Sequential**: `find_symlink_all`, `uninstall_all`, `deselect_all`, `clean`, `select_all` (resolve phase is parallel via `find_all`; only the `current` wire-up loops sequentially) — all local-only (no per-item network), so sequential is correct
-- **CLI-layer fan-outs** (index-tagged `JoinSet`, input order preserved): `package info`, `index update`, `pull --dry-run`. Any new multi-package CLI command doing per-item network work MUST fan out this way, not loop `for … { …await }`.
+- **CLI-layer fan-outs** (index-tagged, input order preserved): `package info` and `pull --dry-run` via `JoinSet`; `index update` and `index sync` via the shared **bounded** `buffer_unordered` in `command/index_common.rs`, which states a ≤ 512 in-flight ceiling. Any new multi-package CLI command doing per-item network work MUST fan out this way, not loop `for … { …await }` — and a catalog-sized work set MUST use the bounded form.
 
 ## Garbage Collection: canonical-path keying
 
