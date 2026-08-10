@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use crate::Result;
 use crate::oci::Digest;
-use crate::oci::index::{CatalogDocument, CatalogIndex};
+use crate::oci::index::{CatalogDocument, CatalogIndex, IndexFormatConfig, serialize_catalog, serialize_config};
 use crate::utility::fs::LockedFile;
 use crate::utility::result_ext::ResultExt;
 
@@ -127,7 +127,13 @@ impl IndexStore {
     /// to a dedicated `SourceEscapesIndexHome` variant if the "repository"
     /// wording in the message ever needs to read accurately for a source
     /// escape.
-    fn ensure_source_contained(source: &str) -> Result<()> {
+    ///
+    /// `pub(crate)` because [`crate::oci::index::regenerate_catalog`] must run
+    /// it before its own existence pre-flight: that pre-flight builds a path
+    /// through [`Self::source_config_path`], a pure builder with no guard, so
+    /// the check has to be reachable from outside this module rather than only
+    /// firing inside the store methods that come after it.
+    pub(crate) fn ensure_source_contained(source: &str) -> Result<()> {
         let slug = super::slugify(source);
         crate::utility::fs::path::join_under_root(Path::new("/ocx-index-home"), Path::new(&slug))
             .map(|_| ())
@@ -554,17 +560,29 @@ impl IndexStore {
         Ok((bytes, root, recovered_entry))
     }
 
-    /// Read a DERIVED (OCX-authored) source's root document — the catalog-free
-    /// sibling of [`Self::read_root`]. A derived index has no `c/index.json`
-    /// (A2: its catalog is the directory enumeration of `p/`), so there is
-    /// nothing to cross-check and no self-heal to perform: read → parse →
-    /// `repository_check` only, returning [`CatalogEntryStatus::NoCatalog`].
-    /// `Ok(None)` when no root exists yet.
+    /// Read a root document without its catalog cross-check — the catalog-free
+    /// sibling of [`Self::read_root`]: read → parse → `repository_check` only,
+    /// no cross-check and no self-heal, returning
+    /// [`CatalogEntryStatus::NoCatalog`]. `Ok(None)` when no root exists yet.
     ///
-    /// The caller ([`crate::oci::index::LocalIndex`]) picks this over
-    /// [`Self::read_root`] per source kind — provenance never enters this store,
-    /// it is passed at the call site, so the derived/published divergence stays
-    /// caller-side (`adr_index_indirection.md` A2/H "two ifs").
+    /// Two callers choose it, for two unrelated reasons.
+    /// [`crate::oci::index::LocalIndex`] reads a DERIVED source this way
+    /// because such a source has no `c/index.json` at all (A2: its catalog is
+    /// the directory enumeration of `p/`), so there is nothing to cross-check;
+    /// provenance never enters this store, it is passed at the call site, so
+    /// that divergence stays caller-side (`adr_index_indirection.md` A2/H "two
+    /// ifs").
+    ///
+    /// [`crate::oci::index::regenerate_catalog`] reads a PUBLISHED — and
+    /// possibly foreign — source this way, and its reason is **lock
+    /// re-entrancy, not provenance**: [`Self::read_root`]'s self-heal opens its
+    /// own [`Self::begin_catalog_transaction`], which would block against the
+    /// transaction `regenerate` holds across its whole run for the full
+    /// [`SOURCE_LOCK_TIMEOUT`] and then error — and [`Self::read_root`]
+    /// *swallows* that error as a best-effort self-heal, so the symptom is a
+    /// silent 60-second stall per straddled root, not a failure. "Correcting"
+    /// that caller to [`Self::read_root`] because its source has a catalog
+    /// deadlocks it.
     pub async fn read_root_uncatalogued(
         &self,
         source: &str,
@@ -636,6 +654,89 @@ impl IndexStore {
         };
         let document: CatalogDocument = serde_json::from_slice(&bytes)?;
         Ok(Some(document.into_packages()?))
+    }
+
+    /// Reads this source's `config.json` — the served format-version pin (A2)
+    /// — or `Ok(None)` when the tree carries none.
+    ///
+    /// Absence is not an error: a tree written before ocx wrote configs, or one
+    /// authored by another implementation, is a valid format-version-1 index.
+    /// Substituting [`IndexFormatConfig::assumed_v1`] for the absent document
+    /// belongs to the gating caller (C-005) — this reader reports what is on
+    /// disk and nothing more.
+    ///
+    /// # Errors
+    ///
+    /// A present-but-unparseable document is
+    /// [`MalformedIndexDocument`](crate::oci::index::error::Error::MalformedIndexDocument);
+    /// a present-but-unreadable one (EACCES, EISDIR) propagates its I/O error
+    /// and is **never** flattened to `Ok(None)` — reading a permission failure
+    /// as absence would promote an unreadable tree to a valid v1 index and
+    /// silently disable the version gate (C-003).
+    pub async fn read_source_config(&self, source: &str) -> Result<Option<IndexFormatConfig>> {
+        Self::ensure_source_contained(source)?;
+        let target = self.source_config_path(source);
+        let bytes = match tokio::fs::read(&target).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(crate::error::file_error(&target, e)),
+        };
+        let config = serde_json::from_slice(&bytes).map_err(|cause| {
+            crate::oci::index::error::Error::MalformedIndexDocument {
+                url: target.display().to_string(),
+                source: cause,
+            }
+        })?;
+        Ok(Some(config))
+    }
+
+    /// Writes `{"format_version": 1}` to this source's `config.json` when the
+    /// tree carries none, so a tree ocx just published declares itself an index
+    /// at the version this binary speaks.
+    ///
+    /// **Write-if-absent, never update.** An existing config is left
+    /// byte-identical, including the `name_segments` an operator declared in a
+    /// hosted tree — ocx cannot derive that value from a tree and never guesses
+    /// one (C-023).
+    ///
+    /// Published sources only, by construction: the single call site is
+    /// [`crate::oci::index::LocalIndex`]'s `commit_published_root`, after the
+    /// catalog transaction commits (C-023). A derived source writes through
+    /// [`Self::write_root_document`] and never reaches it.
+    ///
+    /// **Call it only once [`CatalogTransaction::commit`] has consumed the
+    /// transaction guard.** Calling it while a transaction for the same source
+    /// is alive blocks on that same lock for the full [`SOURCE_LOCK_TIMEOUT`]
+    /// and then errors — the inverted order self-deadlocks.
+    ///
+    /// Takes the source-scoped `"index-catalog"` lock ([`Self::lock_source`])
+    /// for the write — re-acquired rather than inherited, because the write
+    /// sits outside the catalog transaction's scope. The discriminator is
+    /// `"c/index.json"`, the key [`Self::begin_catalog_transaction`] uses, and
+    /// **not** the name of the file being written: `lock_source` keys on scope
+    /// *and* discriminator, so a `"config.json"` discriminator would be an
+    /// independent lock, letting this write land inside a `regenerate` window
+    /// that C-008 requires to leave `config.json` byte-identical.
+    ///
+    /// A caller whose catalog work already committed should absorb a lock
+    /// timeout rather than fail — the tree is content-complete and config-less,
+    /// which the next update repairs. `commit_published_root` does exactly that.
+    pub(crate) async fn ensure_source_config(&self, source: &str) -> Result<()> {
+        // `lock_source` runs the containment guard and creates the source
+        // directory, so the existence probe below is post-lock: a concurrent
+        // writer cannot land a config between the probe and the write.
+        let _lock = self
+            .lock_source("index-catalog", source, "c/index.json", SOURCE_LOCK_TIMEOUT)
+            .await?;
+        let target = self.source_config_path(source);
+        if crate::utility::fs::path_exists_lossy(&target).await {
+            return Ok(());
+        }
+        let bytes = serialize_config(&IndexFormatConfig {
+            format_version: crate::oci::index::SUPPORTED_FORMAT_VERSION,
+            name_segments: None,
+        });
+        Self::write_bytes_atomic(&target, bytes).await
     }
 
     /// Writes `bytes` verbatim to a repository's root-document path
@@ -711,6 +812,15 @@ impl IndexStore {
     /// deduplicated. Returns an empty vec when the source directory does not
     /// exist.
     ///
+    /// # Errors
+    ///
+    /// A name under `p/` that is not valid UTF-8 is
+    /// [`super::error::Error::NonUtf8WireName`] — never a skipped or
+    /// U+FFFD-transliterated entry. This enumeration is what
+    /// [`crate::oci::index::regenerate_catalog`] replaces the catalog from, and
+    /// that replacement is wholesale, so a name dropped here is a package
+    /// deleted from `c/index.json` with its root document still on disk.
+    ///
     /// Iterative `tokio::fs::read_dir` walk, never blocking the executor —
     /// each directory is read exactly once (`entry.file_type()` from that one
     /// listing decides both the recursion and the `.json`-item collection),
@@ -784,17 +894,17 @@ impl IndexStore {
                 if !file_type.is_file() || path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                     continue;
                 }
-                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                let Some(stem) = path.file_stem() else {
                     continue;
                 };
                 let Ok(relative) = dir.strip_prefix(&root) else {
                     continue;
                 };
-                let mut segments: Vec<String> = relative
-                    .components()
-                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                segments.push(stem.to_string());
+                let mut segments: Vec<String> = Vec::new();
+                for component in relative.components() {
+                    segments.push(utf8_wire_name(component.as_os_str(), &dir)?.to_string());
+                }
+                segments.push(utf8_wire_name(stem, &path)?.to_string());
                 repos.push(segments.join("/"));
             }
         }
@@ -810,10 +920,10 @@ impl IndexStore {
     /// acquiring the lock, before committing" contract).
     ///
     /// This is the **single** entry point for every catalog mutation for
-    /// `source`, so no writer can bypass the re-read. In production there is
-    /// exactly one mutation: [`CatalogTransaction::write_root`]'s per-package
-    /// root+entry upsert. All network work (fetching a remote root or dispatch
-    /// object) MUST happen before this call.
+    /// `source`, so no writer can bypass the re-read — see
+    /// [`CatalogTransaction::catalog`] for the three that go through it. All
+    /// network work (fetching a remote root or dispatch object) MUST happen
+    /// before this call.
     pub async fn begin_catalog_transaction(&self, source: &str) -> Result<CatalogTransaction<'_>> {
         let lock = self
             .lock_source("index-catalog", source, "c/index.json", SOURCE_LOCK_TIMEOUT)
@@ -832,9 +942,20 @@ impl IndexStore {
     }
 }
 
-/// Whether `dir` has the dispatch-object CAS shape — every child a directory
-/// named after a supported digest algorithm, holding nothing but
-/// `<hex>.json` object files of that algorithm's digest length (A2/A3
+/// One wire path component as `str`, or [`super::error::Error::NonUtf8WireName`]
+/// naming `path` — the enclosing file or directory, which is what an operator
+/// needs to find a name their terminal cannot print.
+fn utf8_wire_name<'name>(name: &'name std::ffi::OsStr, path: &Path) -> Result<&'name str> {
+    name.to_str().ok_or_else(|| {
+        super::error::Error::NonUtf8WireName {
+            path: path.to_path_buf(),
+        }
+        .into()
+    })
+}
+
+/// Whether `dir` holds the dispatch-object CAS — at least one
+/// `<algo>/<hex>.json` object of a supported algorithm's digest length (A2/A3
 /// `o/<algo>/<hex>.json`).
 ///
 /// The shape test exists because the cheaper "does a sibling root document
@@ -843,6 +964,15 @@ impl IndexStore {
 /// directory can hold objects and no root document at all. Content, not
 /// position, is then the only thing separating the CAS from a namespace
 /// segment that happens to be named `o`.
+///
+/// **One conforming object is the whole test, not every child conforming.** A
+/// stray file anywhere in the CAS — a `README`, a `.DS_Store`, an interrupted
+/// rsync's `.partial` — must not un-prune it: the caller would walk in and emit
+/// `<ns>/<pkg>/o/<algo>/<hex>` as a repository, and
+/// [`crate::oci::index::regenerate_catalog`] would then publish that dispatch
+/// object as a package in `c/index.json`. The strict reading rejected nothing
+/// extra — a directory of real objects that also holds junk is still the CAS —
+/// it only made the detector fail open on the tree shapes people actually have.
 ///
 /// An unreadable directory answers `false` — the caller then walks it, which
 /// is the pre-existing, non-destructive behaviour.
@@ -859,37 +989,30 @@ async fn is_dispatch_object_cas_dir(dir: &std::path::Path) -> bool {
     let Some(algorithm_dirs) = entries_of(dir).await else {
         return false;
     };
-    // An empty directory is not evidence of anything; leave it to the walk.
-    if algorithm_dirs.is_empty() {
-        return false;
-    }
 
     for algorithm_dir in algorithm_dirs {
         let name = algorithm_dir.file_name();
-        let Some(name) = name.to_str() else {
-            return false;
+        let Some(algorithm) = name
+            .to_str()
+            .and_then(|name| crate::oci::Algorithm::ALL.iter().find(|a| a.prefix() == name))
+        else {
+            continue;
         };
-        let Some(algorithm) = crate::oci::Algorithm::ALL.iter().find(|a| a.prefix() == name) else {
-            return false;
+        let Some(objects) = entries_of(&algorithm_dir.path()).await else {
+            continue;
         };
-        let path = algorithm_dir.path();
-        let Some(objects) = entries_of(&path).await else {
-            return false;
-        };
-        for object in objects {
-            let object_path = object.path();
-            if object_path.extension().and_then(|e| e.to_str()) != Some("json") {
-                return false;
-            }
-            let Some(hex) = object_path.file_stem().and_then(|stem| stem.to_str()) else {
-                return false;
-            };
-            if hex.len() != algorithm.hex_len() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return false;
-            }
+        if objects.iter().any(|object| {
+            let path = object.path();
+            path.extension().and_then(|e| e.to_str()) == Some("json")
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|hex| hex.len() == algorithm.hex_len() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        }) {
+            return true;
         }
     }
-    true
+    false
 }
 
 /// A root document read from disk: the verbatim bytes (needed for
@@ -956,9 +1079,14 @@ pub struct CatalogTransaction<'store> {
 impl CatalogTransaction<'_> {
     /// The freshly re-read (post-lock) catalog map.
     ///
-    /// [`Self::write_root`] is the only production writer — it upserts the
-    /// entry it derives from the root bytes it just wrote. Direct mutation is a
-    /// test seam for putting a catalog into a chosen state.
+    /// Three production writers reach the map, at three different scales.
+    /// [`Self::write_root`] upserts the single entry it derives from the root
+    /// bytes it just wrote, reaching the field directly rather than through
+    /// this accessor. [`IndexStore::persist_recovered_catalog_entry`] upserts
+    /// one re-derived entry on the **read** path ([`IndexStore::read_root`]'s
+    /// self-heal), also directly. [`crate::oci::index::regenerate_catalog`]
+    /// replaces the whole map through this accessor — the only operation that
+    /// can drop a stale entry, since an upsert never removes one.
     pub fn catalog(&mut self) -> &mut CatalogIndex {
         &mut self.catalog
     }
@@ -1008,7 +1136,10 @@ impl CatalogTransaction<'_> {
     /// has: what a local index writes is what the hosted site serves, so a
     /// derived source's catalog and a mirrored one are the same document and
     /// [`IndexStore::read_source_catalog`] needs no second branch to tell them
-    /// apart.
+    /// apart. Emitted through [`serialize_catalog`], the wire formatter the
+    /// hosted renderer's form is pinned against — `serde_json`'s pretty
+    /// printer writes the same document without its trailing newline, one byte
+    /// that diffs the whole file on every render of a shared tree (C-025).
     pub async fn commit(self) -> Result<()> {
         // Opportunistic cleanup: ocx used to persist an `index.json.etag`
         // conditional-GET validator beside the catalog. Nothing reads or writes
@@ -1026,7 +1157,7 @@ impl CatalogTransaction<'_> {
             return Ok(());
         }
         let catalog_path = self.store.source_catalog_path(&self.source);
-        let catalog_bytes = serde_json::to_vec_pretty(&CatalogDocument::new(self.catalog))?;
+        let catalog_bytes = serialize_catalog(&CatalogDocument::new(self.catalog));
         IndexStore::write_bytes_atomic(&catalog_path, catalog_bytes).await?;
 
         // `self.lock` drops here, releasing the exclusive advisory lock — held
@@ -1036,17 +1167,14 @@ impl CatalogTransaction<'_> {
 }
 
 /// Specification tests for the wire-grammar section (`adr_index_indirection.md`
-/// Decisions A2/A3/A4/F1/F2) — written from the design record's contracts, not
-/// the stub bodies. Every test exercising a stubbed method
-/// (`write_dispatch_object`, `read_dispatch_object`, `root_catalog_entry`,
-/// `read_root`, `begin_catalog_transaction`, `CatalogTransaction::write_root`/
-/// `commit`) is EXPECTED TO PANIC on `unimplemented!()` until implementation
-/// lands — that panic is a passing signal for this phase. Path-helper tests
-/// (§1) exercise already-implemented pure functions and are expected to pass
-/// now; they stay here as regression coverage, not stub-failure proof.
+/// Decisions A2/A3/A4/F1/F2, `adr_servable_index_snapshot.md` C-003/C-022/
+/// C-023/C-025) — written from the design records' contracts, not from the
+/// bodies. Each test states the contract it pins in its own name and message;
+/// none of them describes a transient phase of the implementation.
 #[cfg(test)]
 mod wire_grammar_tests {
     use std::ffi::OsStr;
+    use std::num::NonZeroU32;
 
     use super::*;
     use crate::cli::{ClassifyExitCode, ExitCode};
@@ -2218,8 +2346,7 @@ mod wire_grammar_tests {
     // A DERIVED (OCX-authored) source has no c/index.json — its catalog is the
     // directory enumeration of p/ — so a derived root read must carry
     // `NoCatalog`, run the caller's C3 `repository_check`, and NEVER materialize
-    // a catalog or lock. read_root_uncatalogued is implemented (WP-A/C1 additive
-    // sibling of read_root), so these pass now as regression coverage.
+    // a catalog or lock.
 
     #[tokio::test(flavor = "multi_thread")]
     async fn read_root_uncatalogued_reads_verbatim_and_never_creates_a_catalog() {
@@ -2413,6 +2540,34 @@ mod wire_grammar_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn list_wire_repositories_prunes_a_dispatch_dir_holding_a_stray_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        // The case above, plus stray entries an index tree collects in the
+        // field: a `.DS_Store`, an interrupted rsync's `.partial`, a
+        // hand-dropped README. A detector demanding that EVERY child conform
+        // fails open on them — the CAS goes unpruned, the walk descends, and the
+        // dispatch object's own digest is emitted as a repository, which
+        // `regenerate_catalog` then publishes into `c/index.json` as a package
+        // at exit 0.
+        let dispatch = s.dispatch_object_path("ocx.sh", "ca-bundle", &crate::oci::Algorithm::Sha256.hash(b"payload"));
+        let algorithm_dir = dispatch.parent().unwrap().to_path_buf();
+        tokio::fs::create_dir_all(&algorithm_dir).await.unwrap();
+        tokio::fs::write(&dispatch, b"{}").await.unwrap();
+        tokio::fs::write(algorithm_dir.join("README"), b"notes").await.unwrap();
+        tokio::fs::write(algorithm_dir.parent().unwrap().join(".DS_Store"), b"junk")
+            .await
+            .unwrap();
+
+        let repos = s.list_wire_repositories("ocx.sh").await.unwrap();
+        assert!(
+            repos.is_empty(),
+            "a stray file beside a dispatch object must not publish that object as a package, got {repos:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_wire_repositories_does_not_prune_a_namespace_named_o_without_a_root_document() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -2471,5 +2626,431 @@ mod wire_grammar_tests {
             vec!["kitware/cmake".to_string(), "o/tool".to_string()],
             "a namespace named \"o\" must be listed; the real o/ dispatch dir must still be pruned"
         );
+    }
+
+    // ── 10. config.json reader (C-003) ────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_source_config_reports_an_absent_document_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        let config = s.read_source_config("ocx.sh").await.unwrap();
+        assert!(
+            config.is_none(),
+            "a tree carrying no config.json is a valid format-version-1 index, not an error — \
+             substituting assumed_v1 for it is the gating caller's job (C-003/C-005), so the \
+             reader reports absence and nothing more"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_source_config_parses_a_present_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let path = s.source_config_path("ocx.sh");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&path, br#"{"format_version": 1, "name_segments": 2}"#)
+            .await
+            .unwrap();
+
+        let config = s
+            .read_source_config("ocx.sh")
+            .await
+            .unwrap()
+            .expect("a present, parseable config.json must read as Some");
+        assert_eq!(config.format_version, 1);
+        assert_eq!(
+            config.name_segments.map(NonZeroU32::get),
+            Some(2),
+            "the operator's declared name shape must survive the read verbatim — index.ocx.sh \
+             serves 2, and ocx never derives a value of its own"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_source_config_rejects_an_unparseable_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let path = s.source_config_path("ocx.sh");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&path, b"not valid json {").await.unwrap();
+
+        let err = s
+            .read_source_config("ocx.sh")
+            .await
+            .expect_err("a present-but-unparseable config.json must be an error, never Ok(None)");
+        assert!(
+            matches!(
+                err,
+                crate::Error::OciIndex(crate::oci::index::error::Error::MalformedIndexDocument { .. })
+            ),
+            "expected MalformedIndexDocument, got {err:?}"
+        );
+        assert_eq!(err.classify(), Some(ExitCode::DataError));
+    }
+
+    /// C-003's fourth row, the local-filesystem twin of C-015: a permission
+    /// failure read as absence would promote an unreadable tree to a valid v1
+    /// index and silently disable the version gate.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_source_config_propagates_an_unreadable_document() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let path = s.source_config_path("ocx.sh");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&path, br#"{"format_version": 1}"#).await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .await
+            .unwrap();
+
+        // A process holding CAP_DAC_OVERRIDE (root in a container) reads a
+        // mode-000 file anyway. The contract still holds there; it is simply not
+        // observable, so skip rather than report a failure the code did not cause.
+        if tokio::fs::read(&path).await.is_ok() {
+            return;
+        }
+
+        let err = s
+            .read_source_config("ocx.sh")
+            .await
+            .expect_err("an unreadable config.json must propagate its I/O error, never flatten to Ok(None)");
+        assert!(
+            matches!(err, crate::Error::InternalFile(_, _)),
+            "expected the file_error I/O wrapper, got {err:?}"
+        );
+        assert_eq!(err.classify(), Some(ExitCode::IoError));
+    }
+
+    // ── 11. config.json writer (C-023, store half) ────────────────────────
+
+    /// The `config.json` document OCX writes, in C-025's form: two-space
+    /// indent, `sort_keys=False` declaration order, one trailing newline, and
+    /// no `name_segments` — an operator declaration ocx cannot derive from a
+    /// tree and declines to guess.
+    const EXPECTED_CONFIG_BYTES: &[u8] = b"{\n  \"format_version\": 1\n}\n";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_source_config_writes_the_wire_form_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        s.ensure_source_config("ocx.sh").await.unwrap();
+
+        let on_disk = tokio::fs::read(s.source_config_path("ocx.sh")).await.unwrap();
+        assert_eq!(
+            on_disk,
+            crate::oci::index::serialize_config(&IndexFormatConfig {
+                format_version: crate::oci::index::SUPPORTED_FORMAT_VERSION,
+                name_segments: None,
+            }),
+            "the write must route through serialize_config — no second formatter (C-025)"
+        );
+        assert_eq!(
+            on_disk,
+            EXPECTED_CONFIG_BYTES,
+            "and serialize_config's form for this document is exactly {:?}",
+            String::from_utf8_lossy(EXPECTED_CONFIG_BYTES)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_source_config_leaves_an_existing_document_byte_identical() {
+        // Write-if-absent, never update. A hosted tree's config carries the
+        // operator's `name_segments`, and the hosted renderer's own byte form;
+        // an `ocx index update` against that tree must not rewrite either.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let path = s.source_config_path("ocx.sh");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let seeded: &[u8] = b"{\n  \"format_version\": 1,\n  \"name_segments\": 2\n}\n";
+        tokio::fs::write(&path, seeded).await.unwrap();
+        let before = tokio::fs::metadata(&path).await.unwrap().modified().unwrap();
+
+        s.ensure_source_config("ocx.sh").await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            seeded,
+            "an existing config must survive byte-identical, including a name_segments ocx never guesses"
+        );
+        assert_eq!(
+            tokio::fs::metadata(&path).await.unwrap().modified().unwrap(),
+            before,
+            "an index tree is committed to repos and rsync'd (A2), so a no-op must not churn the mtime"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_source_config_propagates_a_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        // The source directory exists, so the source-scoped lock still acquires
+        // (it keys on that directory's identity), but it is read-only, so the
+        // atomic write cannot create its tempfile there.
+        let source_dir = s.source_config_path("ocx.sh").parent().unwrap().to_path_buf();
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        tokio::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o555))
+            .await
+            .unwrap();
+
+        // As above: CAP_DAC_OVERRIDE ignores the mode, making the failure
+        // unobservable rather than absent.
+        let mode_is_enforced = tokio::fs::write(source_dir.join("probe"), b"x").await.is_err();
+        let result = if mode_is_enforced {
+            Some(s.ensure_source_config("ocx.sh").await)
+        } else {
+            None
+        };
+        // Restore before asserting so TempDir's cleanup runs either way.
+        tokio::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+
+        let Some(result) = result else { return };
+        let err = result.expect_err("an I/O failure on the config write must propagate, never be swallowed");
+        assert_eq!(err.classify(), Some(ExitCode::IoError));
+    }
+
+    // ── 12. c/index.json goes through the wire formatter (C-025) ──────────
+
+    /// Pins **the switch**: [`CatalogTransaction::commit`] must write
+    /// `c/index.json` through [`crate::oci::index::serialize_catalog`] rather
+    /// than `serde_json::to_vec_pretty`, whose output diverges by the trailing
+    /// newline — one byte, but a full-file diff on every render of a tree the
+    /// Rust and Python producers share.
+    ///
+    /// Scope: this pins the writer `commit` actually calls, **not**
+    /// cross-language parity. The vendored Python fixtures that pin
+    /// `serialize_catalog`'s bytes against the renderer's belong to C-025's
+    /// conformance half and are not exercised here, so nothing below is
+    /// evidence that the two producers agree. The comparison is against
+    /// `serialize_catalog`'s own output — which is what "went through the
+    /// formatter" means — plus an explicit literal, so a change to either side
+    /// is localized rather than mutually cancelling.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_writes_the_catalog_through_the_wire_formatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        let mut txn = s.begin_catalog_transaction("ocx.sh").await.unwrap();
+        txn.catalog()
+            .insert("kitware/cmake".to_string(), format!("sha256:{SHA256_HEX}"));
+        txn.commit().await.unwrap();
+
+        let on_disk = tokio::fs::read(s.source_catalog_path("ocx.sh")).await.unwrap();
+
+        let mut expected = CatalogIndex::new();
+        expected.insert("kitware/cmake".to_string(), format!("sha256:{SHA256_HEX}"));
+        assert_eq!(
+            on_disk,
+            crate::oci::index::serialize_catalog(&CatalogDocument::new(expected)),
+            "commit must write the catalog through serialize_catalog, not serde_json::to_vec_pretty"
+        );
+        assert_eq!(
+            String::from_utf8(on_disk).unwrap(),
+            format!(
+                "{{\n  \"format_version\": 1,\n  \"packages\": {{\n    \
+                 \"kitware/cmake\": \"sha256:{SHA256_HEX}\"\n  }}\n}}\n"
+            ),
+            "…and that form is a two-space indent, declaration order, and one trailing newline"
+        );
+    }
+
+    // ── 13. Wire-layout containment (C-022) ───────────────────────────────
+
+    /// C-022: nothing but C-023's update-path hook may write `config.json`.
+    ///
+    /// Two bounds, because there are two ways to become a second writer. The
+    /// obvious one is calling `ensure_source_config`: no more than one
+    /// production call site in the crate, and any that exists is inside
+    /// `commit_published_root`. The other is bypassing it — `source_config_path`
+    /// is `pub`, so any function can build the path and hand it to a writer of
+    /// its own; that one is bounded by whitelist, since only the reader and the
+    /// writer have a reason to name the path at all.
+    ///
+    /// The call-site half is **exactly one**, in `commit_published_root`. It was
+    /// a `<= 1` bound while C-023's call site was still owed by another work
+    /// package; now that it exists, the existence half is assertable here rather
+    /// than inferred from `dead_code` firing in a different crate module. The
+    /// direction C-022 exists for is still the upper bound — it fails the moment
+    /// a second writer appears in `commit`, in `regenerate`, or on a read path,
+    /// any of which would make a resolve mutate a tree ocx may not own.
+    #[test]
+    fn config_json_has_at_most_one_production_writer_and_it_is_the_update_path() {
+        fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("crate src/ is readable") {
+                let path = entry.expect("a readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension() == Some(OsStr::new("rs")) {
+                    out.push(path);
+                }
+            }
+        }
+
+        /// The enclosing production `fn`'s name for a match at `offset`, or
+        /// `None` when the match is in a comment or doc link, or inside a
+        /// specification test. Matching the bare identifier rather than
+        /// `.ident(` is deliberate: the UFCS form `IndexStore::ident(self, …)`
+        /// carries no receiver dot and slipped through the narrower needle.
+        fn production_site(source: &str, offset: usize) -> Option<String> {
+            let line_start = source[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+            if source[line_start..offset].trim_start().starts_with("//") {
+                return None;
+            }
+            let fn_at = source[..offset].rfind("fn ")?;
+            // A specification test driving the writer is not a production call
+            // site. Its enclosing signature carries a test attribute within the
+            // few lines directly above it.
+            let signature_head: String = source[..fn_at].lines().rev().take(4).collect();
+            if signature_head.contains("#[test]") || signature_head.contains("#[tokio::test") {
+                return None;
+            }
+            // Read the name out of the whole file, not out of the text before
+            // the match: on the declaration line the match IS the name, so a
+            // slice ending at `offset` leaves nothing after `fn `.
+            Some(
+                source[fn_at + "fn ".len()..]
+                    .split(['(', '<', ' ', '\n'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        }
+
+        // Built rather than written literally: a literal needle would match this
+        // test's own source, and the enclosing-`fn` walk would then blame the
+        // nearest nested helper rather than the test holding it.
+        let writer = format!("ensure_source{}config", "_");
+        let path_builder = format!("source_config{}path", "_");
+
+        let mut files = Vec::new();
+        rs_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        files.sort();
+
+        let mut call_sites = Vec::new();
+        let mut path_users = Vec::new();
+        for file in &files {
+            let source = std::fs::read_to_string(file).expect("a readable source file");
+            for (needle, found) in [(&writer, &mut call_sites), (&path_builder, &mut path_users)] {
+                for (offset, _) in source.match_indices(needle.as_str()) {
+                    let Some(enclosing) = production_site(&source, offset) else {
+                        continue;
+                    };
+                    // The item's own declaration: the nearest preceding `fn ` is
+                    // the one being declared.
+                    if &enclosing == needle {
+                        continue;
+                    }
+                    found.push(format!("{}::{enclosing}", file.display()));
+                }
+            }
+        }
+
+        assert_eq!(
+            call_sites.len(),
+            1,
+            "config.json must have exactly one writer (C-022/C-023); found {call_sites:#?}"
+        );
+        assert!(
+            call_sites[0].ends_with("::commit_published_root"),
+            "the one config.json writer must be the update path, not a read or regenerate path; found {}",
+            call_sites[0]
+        );
+        // Naming the path is the prerequisite for writing it, so the bound is on
+        // who may name it — stricter than sniffing for a write verb, which a
+        // two-line bypass (bind the path, write it on the next line) evades.
+        // `regenerate_catalog` is here because it derives the source directory
+        // from this accessor, `wire_source_dir` being private; it never writes.
+        let allowed = [
+            format!("::read_source{}config", "_"),
+            format!("::{writer}"),
+            format!("::regenerate{}catalog", "_"),
+        ];
+        assert!(
+            path_users
+                .iter()
+                .all(|site| allowed.iter().any(|suffix| site.ends_with(suffix))),
+            "only these may name the config.json path, since naming it is how a second writer starts \
+             (C-022): {allowed:?}; found {path_users:#?}"
+        );
+    }
+
+    // ── 14. Non-UTF-8 wire names must not vanish (WP5b) ───────────────────
+    //
+    // `list_wire_repositories` is `regenerate`'s view of what exists on disk.
+    // A `p/` name that is not valid UTF-8 — and C-007 explicitly admits trees
+    // written by another implementation — must not be transliterated to U+FFFD
+    // (a key naming a path that does not exist) nor skipped: either way
+    // `regenerate` deletes the package from `c/index.json` while its root sits
+    // on disk, exit 0, reporting it in none of added/corrected/removed.
+
+    /// The exit code a non-UTF-8 name under `p/` classifies to (C-028),
+    /// asserted from one place.
+    ///
+    /// `DataError` (65), carried by a variant of this module's
+    /// [`super::super::error::Error`] — the home for "this tree's structure is
+    /// malformed", which every variant of that enum classifies to. Not
+    /// `file_error` → `InternalFile` → `IoError` (74): 74 is the generic
+    /// fallback that enum's variants exist to escape, and a foreign tree's
+    /// un-decodable name is malformed input, not an ocx internal fault.
+    ///
+    /// The tests below assert `classify()` rather than the variant, so renaming
+    /// the variant does not break them.
+    #[cfg(unix)]
+    const NON_UTF8_WALK_EXIT_CODE: ExitCode = ExitCode::DataError;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_wire_repositories_propagates_a_non_utf8_root_document_stem() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        // A well-formed neighbour, so a dropped bad name cannot hide behind an
+        // empty listing.
+        let good = s.root_document_path("ocx.sh", "kitware/cmake");
+        tokio::fs::create_dir_all(good.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&good, b"{}").await.unwrap();
+
+        // `p/kitware/<0xff>.json` — nothing on a POSIX filesystem makes a
+        // filename valid UTF-8.
+        let bad = good.parent().unwrap().join(OsStr::from_bytes(b"\xff.json"));
+        tokio::fs::write(&bad, b"{}").await.unwrap();
+
+        let err = s
+            .list_wire_repositories("ocx.sh")
+            .await
+            .expect_err("a non-UTF-8 root-document stem must be reported, never silently skipped");
+        assert_eq!(err.classify(), Some(NON_UTF8_WALK_EXIT_CODE));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_wire_repositories_propagates_a_non_utf8_directory_component() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+
+        // `p/<0xff>/cmake.json` — the failure is in a directory component, not
+        // the stem, so it takes the walk's other lossy path.
+        let namespace = s.wire_source_dir("ocx.sh").join("p").join(OsStr::from_bytes(b"\xff"));
+        tokio::fs::create_dir_all(&namespace).await.unwrap();
+        tokio::fs::write(namespace.join("cmake.json"), b"{}").await.unwrap();
+
+        let err = s
+            .list_wire_repositories("ocx.sh")
+            .await
+            .expect_err("a non-UTF-8 directory component must be reported, never transliterated to U+FFFD");
+        assert_eq!(err.classify(), Some(NON_UTF8_WALK_EXIT_CODE));
     }
 }

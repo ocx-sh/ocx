@@ -9,7 +9,7 @@ use ocx_lib::cli;
 use crate::command;
 
 mod context;
-pub use context::{Context, ManagedConfigGate};
+pub use context::{Context, ManagedConfigGate, is_published_namespace};
 
 mod context_options;
 pub use context_options::ContextOptions;

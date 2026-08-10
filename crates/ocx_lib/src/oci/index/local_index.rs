@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::file_structure::{IndexStore, SOURCE_LOCK_TIMEOUT};
 use crate::{Result, log, oci, package::tag::Tag};
 
+use super::wire::{IndexFormatConfig, gate_format_version};
 use super::{IndexOperation, index_impl};
 
 mod config;
@@ -23,7 +26,12 @@ pub use config::Config;
 /// verbatim manifest bytes) plus a CAS write — not a memory-bound transfer.
 /// 64 resolves a typical many-tagged package in a single round while capping
 /// the simultaneous request burst a registry might answer with `429`.
-const TAG_REFRESH_CONCURRENCY: usize = 64;
+///
+/// Public because it is one factor of a ceiling stated elsewhere: the CLI's
+/// per-package fan-out multiplies by this to state its in-flight bound
+/// (`adr_servable_index_snapshot.md` C-024), and a test that hardcodes `64`
+/// beside that product reads green when this constant moves.
+pub const TAG_REFRESH_CONCURRENCY: usize = 64;
 
 /// An OCX-authored **derived** root document (`adr_index_indirection.md` A2). A
 /// derived index (a plain OCI registry) publishes no index of its own, so OCX
@@ -74,6 +82,12 @@ pub struct LocalIndex {
     /// defaults to false so every construction site (tests, `IndexSync`) that
     /// does not opt in keeps the safe refusal.
     allow_yanked: bool,
+    /// Sources whose local `config.json` has already passed the version gate
+    /// ([`Self::check_format_version`], C-005) — the memo that makes the check
+    /// once-per-source rather than once-per-read. Only a *passing* outcome is
+    /// recorded, absence included; a refusal is an error, never a cached state.
+    /// Shared across clones, since a clone reads the same index home.
+    gated_sources: Arc<RwLock<HashSet<String>>>,
 }
 
 impl LocalIndex {
@@ -81,6 +95,7 @@ impl LocalIndex {
         Self {
             index_store: config.index_store,
             allow_yanked: false,
+            gated_sources: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -578,6 +593,10 @@ impl LocalIndex {
         repository: &str,
         kind: SourceKind,
     ) -> Result<Option<crate::file_structure::RootReadResult>> {
+        // The version gate runs before any local root is consumed, exactly as
+        // it does before a fetched one (C-005) — same rule, same error, either
+        // side of the trust boundary.
+        self.check_format_version(source).await?;
         let repository_check =
             |root: &super::wire::IndexRoot| super::parse_physical_repository(&root.repository).map(|_| ());
         match kind {
@@ -588,6 +607,64 @@ impl LocalIndex {
                     .await
             }
         }
+    }
+
+    /// Version-gates this source's local subtree against its `config.json`
+    /// (`adr_servable_index_snapshot.md` C-005) — the on-disk twin of
+    /// [`OcxIndex::check_format_version`](super::OcxIndex).
+    ///
+    /// An **absent** `config.json` is [`IndexFormatConfig::assumed_v1`]: a tree
+    /// written before ocx wrote configs, or authored by another
+    /// implementation, is a valid version-1 index. A present one is parsed and
+    /// gated. The rule does not soften because the bytes came off local disk —
+    /// a version rule that trusts one provenance and checks the other is the
+    /// asymmetry (CWE-501) this deletes.
+    ///
+    /// Read **once per source per instance**, the absent outcome included.
+    /// That is the deliberate difference from the fetched reader, which
+    /// re-derives absence every call so a site that publishes a `config.json`
+    /// mid-process is picked up: a local subtree is this machine's own tree,
+    /// and re-`stat`ing it on every root read buys nothing.
+    ///
+    /// Only root reads gate here, and that covers every local document this
+    /// reader interprets. `c/index.json` carries its own `format_version` and
+    /// is gated on read by
+    /// [`CatalogDocument::into_packages`](super::wire::CatalogDocument) through
+    /// the same [`gate_format_version`], so
+    /// [`IndexStore::read_source_catalog`] needs no second check; the derived
+    /// half of [`Self::list_local_repositories`] enumerates directories and
+    /// parses no document at all, so it has nothing to gate.
+    ///
+    /// One documented exception, not a universal choke point:
+    /// `package_manager::tasks::resolve::recover_base_with_real_registry` reads
+    /// a root straight off [`IndexStore`], bypassing this gate. It extracts a
+    /// host string and soft-fails to the slug form on any error, so an
+    /// ungated read there cannot resolve or install anything — but a reader
+    /// added on that route WOULD need the gate.
+    ///
+    /// A refusal must not be downgraded to a local miss by the layer above:
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex)'s
+    /// `is_local_read_refusal` propagates it, or the walk would fall through to
+    /// a source and then grow the very tree whose version was refused.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
+    /// (exit 65) on a declared-but-unknown version; a present-but-unreadable or
+    /// unparseable `config.json` propagates from
+    /// [`IndexStore::read_source_config`] (C-003) — never flattened to absence.
+    async fn check_format_version(&self, source: &str) -> Result<()> {
+        if self.gated_sources.read().await.contains(source) {
+            return Ok(());
+        }
+        let config = self
+            .index_store
+            .read_source_config(source)
+            .await?
+            .unwrap_or_else(IndexFormatConfig::assumed_v1);
+        gate_format_version(config.format_version)?;
+        self.gated_sources.write().await.insert(source.to_string());
+        Ok(())
     }
 
     /// List locally-known tags for `identifier`'s repository, by source kind
@@ -695,6 +772,14 @@ impl LocalIndex {
     /// re-emitted through [`super::serialize_root`], the one canonical root
     /// serializer, so every field OCX does not model rides through untouched and
     /// the result stays in the hosted site's normal form.
+    ///
+    /// Once the transaction has committed, the source's `config.json` is
+    /// written **if absent** (`adr_servable_index_snapshot.md` C-023): the
+    /// update path is the sole writer of that document, so a tree OCX grows
+    /// declares itself an index while a tree OCX only reads stays untouched
+    /// (C-022). That write failing to get its lock in time is logged and
+    /// swallowed — its catalog work has already committed and the next update
+    /// writes the config — but every other failure propagates.
     pub(super) async fn commit_published_root(
         &self,
         identifier: &oci::Identifier,
@@ -718,7 +803,38 @@ impl LocalIndex {
         if let Some(bytes) = merge_root(committed.as_deref(), fetched_bytes, scope) {
             transaction.write_root(repository, &bytes, repository_check).await?;
         }
-        transaction.commit().await
+        transaction.commit().await?;
+
+        // The tree ocx just published declares itself an index at the version
+        // this binary speaks (C-023). Two things fix this statement's position.
+        //
+        // It is AFTER the commit because `commit(self)` consumes the
+        // transaction and drops its lock guard, and `ensure_source_config`
+        // RE-acquires that same `index-catalog` / `c/index.json` lock rather
+        // than inheriting it — inverted, this blocks on itself for the full
+        // `SOURCE_LOCK_TIMEOUT` and then errors.
+        //
+        // It is after the catalog for crash order too: a crash between the two
+        // leaves a tree with content and no config, which is the pre-change
+        // status quo and is repaired by the next update. The other order would
+        // leave a config-only tree claiming to be an index with nothing in it.
+        match self.index_store.ensure_source_config(source).await {
+            // Losing the race for that second lock (a concurrent `regenerate`
+            // holds it across its whole run) must not fail an update whose
+            // catalog write already committed. Nothing is corrupted — the tree
+            // is left content-complete and config-less, the same state the
+            // crash case leaves, and the next update writes the config. Only
+            // the timeout is absorbed; a genuine I/O failure still propagates.
+            Err(error) if is_lock_timeout(&error) => {
+                log::warn!(
+                    "Index source '{source}' was published without a 'config.json': its catalog lock \
+                     stayed held for {SOURCE_LOCK_TIMEOUT:?} ({}). The next index update writes it.",
+                    crate::error::render_chain(&error)
+                );
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     /// Stage already-fetched dispatch-object bytes into the wire-grammar object
@@ -833,6 +949,29 @@ pub(super) enum RootScope<'a> {
     /// `ocx index update pkg` — the sanctioned point to take a routing
     /// migration, because the user named the package and nothing narrower.
     Package,
+}
+
+/// Whether `error` is a lock acquisition that ran out of patience rather than a
+/// genuine I/O failure — the one outcome
+/// [`LocalIndex::commit_published_root`]'s `config.json` hook absorbs (C-023).
+///
+/// `LockedFile::open_exclusive_with_timeout` reports an expired wait as
+/// [`std::io::ErrorKind::TimedOut`], wrapped by
+/// [`file_error`](crate::error::file_error) like every other I/O failure on that
+/// path — so the *kind* is the discriminator, not the variant.
+///
+/// The kind alone is not enough: an `ETIMEDOUT` from a network filesystem
+/// (NFS/CIFS) maps to the same kind, and every syscall on this path wraps
+/// through `file_error` too. The wait timeout is synthesized by ocx with
+/// `io::Error::new`, so it carries **no** `raw_os_error`, while an OS
+/// `ETIMEDOUT` always carries one — which is what keeps a real write failure
+/// from being absorbed as a lost lock race.
+fn is_lock_timeout(error: &crate::Error) -> bool {
+    matches!(
+        error,
+        crate::Error::InternalFile(_, io)
+            if io.kind() == std::io::ErrorKind::TimedOut && io.raw_os_error().is_none()
+    )
 }
 
 /// Merge a fetched published root into the `committed` one within `scope`,
@@ -1082,6 +1221,39 @@ mod tests {
 
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
+
+    /// The inner factor of the ceiling `ocx index sync` states (C-024: ≤ 512
+    /// in-flight requests, `INDEX_REFRESH_CONCURRENCY` × this constant).
+    ///
+    /// The CLI asserts the product of the two constants; that leaves the
+    /// constant's **call sites** unguarded, and they are what make the ceiling
+    /// real. `buffer_unordered(500)` here keeps the constant at 64, keeps the
+    /// CLI's product assertion green, and makes the true ceiling 4000 — and the
+    /// acceptance measurement cannot see it either, because its fixture
+    /// publishes one tag per repository, so this nested fan-out runs at width 1.
+    #[test]
+    fn the_per_tag_fan_out_is_sized_by_the_constant_at_every_site() {
+        let source: String = include_str!("local_index.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a non-test half")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            source.matches("buffer_unordered(").count(),
+            2,
+            "two per-tag fan-outs live here, one per provenance kind; a third needs its own \
+             review against C-024's ceiling"
+        );
+        assert_eq!(
+            source.matches("buffer_unordered(TAG_REFRESH_CONCURRENCY)").count(),
+            2,
+            "both must be sized by the constant: a literal leaves the constant true and the \
+             ceiling false"
+        );
+    }
 
     fn make_index(dir: &TempDir) -> LocalIndex {
         LocalIndex::new(Config {
@@ -2951,5 +3123,301 @@ mod tests {
             .unwrap()
             .expect("the trait surface must answer from the committed root, not the None default");
         assert_eq!(physical.registry(), "ghcr.io");
+    }
+
+    // ── C-005 (local half): one version rule, local bytes included ──────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_subtree_with_no_config_json_resolves() {
+        // The inverse of a fail-closed reading of absence: a tree written
+        // before ocx wrote configs — or by another implementation — is a valid
+        // version-1 index, so the root read goes through (C-005).
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let dispatch_digest = seed_root_and_dispatch(&dir).await;
+        assert!(
+            !store(&dir).source_config_path(REGISTRY).exists(),
+            "prerequisite: the subtree carries no config.json"
+        );
+
+        let resolution = index
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
+            .await
+            .expect("an absent config.json is version 1, never a refusal")
+            .expect("a present root + dispatch object resolves");
+        assert!(
+            matches!(resolution, DispatchResolution::Dispatch { ref content, .. } if *content == dispatch_digest),
+            "the config-less subtree must resolve its tag"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_subtree_declaring_an_unknown_format_version_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_root_and_dispatch(&dir).await;
+        let config_path = store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, br#"{"format_version":2}"#).unwrap();
+
+        let error = index
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
+            .await
+            .expect_err("a declared-but-unknown format_version must fail closed on disk too");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::UnsupportedIndexFormat { version: 2 })
+            ),
+            "expected UnsupportedIndexFormat{{2}}, got {error:?}"
+        );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "an unsupported format_version is a data error (65) at the local reader as much as the fetched one"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_local_reader_memoizes_the_absent_config_outcome() {
+        // C-005's local row differs from the fetched one here: the local reader
+        // memoizes absence too, once per source per instance. Pinning it needs
+        // both halves — the memoized instance keeps resolving, and a fresh one
+        // reads the same tree and refuses, which is what proves the first half
+        // is memoization rather than a gate that never ran.
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_root_and_dispatch(&dir).await;
+        index
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
+            .await
+            .expect("the config-less subtree resolves, memoizing the absent outcome");
+
+        let config_path = store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, br#"{"format_version":2}"#).unwrap();
+
+        index
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
+            .await
+            .expect("the memoized absent outcome must not be re-read within one instance");
+        make_index(&dir)
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Derived)
+            .await
+            .expect_err("a fresh instance reads the published config.json and refuses version 2");
+    }
+
+    // ── C-023: the config.json hook on the update path ─────────────────────
+
+    /// Exactly what C-023 writes: the two-space, trailing-newline Python form
+    /// of `{"format_version": 1}`, with no `name_segments` — ocx cannot derive
+    /// a name shape from a tree and never guesses one.
+    const CONFIG_ON_DISK: &str = "{\n  \"format_version\": 1\n}\n";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_first_publish_writes_the_version_pin(/* S-001 */) {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let (_, content) = two_platform_index();
+
+        index
+            .commit_published_root(&tagged_id("3.28"), &root_bytes_for(&content), RootScope::Tag("3.28"))
+            .await
+            .unwrap();
+
+        let on_disk = std::fs::read(store(&dir).source_config_path(REGISTRY)).unwrap();
+        assert_eq!(
+            String::from_utf8(on_disk).unwrap(),
+            CONFIG_ON_DISK,
+            "the first publish declares the tree an index at the version this binary speaks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_that_changes_nothing_still_writes_the_version_pin() {
+        // C-023's reachability clause: `commit_published_root` commits
+        // unconditionally, so the config write must NOT be gated on the merge
+        // having produced bytes. The tree that meets this is the one the whole
+        // ADR is about — an rsync'd published copy whose roots are already
+        // current, so its first `ocx index update` merges nothing. Gating the
+        // write on the merge result (which this module's own "never churn a
+        // tree people commit and rsync" comments invite) would leave that tree
+        // config-less and unservable: S-002/S-016, reintroduced.
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let (_, content) = two_platform_index();
+        let bytes = root_bytes_for(&content);
+        index.seed_root_document(&tagged_id("3.28"), &bytes).await.unwrap();
+        let config_path = store(&dir).source_config_path(REGISTRY);
+        assert!(!config_path.exists(), "prerequisite: the seeded tree carries no config");
+
+        index
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .await
+            .unwrap();
+
+        // `serialize_root` would re-emit these compact bytes pretty-printed, so
+        // an unchanged root file is the proof that the merge wrote nothing.
+        assert_eq!(
+            std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap(),
+            bytes,
+            "prerequisite: this update really is the no-op merge"
+        );
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            CONFIG_ON_DISK.as_bytes(),
+            "an update with nothing to merge still declares the tree an index"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_publish_leaves_config_json_byte_and_mtime_identical(/* S-008 */) {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let (_, content) = two_platform_index();
+        let bytes = root_bytes_for(&content);
+
+        index
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .await
+            .unwrap();
+        let config_path = store(&dir).source_config_path(REGISTRY);
+        let first = std::fs::read(&config_path).unwrap();
+        let stamped = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+
+        index
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .await
+            .unwrap();
+
+        // The writer publishes by atomic rename, so a re-write would carry the
+        // replacement's own stamp — an unchanged mtime is the no-write claim.
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            first,
+            "write-if-absent, never update"
+        );
+        assert_eq!(
+            std::fs::metadata(&config_path).unwrap().modified().unwrap(),
+            stamped,
+            "a second update must not churn the mtime of a tree people commit and rsync"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pre_seeded_config_json_is_untouched(/* S-015 */) {
+        // A tree rsync'd from a hosted index carries the renderer's own config,
+        // including the `name_segments` an operator declared. Write-if-absent
+        // is what keeps ocx from replacing it with its own narrower document.
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let config_path = store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let hosted = br#"{"format_version": 1, "name_segments": 2}"#;
+        std::fs::write(&config_path, hosted).unwrap();
+
+        let (_, content) = two_platform_index();
+        index
+            .commit_published_root(&tagged_id("3.28"), &root_bytes_for(&content), RootScope::Tag("3.28"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            hosted,
+            "an existing config.json is left byte-identical, name_segments included"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_root_self_heal_leaves_a_config_less_tree_config_less(/* S-019 */) {
+        // C-022's containment claim, and the reason the hook is not in
+        // `CatalogTransaction::commit`: the self-heal shares that primitive, so
+        // a hook there would make a plain resolve create `config.json` in a
+        // tree ocx may not own.
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_root_and_dispatch(&dir).await;
+
+        index
+            .resolve_dispatch(&tagged_id("3.28"), SourceKind::Published)
+            .await
+            .unwrap()
+            .expect("a published root + dispatch object resolves");
+
+        let store = store(&dir);
+        assert!(
+            store.source_catalog_path(REGISTRY).exists(),
+            "prerequisite: the resolve really did drive the catalog self-heal"
+        );
+        assert!(
+            !store.source_config_path(REGISTRY).exists(),
+            "a read path must never write config.json (C-022)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_real_contended_acquire_is_what_the_hook_absorbs() {
+        // Coupled to the lock path rather than to an error the test builds
+        // itself: if `FileLock`'s synthesized timeout ever changes shape, the
+        // predicate stops matching and a lost lock race becomes a hard failure
+        // in the update path — silently, if the only pin is hand-built.
+        //
+        // A short timeout stands in for `SOURCE_LOCK_TIMEOUT`; the error is the
+        // same one the 60s wait produces, and the test costs 50ms.
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir);
+        let _held = store
+            .lock_source("index-catalog", REGISTRY, "c/index.json", SOURCE_LOCK_TIMEOUT)
+            .await
+            .unwrap();
+
+        let error = store
+            .lock_source(
+                "index-catalog",
+                REGISTRY,
+                "c/index.json",
+                std::time::Duration::from_millis(50),
+            )
+            .await
+            .expect_err("the guard above still holds this lock");
+        assert!(
+            is_lock_timeout(&error),
+            "the hook must recognize the error the lock path really produces, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_genuine_io_failure_is_never_absorbed_by_the_config_hook() {
+        // The lenient direction of the same discrimination: absorbing one of
+        // these would report a failed write as a successful update.
+        let denied = crate::error::file_error(
+            std::path::Path::new("/x/config.json"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(!is_lock_timeout(&denied), "a genuine I/O failure still propagates");
+
+        // ETIMEDOUT from a network filesystem carries the same kind. The OS
+        // error number is what separates it from ocx's own synthesized wait
+        // timeout — absorbing it would turn a failed NFS write into a success.
+        let nfs = crate::error::file_error(
+            std::path::Path::new("/x/config.json"),
+            std::io::Error::from_raw_os_error(110),
+        );
+        assert_eq!(nfs_kind(&nfs), std::io::ErrorKind::TimedOut, "prerequisite: same kind");
+        assert!(
+            !is_lock_timeout(&nfs),
+            "an OS ETIMEDOUT is a write failure, not a lost race"
+        );
+    }
+
+    /// The `io::ErrorKind` inside an `InternalFile`, for the prerequisite
+    /// assertion above — the test is only meaningful if the OS error really
+    /// does collapse to `TimedOut`.
+    fn nfs_kind(error: &crate::Error) -> std::io::ErrorKind {
+        match error {
+            crate::Error::InternalFile(_, io) => io.kind(),
+            other => panic!("expected InternalFile, got {other:?}"),
+        }
     }
 }

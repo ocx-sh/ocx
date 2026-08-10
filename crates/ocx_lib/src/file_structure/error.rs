@@ -53,6 +53,15 @@ pub enum Error {
         #[source]
         source: crate::utility::fs::path::PathEscapeError,
     },
+
+    /// A filesystem name under a source's `p/` tree is not valid UTF-8, so the
+    /// `<ns>/<pkg>` repository key it belongs to cannot be formed
+    /// (`IndexStore::list_wire_repositories`). Reported rather than skipped or
+    /// transliterated to U+FFFD: that walk is the derivation basis for a
+    /// wholesale `c/index.json` replacement, so a name it drops is a package
+    /// deleted from the catalog while its root document is still on disk.
+    #[error("index path is not valid UTF-8: {}", path.display())]
+    NonUtf8WireName { path: std::path::PathBuf },
 }
 
 impl ClassifyExitCode for Error {
@@ -62,6 +71,7 @@ impl ClassifyExitCode for Error {
             Self::DigestMismatch { .. } => ExitCode::DataError,
             Self::MalformedRootDocument { .. } => ExitCode::DataError,
             Self::RepositoryEscapesIndexHome { .. } => ExitCode::DataError,
+            Self::NonUtf8WireName { .. } => ExitCode::DataError,
         })
     }
 }

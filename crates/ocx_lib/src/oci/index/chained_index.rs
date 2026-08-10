@@ -27,17 +27,38 @@ fn is_corrupt_index_object(err: &crate::Error) -> bool {
     )
 }
 
-/// Whether `err` is a human-lane refusal surfaced from the COMMITTED local root
-/// — a tag resolving to a yanked entry without the opt-in
-/// (`adr_index_indirection.md` F3). Unlike a corrupt object (healable by a
-/// source re-fetch) or a plain local miss (fall through to a source), a yank is
-/// an authoritative publisher signal: it must propagate as a hard `DataError`
-/// straight out of the local read, never fall through to a source that would
-/// serve the same name and silently bypass the refusal. This is the offline
-/// counterpart to the authoritative-source refusal `fetch_and_persist_chain`
-/// already stops the walk on.
-fn is_local_status_refusal(err: &crate::Error) -> bool {
-    matches!(err, crate::Error::OciIndex(super::error::Error::YankedRefused { .. }))
+/// Whether `err` is a local-read **refusal** rather than a miss — a verdict the
+/// walk must not downgrade to "not cached here" by falling through to a source
+/// that would serve the same name and silently bypass it. Unlike a corrupt
+/// object (healable by a source re-fetch) or a plain miss, every member is a
+/// hard `DataError` straight out of the local read. The offline counterpart to
+/// the authoritative-source refusal `fetch_and_persist_chain` already stops the
+/// walk on.
+///
+/// Three shapes, one rule:
+///
+/// - **Yanked without the opt-in** (`adr_index_indirection.md` F3) — an
+///   authoritative publisher signal from the COMMITTED local root.
+/// - **An unsupported `format_version`** (`adr_servable_index_snapshot.md`
+///   C-005) — fail-closed, and identically so on either side of the trust
+///   boundary. Swallowed here it would be advisory: the walk would go on to
+///   *grow* the very tree whose declared version this ocx cannot read.
+/// - **A `config.json` that could not be read at all** — unparseable, or
+///   present-but-unreadable (EACCES/EISDIR). A gate that cannot be evaluated
+///   fails closed; reading either as absence is what C-003 exists to prevent.
+///   Scoped to that one document on purpose: a blanket `InternalFile` match
+///   would also catch a root read or a lock timeout, which the walk legitimately
+///   recovers from by re-fetching.
+fn is_local_read_refusal(err: &crate::Error) -> bool {
+    match err {
+        crate::Error::OciIndex(
+            super::error::Error::YankedRefused { .. }
+            | super::error::Error::UnsupportedIndexFormat { .. }
+            | super::error::Error::MalformedIndexDocument { .. },
+        ) => true,
+        crate::Error::InternalFile(path, _) => path.file_name() == Some(std::ffi::OsStr::new("config.json")),
+        _ => false,
+    }
 }
 
 /// Whether `err` is a source **outage** — a transport-layer failure reaching the
@@ -977,11 +998,12 @@ impl index_impl::IndexImpl for ChainedIndex {
             match self.local_index.resolve_dispatch(identifier, kind).await {
                 Ok(resolution) => resolution,
                 Err(e) => {
-                    // A yanked-tag refusal from the committed local root is an
-                    // authoritative publisher signal (F3) — propagate it straight
-                    // out rather than fall through to a source that would serve the
-                    // same name and bypass the refusal.
-                    if is_local_status_refusal(&e) {
+                    // A refusal from the local read — a yanked tag (F3), or a
+                    // version gate that refused or could not be evaluated
+                    // (C-005) — propagates straight out rather than falling
+                    // through to a source that would serve the same name and
+                    // bypass it.
+                    if is_local_read_refusal(&e) {
                         return Err(e);
                     }
                     // A present-but-corrupt dispatch object is only recoverable
@@ -1101,10 +1123,11 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    // Same authoritative-refusal propagation as `fetch_manifest`:
-                    // a yanked-tag refusal from the committed local root is a hard
-                    // `DataError`, never a fall-through to a source (F3).
-                    if is_local_status_refusal(&e) {
+                    // Same refusal propagation as `fetch_manifest`: a yanked tag
+                    // (F3) or a version gate that refused or could not be
+                    // evaluated (C-005) is a hard `DataError`, never a
+                    // fall-through to a source.
+                    if is_local_read_refusal(&e) {
                         return Err(e);
                     }
                     // Same corrupt-object routing as `fetch_manifest`: escalate a
@@ -5658,5 +5681,143 @@ mod tests {
             .await
             .expect("corrupt cache must degrade for digest queries too");
         assert_eq!(result, Some(digest_a()));
+    }
+
+    // ── C-005 through the production chain mode ───────────────────────────
+    //
+    // The version gate is only a gate if the layer above propagates it. These
+    // drive `ChainMode::Default` — the mode ocx ships — because a refusal that
+    // holds in `LocalIndex::resolve_dispatch` and dissolves one frame up is
+    // advisory, and both `fetch_manifest` and `fetch_manifest_digest` classify
+    // local errors on their own.
+
+    /// Seed a healthy local subtree — root tag pointer plus dispatch object —
+    /// and return a fresh spy source for the chained index under test.
+    ///
+    /// Each caller plants its own `config.json`: C-022's structural test bounds
+    /// who may name that path outside a test body, and a shared helper counts
+    /// as a production namer.
+    async fn seed_healthy_subtree(dir: &TempDir) -> TestIndex {
+        let cache = make_local_index(dir);
+        seed_full(
+            &cache,
+            &tagged_id(),
+            digest_a(),
+            &make_source(TestIndex::with_tag(TAG, digest_a())),
+        )
+        .await;
+        TestIndex::with_tag(TAG, digest_a())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_format_version_propagates_through_the_default_chain() {
+        let dir = TempDir::new().unwrap();
+        let spy = seed_healthy_subtree(&dir).await;
+        let config = index_store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, br#"{"format_version":2}"#).unwrap();
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![make_source(spy.clone())],
+            super::super::ChainMode::Default,
+        );
+
+        for error in [
+            chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await
+                .expect_err("a v2 tree must refuse the read, not degrade to a source walk"),
+            chained
+                .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await
+                .expect_err("the digest reader classifies local errors separately — same rule"),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    crate::Error::OciIndex(super::super::error::Error::UnsupportedIndexFormat { version: 2 })
+                ),
+                "expected UnsupportedIndexFormat{{2}}, got {error:?}"
+            );
+            assert_eq!(
+                crate::cli::ClassifyExitCode::classify(&error),
+                Some(crate::cli::ExitCode::DataError),
+                "65 end to end, not only at the direct reader"
+            );
+        }
+        // The second half of the finding: a swallowed refusal lets the walk
+        // GROW the refused tree, writing v1-shaped documents into a tree
+        // declaring v2 — which `ensure_source_config` then never corrects,
+        // being write-if-absent.
+        assert!(
+            spy.calls.lock().unwrap().is_empty(),
+            "a refused tree must never be walked, and so never grown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unparseable_config_refuses_rather_than_hiding_the_subtree() {
+        // A gate that cannot be evaluated fails closed. Degrading to a miss
+        // would make every package under the source silently invisible — a
+        // cache bypass, and a "not found" under `--frozen`/`Offline`.
+        let dir = TempDir::new().unwrap();
+        let spy = seed_healthy_subtree(&dir).await;
+        let config = index_store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, b"{not json").unwrap();
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![make_source(spy.clone())],
+            super::super::ChainMode::Default,
+        );
+
+        let error = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect_err("an unreadable version gate is a refusal, not a local miss");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::MalformedIndexDocument { .. })
+            ),
+            "expected MalformedIndexDocument, got {error:?}"
+        );
+        assert!(spy.calls.lock().unwrap().is_empty(), "and the source is not consulted");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_config_refuses_rather_than_hiding_the_subtree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // C-003's fourth row, one layer up: a permission failure read as
+        // absence promotes an unreadable tree to a valid v1 index; read as a
+        // MISS it hides an otherwise healthy subtree. Neither is acceptable.
+        let dir = TempDir::new().unwrap();
+        let spy = seed_healthy_subtree(&dir).await;
+        let path = index_store(&dir).source_config_path(REGISTRY);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"format_version":1}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root (CAP_DAC_OVERRIDE) reads it anyway — the contract holds, it is
+        // just not observable here.
+        if std::fs::read(&path).is_ok() {
+            return;
+        }
+
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![make_source(spy.clone())],
+            super::super::ChainMode::Default,
+        );
+        let error = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect_err("an unreadable config.json must not flatten to a local miss");
+        assert!(
+            matches!(error, crate::Error::InternalFile(_, _)),
+            "expected the file_error I/O wrapper, got {error:?}"
+        );
+        assert!(spy.calls.lock().unwrap().is_empty(), "and the source is not consulted");
     }
 }

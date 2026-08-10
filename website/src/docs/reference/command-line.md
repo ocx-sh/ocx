@@ -925,23 +925,23 @@ choice**: resolving a locked tool's platform-manifest digest from the index afte
 other store or network access. The manifest bytes and layers themselves are content, still fetched
 on demand from the registry when actually installed.
 
-When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag is
-recorded — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where
-the local index should contain only explicitly requested tags. When a bare identifier is used
-(e.g., `cmake`), every tag is recorded.
+`<PACKAGE>...` names what gets refreshed, and at least one is required. A tagged identifier (e.g.,
+`cmake:3.28`) records only that tag — the remote tag listing is skipped entirely, which is ideal for
+lockfile workflows where the local index should contain only explicitly requested tags. A bare
+identifier (e.g., `cmake`) records every tag the source currently lists.
 
-**Only the packages you name are touched, and nothing else is fetched.** The command requests the
-named packages' roots and their dispatch objects — no catalog, no other package. A package left
-unnamed keeps every tag pin and its `repository` pointer exactly as committed, even when the source
-has moved on.
+**Only the packages you name are touched, and nothing else is fetched.** A package left out keeps
+every tag pin and its `repository` pointer exactly as committed, even when the source has moved on.
 
-Naming packages is the only form: there is no whole-index sync, because a remote index floats
-(packages appear, platforms get added, tags move) while the local copy is the set of snapshots you
-deliberately asked for. See [Indices][in-depth-indices-update] for why that is the shape. To ask
-what the site has now, ask it: [`ocx index catalog --remote`](#index-catalog) or
+Nothing here syncs a whole index as a side effect, because a remote index floats (packages appear,
+platforms get added, tags move) while the local copy is the set of snapshots you deliberately asked
+for. See [Indices][in-depth-indices-update] for why that is the shape. The whole-registry form is a
+verb of its own — [`ocx index sync <REGISTRY>`](#index-sync) — and is equally explicit. To see what
+a source has without refreshing anything: [`ocx index sync --dry-run`](#index-sync), or ask the
+source directly with [`ocx index catalog --remote`](#index-catalog) /
 [`ocx index list --remote`](#index-list).
 
-A bare `ocx index update` with no PACKAGE is a usage error ([exit 64][exit-codes]) — with no
+A bare `ocx index update` with no `<PACKAGE>` is a usage error ([exit 64][exit-codes]) — with no
 "everything" to fall back on, there is nothing for it to mean.
 
 `ocx index update` never writes to `$OCX_HOME/blobs/` or `$OCX_HOME/layers/` — those are populated
@@ -950,6 +950,10 @@ After running `ocx index update <pkg>`, an `ocx --offline package install <pkg>`
 tool's per-platform digest from the index but still fails to install, since the manifest and layer
 archives themselves are not part of the index.
 
+On the first successful update for a given published source, `ocx index update` also writes that
+source's `config.json` if one is not already present. See
+[Serving a local index snapshot][in-depth-indices-servable] for what that unlocks.
+
 A tag-refresh failure for any requested package fails the whole invocation; the
 [exit code][exit-codes] corresponds to the first failure in request order
 (deterministic across repeated runs). Packages that refresh successfully keep
@@ -957,16 +961,160 @@ their updated tags.
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags. At least one is required.
+- `<PACKAGE>...`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags. At least one is required.
+
+**Options**
+
+- `-h`, `--help`: Print help information.
 
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
 | 0 | Every named package refreshed. |
-| 64 | No PACKAGE given — there is no "everything" to fall back on. |
+| 64 | No `<PACKAGE>` given. |
 | 81 | [`--offline`](#arg-offline) or [`--frozen`](#arg-frozen) refused the command. Recording a new tag→digest mapping *is* the discovery a freeze forbids, and this is the package tier `--frozen` scopes to — so `index update` refuses in its own right. Re-run it without the flag to move the pin. |
-| *other* | The first failure in request order decides — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
+| *other* | The first failure in request order decides — see [Exit codes][exit-codes] (e.g. 79 not found, 80 authentication failure). |
+
+#### `sync` {#index-sync}
+
+```bash
+ocx index sync <REGISTRY>... [--dry-run]
+```
+
+The whole-registry form of [`update`](#index-update): name registries instead of packages, and each
+registry's own catalog names the packages. This is how a whole mirror is snapshotted in one command
+— see [Serving a local index snapshot][in-depth-indices-servable].
+
+The package set is read **live from the source** — a published source's own `c/index.json`, a
+plain-OCI registry's repository listing — never from the local copy, which is the set you already
+have. Each package is then refreshed exactly as if named bare to `update`, so it adopts every tag
+the source lists and keeps any tag only the local copy holds.
+
+The derived branch's repository listing depends on the registry implementing OCI's `_catalog`
+endpoint: Docker Hub disables it outright, and GHCR supports it only with an authenticated,
+correctly-scoped token — a registry that refuses `_catalog` fails that registry's whole snapshot.
+
+It is one explicit, operator-invoked read of each source's catalog **at that instant**, not a
+standing subscription and not a replica. A merge never deletes, so repeated runs accumulate a union
+of snapshots: a package that disappeared upstream keeps the tags this machine already recorded.
+[`regenerate`](#index-regenerate) is the only command that removes anything, and only a catalog
+entry whose root document is already gone — it cannot retract a package, for which the answer is a
+fresh index home.
+
+**Several registries are one run, not several.** Every `<REGISTRY>` is enumerated before any of them
+is refused, so one unreachable source does not cost the others their snapshot; the command still
+fails afterwards and reports each failure separately on stderr. The per-package refresh is bounded
+at the same in-flight ceiling `update` uses, across all registries together rather than per
+registry, so naming ten registries does not multiply the load on any of them.
+
+On the first successful sync for a given published source, `ocx index sync` also writes that
+source's `config.json` if one is not already present, exactly as `update` does.
+
+A registry whose catalog cannot be read at all — a missing endpoint, an auth refusal (exit 80), or a
+reachable, correctly-configured published source that simply serves no `c/index.json` (exit 69) —
+fails the command. It is never read as an empty catalog. A served catalog listing **zero packages**
+is a different fact: the source answered, so that enumerates cleanly and exits 0. That case still
+prints a warning on stderr naming the registry, since a pull token without catalog scope commonly
+answers with an empty listing rather than an authentication refusal.
+
+A published source whose catalog carries a yanked tag is refused fail-closed: the mirror operator
+must set [`OCX_ALLOW_YANKED`](./environment.md#ocx-allow-yanked) before running `ocx index sync`, or
+the run exits 65 and snapshots nothing for that registry. This is the operator's own opt-in, separate
+from and prior to the client-side refusal a resolve against the snapshot hits later.
+
+**Arguments**
+
+- `<REGISTRY>...`: Registries whose catalogs name the packages to refresh. At least one is required; repeat for several. A registry named twice is enumerated once, in first-mention order.
+
+**Options**
+
+- `--dry-run`: Print the packages this would refresh, one per line and sorted within each registry, and refresh none of them. Enumeration still runs, which contacts the source, so [`--offline`](#arg-offline) and [`--frozen`](#arg-frozen) still refuse it. Returns before both the per-package refresh and the patch-descriptor sync that otherwise follows a successful run: nothing under the index home is written — not even `config.json` — and no `[patches]` sync runs either. Exits 0 even when the enumerated set is empty; a registry that fails to enumerate still fails the dry run, with no partial listing printed.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Every enumerated package refreshed — or, under `--dry-run`, printed. |
+| 64 | No `<REGISTRY>` given. |
+| 65 | A registry's catalog served a key that is not a well-formed repository path. That registry is refused whole, before any of its packages is touched, and `--dry-run` fails the same way. |
+| 81 | [`--offline`](#arg-offline) or [`--frozen`](#arg-frozen) refused the command — including a `--dry-run`, since printing the set still means contacting the source. |
+| *other* | A registry that could not be enumerated decides, ahead of any per-package failure — including **69** for a reachable source that serves no `c/index.json`. Otherwise the first per-package failure in the order `--dry-run` prints them decides; see [Exit codes][exit-codes] (e.g. 79 not found, 80 authentication failure). |
+
+#### `regenerate` {#index-regenerate}
+
+```bash
+ocx index regenerate <REGISTRY>...
+```
+
+Re-derives a published index source's `c/index.json` catalog from the root documents actually
+present under its `p/` tree, and writes it back. `c/index.json` is derived data — every entry
+restates a digest the root document beside it already carries — and every other writer only ever
+*adds* to it, which leaves one drift nothing else repairs: an entry naming a package whose root
+document is gone. `regenerate` is the one operation that clears such an entry, by replacing the
+whole map with what the walk actually finds.
+
+It makes no assumption the tree was written by this `ocx`: root documents possibly written by
+another implementation, and a tree with no prior `c/index.json` at all, are both valid input. It
+consults no source and moves no pin — it never contacts a registry or an index endpoint — so
+[`--frozen`](#arg-frozen) and [`--offline`](#arg-offline) both permit it: [`update`](#index-update)
+and [`sync`](#index-sync) are the commands both flags refuse (theirs is the write both flags exist to
+gate); `regenerate` is the only one whose *purpose* is to write, rewriting the catalog deliberately; [`catalog`](#index-catalog) and
+[`list`](#index-list) are permitted because, without `--remote`, they read the local copy — though
+`list` can still trigger a read-path self-heal on an already-drifted tree, a write neither flag gates.
+
+It writes exactly one file per registry, that registry's `c/index.json` — clearing a stale
+`c/index.json.etag` beside it too, if the tree carries one left by an older `ocx` — and never a root
+document, never a dispatch object, and never `config.json`: `name_segments` is an operator
+declaration no tree can be read for, so fabricating one while repairing a foreign tree would be
+wrong. A tree whose catalog already matches its `p/` tree is left byte- and mtime-identical, once any
+stale `c/index.json.etag` has been cleared — that clearing happens even on an otherwise-clean first
+run against a tree written by an older `ocx`.
+
+::: warning Symlinked layouts lose packages silently
+`regenerate` does not follow symlinks under `p/`. A symlinked root document is skipped, and a
+**symlinked directory is never queued at all — taking every root beneath it with it in one step.**
+Because the catalog is replaced wholesale, that is not a missing entry but silent bulk removal from
+`c/index.json`: the packages still resolve by tag (resolution reads roots directly and never through
+the catalog), but they vanish from `ocx index catalog`, from [`index sync`](#index-sync) enumeration, and from
+anything else that reads the catalog. `regenerate` is specified for trees whose roots and
+intermediate directories are real files and directories — every tree `ocx` itself produces. A
+symlink-deduplicated layout (a package staged once and linked into several locations) needs the real
+files underneath, not links to them — hardlinks are unaffected, since a hard-linked file *is* a
+regular file to the walk.
+
+The removal is not always permanent: on a tree this machine also resolves, not merely serves, a
+resolve's own catalog self-heal re-adds a dropped entry the next time the package is resolved, since
+the root read behind it follows symlinks directly. It sticks for a tree that is served and never
+locally resolved.
+:::
+
+Each `<REGISTRY>` must be a **published** index source — one configured with
+[`[registries."<ns>"] index`][config-registries-index]. A derived, plain-OCI namespace has no
+catalog document by grammar (its catalog *is* the `p/` enumeration itself) and is refused with
+[exit 78][exit-codes], naming the registry.
+
+**Arguments**
+
+- `<REGISTRY>...`: One or more published index sources to regenerate. At least one is required.
+
+**Report**
+
+Per registry: the number of root documents the walk found, and every package added (a root on disk
+with no catalog entry), corrected (a catalog entry whose digest disagreed with the root on disk), or
+removed (a catalog entry naming a root no longer on disk). A run that changed nothing for every named
+registry prints a single line instead of an empty table. Honours the root
+[`--format json`][arg-format].
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Every named registry's catalog matches its `p/` tree, and the report was printed. |
+| 64 | No `<REGISTRY>` given. |
+| 78 | A named registry — or a configured namespace resolving to the same on-disk subtree under a different name — is not a published index source. |
+| *other* | 65 — a root document under `p/` failed to parse. 74 — the named registry's subtree does not exist (a mistyped `<REGISTRY>`, or a checkout not yet materialized): `regenerate` never creates one, it refuses instead; 74 also on a `p/` walk that found no root document while the catalog still names packages (refusing to replace a non-empty catalog with an empty one), and on a source lock that timed out. Per-registry failures aggregate in argument order; the lowest-index failure is the process error. |
 
 ### `about` {#about}
 
@@ -1478,7 +1626,7 @@ Whole-file `ocx update` always re-resolves every tag against the registry; scope
 :::
 
 ::: tip The update family
-Three verbs share the name; each refreshes exactly one record. [`ocx index update`](#index-update) refreshes the local index at `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`. [`ocx self update`](#self-update) refreshes the managed ocx installation. `ocx update` refreshes `ocx.lock`. Under [`--frozen`](#arg-frozen), `ocx update` caps discovery at that local index — a declared tag it doesn't already know exits [`81`](#exit-codes). Under [`--offline`](#arg-offline), no network call is made at all, which also exits `81` when resolution is required.
+Four verbs share the name; each refreshes exactly one record. [`ocx index update`](#index-update) refreshes the local index at `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/` — [`ocx index sync`](#index-sync) is `ocx index update` over a whole registry's catalog rather than a named list. [`ocx self update`](#self-update) refreshes the managed ocx installation. [`ocx config update`](#config-update) refreshes the managed-config snapshot. `ocx update` refreshes `ocx.lock`. Under [`--frozen`](#arg-frozen), `ocx update` caps discovery at that local index — a declared tag it doesn't already know exits [`81`](#exit-codes). Under [`--offline`](#arg-offline), no network call is made at all, which also exits `81` when resolution is required.
 :::
 
 **Usage**
@@ -3660,7 +3808,8 @@ any newly-referenced companion packages. Requires network access.
 
 This command also picks up patches for packages installed before the `[patches]` tier was
 configured. All states are re-checked regardless of what was previously recorded. Running
-`patch sync` is equivalent to `ocx index update` for the patch tier.
+`patch sync` is equivalent to `ocx index update` for the patch tier — not to the similarly-named
+`ocx index sync`, despite the shared verb.
 
 Without `--platform`, `patch sync` resolves **every concrete ship platform**
 (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) — not just the
@@ -4200,6 +4349,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-indices-layout]: ../in-depth/indices.md#local-layout
 [in-depth-indices-update]: ../in-depth/indices.md#update-modes
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
+[in-depth-indices-servable]: ../in-depth/indices.md#servable
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

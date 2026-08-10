@@ -35,9 +35,15 @@
 //!
 //! ## Trust anchor
 //!
-//! The dispatch-object verify (`sha256(bytes) == <hex>`) is the one place OCX
-//! re-derives a digest it did not mint, so it is the trust boundary of the
-//! whole index path (F1). A mismatch is a hard
+//! The **root document** is the anchor: nothing pins it from above, so it is
+//! trusted on the strength of the channel it arrived over — TLS for an
+//! `https://` base (which is why [`Error::PlainHttpIndexNotAllowed`](super::error::Error::PlainHttpIndexNotAllowed)
+//! refuses an ungated plaintext one), or the operator's own filesystem for a
+//! `file://` shipped copy.
+//!
+//! Everything *below* the root is verified rather than trusted: the
+//! dispatch-object verify (`sha256(bytes) == <hex>`) is the one place OCX
+//! re-derives a digest it did not mint (F1), and a mismatch is a hard
 //! [`DataError`](crate::cli::ExitCode::DataError), never a silent load. The
 //! bytes are publisher-controlled, so `annotations` and `artifactType` ride
 //! through stored but never rendered.
@@ -62,8 +68,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::wire::{CatalogDocument, CatalogIndex, IndexRoot, RootTag, SUPPORTED_FORMAT_VERSION};
-use super::{IndexOperation, index_impl};
+use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
+use super::{IndexOperation, error, index_impl};
 use crate::{Result, log, oci};
 
 // ── Frozen wire shapes (● contract) ──────────────────────────────────────────
@@ -74,34 +80,11 @@ use crate::{Result, log, oci};
 // verbatim by this remote client and the local store
 // (`crate::file_structure::IndexStore`), imported above. What a tag points at
 // is an `oci::ImageIndex`, whose shape is the OCI image spec's, not ours.
-
-/// `config.json` — the version pin (● `{"format_version": 1}`) and the index's
-/// own declaration of the names it can express.
-///
-/// Read once per source; an unknown `format_version` is a hard error
-/// (fail-closed, F1). Forward-compatible: unknown sibling fields are ignored —
-/// the live site already serves a `name_segments` sibling this reader has no
-/// use for.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IndexFormatConfig {
-    pub format_version: u64,
-    /// Slash-separated segment count a package name must have under this index,
-    /// counted on the name **within** the namespace ([`oci::Identifier::repository`]).
-    /// `index.ocx.sh` serves `2` — its root schema pins the logical name to
-    /// `<ns>/<pkg>`, so it can never hold a root for a flat name.
-    ///
-    /// Absent = this index declares no constraint and can express every name,
-    /// which is the historical behaviour verbatim. Deliberately **not** a
-    /// security control: an older client ignores the field entirely, so nothing
-    /// about the yank gate, the dispatch-object verify, or the authoritative
-    /// stop is delegated to it — it only ever narrows what a client asks for.
-    ///
-    /// `NonZeroU32` does the validation: `0` fails deserialization into the
-    /// existing [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
-    /// path, so there is no hand-written validator to keep in sync.
-    #[serde(default)]
-    pub name_segments: Option<std::num::NonZeroU32>,
-}
+//
+// `IndexFormatConfig` (`config.json`) joined them there: no longer this
+// module's private struct but a shared one — this module reads it today, and
+// the local store will read it (WP11) while the update path writes it (WP5)
+// (`adr_servable_index_snapshot.md` C-001).
 
 use crate::oci::client::MAX_INDEX_DOCUMENT_BYTES;
 
@@ -144,16 +127,20 @@ pub enum IndexFetch {
     NotFound,
 }
 
-/// Plain-HTTPS transport for the static-file index endpoints.
+/// Transport for the static-file index endpoints.
 ///
-/// The seam that lets [`OcxIndex`] resolve without hitting the network in
-/// tests (mock this the way [`StubTransport`](super::super::client::test_transport::StubTransport)
-/// mocks the OCI transport). The production impl is
-/// [`ReqwestIndexTransport`].
+/// Two production impls, one per scheme [`OcxIndex::resolve_base_url`] admits:
+/// [`ReqwestIndexTransport`] over `https://` (or gated `http://`), and
+/// [`FileIndexTransport`](super::FileIndexTransport) over a `file://` shipped
+/// copy. It is also the seam that lets [`OcxIndex`] resolve without hitting the
+/// network in tests (mock this the way
+/// [`StubTransport`](super::super::client::test_transport::StubTransport) mocks
+/// the OCI transport).
 #[async_trait]
 pub trait IndexTransport: Send + Sync {
-    /// `GET url`. Unconditional — nothing here sends `If-None-Match`, so a
-    /// `304` is a protocol violation and surfaces as an error, never a miss.
+    /// Fetch `url`. Unconditional — nothing here sends a validator, so an impl
+    /// must never answer with a not-modified outcome; the only outcomes are
+    /// the bytes, [`IndexFetch::NotFound`], or an error.
     async fn get(&self, url: &str) -> Result<IndexFetch>;
 
     fn box_clone(&self) -> Box<dyn IndexTransport>;
@@ -344,6 +331,113 @@ pub fn parse_physical_repository(value: &str) -> Result<(String, String)> {
 /// Default base URL when no `[registries."<ns>"] index` field is configured.
 pub const DEFAULT_INDEX_BASE_URL: &str = "https://index.ocx.sh";
 
+/// A resolved index base: the URL every fetch is minted from, paired with the
+/// transport that serves that scheme — one value, because
+/// [`OcxIndex::resolve_base_url`] decides the scheme once and the caller never
+/// re-derives it (`adr_servable_index_snapshot.md` C-018).
+pub struct IndexBase {
+    /// Trailing-slash-trimmed, as [`OcxIndex::new`] stores it.
+    pub url: String,
+    /// The transport for `url`'s scheme.
+    pub transport: Box<dyn IndexTransport>,
+}
+
+impl std::fmt::Debug for IndexBase {
+    // `Box<dyn IndexTransport>` cannot derive it, and the URL may carry
+    // `user:password@` userinfo (CWE-532), so it goes through `redact_url`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexBase")
+            .field("url", &redact_url(&self.url))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The lowercased scheme of `url`, or `None` when it carries none.
+///
+/// The same split [`crate::config::mirror::parse_url`] does, applied *before*
+/// it so the closed scheme set can be checked on the configured base — a `file`
+/// base has to be diverted before that parser reads its empty authority as
+/// `MissingHost` (C-018 check 1).
+fn scheme_of(url: &str) -> Option<String> {
+    url.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase())
+}
+
+fn invalid_index_url(
+    namespace: &str,
+    url: &str,
+    origin: String,
+    source: Option<crate::config::mirror::MirrorConfigError>,
+) -> crate::Error {
+    error::Error::InvalidIndexUrl {
+        namespace: namespace.to_string(),
+        // A configured base or a mirror value may embed `user:password@`
+        // (CWE-532), and this error names the offending URL verbatim.
+        url: redact_url(url),
+        origin,
+        source: source.map(Box::new),
+    }
+    .into()
+}
+
+/// Resolves a `file://` configured base into its [`IndexBase`] (C-018's `file`
+/// row, C-019).
+///
+/// Requires an **empty authority** — `file://host/srv/x` and
+/// `file://localhost/srv/x` are UNC/remote forms, not local trees — and an
+/// **absolute path**. Two paths are refused for naming no directory: the
+/// filesystem root (`file:///`), which survives the trailing-slash trim as the
+/// empty string, and a bare Windows drive (`file:///C:/`), which survives it as
+/// `/C:` and would otherwise reach [`file_root`] as the designator `C:` — a
+/// path Win32 resolves against the **per-drive working directory**, silently
+/// serving the whole index out of wherever `ocx` was launched.
+fn resolve_file_base(namespace: &str, base: &str) -> Result<IndexBase> {
+    let rest = base.split_once("://").map_or("", |(_, rest)| rest);
+    // Splitting at the first `/` makes the authority check and the
+    // absolute-path check the same test: whatever precedes it is the authority,
+    // and a path that survives non-empty necessarily starts with `/`.
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let path = path.trim_end_matches('/');
+    // `path.len() == 3` is the whole of `/C:` — a drive with nothing under it.
+    // Refused on every platform, so a base is valid or not independently of
+    // where it is read; `/C:` is not a directory anyone means on Unix either.
+    let bare_drive = has_drive_prefix(path) && path.len() == 3;
+    if !authority.is_empty() || path.is_empty() || bare_drive {
+        return Err(invalid_index_url(
+            namespace,
+            base,
+            error::INDEX_URL_FROM_REGISTRIES.to_string(),
+            None,
+        ));
+    }
+    let url = format!("file://{path}");
+    Ok(IndexBase {
+        transport: Box::new(super::FileIndexTransport::new(url.clone(), file_root(path))),
+        url,
+    })
+}
+
+/// The absolute filesystem path a `file://` URL's tail names.
+///
+/// On Windows the tail `/C:/srv/x` is not itself an absolute path — the
+/// drive-letter form needs its leading separator stripped (C-018). Stripping it
+/// unconditionally would turn a legitimate Unix root literally named `/C:/…`
+/// into a **relative** path resolved against the process working directory, so
+/// it is gated on the target OS.
+fn file_root(path: &str) -> std::path::PathBuf {
+    if cfg!(windows) && has_drive_prefix(path) {
+        std::path::PathBuf::from(&path[1..])
+    } else {
+        std::path::PathBuf::from(path)
+    }
+}
+
+/// Whether `path` is a `file://` tail of the Windows drive-letter form
+/// (`/C:/…`). OS-independent so it stays testable off Windows.
+fn has_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
+}
+
 /// In-memory caches shared across [`OcxIndex`] clones (per-invocation).
 ///
 /// Roots are volatile but cheap to re-read within one resolution (the tag →
@@ -362,26 +456,11 @@ struct SourceCacheInner {
     /// (F1 "read once") and [`OcxIndex::jurisdiction`] reads the declared name
     /// grammar for free. Never set on a served-but-unsupported version (a
     /// re-checked hard error, not a remembered steady state) NOR on an absent
-    /// `config.json` (a re-checked inert state — a fixed deploy that later
-    /// serves `config.json` is picked up without restarting). Config-driven
+    /// `config.json` (assumed v1 and re-derived every call, so a tree that
+    /// later publishes one is picked up without restarting). Config-driven
     /// construction means there is no probe outcome to soften a transport
     /// failure into — that always propagates.
     config: Option<Arc<IndexFormatConfig>>,
-}
-
-/// Outcome of the per-source `config.json` version check
-/// ([`OcxIndex::check_format_version`]).
-enum FormatVersionState {
-    /// `config.json` present and its `format_version` is supported — roots may
-    /// resolve. Carries the parsed document so the declared name grammar
-    /// ([`IndexFormatConfig::name_segments`]) rides the same memoized fetch.
-    Confirmed(Arc<IndexFormatConfig>),
-    /// `config.json` absent (404) — this base URL is not (yet) a version-pinned
-    /// OCX index, so no root resolves and nothing is cached (fail-closed, F1;
-    /// re-checked every call). Serving a valid-looking root without the version
-    /// pin must not let it resolve — `adr_index_indirection.md` F1, the
-    /// "misconfigured index endpoint fails loud" contract in `subsystem-oci`.
-    NotAnIndex,
 }
 
 /// A live `index.ocx.sh`-style source.
@@ -492,9 +571,7 @@ impl OcxIndex {
             return super::Jurisdiction::Outside;
         }
         let declared = match self.check_format_version().await {
-            Ok(FormatVersionState::Confirmed(config)) => config.name_segments,
-            // 404 (not a version-pinned index) — no declaration to honour.
-            Ok(FormatVersionState::NotAnIndex) => None,
+            Ok(config) => config.name_segments,
             Err(error) => {
                 log::debug!(
                     "Could not read '{}' config.json to check jurisdiction over '{identifier}' \
@@ -556,7 +633,8 @@ impl OcxIndex {
         &self.trusted_hosts
     }
 
-    /// Resolves the static-file base URL for `namespace`: the
+    /// Resolves the static-file base for `namespace` — the URL and the
+    /// transport that serves it, as one [`IndexBase`]: the
     /// `[registries."<ns>"] index` base (already merged through the managed
     /// tier) if present, else [`DEFAULT_INDEX_BASE_URL`] — then applies the
     /// `[mirrors."<host>"] index` role override for the base's own traffic
@@ -564,22 +642,31 @@ impl OcxIndex {
     /// fallback). Minted **once** here, the single place base URLs come
     /// from (`adr_index_indirection.md` F5c).
     ///
-    /// A plain-`http://` final target is refused unless its host is in
-    /// `insecure_hosts` (`OCX_INSECURE_REGISTRIES`) — the root document is the
-    /// index path's trust anchor, so a plaintext index is an on-path takeover
-    /// (CWE-319), gated exactly like the registry role.
+    /// The scheme set is closed and checked twice — on the configured base,
+    /// and again on the post-override target, since a `[mirrors]` entry (table
+    /// or `OCX_MIRRORS`) replaces the scheme
+    /// (`adr_servable_index_snapshot.md` C-018/C-019/C-020):
+    ///
+    /// | Scheme | Target |
+    /// |---|---|
+    /// | absent / `https` | [`ReqwestIndexTransport`] |
+    /// | `http` | [`ReqwestIndexTransport`], only when the final host is in `insecure_hosts` (`OCX_INSECURE_REGISTRIES`) — the root document is the index path's trust anchor, so a plaintext index is an on-path takeover (CWE-319), gated exactly like the registry role |
+    /// | `file` | [`FileIndexTransport`](super::FileIndexTransport), as a **configured base only** — empty authority, absolute path, and no `[mirrors]` override (which is host-keyed, and a `file` base has no host) |
+    /// | anything else | refused |
     ///
     /// # Errors
     ///
     /// [`Error::PlainHttpIndexNotAllowed`](super::error::Error::PlainHttpIndexNotAllowed)
     /// for an ungated `http://` target; [`Error::InvalidIndexUrl`](super::error::Error::InvalidIndexUrl)
-    /// for an unparseable `[registries."<ns>"] index` base.
+    /// for an unparseable `[registries."<ns>"] index` base, a scheme outside the
+    /// set above, or a `file://` base with a non-empty authority or a relative
+    /// path.
     pub fn resolve_base_url(
         config: &crate::config::Config,
         namespace: &str,
         mirrors_index: &BTreeMap<String, crate::config::mirror::ParsedMirror>,
         insecure_hosts: &[String],
-    ) -> Result<String> {
+    ) -> Result<IndexBase> {
         let base = config
             .registries
             .as_ref()
@@ -588,79 +675,120 @@ impl OcxIndex {
             .filter(|url| !url.is_empty())
             .unwrap_or(DEFAULT_INDEX_BASE_URL);
 
+        // Check 1, on the CONFIGURED base and before `parse_url`: a `file` base
+        // is diverted here because it must never be host-keyed — it has no host
+        // to key a `[mirrors]` override by, and `parse_url` reads its empty
+        // authority as `MissingHost`.
+        match scheme_of(base).as_deref() {
+            None | Some("http") | Some("https") => {}
+            Some("file") => return resolve_file_base(namespace, base),
+            Some(_) => {
+                return Err(invalid_index_url(
+                    namespace,
+                    base,
+                    error::INDEX_URL_FROM_REGISTRIES.to_string(),
+                    None,
+                ));
+            }
+        }
+
         // Reuse the mirror URL parser (scheme/host split, https default) so the
         // plain-HTTP gate matches the registry role byte for byte.
-        let parsed = crate::config::mirror::parse_url(base).map_err(|source| super::error::Error::InvalidIndexUrl {
-            namespace: namespace.to_string(),
-            source,
+        let parsed = crate::config::mirror::parse_url(base).map_err(|source| {
+            invalid_index_url(
+                namespace,
+                base,
+                error::INDEX_URL_FROM_REGISTRIES.to_string(),
+                Some(source),
+            )
         })?;
 
         // Index-role mirror override, keyed by the base's own traffic host —
-        // replace semantics, no fallback.
-        let target = mirrors_index.get(&parsed.host).cloned().unwrap_or(parsed);
-
-        if target.protocol == "http" && !insecure_hosts.iter().any(|host| host == &target.host) {
-            return Err(super::error::Error::PlainHttpIndexNotAllowed {
-                namespace: namespace.to_string(),
-                host: target.host,
-            }
-            .into());
-        }
-
+        // replace semantics, no fallback. The key is kept because it is what
+        // names the offending `[mirrors]` entry if check 2 refuses below.
+        let upstream = parsed.host.clone();
+        let overridden = mirrors_index.get(&upstream);
+        let target = overridden.cloned().unwrap_or(parsed);
         let path = if target.path_prefix.is_empty() {
             String::new()
         } else {
             format!("/{}", target.path_prefix)
         };
-        Ok(format!("{}://{}{}", target.protocol, target.host, path))
+        let url = format!("{}://{}{}", target.protocol, target.host, path);
+
+        // Check 2, on the POST-override target. Not redundant with check 1: the
+        // override replaces the scheme, so a `[mirrors]` entry — including one
+        // injected through `OCX_MIRRORS` — bypasses a base-only check (C-020).
+        match target.protocol.as_str() {
+            "https" => {}
+            "http" if insecure_hosts.iter().any(|host| host == &target.host) => {}
+            "http" => {
+                return Err(super::error::Error::PlainHttpIndexNotAllowed {
+                    namespace: namespace.to_string(),
+                    host: target.host,
+                }
+                .into());
+            }
+            _ => {
+                // Check 1 admitted only http/https past its own branch, so a
+                // scheme reaching here can only have come from the override.
+                let origin = if overridden.is_some() {
+                    error::index_url_from_mirrors(&upstream)
+                } else {
+                    error::INDEX_URL_FROM_REGISTRIES.to_string()
+                };
+                return Err(invalid_index_url(namespace, &url, origin, None));
+            }
+        }
+
+        Ok(IndexBase {
+            url,
+            transport: Box::new(ReqwestIndexTransport::new()),
+        })
     }
 
     // ── config.json (F1) ─────────────────────────────────────────────────────
 
-    /// Validates `config.json`'s `format_version`, fetching it once per source
-    /// instance on success (F1 "read once") and skipping the fetch on every
-    /// later call. Config-driven construction (`[registries."<ns>"].index`
-    /// presence) already decided this host serves an ocx-index, so there is
-    /// nothing left to *probe* for — this only guards the wire-format version.
+    /// Resolves this source's `config.json` and version-gates it, fetching it
+    /// once per source instance on success (F1 "read once") and skipping the
+    /// fetch on every later call. Config-driven construction
+    /// (`[registries."<ns>"].index` presence) already decided this host serves
+    /// an ocx-index, so there is nothing left to *probe* for — this only
+    /// guards the wire-format version and carries the declared name grammar
+    /// ([`IndexFormatConfig::name_segments`]) on the same fetch.
     ///
-    /// A served-but-unsupported `format_version` is a hard, fail-closed error
-    /// (F1) and is never cached as a steady state — every call re-checks so a
-    /// fixed deploy is picked up without restarting the process. An absent
-    /// `config.json` (404) yields [`FormatVersionState::NotAnIndex`] — inert,
-    /// never cached, and (critically) never a pass that lets roots resolve: a
-    /// base URL serving a valid-looking root but no version pin is not an OCX
-    /// index, and resolving it anyway would consume roots against an
-    /// unversioned endpoint (F1 fail-closed). A transport failure reaching
-    /// `config.json` propagates as a hard error on every call — there is no
-    /// soft "maybe not an index yet" state left to absorb it.
+    /// An **absent** `config.json` (404) resolves to
+    /// [`IndexFormatConfig::assumed_v1`] and is deliberately **not** memoized,
+    /// so a tree that later publishes one is picked up without restarting the
+    /// process (`adr_servable_index_snapshot.md` C-005). A
+    /// served-but-unsupported `format_version` is a hard, fail-closed error
+    /// (F1), likewise never cached as a steady state. A transport failure
+    /// reaching `config.json` propagates as a hard error on every call — there
+    /// is no soft "maybe not an index yet" state to absorb it.
     ///
     /// # Errors
     ///
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
     /// on a served-but-unknown version; the transport error otherwise.
-    async fn check_format_version(&self) -> Result<FormatVersionState> {
+    async fn check_format_version(&self) -> Result<Arc<IndexFormatConfig>> {
         if let Some(config) = &self.cache.read().await.config {
-            return Ok(FormatVersionState::Confirmed(config.clone()));
+            return Ok(config.clone());
         }
         let url = format!("{}/config.json", self.base_url);
-        let config = match self.transport.get(&url).await? {
-            IndexFetch::Found { bytes } => {
-                let config: IndexFormatConfig = parse_document(&bytes, &url)?;
-                if config.format_version != SUPPORTED_FORMAT_VERSION {
-                    return Err(super::error::Error::UnsupportedIndexFormat {
-                        version: config.format_version,
-                    }
-                    .into());
-                }
-                Arc::new(config)
-            }
-            // Absent config: not a version-pinned OCX index at this base URL.
-            // Do NOT cache and do NOT let roots resolve — fail-closed (F1),
-            // re-checked every call so a later-deployed config.json is picked up.
-            IndexFetch::NotFound => return Ok(FormatVersionState::NotAnIndex),
+        let fetched = self.transport.get(&url).await?;
+        let config = match &fetched {
+            IndexFetch::Found { bytes } => parse_document(bytes, &url)?,
+            IndexFetch::NotFound => IndexFormatConfig::assumed_v1(),
         };
-        self.cache.write().await.config = Some(config.clone());
-        Ok(FormatVersionState::Confirmed(config))
+        gate_format_version(config.format_version)?;
+        let config = Arc::new(config);
+        // Only a document that was actually served is memoized. An assumed v1
+        // is re-derived every call, so a tree that later publishes a
+        // `config.json` is picked up without restarting the process (C-005).
+        if matches!(fetched, IndexFetch::Found { .. }) {
+            self.cache.write().await.config = Some(config.clone());
+        }
+        Ok(config)
     }
 
     // ── root (F1 volatile) ──────────────────────────────────────────────────
@@ -675,12 +803,9 @@ impl OcxIndex {
     /// miss: this `None` is what [`Self::jurisdiction`] settles an `Outside`
     /// verdict off, and it is memoized, so no other status may fold into it.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
-        // An absent config.json makes the base a non-index — no root resolves
-        // (fail-closed, F1), never a pass that consumes a valid-looking root.
-        // Deliberately NOT memoized: the config itself is re-checked every call.
-        if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
-            return Ok(None);
-        }
+        // The version gate runs before any root is consumed (F1). Absence is
+        // v1, not a refusal (C-005) — an unsupported served version still is.
+        self.check_format_version().await?;
         if let Some(root) = self.cache.read().await.roots.get(repository) {
             return Ok(root.clone());
         }
@@ -822,20 +947,48 @@ impl OcxIndex {
     /// what answers `ocx index catalog --remote`, and it is the only reason the
     /// remote catalog is fetched at all.
     ///
-    /// A `404`, or a base URL with no `config.json`, yields an empty catalog
-    /// rather than an error — neither is a failure, just an index with nothing
-    /// to list.
+    /// A `404` yields an empty catalog rather than an error — not a failure,
+    /// just an index with nothing to list. That tolerance is right for a
+    /// *listing* command and wrong for an enumeration that then acts on the
+    /// result; see [`Self::fetch_catalog_strict`].
     pub async fn fetch_catalog(&self) -> Result<CatalogIndex> {
-        // No config.json ⇒ not a version-pinned index: nothing to list, an
-        // empty catalog (fail-closed, F1) — never a walk of an unversioned base.
-        if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
-            return Ok(CatalogIndex::new());
-        }
+        Ok(self.fetch_catalog_document().await?.unwrap_or_else(CatalogIndex::new))
+    }
+
+    /// [`Self::fetch_catalog`], but an **absent** catalog document is an error
+    /// rather than an empty one.
+    ///
+    /// For a caller that enumerates a source in order to act on the result,
+    /// "this source serves no catalog" and "this source serves a catalog
+    /// listing nothing" are different facts and only the second is a clean
+    /// enumeration. `index sync` collapsed them and so exited
+    /// 0 having refreshed nothing and printed nothing — C-013's
+    /// authoritative-stop rule requires the stop.
+    ///
+    /// A served catalog with zero packages still returns `Ok` and still exits 0
+    /// (C-027's Exit row): the source answered.
+    pub async fn fetch_catalog_strict(&self) -> Result<CatalogIndex> {
         let url = format!("{}/c/index.json", self.base_url);
-        match self.transport.get(&url).await? {
-            IndexFetch::NotFound => Ok(CatalogIndex::new()),
-            IndexFetch::Found { bytes } => parse_document::<CatalogDocument>(&bytes, &url)?.into_packages(),
-        }
+        self.fetch_catalog_document().await?.ok_or_else(|| {
+            super::error::Error::CatalogDocumentAbsent {
+                index_source: self.namespace.clone(),
+                url,
+            }
+            .into()
+        })
+    }
+
+    /// The catalog document, or `None` when the source serves none. The two
+    /// public wrappers differ only in what they make of that `None`.
+    async fn fetch_catalog_document(&self) -> Result<Option<CatalogIndex>> {
+        // The version gate runs before the listing every other read fans out
+        // from (F1).
+        self.check_format_version().await?;
+        let url = format!("{}/c/index.json", self.base_url);
+        Ok(match self.transport.get(&url).await? {
+            IndexFetch::NotFound => None,
+            IndexFetch::Found { bytes } => Some(parse_document::<CatalogDocument>(&bytes, &url)?.into_packages()?),
+        })
     }
 }
 
@@ -1014,11 +1167,8 @@ impl index_impl::IndexImpl for OcxIndex {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
-        // Fail-closed: an absent config.json means this base is not a
-        // version-pinned index, so its root documents must not be consumed (F1).
-        if let FormatVersionState::NotAnIndex = self.check_format_version().await? {
-            return Ok(None);
-        }
+        // The version gate runs before any root is consumed (F1).
+        self.check_format_version().await?;
         let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
@@ -1601,7 +1751,7 @@ mod tests {
         );
     }
 
-    // ── config.json fail-closed / inert ──────────────────────────────────────
+    // ── config.json: absent is v1, unknown is fatal (C-004/C-005) ────────────
 
     #[tokio::test]
     async fn unsupported_format_version_fails_closed() {
@@ -1621,29 +1771,37 @@ mod tests {
             ),
             "expected UnsupportedIndexFormat{{2}}, got {error:?}"
         );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "a served-but-unknown format_version is a data error (65)"
+        );
     }
 
     #[tokio::test]
-    async fn absent_config_leaves_source_inert() {
-        // No config.json, no root registered → every fetch is a clean miss,
-        // never an error (a base URL that serves no config is simply not an
-        // OCX index yet).
-        let source = make_source(StubIndexTransport::new(), false);
+    async fn absent_config_and_absent_root_is_a_clean_miss() {
+        // No config.json and no root registered. The miss now comes from the
+        // ABSENT ROOT — an absent config is version 1 (C-005), so the root GET
+        // is issued rather than short-circuited.
+        let transport = StubIndexTransport::new();
+        let source = make_source(transport.clone(), false);
         let result = source
             .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
             .await
             .unwrap();
-        assert!(result.is_none(), "an inert source must miss cleanly, not error");
+        assert!(result.is_none(), "an empty base must miss cleanly, not error");
+        assert!(
+            transport.request_urls().contains(&root_url()),
+            "the root must be asked for — the absent config no longer short-circuits it"
+        );
     }
 
     #[tokio::test]
-    async fn absent_config_refuses_valid_root_and_never_fetches_it() {
-        // Fail-closed (F1): a base that serves a fully valid root + dispatch object
-        // but NO config.json is not a version-pinned OCX index. The root must
-        // never be consumed — an absent config.json must not degrade to a clean
-        // pass that lets a valid-looking root resolve against an unversioned
-        // endpoint. The root document must not even be fetched: the config check
-        // short-circuits before the root GET.
+    async fn absent_config_is_version_one_and_the_root_resolves() {
+        // C-005, the inverse of the behaviour this file shipped: a tree with a
+        // valid root + dispatch object but NO config.json is a v1 index, and it
+        // resolves. This is the defect the whole change exists to fix — such a
+        // tree is exactly what `ocx index update` produces.
         let transport = StubIndexTransport::new();
         // Deliberately DO NOT insert config.json — serve an otherwise-valid tree.
         let dispatch_bytes = glibc_musl_index();
@@ -1660,12 +1818,30 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.is_none(),
-            "a valid root must not resolve when config.json is absent (fail-closed, F1)"
+            result.is_some(),
+            "a valid root under a config-less tree must resolve — absent means v1 (C-005)"
         );
         assert!(
-            !transport.request_urls().contains(&root_url()),
-            "the root document must never be fetched when config.json is absent"
+            transport.request_urls().contains(&root_url()),
+            "the root document must be fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_assumed_v1_is_never_memoized() {
+        // C-005: only a SERVED config.json is memoized. An assumed v1 is
+        // re-derived every call, so a tree that publishes one later is picked
+        // up without restarting the process.
+        let transport = StubIndexTransport::new();
+        let source = make_source(transport.clone(), false);
+
+        assert!(source.fetch_catalog().await.unwrap().is_empty());
+        assert!(source.fetch_catalog().await.unwrap().is_empty());
+
+        assert_eq!(
+            transport.request_count(&config_url()),
+            2,
+            "an assumed v1 must not be cached — every call re-asks for config.json"
         );
     }
 
@@ -1786,7 +1962,9 @@ mod tests {
     fn resolve_base_url_defaults_and_honors_registries_index() {
         let empty = crate::config::Config::default();
         assert_eq!(
-            OcxIndex::resolve_base_url(&empty, "ocx.sh", &no_mirrors(), &[]).unwrap(),
+            OcxIndex::resolve_base_url(&empty, "ocx.sh", &no_mirrors(), &[])
+                .unwrap()
+                .url,
             DEFAULT_INDEX_BASE_URL,
             "no [registries.\"ocx.sh\"] index field must yield the default base URL"
         );
@@ -1794,12 +1972,16 @@ mod tests {
         let config: crate::config::Config =
             toml::from_str("[registries.\"ocx.sh\"]\nindex = \"https://artifactory.corp/ocx-index/\"").unwrap();
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[]).unwrap(),
+            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[])
+                .unwrap()
+                .url,
             "https://artifactory.corp/ocx-index",
             "[registries.\"<ns>\"] index must replace the base URL (trailing slash trimmed)"
         );
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "other.sh", &no_mirrors(), &[]).unwrap(),
+            OcxIndex::resolve_base_url(&config, "other.sh", &no_mirrors(), &[])
+                .unwrap()
+                .url,
             DEFAULT_INDEX_BASE_URL,
             "an unlisted namespace falls back to the default"
         );
@@ -1825,14 +2007,18 @@ mod tests {
         // Same base allowed once the host is listed.
         let insecure = vec!["mirror.corp".to_string()];
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &insecure).unwrap(),
+            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &insecure)
+                .unwrap()
+                .url,
             "http://mirror.corp/ocx-index",
             "an http base is allowed when its host is in OCX_INSECURE_REGISTRIES"
         );
 
         // The default https base URL is never gated.
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &no_mirrors(), &[]).unwrap(),
+            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &no_mirrors(), &[])
+                .unwrap()
+                .url,
             DEFAULT_INDEX_BASE_URL,
             "https must pass the gate untouched"
         );
@@ -1871,7 +2057,9 @@ mod tests {
         );
 
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &mirrors_index, &[]).unwrap(),
+            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &mirrors_index, &[])
+                .unwrap()
+                .url,
             "https://artifactory.corp/ocx-index",
             "a mirrors index-role override for the base's traffic host must replace the base URL"
         );
@@ -1884,9 +2072,186 @@ mod tests {
             crate::config::mirror::parse_url("https://artifactory.corp/ocx-index").unwrap(),
         );
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &unrelated_mirror, &[]).unwrap(),
+            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &unrelated_mirror, &[])
+                .unwrap()
+                .url,
             DEFAULT_INDEX_BASE_URL,
             "a mirror keyed by an unrelated host must not affect this base URL"
+        );
+    }
+
+    // ── closed scheme set (C-018/C-019/C-020) ────────────────────────────────
+
+    fn index_config(url: &str) -> crate::config::Config {
+        toml::from_str(&format!("[registries.\"ocx.sh\"]\nindex = \"{url}\"")).unwrap()
+    }
+
+    /// The `InvalidIndexUrl` a refused scheme must raise, with its exit code.
+    fn expect_invalid_index_url(error: &crate::Error, expected_origin: &str) {
+        let crate::Error::OciIndex(super::super::error::Error::InvalidIndexUrl { origin, .. }) = error else {
+            panic!("expected InvalidIndexUrl, got {error:?}");
+        };
+        assert_eq!(*origin, expected_origin, "the diagnostic must name the setting to fix");
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(error),
+            Some(crate::cli::ExitCode::ConfigError),
+            "a refused index scheme is a config error (78)"
+        );
+    }
+
+    #[test]
+    fn a_refused_index_url_is_redacted() {
+        // CWE-532: the refusal names the offending URL, and a configured base
+        // may embed credentials.
+        let error = OcxIndex::resolve_base_url(
+            &index_config("ftp://alice:hunter2@mirror.corp/ocx-index"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+        )
+        .expect_err("ftp is outside the closed scheme set");
+        let rendered = error.to_string();
+        assert!(!rendered.contains("hunter2"), "userinfo must not reach the message");
+        assert!(
+            rendered.contains("mirror.corp"),
+            "the host must survive — the operator has to recognise the entry"
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_refuses_a_scheme_outside_the_closed_set() {
+        // C-018 last row, at check 1. Today such a base flows through
+        // `parse_url` and fails later as a transport error — wrong class,
+        // wrong moment.
+        for base in ["ftp://mirror.corp/ocx-index", "gopher://mirror.corp"] {
+            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect_err("a scheme outside the closed set must be refused");
+            expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
+        }
+    }
+
+    #[test]
+    fn resolve_base_url_accepts_a_file_base() {
+        // C-018 `file` row: empty authority + absolute path, yielding a
+        // `file://<abs>` base. The scheme of the returned URL is what proves
+        // the `FileIndexTransport` branch was taken — the two are one decision.
+        let base = OcxIndex::resolve_base_url(&index_config("file:///srv/ocx-index"), "ocx.sh", &no_mirrors(), &[])
+            .expect("a file:// base with an empty authority and an absolute path is permitted");
+        assert_eq!(base.url, "file:///srv/ocx-index");
+
+        let trimmed = OcxIndex::resolve_base_url(&index_config("file:///srv/ocx-index/"), "ocx.sh", &no_mirrors(), &[])
+            .expect("a trailing slash is trimmed, matching every other base");
+        assert_eq!(trimmed.url, "file:///srv/ocx-index");
+
+        // A drive with a directory under it stays valid — the bare-drive
+        // refusal must not swallow the Windows form C-018's table admits.
+        let drive = OcxIndex::resolve_base_url(&index_config("file:///C:/srv/x"), "ocx.sh", &no_mirrors(), &[])
+            .expect("a drive-qualified path is a valid file base");
+        assert_eq!(drive.url, "file:///C:/srv/x");
+    }
+
+    #[test]
+    fn resolve_base_url_refuses_a_file_base_with_an_authority() {
+        // C-019: a non-empty authority is a UNC/remote form, never a local
+        // tree. `localhost` is the interesting one — `parse_url` accepts it
+        // (WP4's regression guard pins that), so this gate is the only refusal.
+        // `file://srv` has no `/` at all, so `srv` is the authority.
+        for base in ["file://localhost/srv/x", "file://host.example/srv/x", "file://srv"] {
+            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect_err("a file:// base needs an empty authority");
+            expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
+        }
+    }
+
+    #[test]
+    fn resolve_base_url_refuses_a_file_base_naming_no_directory() {
+        // C-018's absolute-path half, which is a separate row from C-019: these
+        // all have an EMPTY authority and are refused for naming no directory.
+        // `file:///C:/` is the dangerous one — see the assertion below.
+        for base in ["file://", "file:///", "file:///C:/", "file:///c:"] {
+            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect_err("a file:// base must name a directory");
+            expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_bare_windows_drive_is_not_an_absolute_path() {
+        // The rule the test above rests on, and the reason a bare drive cannot
+        // be waved through as "it starts with a drive letter, so it is
+        // absolute": `C:` carries a `Prefix(Disk)` component with no `RootDir`,
+        // so Win32 resolves it against the per-drive working directory. An
+        // index base that resolved there would serve every document — including
+        // the root, the trust anchor of the resolve — out of whatever directory
+        // `ocx` happened to be launched from.
+        assert!(!std::path::Path::new("C:").is_absolute());
+        assert!(std::path::Path::new("C:/").is_absolute());
+    }
+
+    #[test]
+    fn mirrors_may_not_route_index_traffic_to_file() {
+        // C-020 through C-018 check 2: the override replaces the scheme AFTER
+        // check 1 ran, so a base-only check is bypassed by any `[mirrors]`
+        // entry — including one injected through `OCX_MIRRORS`, which resolves
+        // into this same map. The diagnostic must name `[mirrors]`, not the
+        // configured base: that is where the operator's mistake is.
+        let mut mirrors_index = BTreeMap::new();
+        mirrors_index.insert(
+            "up.example".to_string(),
+            crate::config::mirror::parse_url("file://localhost/srv/x").unwrap(),
+        );
+
+        let error = OcxIndex::resolve_base_url(&index_config("https://up.example"), "ocx.sh", &mirrors_index, &[])
+            .expect_err("a [mirrors] index-role override may not route index traffic to file://");
+        expect_invalid_index_url(&error, &super::super::error::index_url_from_mirrors("up.example"));
+    }
+
+    #[test]
+    fn a_file_base_ignores_mirrors_entirely() {
+        // C-018 `file` row: the override is host-keyed and a `file` base has no
+        // host, so check 1 diverts before the map is ever consulted. Keyed by
+        // the literal authority a naive parse would produce, to pin that.
+        let mut mirrors_index = BTreeMap::new();
+        mirrors_index.insert(
+            String::new(),
+            crate::config::mirror::parse_url("https://artifactory.corp").unwrap(),
+        );
+
+        let base = OcxIndex::resolve_base_url(&index_config("file:///srv/x"), "ocx.sh", &mirrors_index, &[])
+            .expect("a file base resolves without consulting the host-keyed mirror map");
+        assert_eq!(base.url, "file:///srv/x");
+    }
+
+    #[test]
+    fn a_file_url_tail_is_an_absolute_path() {
+        // C-018's Windows row. `/C:/srv/x` is not an absolute path — the
+        // drive-letter form needs its leading separator stripped — while
+        // `/srv/x` already is one and must survive untouched.
+        //
+        // This pins the STRIPPING rule only. It is deliberately blind to
+        // whether the result is absolute: `file_root("/C:")` returns `C:`, and
+        // the assertions below would accept that. The absoluteness rule is
+        // `resolve_file_base`'s, pinned by
+        // `resolve_base_url_refuses_a_file_base_naming_no_directory`.
+        assert!(has_drive_prefix("/C:/srv/x"), "the Windows drive-letter tail");
+        assert!(has_drive_prefix("/c:/srv/x"), "the letter case is irrelevant");
+        assert!(
+            !has_drive_prefix("/srv/x"),
+            "a Unix absolute path is not drive-prefixed"
+        );
+        assert!(!has_drive_prefix("/CC:/srv/x"), "only a single-letter drive qualifies");
+
+        assert_eq!(
+            file_root("/srv/x"),
+            std::path::PathBuf::from("/srv/x"),
+            "a Unix absolute path is used verbatim on every platform"
+        );
+        let drive = file_root("/C:/srv/x");
+        assert_eq!(
+            drive,
+            std::path::PathBuf::from(if cfg!(windows) { "C:/srv/x" } else { "/C:/srv/x" }),
+            "the leading separator is stripped only where the drive form is meaningful"
         );
     }
 
@@ -2316,13 +2681,11 @@ mod tests {
         );
     }
 
-    // ── fetch_root_document: verbatim published-root fetch (A2/F1, C1 stub) ───
+    // ── fetch_root_document: verbatim published-root fetch (A2/F1) ───────────
     //
-    // Specification tests for the `OcxIndex::fetch_root_document` override
-    // (currently `unimplemented!()`): a published source serves the verbatim
-    // `p/<ns>/<pkg>.json` bytes paired with the parsed root so
-    // `LocalIndex::persist_published_root` can grow the local copy byte-for-byte
-    // (copy-a-mirror). These are EXPECTED TO PANIC on the stub until C1 lands.
+    // A published source serves the verbatim `p/<ns>/<pkg>.json` bytes paired
+    // with the parsed root so `LocalIndex::persist_published_root` can grow the
+    // local copy byte-for-byte (copy-a-mirror).
 
     #[tokio::test]
     async fn fetch_root_document_returns_verbatim_bytes_and_parsed_root() {

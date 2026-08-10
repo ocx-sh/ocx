@@ -55,7 +55,13 @@ impl IndexCatalog {
             join_set.spawn(async move {
                 let result = context.default_index().list_tags(&identifier).await.map(|tags| {
                     let tags = tags.unwrap_or_else(|| {
-                        log::warn!("No tags found for repository '{}'.", identifier);
+                        // Same `repositories` vector as the `error!` below, so
+                        // the same neutralization. `warn!` reaches stderr under
+                        // the default INFO console filter.
+                        log::warn!(
+                            "No tags found for repository '{}'.",
+                            api::data::sanitize_for_terminal(&identifier.to_string())
+                        );
                         Vec::new()
                     });
                     (display_name, tags)
@@ -72,7 +78,18 @@ impl IndexCatalog {
                     tags.insert(repository, repository_tags);
                 }
                 Ok((index, Err(e))) => {
-                    log::error!("fetching tags for repository '{}' failed: {e:#}", repositories[index]);
+                    // Both halves are foreign-authored and neither reaches
+                    // `main.rs`'s boundary intact: `repositories` comes from
+                    // `list_repositories`' response, and the aggregation below
+                    // returns the lowest-index failure alone, so every other
+                    // chain is printed here and nowhere else. Without this the
+                    // command neutralized the same repository name on stdout
+                    // (`api::data::catalog`) while emitting it raw on stderr.
+                    log::error!(
+                        "fetching tags for repository '{}' failed: {}",
+                        api::data::sanitize_for_terminal(&repositories[index].to_string()),
+                        api::data::sanitize_error_chain(&e)
+                    );
                     failures.push((index, e));
                 }
                 Err(join_err) => {
@@ -99,5 +116,44 @@ impl IndexCatalog {
         let catalog = api::data::catalog::Catalog::with_tags(tags.into_iter().collect());
         context.api().report(&catalog)?;
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Both stderr sites here print names from `list_repositories`, and neither
+    /// is covered by `main.rs`'s boundary: the aggregation returns the
+    /// lowest-index failure alone, and the `warn!` is not a failure at all. This
+    /// command neutralized the same names on stdout while emitting them raw on
+    /// stderr until `1dea4f78`, so the pairing is the contract.
+    #[test]
+    fn every_stderr_site_is_neutralized() {
+        let body = include_str!("index_catalog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a non-test half");
+        assert_eq!(
+            body.matches("log::warn!").count() + body.matches("log::error!").count(),
+            2,
+            "a third stderr site here needs its own neutralization and this count updated"
+        );
+        assert_eq!(
+            body.matches("log::error!").count(),
+            body.matches("sanitize_error_chain(&").count(),
+            "every error log must render its chain through `sanitize_error_chain`"
+        );
+        for interpolation in ["identifier", "repositories[index]"] {
+            assert!(
+                body.contains(&format!("sanitize_for_terminal(&{interpolation}")),
+                "`{interpolation}` reaches stderr and must route through the sanitizer"
+            );
+        }
+        for raw in ["{e:#}", "{:#}", "{:?}"] {
+            assert!(
+                !body.contains(raw),
+                "`{raw}` interpolates an error without the sanitizer or without its cause chain"
+            );
+        }
+        assert!(!body.contains("eprintln!"), "error prose goes through the log boundary");
     }
 }

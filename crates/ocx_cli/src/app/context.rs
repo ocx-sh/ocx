@@ -53,6 +53,13 @@ pub struct Context {
     /// between them, reproducing the adoption order exactly.
     config_base: ocx_lib::Config,
     config_overlay: ocx_lib::Config,
+    /// The **locally-authored** `[mirrors]` table (the loader's `local_only`
+    /// view), kept because [`is_published_namespace`] needs it and
+    /// `ocx index regenerate` asks that question after init. The merged view
+    /// would be wrong here for the reason `build_index_sources` documents: a
+    /// managed payload may redirect traffic, but it may not revoke the verified
+    /// index path.
+    local_mirrors: Option<std::collections::HashMap<String, ocx_lib::MirrorConfig>>,
     /// The effective `OCX_MANAGED_CONFIG` override, already hermetic-gated by
     /// `OCX_NO_CONFIG` and empty-string-is-unset — resolved once here so every
     /// consumer (the required-gate below, `config update`, the refresh hook)
@@ -468,6 +475,7 @@ impl Context {
             config,
             config_base,
             config_overlay,
+            local_mirrors: local_only_config.mirrors.clone(),
             managed_config_env_override,
             managed_config_snapshot,
         })
@@ -692,35 +700,11 @@ impl Context {
             return Ok(Vec::new());
         };
 
-        // A locally-authored `[mirrors."<ns>"]` entry pinning the namespace's
-        // REGISTRY role — the one declaration that both redirects the
-        // namespace's traffic and leaves the compiled-in index host unnamed.
-        // A bare-string entry sets `registry`, so it counts too.
-        let locally_pinned_at_a_mirror = |namespace: &str| {
-            local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()))
-        };
-
         // Deterministic chain order: sort namespaces so the built sources — and
         // therefore the resolution chain — are stable across runs.
         let mut namespaces: Vec<&String> = registries
             .iter()
-            .filter(|(namespace, entry)| {
-                // `index = ""` is the documented kill switch: an empty base URL
-                // is not a kind marker, so the namespace resolves as plain OCI.
-                if entry.index.as_deref().is_none_or(str::is_empty) {
-                    return false;
-                }
-                if entry.index_is_compiled_default && locally_pinned_at_a_mirror(namespace) {
-                    log::warn!(
-                        "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
-                         default for it is suppressed; it resolves as a plain OCI registry through the mirror, \
-                         without the index's digest verification or yank gate. Declare \
-                         [registries.\"{namespace}\"] index explicitly to keep the index path."
-                    );
-                    return false;
-                }
-                true
-            })
+            .filter(|(namespace, entry)| is_published_namespace(entry, namespace, local_mirrors))
             .map(|(namespace, _)| namespace)
             .collect();
         namespaces.sort();
@@ -746,9 +730,13 @@ impl Context {
                 .progress(progress.clone())
                 .ssrf_guard(trusted_hosts.clone())
                 .build();
+            // The base URL and its transport are one decision, taken inside
+            // `resolve_base_url` — picking a transport here would re-derive the
+            // scheme the gate there already settled.
+            let base = index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts)?;
             sources.push(index::OcxIndex::new(index::OcxIndexConfig {
-                transport: Box::new(index::ReqwestIndexTransport::new()),
-                base_url: index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts)?,
+                transport: base.transport,
+                base_url: base.url,
                 namespace: namespace.clone(),
                 client,
                 allow_yanked,
@@ -814,6 +802,13 @@ impl Context {
         &self.config_overlay
     }
 
+    /// The locally-authored `[mirrors]` table, for callers that must re-ask
+    /// [`is_published_namespace`] after init — `ocx index regenerate`'s
+    /// published-only guard is the only one today.
+    pub fn local_mirrors(&self) -> Option<&std::collections::HashMap<String, ocx_lib::MirrorConfig>> {
+        self.local_mirrors.as_ref()
+    }
+
     /// The effective `OCX_MANAGED_CONFIG` override — already hermetic-gated
     /// by `OCX_NO_CONFIG` and with an empty string treated as unset.
     pub fn managed_config_env_override(&self) -> Option<&str> {
@@ -827,6 +822,56 @@ impl Context {
     pub fn managed_config_snapshot(&self) -> Option<&ocx_lib::managed_config::ManagedConfigSnapshot> {
         self.managed_config_snapshot.as_ref()
     }
+}
+
+/// Whether `<namespace>` resolves through the ocx-index protocol — the single
+/// published/derived test, shared by every consumer that needs the answer.
+///
+/// Two conditions, and **both** are load-bearing:
+///
+/// 1. `index` present and non-empty. `index = ""` is the documented kill
+///    switch: an empty base URL is not a kind marker, so the namespace resolves
+///    as plain OCI.
+/// 2. Not a compiled-in default that a **locally-authored** `[mirrors."<ns>"]`
+///    entry pins at a registry. That operator declared where the namespace's
+///    traffic goes, and honouring both would start dialling a host they never
+///    allow-listed — see [`Context::build_index_sources`]'s doc for the full
+///    scoping argument.
+///
+/// It is a free function rather than a closure inside `build_index_sources`
+/// because `ocx index regenerate`'s published-only guard (C-010) must reach the
+/// same verdict, and it cannot consult the built sources instead: those are
+/// empty under `--offline`, which C-021 requires `regenerate` to permit. A
+/// guard that restated only condition 1 would mint a `c/index.json` under a
+/// mirror-pinned namespace the resolver routes as derived — the exact outcome
+/// C-010 exists to prevent.
+///
+/// [`Context::build_index_sources`]: Context
+pub fn is_published_namespace(
+    entry: &ocx_lib::RegistryConfig,
+    namespace: &str,
+    local_mirrors: Option<&std::collections::HashMap<String, ocx_lib::MirrorConfig>>,
+) -> bool {
+    if entry.index.as_deref().is_none_or(str::is_empty) {
+        return false;
+    }
+    // A bare-string `[mirrors]` entry sets `registry`, so it counts too.
+    let locally_pinned_at_a_mirror =
+        local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()));
+    if entry.index_is_compiled_default && locally_pinned_at_a_mirror {
+        // `build_index_sources` feeds this from the MERGED config, so a
+        // namespace key can come from the managed tier rather than from the
+        // operator — neutralized for the same reason the report payloads are.
+        let namespace = crate::api::data::sanitize_for_terminal(namespace);
+        log::warn!(
+            "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
+             default for it is suppressed; it resolves as a plain OCI registry through the mirror, \
+             without the index's digest verification or yank gate. Declare \
+             [registries.\"{namespace}\"] index explicitly to keep the index path."
+        );
+        return false;
+    }
+    true
 }
 
 /// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.

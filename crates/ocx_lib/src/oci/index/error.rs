@@ -4,6 +4,19 @@
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
 
+/// [`Error::InvalidIndexUrl`] `origin` for the configured base.
+pub const INDEX_URL_FROM_REGISTRIES: &str = "[registries.\"<ns>\"] index";
+
+/// [`Error::InvalidIndexUrl`] `origin` for the index-role mirror override
+/// keyed by `upstream` — the `[mirrors]` table entry, or the `OCX_MIRRORS`
+/// environment entry that fed it.
+///
+/// Interpolates the real key rather than a placeholder: the operator has to
+/// find the entry, and the upstream host is what it is keyed by.
+pub fn index_url_from_mirrors(upstream: &str) -> String {
+    format!("[mirrors.\"{upstream}\"] index")
+}
+
 /// Errors specific to OCI index operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -139,10 +152,12 @@ pub enum Error {
         source: serde_json::Error,
     },
 
-    /// An HTTP request to a static-file index endpoint failed at the transport
-    /// layer (connection, TLS, unexpected status). The source is boxed so the
+    /// A request to a static-file index endpoint failed at the transport layer
+    /// — connection, TLS or an unexpected status over HTTPS, and equally a
+    /// permission, path-containment or file-type refusal from the `file://`
+    /// transport, which raises this same variant. The source is boxed so the
     /// index error type stays free of a `reqwest` dependency edge.
-    #[error("index HTTP request to {url} failed")]
+    #[error("index request to {url} failed")]
     IndexHttpFailed {
         url: String,
         #[source]
@@ -162,13 +177,30 @@ pub enum Error {
     )]
     PlainHttpIndexNotAllowed { namespace: String, host: String },
 
-    /// The `[registries."<namespace>"] index` base URL could not be parsed
-    /// into a scheme + host.
-    #[error("invalid index url configured for registry '{namespace}'")]
+    /// An index-role traffic target is unusable: unparseable, or carrying a
+    /// scheme outside the closed set (`adr_servable_index_snapshot.md` C-018 —
+    /// `https`, gated `http`, or a `file://` configured base with an empty
+    /// authority and an absolute path).
+    ///
+    /// `origin` names *which* setting the operator must fix, because the
+    /// refused value is not always the configured base: a
+    /// `[mirrors."<host>"] index` override replaces the scheme after the base
+    /// was checked, and a `file://` override is refused there (C-020).
+    #[error("invalid index url '{url}' for registry '{namespace}' (from {origin})")]
     InvalidIndexUrl {
         namespace: String,
+        url: String,
+        /// The setting `url` came from, named as the operator will find it —
+        /// [`INDEX_URL_FROM_REGISTRIES`], or
+        /// [`index_url_from_mirrors`] carrying the upstream key that selected
+        /// the override.
+        origin: String,
+        /// Absent for a refused scheme, which is a policy decision with no
+        /// underlying parse failure. Boxed to keep this variant off
+        /// `clippy::result_large_err`'s threshold, matching
+        /// [`MirrorConfigError::InvalidEntry`](crate::config::mirror::MirrorConfigError::InvalidEntry).
         #[source]
-        source: crate::config::mirror::MirrorConfigError,
+        source: Option<Box<crate::config::mirror::MirrorConfigError>>,
     },
 
     /// A published index's `c/index.json` catalog carried a key that is not a
@@ -176,14 +208,33 @@ pub enum Error {
     /// attacker-controlled for a mirrored or compromised index; each key
     /// becomes the `repository` component of an identifier and then a
     /// filesystem path, so a key like `../../victim` would write outside the
-    /// index home. The whole sync is refused fail-closed
-    /// (`adr_index_indirection.md` F2 "surfaces, never silently acts").
+    /// index home.
+    ///
+    /// That registry's enumeration is refused fail-closed
+    /// (`adr_index_indirection.md` F2 "surfaces, never silently acts") — never a
+    /// filtered key list, which would snapshot a tampered catalog minus the part
+    /// that gave it away. Under `ocx index sync` the batch rule then applies:
+    /// the other named registries still enumerate and snapshot, and the command
+    /// still fails afterwards.
     #[error("index source '{index_source}' served a malformed catalog key '{key}': {reason}")]
     MalformedCatalogKey {
         index_source: String,
         key: String,
         reason: String,
     },
+
+    /// A published index source serves no `c/index.json` at all.
+    ///
+    /// Distinct from a catalog that lists **zero packages**, and the distinction
+    /// is the whole point: a served empty catalog is a source saying "I have
+    /// nothing", while an absent document is a source that cannot answer the
+    /// question. Collapsing the two let `index sync` exit 0
+    /// having refreshed nothing and printed nothing, which is C-013's
+    /// authoritative-stop rule inverted ("no fall-through, no empty-set
+    /// success"). Reachable from a base URL with a wrong path component, a tree
+    /// deployed before `c/` was published, or a CDN 404 on the catalog path.
+    #[error("index source '{index_source}' serves no catalog document at {url}")]
+    CatalogDocumentAbsent { index_source: String, url: String },
 }
 
 impl ClassifyExitCode for Error {
@@ -225,8 +276,11 @@ impl ClassifyExitCode for Error {
             | Self::InvalidImageIndex(_)
             | Self::MalformedIndexDocument { .. } => ExitCode::DataError,
             // A transport-layer failure reaching the static-file index — the
-            // resource is unavailable, same class as a registry outage.
-            Self::IndexHttpFailed { .. } => ExitCode::Unavailable,
+            // resource is unavailable, same class as a registry outage. An
+            // absent catalog document is the same class for the same reason:
+            // the source is reachable but is not serving what a published index
+            // must serve, and every cause of it is external and retryable.
+            Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
             // A misconfigured index-role traffic target — a configuration fault.
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
             // An SSRF-refused physical host — the fix is `trusted_hosts` config.
