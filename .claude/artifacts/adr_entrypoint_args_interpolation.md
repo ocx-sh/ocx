@@ -259,6 +259,17 @@ impl<'a> TemplateResolver<'a> {
 - Extensibility: new consumer = new `Usage` variant + `From` arm; new token kind = new
   `AllowedTokens` field + tokenizer arm. No trait-object registry (YAGNI for two kinds).
 
+> **Superseded by `adr_interpolation_token_grammar.md`.** "One tokenizer scans
+> `${…}` segments and classifies them" above described a type that was never
+> built — not a deviation from this decision, a correction of the record.
+> `adr_interpolation_token_grammar.md` D1 builds that scanner
+> (`metadata/template/scanner.rs`), and its D6/D14 supersede this ADR's D6
+> capability-gate mechanics with the same decision (capability gate,
+> gate-before-substitution) intact and strengthened: `AllowedTokens` gains a
+> `self_env` field alongside `deps`, and the closed token set grows to four
+> recognised bodies. Nothing else in this ADR (D1–D5, the venv tension below)
+> is affected.
+
 ---
 
 ## Tension — venv-writable-state: direction A vs B
