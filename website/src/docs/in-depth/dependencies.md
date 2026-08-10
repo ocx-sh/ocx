@@ -47,7 +47,7 @@ OCX sits closest to Nix in philosophy — exact pins, no resolution — but with
 
 ## Composition {#composition}
 
-To actually *run* a package with its dependency environments configured, use [`ocx package exec`][cmd-exec] (or [`ocx env`][cmd-env] to export the composed environment into a shell). [`ocx package exec`][cmd-exec] composes the environments of all dependencies in <Tooltip term="topological order">Dependencies are applied before their dependents. If A depends on B, and B depends on C, the order is C → B → A. Among packages at the same level, alphabetical order (by identifier) is used as a tiebreaker so the result is deterministic.</Tooltip> before launching the command. Dependencies come first, then the package you requested.
+To actually *run* a package with its dependency environments configured, use [`ocx package exec`][cmd-exec] (or [`ocx env`][cmd-env-root] to export the composed environment into a shell). [`ocx package exec`][cmd-exec] composes the environments of all dependencies in <Tooltip term="topological order">Dependencies are applied before their dependents. If A depends on B, and B depends on C, the order is C → B → A. Among packages at the same level, alphabetical order (by identifier) is used as a tiebreaker so the result is deterministic.</Tooltip> before launching the command. Dependencies come first, then the package you requested.
 
 Scalar variables (like `JAVA_HOME`) follow last-writer-wins; accumulator variables (like `PATH`) merge naturally — each dependency's `bin/` directory is prepended in order.
 
@@ -101,7 +101,7 @@ The result: the dependency surface is a strict subset of what a general-purpose 
 
 <!-- commands -->
 [cmd-exec]: ../reference/command-line.md#package-exec
-[cmd-env]: ../reference/command-line.md#env
+[cmd-env-root]: ../reference/command-line.md#env-root
 [cmd-clean]: ../reference/command-line.md#clean
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
