@@ -68,6 +68,8 @@ futures.workspace = true
 fs4.workspace = true
 chrono.workspace = true
 regex.workspace = true
+# Near-miss root suggestion in the unknown-token message (D13).
+strsim.workspace = true
 async-trait.workspace = true
 docker_credential.workspace = true
 secrecy.workspace = true

@@ -156,10 +156,13 @@ impl LauncherExec {
             self.run_with_env(entries, &project_env, args, command, context.config_view())
                 .await
         } else {
-            // ADR D6: pass an empty dep_contexts map — the Usage::EntryPointArgs
-            // capability gate rejects any ${deps.*} token before the dep regex
-            // fires. The gate is the safety mechanism; publish-time
-            // validate_entrypoint_args already rejected such args before publish.
+            // Pass an empty dep_contexts map — the Usage::EntryPointArgs
+            // capability gate refuses a ${deps.*} token on the classified
+            // scanner output, before any substitution is attempted, so there is
+            // nothing for the map to answer. The gate is the safety mechanism;
+            // `validate_entrypoint_args` refused such args at publish time, and
+            // under D14 this runtime gate is what still refuses them in an
+            // already-published package.
             let dep_contexts = std::collections::HashMap::new();
             let resolver = TemplateResolver::new(&content_path, &dep_contexts).usage(Usage::EntryPointArgs);
             let mut combined = Vec::with_capacity(baked.len() + args.len());

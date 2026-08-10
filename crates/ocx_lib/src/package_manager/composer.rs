@@ -35,6 +35,7 @@ use crate::{
             dependency::DependencyName,
             entrypoint::{EntrypointName, Entrypoints},
             env::{dep_context::DependencyContext, entry::Entry, modifier::ModifierKind, resolver::EnvResolver},
+            template::SelfEnvScope,
         },
         resolved_package::ResolvedPackage,
     },
@@ -527,62 +528,93 @@ fn build_dep_context_map(
         .collect()
 }
 
-/// Emit a dep's interface-tagged env vars into `entries`.
+/// Resolve one package's whole declared env into a **private per-package
+/// accumulator**, then gate by visibility and push the crossing entries into
+/// `entries`.
 ///
-/// Only `var.visibility.has_interface()` vars cross the dep edge into the
-/// consumer's surface (ADR Algorithm v3 step 5 — "only the interface side of
-/// a dep crosses edges").
-fn emit_interface_vars(
-    dep_metadata: &metadata::Metadata,
-    dep_content: &Path,
-    dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
+/// # Resolve, then gate (D8)
+///
+/// The order is the decision, not an implementation detail. `${self.env.KEY}`
+/// is surface-**independent**: an `interface` var may reference a `private` one,
+/// and the resolved bytes are identical under `ocx env`, `ocx env --self` and
+/// the launcher's `self_view=true` composition. A gate-then-resolve loop cannot
+/// serve that — the referenced var would never have been resolved on the
+/// surface the referencing var crosses.
+///
+/// The accumulator is private to this package and is what `${self.env.KEY}`
+/// scans. It is deliberately **not** `entries`: that vec is global across
+/// packages and already surface-gated, so reading self-env out of it would
+/// violate D6.1 (it holds other packages' vars) and D8 (it holds only crossing
+/// ones) at once.
+///
+/// Push order into `entries` is unchanged, so the PATH ordering invariant
+/// documented on [`emit_dep_path_block`] is untouched.
+///
+/// # The assertion split
+///
+/// *Value resolution always; every filesystem and shape assertion on emit only.*
+/// A crossing var resolves through `EnvResolver::resolve`; a non-crossing one
+/// through `EnvResolver::resolve_without_emit_assertions`, so a `required` path
+/// that is absent (C-026) or a declared-but-uninstalled dep (C-027) cannot fail
+/// a composition over a value nobody emits.
+///
+/// The accepted consequence: a template *fault* in a non-crossing var now
+/// surfaces where it previously never ran. A package whose own metadata cannot
+/// resolve is broken regardless of who is looking.
+///
+/// `is_root` selects the carrier axis exactly as [`carrier_crosses`] defines it
+/// — at the root a carrier crosses on the surface's own axis; on a dependency
+/// only its interface side crosses, on either surface.
+///
+/// # Errors
+///
+/// Propagates the first resolution failure in declaration order.
+fn emit_package_vars(
+    metadata: &metadata::Metadata,
+    content: &Path,
+    dep_contexts: &HashMap<DependencyName, DependencyContext>,
+    is_root: bool,
     self_view: bool,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    let Some(env) = dep_metadata.env() else {
+    let Some(env) = metadata.env() else {
         return Ok(());
     };
-    let resolver = EnvResolver::new(dep_content, dep_dep_contexts);
-    for var in env {
-        // A dependency crosses only its interface side onto either surface —
-        // `carrier_crosses(_, is_root=false, _)` is `has_interface()` regardless
-        // of `self_view`; routed through the shared predicate so inspect and the
-        // env command cannot diverge.
-        if !carrier_crosses(var.visibility, false, self_view) {
-            continue;
-        }
-        if let Some(entry) = resolver.resolve(var)? {
-            entries.push(entry);
-        }
-    }
-    Ok(())
-}
+    let resolver = EnvResolver::new(content, dep_contexts);
 
-/// Emit a root's own env vars partitioned by `self_view`.
-///
-/// `self_view=false` (default exec): emit if `var.visibility.has_interface()`.
-/// `self_view=true` (`--self`): emit if `var.visibility.has_private()`.
-fn emit_root_vars(
-    root_metadata: &metadata::Metadata,
-    root_content: &Path,
-    root_dep_contexts: &HashMap<DependencyName, DependencyContext>,
-    self_view: bool,
-    entries: &mut Vec<Entry>,
-) -> crate::Result<()> {
-    let Some(env) = root_metadata.env() else {
-        return Ok(());
-    };
-    let resolver = EnvResolver::new(root_content, root_dep_contexts);
+    // The private accumulator: every var resolved so far, crossing or not, in
+    // declaration order. This is the scope `${self.env.KEY}` scans.
+    //
+    // A var whose `Var::value()` is `None` — a `Modifier::Unknown`, the
+    // forward-compat read fallback — produces no `Entry` and so is absent from
+    // it. A `KEY` declared twice earlier with one of the two unreadable would
+    // therefore count once and resolve, where D7 wants `AmbiguousSelfEnvRef`.
+    // Unreachable today: every load path into the composer routes through
+    // `ValidMetadata::try_from`, which D14 keeps `validate_env_modifier_types`
+    // on, and that refuses `Modifier::Unknown` unconditionally. A change that
+    // moves that check off the ingress path opens this hole.
+    let mut declared_before: SelfEnvScope<Entry> = SelfEnvScope::new();
+
     for var in env {
-        // The root's own vars cross on the surface's own axis. Routed through
-        // the shared predicate — the single source of truth inspect also uses.
-        if !carrier_crosses(var.visibility, true, self_view) {
+        // Routed through the shared predicate — the single source of truth
+        // inspect also uses. At the root a carrier crosses on the surface's own
+        // axis; on a dependency only its interface side crosses, on either
+        // surface (ADR Algorithm v3 step 5).
+        let crosses = carrier_crosses(var.visibility, is_root, self_view);
+        let resolved = if crosses {
+            resolver.resolve(var, &declared_before)?
+        } else {
+            resolver.resolve_without_emit_assertions(var, &declared_before)?
+        };
+        let Some(entry) = resolved else {
             continue;
+        };
+        if crosses {
+            entries.push(entry.clone());
         }
-        if let Some(entry) = resolver.resolve(var)? {
-            entries.push(entry);
-        }
+        declared_before.push(entry);
     }
+
     Ok(())
 }
 
@@ -597,7 +629,7 @@ fn emit_root_vars(
 /// is `Deps > Env > Entrypoints`, where entrypoints land last so that
 /// `entrypoints/` shadows the declared `bin/` PATH entry. This means:
 ///
-/// 1. Call `emit_interface_vars` *first* — its `bin/` PATH entry is pushed
+/// 1. Call [`emit_package_vars`] *first* — its `bin/` PATH entry is pushed
 ///    before the synth-PATH.
 /// 2. Push `entrypoints/` synth-PATH *second* — pushed after, so it is
 ///    prepended on top and wins lookup priority at runtime.
@@ -619,8 +651,15 @@ fn emit_dep_path_block(
 ) -> crate::Result<()> {
     // Step 1: interface-tagged env vars (includes declared bin/ PATH entry).
     // Only the interface side of a dep crosses edges into the consumer's
-    // surface (ADR Algorithm v3 step 5).
-    emit_interface_vars(dep_metadata, dep_content, dep_dep_contexts, self_view, entries)?;
+    // surface (ADR Algorithm v3 step 5) — `is_root = false`.
+    emit_package_vars(
+        dep_metadata,
+        dep_content,
+        dep_dep_contexts,
+        /* is_root = */ false,
+        self_view,
+        entries,
+    )?;
 
     // Step 2: synth-PATH last so entrypoints/ ends up at the front of PATH
     // and shadows bin/ from step 1. Same carrier gate as the claim list —
@@ -659,8 +698,16 @@ fn emit_root_path_block(
     self_view: bool,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    // Step 1: env vars (includes declared bin/ PATH entry when present).
-    emit_root_vars(root_metadata, root_content, root_dep_contexts, self_view, entries)?;
+    // Step 1: env vars (includes declared bin/ PATH entry when present). The
+    // root's own carriers cross on the surface's own axis — `is_root = true`.
+    emit_package_vars(
+        root_metadata,
+        root_content,
+        root_dep_contexts,
+        /* is_root = */ true,
+        self_view,
+        entries,
+    )?;
 
     // Step 2: synth-PATH last (no launchers on the --self surface). Same
     // carrier gate as the root's `admitted_entrypoints` claim in `compose`.
@@ -3642,6 +3689,471 @@ mod tests {
             out.entries.iter().any(|e| e.key == "OWN_VAR"),
             "the root's own env-var contribution must still reach entries, unaffected by dep claim exclusion: {:?}",
             out.entries
+        );
+    }
+
+    // ── `${self.env.KEY}` — scope, order, and the resolve-then-gate split ─────
+    //
+    // Every test below builds a package whose `env` array IS the fixture: the
+    // declaration order of `vars` is the property under test, so the helper
+    // preserves it and never sorts.
+
+    use std::collections::HashMap;
+
+    use crate::package::error::Error as PackageError;
+    use crate::package::metadata::dependency::DependencyName;
+    use crate::package::metadata::env::dep_context::DependencyContext;
+    use crate::package::metadata::env::entry::Entry;
+    use crate::package::metadata::template::TemplateError;
+
+    type DepContexts = HashMap<DependencyName, DependencyContext>;
+
+    /// Package metadata carrying exactly `vars`, in the order given.
+    fn metadata_with_vars(vars: Vec<Var>) -> metadata::Metadata {
+        let mut builder = metadata_env::EnvBuilder::new();
+        for var in vars {
+            builder.add_var(var);
+        }
+        metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
+            version: bundle::Version::V1,
+            strip_components: None,
+            env: builder.build(),
+            dependencies: dependency::Dependencies::default(),
+            entrypoints: Entrypoints::default(),
+        })
+    }
+
+    /// A package directory with a real `content/` tree, so path resolution has
+    /// something to root itself in.
+    fn package_content(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let content = root.join(name).join("content");
+        std::fs::create_dir_all(&content).unwrap();
+        content
+    }
+
+    /// Compose one root package's own env onto the surface `self_view` selects.
+    fn compose_root(
+        meta: &metadata::Metadata,
+        content: &std::path::Path,
+        dep_contexts: &DepContexts,
+        self_view: bool,
+    ) -> crate::Result<Vec<Entry>> {
+        let root_dir = crate::file_structure::PackageDir {
+            dir: content.parent().unwrap().to_path_buf(),
+        };
+        let mut entries = Vec::new();
+        emit_root_path_block(meta, &root_dir, content, dep_contexts, self_view, &mut entries)?;
+        Ok(entries)
+    }
+
+    /// Compose one dependency's env across the edge onto the surface
+    /// `self_view` selects.
+    fn compose_dep(meta: &metadata::Metadata, content: &std::path::Path, self_view: bool) -> crate::Result<Vec<Entry>> {
+        let dep_pkg = crate::file_structure::PackageDir {
+            dir: content.parent().unwrap().to_path_buf(),
+        };
+        let dep_contexts = DepContexts::new();
+        let mut entries = Vec::new();
+        emit_dep_path_block(meta, &dep_pkg, content, &dep_contexts, self_view, &mut entries)?;
+        Ok(entries)
+    }
+
+    fn value_of<'a>(entries: &'a [Entry], key: &str) -> &'a str {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .unwrap_or_else(|| panic!("expected an entry for {key}; got {entries:?}"))
+            .value
+            .as_str()
+    }
+
+    // ─ Declaration order (D6.1, C-018, C-025) ────────────────────────────────
+
+    /// C-018 / C-025 (first leg) — a var may reference one declared strictly
+    /// earlier in the same package, and gets its resolved value.
+    ///
+    /// Paired with
+    /// `the_same_two_vars_in_the_opposite_declaration_order_are_refused`: the
+    /// two documents are identical modulo the order of the `env` array, so an
+    /// implementation that ignores order gives them the same verdict and one
+    /// of the two legs reds. Neither leg pins order on its own.
+    #[test]
+    fn a_var_may_reference_one_declared_earlier_in_the_same_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "forward");
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("A", "alpha", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("B", "${self.env.A}/x", Visibility::PUBLIC),
+        ]);
+
+        let entries = compose_root(&meta, &content, &DepContexts::new(), false).expect("the document must compose");
+        assert_eq!(value_of(&entries, "A"), "alpha");
+        assert_eq!(value_of(&entries, "B"), "alpha/x");
+    }
+
+    /// C-025 (second leg) — the same two vars, same keys, same values, only
+    /// the array order swapped: the reference now points forward and is
+    /// refused.
+    #[test]
+    fn the_same_two_vars_in_the_opposite_declaration_order_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "backward");
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("B", "${self.env.A}/x", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("A", "alpha", Visibility::PUBLIC),
+        ]);
+
+        let error = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect_err("a forward reference names a var that is not yet in scope");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    var_key,
+                    source: TemplateError::UndefinedSelfEnvRef { key, .. },
+                } if var_key == "B" && key == "A"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// C-020 — a var referencing itself is the same fault, reached through a
+    /// one-var document: its own declaration is not strictly earlier than
+    /// itself, so the scope is empty and there is no cycle to detect.
+    #[test]
+    fn a_var_referencing_itself_is_undefined_rather_than_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "self-ref");
+        let meta = metadata_with_vars(vec![Var::new_constant_with_visibility(
+            "A",
+            "${self.env.A}",
+            Visibility::PUBLIC,
+        )]);
+
+        let error = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect_err("a var cannot see its own declaration");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::UndefinedSelfEnvRef { key, declared_before }, ..
+                } if key == "A" && declared_before.is_empty()
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// C-021 (first leg) — a key declared twice earlier is refused, not
+    /// picked: both contributions are legally visible and neither is
+    /// privileged.
+    #[test]
+    fn a_key_declared_twice_earlier_makes_the_reference_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "ambiguous");
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("A", "one", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("A", "two", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("B", "${self.env.A}", Visibility::PUBLIC),
+        ]);
+
+        let error = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect_err("two earlier contributions leave no non-arbitrary answer");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::AmbiguousSelfEnvRef { key }, ..
+                } if key == "A"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// C-021 (second leg) — duplicates stay legal. Only *referencing* an
+    /// ambiguous key is refused; without this leg the refusal above is
+    /// indistinguishable from a new uniqueness rule on `Env`.
+    #[test]
+    fn a_key_declared_twice_with_no_reference_to_it_composes_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "duplicates");
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("A", "one", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("A", "two", Visibility::PUBLIC),
+        ]);
+
+        let entries =
+            compose_root(&meta, &content, &DepContexts::new(), false).expect("duplicate keys remain publishable");
+        let values: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.key == "A")
+            .map(|entry| entry.value.as_str())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["one", "two"],
+            "both contributions must still be emitted, in declaration order"
+        );
+    }
+
+    // ─ Surface independence (D8, C-024) ──────────────────────────────────────
+
+    /// C-024 — an `interface` var may reference a `private` one, and the
+    /// resolved bytes are identical on both surfaces.
+    ///
+    /// The fixture is a dependency, where `carrier_crosses` is
+    /// `has_interface()` on either surface: `I` crosses both times and `S`
+    /// crosses neither, so the two runs differ only in the surface asked for.
+    ///
+    /// The literal value assertion is not redundant with C-018: an
+    /// implementation resolving `${self.env.S}` to the empty string on **both**
+    /// surfaces satisfies equality perfectly, so equality alone cannot tell
+    /// surface-independence from uniformly-degenerate.
+    #[test]
+    fn an_interface_var_referencing_a_private_one_resolves_identically_on_both_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "surfaces");
+        let build = || {
+            metadata_with_vars(vec![
+                Var::new_constant_with_visibility("S", "private-value", Visibility::PRIVATE),
+                Var::new_constant_with_visibility("I", "${self.env.S}", Visibility::INTERFACE),
+            ])
+        };
+
+        let interface_surface = compose_dep(&build(), &content, false).expect("the interface surface must compose");
+        let private_surface = compose_dep(&build(), &content, true).expect("the private surface must compose");
+
+        assert_eq!(
+            value_of(&interface_surface, "I"),
+            value_of(&private_surface, "I"),
+            "the same metadata must not produce different bytes depending on who asked"
+        );
+        assert_eq!(
+            value_of(&interface_surface, "I"),
+            "private-value",
+            "the agreed value must be the referenced var's own resolved value"
+        );
+
+        for (surface, entries) in [("interface", &interface_surface), ("private", &private_surface)] {
+            assert!(
+                !entries.iter().any(|entry| entry.key == "S"),
+                "a dep's private var crosses no edge, so it must not be emitted on the {surface} surface: {entries:?}"
+            );
+        }
+    }
+
+    // ─ Resolve, then gate: assertions on emit only (D8, C-026, C-027) ────────
+
+    /// C-026(a) — a `required` path var whose target is absent and that does
+    /// **not** cross the active surface is resolved but not asserted.
+    ///
+    /// This leg cannot red against the stub, and it cannot red against `main`
+    /// either: today the var is `continue`d before `EnvResolver::resolve` runs,
+    /// so the assertion never fires. Its red state exists only against
+    /// resolve-then-gate code that left the existence assertion on the
+    /// non-emitted path — which is exactly the regression D8 would otherwise
+    /// introduce. `..._that_crosses_is_asserted_to_exist` is what makes the
+    /// pair a check: without it, deleting the assertion outright passes here.
+    #[test]
+    fn a_missing_required_path_that_does_not_cross_is_not_asserted_to_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "required-private");
+        let meta = metadata_with_vars(vec![Var::new_path_with_visibility(
+            "TOOL_DIR",
+            "${installPath}/absent",
+            /* required = */ true,
+            Visibility::PRIVATE,
+        )]);
+
+        let entries = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect("a var nobody emits must not assert its target exists");
+        assert!(
+            entries.is_empty(),
+            "a private var does not cross the interface surface: {entries:?}"
+        );
+    }
+
+    /// C-026(b) — the otherwise identical `required` path var that **does**
+    /// cross still raises `RequiredPathMissing`. This leg carries the pair's
+    /// discrimination.
+    #[test]
+    fn a_missing_required_path_that_crosses_is_asserted_to_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "required-interface");
+        let meta = metadata_with_vars(vec![Var::new_path_with_visibility(
+            "TOOL_DIR",
+            "${installPath}/absent",
+            /* required = */ true,
+            Visibility::INTERFACE,
+        )]);
+
+        let error = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect_err("an emitted required path must be asserted to exist");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(), PackageError::RequiredPathMissing(_))),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A dependency context whose install path does not exist on disk — the
+    /// declared-but-not-installed case `build_dep_context_map` produces when a
+    /// declared dep is absent from the resolved toolchain.
+    fn uninstalled_dep_contexts(missing: std::path::PathBuf) -> DepContexts {
+        let mut contexts = DepContexts::new();
+        contexts.insert(
+            DependencyName::try_from("tool").unwrap(),
+            DependencyContext::path_only(pinned("tool", 'e'), missing),
+        );
+        contexts
+    }
+
+    /// C-027(a) — a var referencing a declared-but-uninstalled dependency
+    /// composes cleanly when it does not cross the active surface.
+    ///
+    /// Same standing as C-026(a): green today because the var is never
+    /// resolved at all, and red only against resolve-then-gate code that kept
+    /// `check_exists = true` on the non-emitted path — which would turn a
+    /// working install into exit 79. The crossing sibling below is what makes
+    /// the pair a check.
+    #[test]
+    fn an_uninstalled_dependency_in_a_non_crossing_var_does_not_fail_composition() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "dep-private");
+        let contexts = uninstalled_dep_contexts(dir.path().join("not-installed"));
+        let meta = metadata_with_vars(vec![Var::new_constant_with_visibility(
+            "TOOL",
+            "${deps.tool.installPath}/bin",
+            Visibility::PRIVATE,
+        )]);
+
+        let entries = compose_root(&meta, &content, &contexts, false)
+            .expect("an uninstalled dep must not fail a value nobody emits");
+        assert!(
+            entries.is_empty(),
+            "a private var does not cross the interface surface: {entries:?}"
+        );
+    }
+
+    /// C-027(b) — the otherwise identical var that **does** cross fails with
+    /// `DependencyNotInstalled`, exit 79.
+    #[test]
+    fn an_uninstalled_dependency_in_a_crossing_var_fails_composition() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "dep-interface");
+        let contexts = uninstalled_dep_contexts(dir.path().join("not-installed"));
+        let meta = metadata_with_vars(vec![Var::new_constant_with_visibility(
+            "TOOL",
+            "${deps.tool.installPath}/bin",
+            Visibility::INTERFACE,
+        )]);
+
+        let error = compose_root(&meta, &content, &contexts, false)
+            .expect_err("an emitted value must still assert its dependency is installed");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::DependencyNotInstalled { ref_name, .. }, ..
+                } if ref_name.as_str() == "tool"
+            )),
+            "unexpected error: {error}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::NotFound));
+    }
+
+    /// D8 — a template *fault* in a non-crossing var now surfaces where it
+    /// previously never ran. This is the accepted behaviour change, and it is
+    /// what keeps the two suppression legs above from reading as "a
+    /// non-crossing var is never resolved at all".
+    #[test]
+    fn a_template_fault_in_a_non_crossing_var_still_fails_composition() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "fault-private");
+        let meta = metadata_with_vars(vec![Var::new_constant_with_visibility(
+            "BROKEN",
+            "${deps.undeclared.installPath}",
+            Visibility::PRIVATE,
+        )]);
+
+        let error = compose_root(&meta, &content, &DepContexts::new(), false)
+            .expect_err("a package whose own metadata cannot resolve is broken regardless of who is looking");
+        assert!(
+            matches!(&error, crate::Error::Package(e) if matches!(e.as_ref(),
+                PackageError::EnvVarInterpolation {
+                    source: TemplateError::UnknownDependencyRef { ref_name, .. }, ..
+                } if ref_name.as_str() == "undeclared"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    // ─ What is substituted: the resolved value, never the template (C-029) ───
+
+    /// C-029 — composition substitutes the referenced var's **resolved value**,
+    /// not its template.
+    ///
+    /// The red state is a mutant of the code WP4 adds: an accumulator holding
+    /// each var's authored template instead of its resolved `Entry`. `A`'s
+    /// template and `A`'s resolved value differ visibly here, so the mutant is
+    /// caught by the assertion rather than by an equality that both satisfy.
+    #[test]
+    fn a_self_env_reference_substitutes_the_resolved_value_not_the_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "resolved-value");
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("A", "${installPath}/bin", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("B", "${self.env.A}/x", Visibility::PUBLIC),
+        ]);
+
+        let entries = compose_root(&meta, &content, &DepContexts::new(), false).expect("the document must compose");
+        let a = value_of(&entries, "A");
+        let b = value_of(&entries, "B");
+
+        assert_ne!(
+            a, "${installPath}/bin",
+            "the fixture is only a check if A's template and A's resolved value differ"
+        );
+        assert_eq!(b, format!("{a}/x"), "B must carry A's resolved value");
+        assert!(
+            !b.contains("${installPath}"),
+            "substituting A's template would leave an unresolved token in B: {b:?}"
+        );
+    }
+
+    /// C-029 / C-009 sibling — bytes a `${self.env.*}` reference substitutes
+    /// are never rescanned.
+    ///
+    /// `A` resolves, through the escape, to the literal text
+    /// `${deps.tool.installPath}`, and `tool` is present in `dep_contexts`. If
+    /// composition re-read substituted bytes, `B` would come out carrying the
+    /// dependency's install path. D12 deletes the install-path injection
+    /// defence on the grounds that substituted bytes are never re-examined;
+    /// `${self.env.*}` is the second composition path where that premise could
+    /// be falsified.
+    #[test]
+    fn bytes_a_self_env_reference_substitutes_are_never_rescanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = package_content(dir.path(), "injection");
+        let installed = dir.path().join("tool-installed");
+        std::fs::create_dir_all(&installed).unwrap();
+        let mut contexts = DepContexts::new();
+        contexts.insert(
+            DependencyName::try_from("tool").unwrap(),
+            DependencyContext::path_only(pinned("tool", 'f'), installed.clone()),
+        );
+
+        let meta = metadata_with_vars(vec![
+            Var::new_constant_with_visibility("A", "$${deps.tool.installPath}", Visibility::PUBLIC),
+            Var::new_constant_with_visibility("B", "${self.env.A}/x", Visibility::PUBLIC),
+        ]);
+
+        let entries = compose_root(&meta, &content, &contexts, false).expect("the document must compose");
+        assert_eq!(
+            value_of(&entries, "B"),
+            "${deps.tool.installPath}/x",
+            "substituted bytes must reach the output verbatim"
+        );
+        assert!(
+            !value_of(&entries, "B").contains(&*installed.to_string_lossy()),
+            "the dependency's install path must not appear — that would mean the output was rescanned"
         );
     }
 }

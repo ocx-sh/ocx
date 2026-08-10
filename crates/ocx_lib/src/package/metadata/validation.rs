@@ -1,22 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Publish-time validation for package metadata.
+//! Structural and publish-time validation for package metadata.
 //!
-//! This module owns all logic that runs when a publisher calls
-//! [`ValidMetadata::try_from`]:
+//! The two are deliberately different layers (D14 —
+//! `adr_interpolation_token_grammar.md`). [`ValidMetadata::try_from`] runs on
+//! **every** ingress path, so it may only assert that a document is
+//! *structurally readable*:
 //!
-//! - [`validate_env_modifier_types`] — refuses an env var whose modifier `type`
+//! - `validate_env_modifier_types` — refuses an env var whose modifier `type`
 //!   this binary does not know, so a package built for a newer ocx fails closed
 //!   with a version remedy instead of running with a silently wrong environment.
-//! - [`validate_env_list_entries`] — enforces the wire contract for `list`
+//! - `validate_env_list_entries` — enforces the wire contract for `list`
 //!   entries: a separator is present, foldable, and does not edge its value.
-//! - [`validate_env_tokens`] — walks env var values and checks that every
-//!   `${deps.NAME.FIELD}` token references a declared, non-ambiguous dep with
-//!   a supported field name.
-//! - [`validate_entrypoint_args`] — checks that every `args` element in every
-//!   entrypoint uses only permitted tokens (`${installPath}`); `${deps.*}` and
-//!   unknown placeholders are rejected at publish time.
+//!
+//! [`validate_for_publish`] is the strict gate on top of it, run by
+//! `ocx package create` / `ocx package push` where a publisher is present:
+//!
+//! - `validate_env_tokens` — scans every env var value and checks that each
+//!   `${deps.NAME.installPath}` token references a declared, non-ambiguous dep,
+//!   and that each `${self.env.KEY}` names exactly one var declared strictly
+//!   earlier. An unsupported field never reaches the reference check: the scan
+//!   itself refuses `${deps.NAME.version}`.
+//! - `validate_entrypoint_args` — scans every `args` element in every
+//!   entrypoint and refuses the token classes `Usage::EntryPointArgs` does not
+//!   permit.
+//!
+//! Refusing an unrecognised token on a *read* path is what D14 removes: an ocx
+//! meeting a token it does not know still shows the package, and refuses only
+//! when something asks for the value. Compose and execute need no gate of their
+//! own — `TemplateResolver::resolve` cannot produce bytes for a token it does
+//! not recognise.
 //!
 //! Entrypoint uniqueness is enforced at construction time by
 //! [`super::entrypoint::Entrypoints::new`] (also from the serde path), so no
@@ -25,36 +39,23 @@
 use std::collections::HashMap;
 
 use super::Metadata;
-use super::dependency::{Dependencies, Dependency, DependencyName};
-use super::slug::DEP_TOKEN_PATTERN;
-use super::template::{TemplateError, disallowed_dep_token};
-
-/// Matches any `${...}` token. After [`validate_env_tokens`] strips the two
-/// recognized forms (`${installPath}` and `${deps.NAME.FIELD}`), anything still
-/// matching here is an unknown placeholder and is rejected.
-static UNKNOWN_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"\$\{[^}]*\}").expect("valid regex"));
-
-/// Returns the first `${...}` placeholder in `value` that is neither
-/// `${installPath}` nor a valid `${deps.NAME.FIELD}` token, or `None` if every
-/// placeholder is recognized. Shared by `validate_env_tokens` and
-/// `validate_entrypoint_args` so the "unknown placeholder" rule has one source.
-fn first_unknown_placeholder(value: &str) -> Option<String> {
-    UNKNOWN_TOKEN_RE
-        .find_iter(value)
-        .map(|m| m.as_str())
-        .find(|seg| *seg != "${installPath}" && !DEP_TOKEN_PATTERN.is_match(seg))
-        .map(str::to_string)
-}
+use super::dependency::{Dependencies, Dependency};
+use super::template::scanner::{self, Segment, Token};
+use super::template::{AllowedTokens, TemplateError, Usage, first_disallowed_token};
 
 // ── ValidMetadata ─────────────────────────────────────────────────────────────
 
-/// Metadata that has passed publish-time validation.
+/// Metadata this binary can structurally read.
 ///
-/// Constructed exclusively via `TryFrom<Metadata>`, which verifies that all
-/// `${deps.NAME.FIELD}` tokens in env var values reference declared direct
-/// dependencies with known field names. This makes it impossible to publish
-/// without running the check.
+/// Constructed exclusively via `TryFrom<Metadata>`, which verifies that every
+/// env var declares a modifier type this binary knows and that every `list`
+/// entry satisfies the separator contract — statements about the document's
+/// *grammar*, not about whether its values resolve.
+///
+/// It deliberately does **not** promise that the document's interpolation
+/// tokens are recognised or that its `${deps.*}` references resolve: that is
+/// [`validate_for_publish`]'s job at publish time, and
+/// `TemplateResolver::resolve`'s at compose time (D14).
 ///
 /// Derefs to [`Metadata`] for read access without unwrapping.
 #[derive(Debug)]
@@ -65,23 +66,39 @@ impl TryFrom<Metadata> for ValidMetadata {
 
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - A token references a name not matching any direct dependency (by name field or basename).
-    /// - A token references an unsupported field (currently only `installPath` is supported).
-    /// - Two direct dependencies share the same interpolation name (collision) and a token
-    ///   uses that name — in this case `name` must be set to disambiguate.
-    /// - An entrypoint `args` element contains a `${deps.*}` token or an unknown placeholder.
+    /// Returns an error if an env var declares an unknown modifier `type`, or
+    /// if a `list` entry is missing its separator, declares an unusable one, or
+    /// carries a value that separator edges.
     fn try_from(metadata: Metadata) -> Result<Self, Self::Error> {
         // Runs first: an unknown modifier type means the reader is too old for
         // this package, which is the answer the user needs — reporting a
-        // template complaint about a var whose grammar we cannot read would
-        // send them to fix the wrong thing.
+        // complaint about a var whose grammar we cannot read would send them to
+        // fix the wrong thing.
         validate_env_modifier_types(&metadata)?;
         validate_env_list_entries(&metadata)?;
-        validate_env_tokens(&metadata)?;
-        validate_entrypoint_args(&metadata)?;
         Ok(Self(metadata))
     }
+}
+
+/// The publish gate: structural readability **plus** every token check.
+///
+/// `ocx package create` and `ocx package push` call this instead of
+/// [`ValidMetadata::try_from`]. It is the one explicit enforcement point D14
+/// keeps — the publisher is present, and a typo must not reach a registry.
+/// Every other refusal is the resolver's own, at the operation that needs the
+/// value.
+///
+/// # Errors
+///
+/// Everything [`ValidMetadata::try_from`] returns, plus an unrecognised
+/// `${…}`, a `${deps.*}` token naming an undeclared or ambiguous dependency or
+/// an unsupported field, and a token class an entrypoint `args` element may
+/// not carry.
+pub fn validate_for_publish(metadata: Metadata) -> Result<ValidMetadata, crate::Error> {
+    let valid = ValidMetadata::try_from(metadata)?;
+    validate_env_tokens(&valid)?;
+    validate_entrypoint_args(&valid)?;
+    Ok(valid)
 }
 
 impl From<ValidMetadata> for Metadata {
@@ -207,102 +224,120 @@ pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), crate
     Ok(())
 }
 
-/// Validates env var values: checks every `${deps.NAME.FIELD}` token for declared,
-/// non-ambiguous deps and supported field names.
+/// Validates env var values: every `${…}` must be one of the four recognised
+/// tokens, every `${deps.NAME.installPath}` must name a declared, non-ambiguous
+/// dep, and every `${self.env.KEY}` must name exactly one var declared strictly
+/// earlier in this same document.
 ///
+/// Recognition is [`scanner::scan`]'s — the one recogniser (D10) — so a token
+/// this gate refuses is exactly a token the resolver could not have rendered.
 /// Does not consult the filesystem; pure syntax + reference check.
+///
+/// **Why `${self.env.*}` is refused here and not only at compose time.** The
+/// reference is decidable from the document alone — no filesystem, no dep
+/// contexts, no install — which is the class the publish gate already handles
+/// for `${deps.*}`. Left to the composer, a forward or ambiguous reference
+/// publishes cleanly and then exits 65 on every consumer: a publishable artifact
+/// nobody can use. The direction is the safe one, too — the accept set may only
+/// grow, so refusing now and accepting later stays available.
 pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Error> {
     use super::super::error::Error;
+    use super::template::SelfEnvScope;
+    use super::template::scanner::TokenShape;
 
-    let deps = metadata.dependencies();
-    let (name_map, collision_map) = build_name_and_collision_maps(deps);
+    let (name_map, collision_map) = build_name_and_collision_maps(metadata.dependencies());
 
-    if let Some(env) = metadata.env() {
-        for var in env {
-            let value = match var.value() {
-                Some(v) => v,
-                None => continue,
+    let Some(env) = metadata.env() else {
+        return Ok(());
+    };
+
+    // The scope a `${self.env.KEY}` in the var being walked may name: the keys
+    // declared strictly earlier, in declaration order. The same prefix the
+    // composer's accumulator holds, without the values this gate has no way to
+    // resolve — so the two agree on which references are legal.
+    let mut declared_before: SelfEnvScope<&str> = SelfEnvScope::new();
+
+    for var in env {
+        let Some(value) = var.value() else {
+            // No value template, no contribution: `Var::value()` is `None` only
+            // for a modifier type this binary cannot read, and the composer's
+            // accumulator skips such a var for the same reason.
+            continue;
+        };
+
+        let segments = scanner::scan(value).map_err(|source| Error::EnvVarInterpolation {
+            var_key: var.key.clone(),
+            source,
+        })?;
+
+        for segment in segments {
+            let Segment::Token(token) = segment else {
+                continue;
             };
-
-            // Dep-token regex shared with `template::resolve_inner`
-            // via `slug::DEP_TOKEN_PATTERN` so the sites cannot drift out of sync.
-            for cap in DEP_TOKEN_PATTERN.captures_iter(value) {
-                // Invariant: DEP_TOKEN_PATTERN defines exactly 2 capture groups; a successful
-                // captures_iter match guarantees groups 1 and 2 are Some.
-                let dep_name = cap
-                    .get(1)
-                    .expect("regex group 1 guaranteed by DEP_TOKEN_PATTERN")
-                    .as_str();
-                let field = cap
-                    .get(2)
-                    .expect("regex group 2 guaranteed by DEP_TOKEN_PATTERN")
-                    .as_str();
-
-                // The DEP_TOKEN_PATTERN regex only matches the slug pattern so dep_name is always
-                // a structurally valid DependencyName by construction.
-                let dep_name_typed =
-                    DependencyName::try_from(dep_name).expect("regex guarantees dep_name matches slug pattern");
-
-                // Check for collision first.
-                if collision_map.contains_key(dep_name) {
-                    let first = name_map[dep_name].identifier.clone();
-                    let second = collision_map[dep_name].identifier.clone();
-                    return Err(Error::EnvVarInterpolation {
+            check_token_reference(&token, &name_map, &collision_map).map_err(|source| Error::EnvVarInterpolation {
+                var_key: var.key.clone(),
+                source,
+            })?;
+            if let TokenShape::SelfEnv { key } = &token.shape {
+                declared_before
+                    .lookup(key)
+                    .map_err(|source| Error::EnvVarInterpolation {
                         var_key: var.key.clone(),
-                        source: TemplateError::AmbiguousDependencyRef {
-                            ref_name: dep_name_typed,
-                            first,
-                            second,
-                        },
-                    }
-                    .into());
-                }
-
-                // Check name is declared.
-                if !name_map.contains_key(dep_name) {
-                    return Err(Error::EnvVarInterpolation {
-                        var_key: var.key.clone(),
-                        source: TemplateError::UnknownDependencyRef {
-                            ref_name: dep_name_typed,
-                            declared: name_map
-                                .keys()
-                                .map(|s| {
-                                    // Names in name_map come from dep.name() — always valid slugs.
-                                    DependencyName::try_from(s.as_str()).expect("name_map key is a valid slug")
-                                })
-                                .collect(),
-                        },
-                    }
-                    .into());
-                }
-
-                // Check field is supported.
-                if field != "installPath" {
-                    return Err(Error::EnvVarInterpolation {
-                        var_key: var.key.clone(),
-                        source: TemplateError::UnknownDependencyField {
-                            ref_name: dep_name.to_string(),
-                            field: field.to_string(),
-                            supported_fields: vec!["installPath".to_string()],
-                        },
-                    }
-                    .into());
-                }
-            }
-
-            // W1: reject any leftover `${...}` that is not `${installPath}` and was not
-            // consumed by the DEP_TOKEN_PATTERN loop above (e.g. `${unknown}`,
-            // `${installpath}`, `${deps.foo.install_path}`, `${deps.Python.installPath}`).
-            // Routed through `first_unknown_placeholder` so the recognition logic is
-            // shared with `validate_entrypoint_args` below.
-            if let Some(placeholder) = first_unknown_placeholder(value) {
-                return Err(Error::EnvVarInterpolation {
-                    var_key: var.key.clone(),
-                    source: TemplateError::UnknownPlaceholder { placeholder },
-                }
-                .into());
+                        source,
+                    })?;
             }
         }
+
+        declared_before.push(var.key.as_str());
+    }
+
+    Ok(())
+}
+
+/// Checks one recognised token's `${deps.*}` reference against the declared
+/// direct dependencies.
+///
+/// Only the dependency reference lives here — shape recognition already happened
+/// in [`scanner::scan`], `${installPath}` always has a referent, and
+/// `${self.env.KEY}` is checked against the declaration prefix its caller
+/// carries, which this function has no view of.
+///
+/// The field is not re-checked either. `TokenShape::Dep` carries no field:
+/// `installPath` is the only leaf, so the scan refuses `${deps.cmake.version}`
+/// as [`TemplateError::UnknownField`] and a `Dep` token with an unsupported
+/// field cannot be constructed. A branch for it here would be a green that
+/// could never go red.
+fn check_token_reference(
+    token: &Token<'_>,
+    name_map: &HashMap<String, &Dependency>,
+    collision_map: &HashMap<String, &Dependency>,
+) -> Result<(), TemplateError> {
+    use super::template::scanner::TokenShape;
+
+    let TokenShape::Dep { name } = &token.shape else {
+        return Ok(());
+    };
+
+    // Ambiguity first: a name two deps answer to is refused before the
+    // declared-name check can pick one of them.
+    if let (Some(first), Some(second)) = (name_map.get(name.as_str()), collision_map.get(name.as_str())) {
+        return Err(TemplateError::AmbiguousDependencyRef {
+            ref_name: name.clone(),
+            first: Box::new(first.identifier.clone()),
+            second: Box::new(second.identifier.clone()),
+        });
+    }
+
+    if !name_map.contains_key(name.as_str()) {
+        // Read back off the `Dependency` rather than reparsing the map key, so
+        // the declared list needs no fallible step and no unreachable arm.
+        // Sorted, because the map's own order is hash noise in a message.
+        let mut declared: Vec<_> = name_map.values().map(|dependency| dependency.name()).collect();
+        declared.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        return Err(TemplateError::UnknownDependencyRef {
+            ref_name: name.clone(),
+            declared,
+        });
     }
 
     Ok(())
@@ -310,43 +345,41 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
 
 /// Validates entrypoint `args` elements at publish time.
 ///
-/// Checks that every element in every entrypoint's `args` list uses only
-/// permitted tokens (`${installPath}`). Rejects `${deps.*}` tokens with a
-/// dedicated [`crate::package::error::Error::EntrypointArgInterpolation`]
-/// error (not the misleading `UnknownDependencyRef`) and rejects unknown
-/// placeholders such as `${installpath}` (wrong case) or `${foo}`.
+/// Every `${…}` in every `args` element must be recognised, and must belong to
+/// a token class `Usage::EntryPointArgs` permits — `${installPath}` and its
+/// `${self.installPath}` alias, nothing else. `${deps.*}` and `${self.env.*}`
+/// are refused as [`TemplateError::DisallowedToken`], never the misleading
+/// `UnknownDependencyRef`.
 ///
 /// Pure syntax check — no filesystem access.
 ///
 /// # Errors
 ///
-/// Returns an error if any arg element contains a disallowed or unknown token.
+/// [`crate::package::error::Error::EntrypointArgInterpolation`] for the first
+/// arg element carrying an unrecognised or disallowed token.
 pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), crate::Error> {
     use super::super::error::Error;
 
     let Some(entrypoints) = metadata.entrypoints() else {
         return Ok(());
     };
+    let allowed = AllowedTokens::from(Usage::EntryPointArgs);
 
     for (name, entry) in entrypoints.iter() {
         for arg in entry.args() {
-            // Check for disallowed ${deps.*} token FIRST — the dep regex recognises
-            // these tokens and would NOT cause first_unknown_placeholder to flag them,
-            // so the disallowed-token check must precede the unknown-placeholder scan.
-            if let Some(token) = disallowed_dep_token(arg) {
-                return Err(Error::EntrypointArgInterpolation {
-                    entrypoint: name.to_string(),
-                    arg: arg.clone(),
-                    source: TemplateError::DisallowedToken { token },
-                }
-                .into());
-            }
+            let segments = scanner::scan(arg).map_err(|source| Error::EntrypointArgInterpolation {
+                entrypoint: name.to_string(),
+                arg: arg.clone(),
+                source,
+            })?;
 
-            if let Some(placeholder) = first_unknown_placeholder(arg) {
+            if let Some(token) = first_disallowed_token(&segments, allowed) {
                 return Err(Error::EntrypointArgInterpolation {
                     entrypoint: name.to_string(),
                     arg: arg.clone(),
-                    source: TemplateError::UnknownPlaceholder { placeholder },
+                    source: TemplateError::DisallowedToken {
+                        token: token.to_owned(),
+                    },
                 }
                 .into());
             }
@@ -397,7 +430,7 @@ mod tests {
             &dep_json("cmake", None),
             &constant_env("X", "${deps.cmake.installPath}"),
         );
-        assert!(ValidMetadata::try_from(meta).is_ok());
+        assert!(validate_for_publish(meta).is_ok());
     }
 
     // 3.3 — valid: env ref matches declared dep name
@@ -407,14 +440,14 @@ mod tests {
             &dep_json("myorg/cmake", Some("my-cmake")),
             &constant_env("X", "${deps.my-cmake.installPath}"),
         );
-        assert!(ValidMetadata::try_from(meta).is_ok());
+        assert!(validate_for_publish(meta).is_ok());
     }
 
     // 3.3 — valid: no ${deps.*} tokens → no error
     #[test]
     fn no_dep_tokens_ok() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installPath}/bin"));
-        assert!(ValidMetadata::try_from(meta).is_ok());
+        assert!(validate_for_publish(meta).is_ok());
     }
 
     // 3.3 — error: ref to undeclared dep name
@@ -424,7 +457,7 @@ mod tests {
             &dep_json("cmake", None),
             &constant_env("X", "${deps.ninja.installPath}"),
         );
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         assert!(format!("{err}").contains("ninja"), "expected ninja in error: {err}");
     }
 
@@ -432,7 +465,7 @@ mod tests {
     #[test]
     fn unsupported_field_errors() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${deps.cmake.version}"));
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         assert!(
             format!("{err}").contains("version"),
             "expected 'version' in error: {err}"
@@ -449,7 +482,7 @@ mod tests {
         let env = constant_env("X", "${deps.cmake.installPath}");
         let json = format!(r#"{{"type":"bundle","version":1,"dependencies":[{deps}],"env":[{env}]}}"#);
         let meta: Metadata = serde_json::from_str(&json).unwrap();
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         assert!(format!("{err}").contains("cmake"), "expected cmake in error: {err}");
     }
 
@@ -463,7 +496,7 @@ mod tests {
         let env = constant_env("X", "${installPath}/bin");
         let json = format!(r#"{{"type":"bundle","version":1,"dependencies":[{deps}],"env":[{env}]}}"#);
         let meta: Metadata = serde_json::from_str(&json).unwrap();
-        assert!(ValidMetadata::try_from(meta).is_ok());
+        assert!(validate_for_publish(meta).is_ok());
     }
 
     // 3.3 — transitive scoping: R has direct dep D but tokens ref T (D's dep) → error
@@ -473,7 +506,7 @@ mod tests {
             &dep_json("direct-dep", None),
             &constant_env("X", "${deps.transitive-tool.installPath}"),
         );
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("transitive-tool"),
@@ -491,7 +524,7 @@ mod tests {
     #[test]
     fn unknown_placeholder_in_env_value_rejected() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${unknown}"));
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown") || msg.contains("${unknown}"),
@@ -503,7 +536,7 @@ mod tests {
     #[test]
     fn lowercase_install_path_placeholder_rejected() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installpath}/bin"));
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("installpath") || msg.contains("${installpath}"),
@@ -512,13 +545,12 @@ mod tests {
     }
 
     // W1.3 — snake_case field: ${deps.foo.install_path} is rejected
-    // The DEP_TOKEN regex only accepts [a-zA-Z]+ for the field segment, so
-    // install_path (contains underscore) does not match and the whole token
-    // is treated as an unknown placeholder by UNKNOWN_TOKEN_RE.
+    // `deps.NAME` is a recognised namespace, so the scanner reports the unknown
+    // leaf by name rather than calling the whole token unrecognisable.
     #[test]
     fn snake_case_field_placeholder_rejected() {
         let meta = make_metadata(&dep_json("foo", None), &constant_env("X", "${deps.foo.install_path}"));
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("install_path") || msg.contains("${deps.foo.install_path}"),
@@ -527,15 +559,15 @@ mod tests {
     }
 
     // W1.4 — uppercase dep NAME: ${deps.Python.installPath} is rejected
-    // The slug pattern [a-z0-9][a-z0-9_-]* forbids uppercase, so DEP_TOKEN does
-    // not match and the token falls through to the UNKNOWN_TOKEN_RE check.
+    // The scanner validates NAME by `DependencyName::try_from`, whose pattern
+    // forbids uppercase, so the body fails the anchored grammar.
     #[test]
     fn uppercase_dep_name_placeholder_rejected() {
         let meta = make_metadata(
             &dep_json("python", None),
             &constant_env("X", "${deps.Python.installPath}"),
         );
-        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let err = validate_for_publish(meta).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Python") || msg.contains("${deps.Python.installPath}"),
@@ -609,7 +641,7 @@ mod tests {
             r#"{"key":"BROKEN","type":"constant","value":"${nonsense}"}"#
         );
         let meta = make_metadata(&dep_json("cmake", None), env);
-        let message = ValidMetadata::try_from(meta)
+        let message = validate_for_publish(meta)
             .expect_err("both faults are fatal")
             .to_string();
         assert!(
@@ -715,10 +747,121 @@ mod tests {
             &dep_json("cmake", None),
             r#"{"key":"OPTS","type":"list","separator":" ","value":"${nonsense}"}"#,
         );
-        let message = ValidMetadata::try_from(meta)
+        let message = validate_for_publish(meta)
             .expect_err("template faults still apply to list values")
             .to_string();
         assert!(message.contains("nonsense"), "must name the placeholder: {message}");
+    }
+
+    // ── D14: classification always, refusal on resolve only ───────────────────
+
+    /// The one document C-037 and C-038's unit legs are both asserted over. A
+    /// read-only leg with no failing sibling proves nothing, and a check that
+    /// only ever fails is indistinguishable from one that always fails — so the
+    /// two verdicts have to be about the same bytes.
+    ///
+    /// [`Metadata`] is not `Clone`, so each leg parses this fixture again; the
+    /// document is one source either way.
+    fn unrecognised_token_document() -> Metadata {
+        make_metadata(&dep_json("cmake", None), &constant_env("X", "${workspaceFolder}/x"))
+    }
+
+    /// C-037 / C-038 (unit legs) / S-026 / S-027 — ingress accepts a token this
+    /// binary does not recognise, and the publish gate refuses it.
+    ///
+    /// The ingress leg is what makes the permissive read path *reachable*: `pull`
+    /// and `install` route through `ValidMetadata::try_from`, so a refusal there
+    /// would mean `inspect` / `info` / `describe` have nothing left to read. The
+    /// publish leg is the one explicit enforcement point D14 keeps — the
+    /// publisher is present, and a typo must not reach a registry.
+    #[test]
+    fn an_unrecognised_token_passes_ingress_and_is_refused_at_publish() {
+        assert!(
+            ValidMetadata::try_from(unrecognised_token_document()).is_ok(),
+            "ingress must accept an unrecognised token, or the read-only surfaces have nothing to read"
+        );
+
+        let message = validate_for_publish(unrecognised_token_document())
+            .expect_err("the publish gate must refuse an unrecognised token")
+            .to_string();
+        assert!(
+            message.contains("${workspaceFolder}"),
+            "the refusal must name the token verbatim: {message}"
+        );
+    }
+
+    /// The publish refusal is malformed input (65), the same class as every
+    /// other metadata refusal.
+    #[test]
+    fn an_unrecognised_token_exits_with_data_error_at_publish() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let error = validate_for_publish(unrecognised_token_document()).expect_err("an unrecognised token must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// C-006(a) / S-022 — the escape is the publisher's exit from the claimed
+    /// space, so the escaped form of the same payload publishes. Without this
+    /// leg the refusal above would be indistinguishable from "OCX refuses every
+    /// value containing the bytes `workspaceFolder`".
+    #[test]
+    fn an_escaped_foreign_token_publishes() {
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "$${workspaceFolder}/x"));
+        assert!(
+            validate_for_publish(meta).is_ok(),
+            "$${{…}} is the only way to publish a literal ${{…}}, so it must publish"
+        );
+    }
+
+    /// C-005 / S-025 — a `${` with no `}` is literal text, not a token, so it
+    /// publishes. This is the one shape that is legal today and must stay legal:
+    /// it is why the publish accept-set only ever grows.
+    #[test]
+    fn an_unterminated_open_delimiter_publishes() {
+        for value in ["${installPath", "prefix ${", "${self.installPath"] {
+            let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", value));
+            assert!(
+                validate_for_publish(meta).is_ok(),
+                "{value:?} carries no token, so it must publish unchanged"
+            );
+        }
+    }
+
+    /// S-001 / S-010 — the alias and both render modifiers move from rejected
+    /// to accepted. Nothing moves the other way.
+    #[test]
+    fn the_self_alias_and_its_render_modifiers_publish() {
+        for value in [
+            "${self.installPath}/bin",
+            "${self.installPath:posix}",
+            "${installPath:native}",
+            "${deps.cmake.installPath:posix}/bin",
+        ] {
+            let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", value));
+            assert!(validate_for_publish(meta).is_ok(), "{value:?} must publish");
+        }
+    }
+
+    /// S-012 — a modifier outside the closed set is refused at publish, and the
+    /// message lists what is supported. The vocabulary is the whole enum, so a
+    /// publisher who guessed gets the complete answer.
+    #[test]
+    fn an_unknown_render_modifier_is_refused_at_publish() {
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            &constant_env("X", "${self.installPath:frobnicate}"),
+        );
+        let message = validate_for_publish(meta)
+            .expect_err("a modifier outside the closed set must be refused")
+            .to_string();
+        assert!(
+            message.contains("frobnicate"),
+            "must name the offending modifier: {message}"
+        );
+        assert!(
+            message.contains("native") && message.contains("posix"),
+            "must list the supported modifiers: {message}"
+        );
     }
 
     // ── validate_entrypoint_args ──────────────────────────────────────────────
@@ -732,31 +875,42 @@ mod tests {
 
     // Contract 8 — MUST FAIL against the current no-op validate_entrypoint_args stub.
     //
-    // A `${deps.*}` token in any entrypoint arg must cause ValidMetadata::try_from to
-    // return Err. The error message must name the entrypoint ("run"), carry the token
-    // text ("deps.foo"), and state the policy ("is only valid in env values").
+    // A `${deps.*}` token in any entrypoint arg must cause validate_for_publish to
+    // return Err, carrying `TemplateError::DisallowedToken` under the entrypoint
+    // that declared the arg.
+    //
+    // Asserted on the variant, not on the sentence. `DisallowedToken` is what
+    // separates "refused because this token class is not permitted here" from
+    // `UnknownDependencyRef` ("permitted, but names nothing") — the distinction the
+    // gate exists to make. A substring assertion on the remedy wording cannot tell
+    // those two apart and goes green for the wrong error the moment either message
+    // is reworded (C-028); only the token text itself is asserted as text.
     //
     // Note: deps need NOT be declared in the metadata — the gate rejects ${deps.*}
     // in args unconditionally, distinct from env validation where undeclared refs
     // produce UnknownDependencyRef instead.
     #[test]
     fn entrypoint_arg_deps_token_rejected() {
+        use crate::package::error::Error as PackageError;
+
         let meta =
             make_metadata_with_entrypoints(r#"{"run":{"command":"python","args":["${deps.foo.installPath}/x"]}}"#);
         let err =
-            ValidMetadata::try_from(meta).expect_err("${deps.*} in entrypoint args must be rejected at publish time");
-        let msg = format!("{err}");
+            validate_for_publish(meta).expect_err("${deps.*} in entrypoint args must be rejected at publish time");
+
+        let crate::Error::Package(package_error) = &err else {
+            panic!("expected a package error, got: {err}");
+        };
+        let PackageError::EntrypointArgInterpolation { entrypoint, source, .. } = package_error.as_ref() else {
+            panic!("expected EntrypointArgInterpolation, got: {package_error}");
+        };
+        assert_eq!(entrypoint.as_str(), "run", "error must name the offending entrypoint");
+        let TemplateError::DisallowedToken { token } = source else {
+            panic!("expected TemplateError::DisallowedToken, got: {source:?}");
+        };
         assert!(
-            msg.contains("run"),
-            "error must name the offending entrypoint 'run': {msg}"
-        );
-        assert!(
-            msg.contains("deps.foo"),
-            "error must contain the token text 'deps.foo': {msg}"
-        );
-        assert!(
-            msg.contains("is only valid in env values"),
-            "error must state that deps tokens are only valid in env values: {msg}"
+            token.contains("deps.foo"),
+            "the refused token must be named verbatim: {token}"
         );
     }
 
@@ -768,7 +922,7 @@ mod tests {
     fn entrypoint_arg_unknown_placeholder_wrong_case_rejected() {
         let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["${installpath}/x"]}}"#);
         let err =
-            ValidMetadata::try_from(meta).expect_err("${installpath} (wrong case) in entrypoint args must be rejected");
+            validate_for_publish(meta).expect_err("${installpath} (wrong case) in entrypoint args must be rejected");
         let msg = format!("{err}");
         assert!(
             msg.contains("installpath"),
@@ -783,7 +937,7 @@ mod tests {
     #[test]
     fn entrypoint_arg_unknown_placeholder_rejected() {
         let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["${foo}"]}}"#);
-        let err = ValidMetadata::try_from(meta).expect_err("${foo} in entrypoint args must be rejected");
+        let err = validate_for_publish(meta).expect_err("${foo} in entrypoint args must be rejected");
         let msg = format!("{err}");
         assert!(
             msg.contains("foo"),
@@ -797,7 +951,7 @@ mod tests {
         let meta =
             make_metadata_with_entrypoints(r#"{"run":{"command":"python","args":["${installPath}/app/main.py"]}}"#);
         assert!(
-            ValidMetadata::try_from(meta).is_ok(),
+            validate_for_publish(meta).is_ok(),
             "${{installPath}} in entrypoint args must be accepted at publish time"
         );
     }
@@ -807,7 +961,7 @@ mod tests {
     fn entrypoint_arg_backward_compat_no_args() {
         let meta = make_metadata_with_entrypoints(r#"{"run":{}}"#);
         assert!(
-            ValidMetadata::try_from(meta).is_ok(),
+            validate_for_publish(meta).is_ok(),
             "entrypoint with no args field must be accepted (backward-compatible)"
         );
     }
@@ -817,7 +971,7 @@ mod tests {
     fn entrypoint_arg_backward_compat_command_only() {
         let meta = make_metadata_with_entrypoints(r#"{"run":{"command":"python"}}"#);
         assert!(
-            ValidMetadata::try_from(meta).is_ok(),
+            validate_for_publish(meta).is_ok(),
             "entrypoint with command but no args must be accepted (backward-compatible)"
         );
     }
@@ -828,7 +982,7 @@ mod tests {
         let json = r#"{"type":"bundle","version":1}"#;
         let meta: Metadata = serde_json::from_str(json).unwrap();
         assert!(
-            ValidMetadata::try_from(meta).is_ok(),
+            validate_for_publish(meta).is_ok(),
             "metadata without any entrypoints key must be accepted"
         );
     }
@@ -841,8 +995,148 @@ mod tests {
         let meta =
             make_metadata_with_entrypoints(r#"{"run":{"args":["${installPath}/nonexistent/deeply/nested.xyz"]}}"#);
         assert!(
-            ValidMetadata::try_from(meta).is_ok(),
+            validate_for_publish(meta).is_ok(),
             "${{installPath}} arg with non-existent path must be accepted (validation is pure syntax, no FS)"
+        );
+    }
+
+    // ── A forward `${self.env.KEY}` reference is refused at publish ────────────
+    //
+    // The reference is statically decidable from the document alone — no
+    // filesystem, no dep contexts, no install — which is the class the publish
+    // gate already handles for `${deps.*}`. Left to the composer it would
+    // publish cleanly and then exit 65 on every consumer: a publishable
+    // artifact nobody can use.
+
+    /// Two vars, `A = "alpha"` and `B = "${self.env.A}"`, in the given order.
+    /// The two fixtures below are byte-identical modulo the array order, which
+    /// is what makes the accept/refuse pair a check rather than two unrelated
+    /// documents.
+    fn self_env_pair(first_is_the_reference: bool) -> Metadata {
+        let reference = constant_env("B", "${self.env.A}");
+        let target = constant_env("A", "alpha");
+        let env = if first_is_the_reference {
+            format!("{reference},{target}")
+        } else {
+            format!("{target},{reference}")
+        };
+        make_metadata(&dep_json("cmake", None), &env)
+    }
+
+    /// A reference to a var declared **later** is refused at publish, naming
+    /// the referencing var and the key it could not see.
+    #[test]
+    fn a_forward_self_env_reference_is_refused_at_publish() {
+        use crate::package::error::Error as PackageError;
+
+        let error =
+            validate_for_publish(self_env_pair(true)).expect_err("a forward reference must not reach a registry");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::EnvVarInterpolation { var_key, source } = package_error.as_ref() else {
+            panic!("expected EnvVarInterpolation, got: {package_error}");
+        };
+        assert_eq!(var_key, "B", "the refusal must name the var that carries the reference");
+        let TemplateError::UndefinedSelfEnvRef { key, .. } = source else {
+            panic!("expected UndefinedSelfEnvRef, got: {source:?}");
+        };
+        assert_eq!(key, "A", "the refusal must name the key that was not in scope");
+    }
+
+    /// The same two vars in declaration order publish. Without this leg the
+    /// refusal above is indistinguishable from refusing every
+    /// `${self.env.*}` token.
+    #[test]
+    fn a_backward_self_env_reference_publishes() {
+        assert!(
+            validate_for_publish(self_env_pair(false)).is_ok(),
+            "a reference to an earlier-declared var is the feature, and must publish"
+        );
+    }
+
+    /// C-021 — a key declared twice before the reference is refused at publish
+    /// too, and as the *ambiguous* fault rather than the undefined one.
+    ///
+    /// The gate and the composer share one rule (`SelfEnvScope::lookup`), so a
+    /// document that publishes is one every consumer can compose; without this
+    /// leg the gate's half of D7 is unpinned, and a gate that only counted "at
+    /// least one" would let the ambiguity through to every consumer instead.
+    #[test]
+    fn a_doubly_declared_self_env_target_is_refused_at_publish() {
+        use crate::package::error::Error as PackageError;
+
+        let env = format!(
+            "{},{},{}",
+            constant_env("A", "first"),
+            constant_env("A", "second"),
+            constant_env("B", "${self.env.A}")
+        );
+        let error = validate_for_publish(make_metadata(&dep_json("cmake", None), &env))
+            .expect_err("an ambiguous reference must not reach a registry");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::EnvVarInterpolation { var_key, source } = package_error.as_ref() else {
+            panic!("expected EnvVarInterpolation, got: {package_error}");
+        };
+        assert_eq!(var_key, "B", "the refusal must name the var that carries the reference");
+        let TemplateError::AmbiguousSelfEnvRef { key } = source else {
+            panic!("expected AmbiguousSelfEnvRef, got: {source:?}");
+        };
+        assert_eq!(key, "A", "the refusal must name the key that was declared twice");
+    }
+
+    /// The refusal is malformed input (65), the same class as every other
+    /// metadata refusal.
+    #[test]
+    fn a_forward_self_env_reference_exits_with_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let error = validate_for_publish(self_env_pair(true)).expect_err("a forward reference must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// D14 — the refusal belongs to the publish gate, not to ingress. An older
+    /// ocx meeting the same document must still be able to *look* at it.
+    #[test]
+    fn a_forward_self_env_reference_still_passes_ingress() {
+        assert!(
+            ValidMetadata::try_from(self_env_pair(true)).is_ok(),
+            "token references are a publish-time concern; ingress only asserts structural readability"
+        );
+    }
+
+    /// C-028 (publish leg) — `${self.env.*}` is legal in env values only, so an
+    /// entrypoint arg refuses it as `DisallowedToken`.
+    ///
+    /// Asserted on the variant, which is what makes the leg falsifiable:
+    /// delete the D9 gate and publish *accepts* the document, because args
+    /// carry no self-env scope for a reference check to fail against. The
+    /// runtime leg lives at
+    /// `template::tests::entrypoint_args_reject_a_self_env_token_as_disallowed`.
+    #[test]
+    fn a_self_env_token_in_an_entrypoint_arg_is_refused_as_disallowed() {
+        use crate::package::error::Error as PackageError;
+
+        let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["${self.env.TOOL_HOME}/x"]}}"#);
+        let error = validate_for_publish(meta).expect_err("${self.env.*} in entrypoint args must be refused");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::EntrypointArgInterpolation { entrypoint, source, .. } = package_error.as_ref() else {
+            panic!("expected EntrypointArgInterpolation, got: {package_error}");
+        };
+        assert_eq!(entrypoint.as_str(), "run");
+        let TemplateError::DisallowedToken { token } = source else {
+            panic!("expected TemplateError::DisallowedToken, got: {source:?}");
+        };
+        assert_eq!(
+            token, "${self.env.TOOL_HOME}",
+            "the refused token must be named verbatim"
         );
     }
 }

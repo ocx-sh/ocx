@@ -154,6 +154,13 @@ glob = "0.3"
 # Data structures + utility
 bytes = "1.11.1"
 indexmap = "2.14.0"
+# Edit distance for the unknown-token near-miss suggestion
+# (`adr_interpolation_token_grammar.md` D13). A generic string algorithm, not
+# OCX domain code — hand-rolling it is the "generic capability dressed up as a
+# specific feature" signal from quality-core.md. Already resolved in Cargo.lock
+# (transitively, via clap), so this direct edge adds no crate to the graph and
+# no line to LICENSE-THIRD-PARTY.md. MIT — already in deny.toml's allowlist.
+strsim = "0.11.1"
 regex = "1.12.3"
 chrono = "0.4.44"
 schemars = "1.2.1"

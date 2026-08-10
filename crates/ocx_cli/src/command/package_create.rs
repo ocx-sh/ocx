@@ -123,6 +123,24 @@ impl PackageCreate {
                 let metadata = AuthoringMetadata::read_json(metadata_source).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
                 let metadata = self.resolve_binaries(metadata, &platform).await?;
+                // Project to the published form and run the publish-time
+                // env/entrypoint checks over it. This projection is what gets
+                // written beside the bundle: push and test read the compiled
+                // wire shape, never the authoring input.
+                //
+                // `validate_for_publish`, not `ValidMetadata::try_from`: the
+                // token checks live only in the publish gate now (D14), and a
+                // publisher is present here to be told about a typo. Downgrading
+                // this line to the structural check would let an unrecognised
+                // token reach a registry with no error anywhere.
+                //
+                // Ahead of the libc lint, because the lint resolves its scan
+                // scope out of the same `PATH` value: an unrecognised token
+                // there is not a directory it can name, so it lands on
+                // `unresolvable` and the publisher is told the scope could not
+                // be resolved rather than which token was misspelled. Both
+                // refuse the same publish; only one of them says what is wrong.
+                let valid = package::metadata::validate_for_publish(metadata.to_published()?)?;
                 // Check what the packaged binaries actually demand of a host
                 // against what `--platform` claims they demand. Runs after
                 // the binaries scan (both read the same content tree) and,
@@ -160,11 +178,7 @@ impl PackageCreate {
                 } else {
                     package::libc_lint::check_declared_libc(&self.path, &metadata, &platform).await?;
                 }
-                // Project to the published form and run the publish-time
-                // env/entrypoint checks over it. This projection is what gets
-                // written beside the bundle: push and test read the compiled
-                // wire shape, never the authoring input.
-                Some(package::metadata::ValidMetadata::try_from(metadata.to_published()?)?)
+                Some(valid)
             }
             None => None,
         };

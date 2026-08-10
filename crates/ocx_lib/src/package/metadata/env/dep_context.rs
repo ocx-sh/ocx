@@ -77,27 +77,6 @@ impl DependencyContext {
             Self::PathOnly { id, .. } => id,
         }
     }
-
-    /// Resolves a named field to a string value.
-    ///
-    /// `"installPath"` is supported on every variant. Future
-    /// metadata-dependent fields (`"version"`, `"digest"`) will resolve only
-    /// on [`DependencyContext::Full`] and return `None` on
-    /// [`DependencyContext::PathOnly`] — the type discriminates at compile
-    /// time, no synthetic-empty fallbacks.
-    pub fn resolve_field(&self, field: &str) -> Option<String> {
-        match field {
-            // Strip the Windows `\\?\` verbatim prefix before converting to a
-            // string.  See the matching comment in `template::resolve_inner` for
-            // the full rationale.  `dunce::simplified` is a no-op on all
-            // non-verbatim paths (Linux, macOS, regular Windows paths).
-            "installPath" => {
-                let path = self.install_path();
-                Some(dunce::simplified(&path).to_string_lossy().into_owned())
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -117,18 +96,7 @@ mod tests {
         let path = PathBuf::from("/__OCX_SENTINEL__");
         let ctx = DependencyContext::path_only(pinned("cmake"), path.clone());
         assert_eq!(ctx.install_path(), path);
-        assert_eq!(ctx.resolve_field("installPath").as_deref(), Some("/__OCX_SENTINEL__"));
         assert!(ctx.install_info().is_none(), "PathOnly carries no InstallInfo");
-    }
-
-    /// `DependencyContext::resolve_field` — unknown fields return None.
-    #[test]
-    fn dependency_context_resolve_field_unknown_returns_none() {
-        let dir = TempDir::new().unwrap();
-        let ctx = DependencyContext::path_only(pinned("cmake"), dir.path().to_path_buf());
-        assert!(ctx.resolve_field("version").is_none());
-        assert!(ctx.resolve_field("digest").is_none());
-        assert!(ctx.resolve_field("").is_none());
     }
 
     /// `DependencyContext::Full` — accessors read through to the wrapped InstallInfo.

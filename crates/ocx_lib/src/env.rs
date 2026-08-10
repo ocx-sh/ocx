@@ -1050,6 +1050,13 @@ pub fn string(key: impl AsRef<str>, default: String) -> String {
 /// Lives in `crate::env` so every consumer that writes env-var keys — the
 /// `shell` emitters and the `ci` flavors — validates through one source of
 /// truth.
+///
+/// This is also what the interpolation scanner validates the `KEY` segment of
+/// `${self.env.KEY}` against
+/// ([`crate::package::metadata::template::scanner::scan`]), so a change here
+/// changes what the token grammar accepts: widening this predicate admits new
+/// `${self.env.*}` tokens, and narrowing it turns tokens published packages
+/// already carry into refusals.
 pub fn is_valid_env_key(key: &str) -> bool {
     if key.is_empty() {
         return false;

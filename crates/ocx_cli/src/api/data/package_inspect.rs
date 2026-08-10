@@ -728,8 +728,10 @@ fn metadata_node(metadata: &Metadata) -> Node {
             .into_iter()
             .map(|var| {
                 // A tree render is not a gate: a modifier type this binary does
-                // not know still gets a row, labelled as such. The refusal lives
-                // in `ValidMetadata`, which every execution path runs first.
+                // not know still gets a row, labelled as such. The refusal is
+                // `ValidMetadata`'s, which every ingress path runs first — an
+                // unrecognised *token* reaches here unrefused by design (D14),
+                // and shows as the value the publisher wrote.
                 let note = match ModifierKind::try_from(&var.modifier) {
                     Ok(kind) => kind.to_string(),
                     Err(_) => "unknown type".to_string(),

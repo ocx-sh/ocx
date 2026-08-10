@@ -188,7 +188,10 @@ impl PackagePush {
         );
         let metadata = conventions::read_published_metadata(&metadata_path).await?;
 
-        let valid = package::metadata::ValidMetadata::try_from(metadata)?;
+        // The publish gate, not the structural check: push is the last moment a
+        // publisher can be told about an unrecognised token before it becomes a
+        // published artifact nobody can edit (D14).
+        let valid = package::metadata::validate_for_publish(metadata)?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;

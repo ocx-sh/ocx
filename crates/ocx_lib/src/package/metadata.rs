@@ -18,8 +18,11 @@ pub mod visibility;
 pub use binary::{Binaries, BinaryError, BinaryName};
 // Re-export entrypoint public API so callers can use `metadata::Entrypoint` etc.
 pub use entrypoint::{Entrypoint, EntrypointError, EntrypointName, Entrypoints};
-// Re-export ValidMetadata so callers continue to use `metadata::ValidMetadata`.
-pub use validation::ValidMetadata;
+// Re-export the two validation entry points so callers reach both through
+// `metadata::` — `ValidMetadata` for structural readability on every ingress
+// path, `validate_for_publish` for the strict gate `ocx package create` /
+// `ocx package push` run on top of it (D14).
+pub use validation::{ValidMetadata, validate_for_publish};
 
 /// OCX package metadata.
 ///
