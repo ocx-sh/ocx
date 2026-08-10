@@ -105,15 +105,171 @@ Here `cmake` dispatches to a binary named `cmake` (empty object, the common case
 ## Environment Variables {#env}
 
 The `env` array declares environment variables that OCX exposes when running
-commands with the package (via [`ocx package exec`][cmd-exec] or [`ocx env`][cmd-env]).
+commands with the package (via [`ocx package exec`][cmd-exec] or [`ocx env`][cmd-env-root]).
 
 Each entry is an object with a `key`, a `type` (`path`, `constant`, or `list`), and a `value`
-template. Two placeholders are available in `value`:
+template. `value` is resolved when OCX composes the environment — see
+[Interpolation Tokens](#env-interpolation) for the grammar available in it.
 
-- **`${installPath}`** — replaced with the absolute path to this package's content directory.
-- **`${deps.NAME.installPath}`** — replaced with the absolute path to a declared dependency's content directory, where `NAME` is the dependency's repository basename (or its explicit `name` field if one is declared). Useful for pointing consumers at a dependency's installation directory.
+### Interpolation Tokens {#env-interpolation}
 
-`${installPath}` and `${deps.NAME.installPath}` may appear multiple times and can be combined in the same value (e.g. `${installPath}/bin:${deps.cmake.installPath}/bin`). OCX validates at publish time that every `${deps.*}` reference names a declared dependency.
+A `value` cannot hardcode an install path. Content-addressed storage means the
+same package lands at a different path on every machine, and a version bump
+moves it even on one machine that never changes. `${installPath}` is how a
+`value` names "wherever OCX put me" without knowing, at authoring time, where
+that will be.
+
+Build tools face the same problem and defer the same way: [CMake generator
+expressions][cmake-genex] like `$<TARGET_FILE:foo>` and [Terraform string
+templates][terraform-strings] like `${var.region}` both resolve a path or
+value at build/apply time instead of writing it out. OCX's tokens serve the
+same purpose for one field in one config file.
+
+`${…}` is a closed namespace: every occurrence in a `value` (or in an
+[entry-point `args`](#entry-points-args) element) must parse as one of four
+recognised bodies, three of which take an optional `:native` / `:posix` render
+modifier. A `${…}` that matches none of them is refused, not passed through —
+see [Unrecognised Tokens](#env-interpolation-unrecognised) below.
+
+| Body | Resolves to |
+|---|---|
+| `${installPath}` | This package's own `content/` directory. |
+| `${self.installPath}` | Exact alias of `${installPath}` — see [Aliases](#env-interpolation-self). |
+| `${self.env.KEY}` | The **resolved value** of this package's own `KEY` var, declared earlier in the same `env` array. Env values only — not legal in entry-point `args`. See [`self.env`](#env-interpolation-self-env). |
+| `${deps.NAME.installPath}` | A declared dependency's `content/` directory, where `NAME` is the dependency's repository basename or its explicit `name` field. |
+
+```json
+{
+  "key": "PATH",
+  "type": "path",
+  "value": "${self.installPath}/bin:${deps.cmake.installPath}/bin"
+}
+```
+
+A token may appear more than once, and different bodies combine freely in one `value`.
+
+#### Render Modifiers {#env-interpolation-render}
+
+The three install-path bodies accept an optional `:native` or `:posix` suffix —
+`${installPath:posix}` — controlling how path separators render. This is
+independent of the `type` field, which governs how the value as a whole
+composes: prepend, replace, or append (see [Path](#env-path),
+[Constant](#env-constant), [List](#env-list)). `:native` (the default when the
+suffix is omitted) renders Windows paths with `\` and POSIX paths with `/`.
+`:posix` always renders `/`, for values read by tools that expect forward
+slashes regardless of host — an MSYS2/Git Bash binary, or a value piped into a
+shell script.
+
+`${self.env.KEY}` takes no modifier, and one written there is refused at exit
+65. The suffix rewrites every `\` in the resolved value, and OCX cannot know
+what a referenced variable holds — a regex, a compiler flag, or a `list` would
+lose backslashes it meant to keep. Render at the point the value is *built*
+instead, and the reference inherits it:
+
+```json
+[
+  { "key": "SDK_ROOT", "type": "constant", "value": "${installPath:posix}/sdk" },
+  { "key": "SDK_TOOL", "type": "constant", "value": "${self.env.SDK_ROOT}/bin/tool" }
+]
+```
+
+::: warning A modifier on an interface `PATH` value can fail `ocx package create`
+Any render modifier — `:native` written out, or `:posix` — takes that token
+out of [binaries-scan scope](#executables-scope): the scan only matches the
+bare, modifier-free form. On Linux and `any`, [`ocx package
+create`][cmd-package-create]'s libc lint (see [Checking the Declared
+libc][cmd-package-create-libc-check]) treats a modifier-bearing
+[interface-visible](#env-entry-visibility) `PATH` value as a refusal, exit 65,
+naming the variable — exactly the value shape `:posix` looks most tempting
+on. On darwin and Windows the same exclusion is silent instead (see
+[Interface Surface, Own Package Only](#executables-scope)). Reach for
+`:posix` on a `PATH` value only when a real MSYS2/Git-Bash-style consumer
+needs forward slashes, and expect the Linux lint to name it.
+:::
+
+#### Escaping {#env-interpolation-escape}
+
+Write `$${` to emit a literal `${` — `$${workspaceFolder}` publishes as the literal
+text `${workspaceFolder}`. This is the only escape; a bare `$` not immediately
+followed by `${` is ordinary text.
+
+::: info Passing another tool's own `${…}` syntax through untouched
+[devcontainer.json variables][devcontainer-vars] use the same `${…}` syntax
+for their own substitutions (`${workspaceFolder}`, `${localEnv:VAR}`). A
+package whose `value` ships a devcontainer.json snippet, or any config
+destined for a tool with its own `${…}` vocabulary, needs
+`$${workspaceFolder}` so OCX leaves it untouched for the downstream tool to
+resolve.
+:::
+
+#### Aliases {#env-interpolation-self}
+
+`${self.installPath}` is an exact alias of `${installPath}` — same referent, same
+resolution, interchangeable. Prefer `${self.installPath}` in new values: it reads
+unambiguously next to `${self.env.KEY}` and `${deps.NAME.installPath}`, all three of
+which name *whose* path or value is meant. The bare `${installPath}` form is not
+deprecated and will not be removed — it remains legitimate and continues to appear
+throughout this page's examples; the preference above is guidance for new values, not
+a rewrite of existing ones.
+
+#### `self.env` — Referencing Your Own Variables {#env-interpolation-self-env}
+
+`${self.env.KEY}` resolves to the resolved value of this package's own `KEY`
+env var — not its template text, and not a value folded together with a
+consumer's or a dependency's contribution. `KEY` must be declared **strictly
+earlier** in the same package's `env` array; a forward reference — to a var
+declared later, or to itself — is refused at publish time. Declaring the same
+key twice and then referencing it is refused as ambiguous: OCX does not guess
+which declaration was meant.
+
+`${self.env.KEY}` is legal only inside `env` values, never inside entry-point
+[`args`](#entry-points-args).
+
+::: warning Generators must emit `env` in a stable order
+Declaration order becomes part of a package's grammar once `${self.env.KEY}` is
+used. A generator built on an unordered map type (Go `map`, Java `HashMap`)
+can emit `env` entries in a different order on every run, which makes publish
+succeed or fail nondeterministically depending on whether the referenced key
+happened to land earlier that particular run. Emit `env` from an ordered
+structure — a slice, a `LinkedHashMap`, a sorted map — when generating
+metadata that uses `self.env`.
+:::
+
+#### Unrecognised Tokens {#env-interpolation-unrecognised}
+
+OCX claims the entire `${…}` namespace in a `value` — there is no fifth body
+and no pass-through for a token this ocx does not recognise, unlike
+[devcontainer.json][devcontainer-vars]'s own open vocabulary. A refusal names
+what is wrong:
+
+- A near-miss (`${slef.installPath}`) suggests the root it is closest to.
+- An unknown root (`${workspaceFolder}`) explains the `$${` escape.
+- A recognised root with an illegal body (`${self.env.A B}`) lists the
+  supported bodies for that root — no escape hint, since escaping is not what
+  the publisher needs there.
+- A recognised namespace with an unknown leaf (`${deps.cmake.version}` —
+  `deps` is real, `version` is not) is a distinct case: it names the field and
+  lists the leaves that actually exist for it (`installPath`), rather than
+  suggesting an escape or a different root.
+
+Refusal is scoped to *resolving* the value, not to reading the package.
+[`ocx package pull`][cmd-package-pull], [`ocx package install`][cmd-package-install],
+[`ocx package inspect`][cmd-package-inspect], [`ocx package info`][cmd-package-info],
+[`ocx package which`][cmd-package-which], and [`ocx package deps`][cmd-package-deps]
+on a document with an unrecognised token all succeed — none of them resolve
+`env` values. Only [`ocx package inspect`][cmd-package-inspect] actually echoes
+one, and only the declared template text, verbatim, never a resolved value
+(add `--resolve` when the reference is a multi-platform image index); `ocx
+package info` never even reads `env` — it reads only the package's
+`__ocx.desc` tag.
+
+[`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run],
+any environment composition, and [`ocx package create`][cmd-package-create] /
+[`ocx package push`][cmd-package-push] refuse, exit 65, naming the token. So
+does a generated **entrypoint launcher**: a refused token in a baked
+[`args`](#entry-points-args) element aborts the launcher at run time, after
+install — a package can always be inspected; only *using* it, at any point,
+requires every token to resolve.
 
 ### Path Variables {#env-path}
 
@@ -125,7 +281,7 @@ separated by the platform path delimiter.
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"path"`. |
 | `required` | boolean | No | If `true`, the resolved path must exist on disk. Defaults to `false`. |
-| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. |
+| `value` | string | Yes | Value template — see [Interpolation Tokens](#env-interpolation). |
 | `visibility` | string | No | Entry visibility. See [Entry Visibility](#env-entry-visibility). Default: `"private"`. |
 
 ```json
@@ -133,7 +289,7 @@ separated by the platform path delimiter.
   "key": "PATH",
   "type": "path",
   "required": true,
-  "value": "${installPath}/bin"
+  "value": "${self.installPath}/bin"
 }
 ```
 
@@ -149,14 +305,14 @@ Constant variables **replace** any existing value of the environment variable.
 |---|---|---|---|
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"constant"`. |
-| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. |
+| `value` | string | Yes | Value template — see [Interpolation Tokens](#env-interpolation). |
 | `visibility` | string | No | Entry visibility. See [Entry Visibility](#env-entry-visibility). Default: `"private"`. |
 
 ```json
 {
   "key": "JAVA_HOME",
   "type": "constant",
-  "value": "${installPath}"
+  "value": "${self.installPath}"
 }
 ```
 
@@ -178,7 +334,7 @@ erase every other package's contribution instead of composing with it.
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"list"`. |
 | `separator` | string | Yes | The string this contribution joins to the variable's existing value (e.g. `" "` for `JDK_JAVA_OPTIONS`, `","` for `GODEBUG`). Required in package metadata — see [Separator Is Required](#env-list-separator) below. Must be non-empty and must not contain `=`, a newline, or a carriage return. |
-| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. Must not start or end with `separator` (see below). |
+| `value` | string | Yes | Value template — see [Interpolation Tokens](#env-interpolation). Must not start or end with `separator` (see below). |
 | `visibility` | string | No | Entry visibility. See [Entry Visibility](#env-entry-visibility). Default: `"private"`. |
 
 ```json
@@ -467,7 +623,7 @@ package follows from JSON object key semantics, and per-entry fields land inside
 | Key | string | Yes | The invocable name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. Used as the launcher script filename and the command users invoke. |
 | Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name *is* the dispatched command. |
 | `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-byte rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. Not interpolated — must be a plain slug, not a path. |
-| `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments when the launcher dispatches. Each element is one argv token (no shell word-splitting). `${installPath}` is interpolated in each element; `${deps.*}` tokens are rejected at publish time. Omit or supply an empty array — both are wire-identical; the field is absent in the serialized form when empty. See [Baked Arguments](#entry-points-args). |
+| `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments when the launcher dispatches. Each element is one argv token (no shell word-splitting). `${installPath}` / `${self.installPath}` are interpolated in each element; `${deps.*}` and `${self.env.*}` tokens are rejected at publish time. Omit or supply an empty array — both are wire-identical; the field is absent in the serialized form when empty. See [Baked Arguments](#entry-points-args). |
 
 ### Baked Arguments {#entry-points-args}
 
@@ -476,23 +632,27 @@ the launcher prepends these arguments before the user's arguments, then passes t
 the dispatched command.
 
 ```json
-{ "command": "python", "args": ["${installPath}/app/main.py"] }
+{ "command": "python", "args": ["${self.installPath}/app/main.py"] }
 ```
 
 Invoking `mytool a b` with this entrypoint runs `python <content>/app/main.py a b` — baked args
 first, user args appended in left-to-right array order. Each element is one argv token; there is
 no shell word-splitting, so paths with spaces work without escaping.
 
-**`${installPath}` interpolation.** Each element of `args` supports the `${installPath}` token,
-which resolves to the package's content directory — the same path that [`env`](#env) values
-reference with the same token. The token may appear more than once within a single element.
+**`${installPath}` interpolation.** Each element of `args` supports the `${installPath}` token and
+its exact alias `${self.installPath}` (see [Aliases](#env-interpolation-self)), optionally suffixed
+`:native` / `:posix` (see [Render Modifiers](#env-interpolation-render)). Both resolve to the
+package's content directory — the same path that [`env`](#env) values reference with the same
+tokens. A token may appear more than once within a single element. `$${` escapes a literal `${`,
+exactly as in `env` values.
 
-**Token restrictions.** `${deps.*}` tokens are rejected at publish time with a dedicated error.
-Dependency paths belong in the [`env`](#env) block where the visibility contract applies;
-consumers read them at runtime from the composed environment. `command` is a plain slug resolved
-on the composed `PATH`; it accepts no interpolation and cannot be a filesystem path. To reach a
-dependency's binary in `command`, expose it through the dependency's `interface` or `public` env
-entries.
+**Token restrictions.** `${deps.*}` and `${self.env.*}` tokens are both rejected at publish time
+with a dedicated error (`DisallowedToken`) — `args` permits only the install-path forms. Dependency
+paths and a package's own composed env values belong in the [`env`](#env) block where the
+visibility contract applies; consumers read them at runtime from the composed environment. `command`
+is a plain slug resolved on the composed `PATH`; it accepts no interpolation and cannot be a
+filesystem path. To reach a dependency's binary in `command`, expose it through the dependency's
+`interface` or `public` env entries.
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -581,10 +741,25 @@ of that scan — declaring its binaries is the publisher's job, by hand. See
 
 ### Interface Surface, Own Package Only {#executables-scope}
 
-Only names reachable through a `${installPath}`-rooted [`path`](#env-path) variable with
-[interface visibility](#env-entry-visibility) are eligible. Private, `libexec`-style
-directories are never candidates — a name only a package's own launchers can see was never part
-of the public contract `binaries` describes.
+Only names reachable through a `${installPath}`- or `${self.installPath}`-rooted
+(the two are [exact aliases](#env-interpolation-self)) [`path`](#env-path)
+variable with [interface visibility](#env-entry-visibility) are eligible.
+Private, `libexec`-style directories are never candidates — a name only a
+package's own launchers can see was never part of the public contract
+`binaries` describes.
+
+A [render modifier](#env-interpolation-render) on that `PATH` value
+(`${self.installPath:posix}/bin`) takes it out of scan scope entirely — the
+scan only matches the bare, modifier-free token, so a modifier-bearing segment
+is silently excluded from the auto-filled claim rather than scanned. On Linux
+and `any`, [`ocx package create`][cmd-package-create]'s libc lint (see
+[Checking the Declared libc][cmd-package-create-libc-check]) independently
+refuses a modifier-bearing interface `PATH` value at publish time, so the
+exclusion surfaces there as an error naming the variable. On darwin and
+Windows the libc lint never runs, so the same exclusion produces a silently
+shorter `binaries` array with no diagnostic at all — the only defenses are
+`--bin-scan` in verify mode against a hand-authored claim, or hand-authoring
+`binaries` outright.
 
 The claim is **own-package only, never transitive**: a package never lists a dependency's
 executables. What is reachable *through* a dependency chain is a composition question — answered
@@ -803,6 +978,9 @@ If you published packages before the visibility-default flip, their untagged env
 [cargo-bin]: https://doc.rust-lang.org/cargo/reference/cargo-targets.html#binaries
 [nixpkgs-main-program]: https://nixos.org/manual/nixpkgs/stable/#var-meta-mainProgram
 [godebug-doc]: https://go.dev/doc/godebug
+[cmake-genex]: https://cmake.org/cmake/help/latest/manual/cmake-generator-expressions.7.html
+[terraform-strings]: https://developer.hashicorp.com/terraform/language/expressions/strings
+[devcontainer-vars]: https://containers.dev/implementors/json_reference/
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json
@@ -818,15 +996,20 @@ If you published packages before the visibility-default flip, their untagged env
 <!-- commands -->
 [cmd-exec]: ./command-line.md#package-exec
 [cmd-launcher-exec]: ./command-line.md#launcher-exec
-[cmd-env]: ./command-line.md#env
 [cmd-env-root]: ./command-line.md#env-root
 [cmd-package-env]: ./command-line.md#package-env
 [cmd-package-create]: ./command-line.md#package-create
+[cmd-package-create-libc-check]: ./command-line.md#package-create-libc-check
 [cmd-package-push]: ./command-line.md#package-push
 [cmd-package-push-layout]: ./command-line.md#package-push-layout
 [cmd-package-install]: ./command-line.md#package-install
 [cmd-package-test]: ./command-line.md#package-test
 [cmd-run]: ./command-line.md#run
+[cmd-package-pull]: ./command-line.md#package-pull
+[cmd-package-inspect]: ./command-line.md#package-inspect
+[cmd-package-info]: ./command-line.md#package-info
+[cmd-package-which]: ./command-line.md#which
+[cmd-package-deps]: ./command-line.md#deps
 
 <!-- reference -->
 [reference-platforms]: ./platforms.md
