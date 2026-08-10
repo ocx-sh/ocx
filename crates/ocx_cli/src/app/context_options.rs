@@ -40,7 +40,7 @@ pub struct ContextOptions {
     /// `OCX_GLOBAL`. Equivalent env var: `OCX_GLOBAL`. The global
     /// toolchain never composes into project resolution; `ocx run` and
     /// `ocx exec` stay hermetic and never read it.
-    #[arg(long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
+    #[arg(short = 'g', long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
     pub global: bool,
 
     /// Route mutable lookups (tag list, catalog, tag->manifest) to the
@@ -53,7 +53,7 @@ pub struct ContextOptions {
     /// "pinned-only mode": no source contact, and any tag-addressed
     /// resolution that cannot be satisfied locally errors instead of
     /// silently falling back. Equivalent env var: `OCX_REMOTE`.
-    #[arg(long, default_value_t = env::flag(env::keys::OCX_REMOTE, false))]
+    #[arg(short = 'r', long, default_value_t = env::flag(env::keys::OCX_REMOTE, false))]
     pub remote: bool,
 
     /// Disable all network access.

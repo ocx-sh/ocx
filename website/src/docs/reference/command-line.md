@@ -55,7 +55,7 @@ index does not carry — those are fetched into the [package store][fs-objects] 
 itself available offline.
 :::
 
-### `--remote` {#arg-remote}
+### `--remote`, `-r` {#arg-remote}
 
 Routes mutable lookups (tag list, catalog, tag→manifest resolution) to the
 remote registry instead of the local index. Pure-query commands
@@ -235,14 +235,17 @@ The same override can be set persistently via the [`OCX_PROJECT`][env-project] e
 
 **Error cases:** A missing explicit path exits with code 79 ([`NotFound`][exit-codes]). A path that exists but cannot be read (permission denied, not a regular file) exits with code 74 ([`IoError`][exit-codes]).
 
-### `--global` {#global-flag}
+### `--global`, `-g` {#global-flag}
 
 Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file. This is a **root flag** — it must appear before the subcommand name (like `--project` or `--offline`), not after it.
 
 ```sh
 ocx --global add ripgrep:14      # correct
+ocx -g add ripgrep:14            # same thing
 ocx add --global ripgrep/ripgrep:14      # error: unknown flag
 ```
+
+The short form is position-sensitive, and deliberately so: `-g` before the subcommand is `--global`, while `-g` after it is the `--group` selector of the toolchain-tier commands. `ocx -g update -g ci` updates the `ci` group of the global toolchain.
 
 When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `env`.
 
