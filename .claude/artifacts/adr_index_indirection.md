@@ -220,7 +220,11 @@ explicit `--index` and a deployment-set `OCX_INDEX` — nothing ambient. Home pr
 
 ### A2. On-disk layout — a local copy IS the hosted wire grammar (owner decision 2026-07-18)
 
-> superseded — see `adr_oci_index_only_dispatch.md` D6
+> superseded, scoped — only the published-index bullet's "self-verifying, no OCX-minted metadata"
+> claim about `o/` objects (below) is superseded, by `adr_oci_index_only_dispatch.md` D6: it now
+> "Holds unconditionally" rather than being overstated. The decision sentence immediately below, and
+> the rest of this section, stand (`adr_servable_index_snapshot.md` Context, "Cite D3/D6 for this,
+> not A2").
 
 **Decision: each source's subtree under the home is the hosted served tree, byte-for-byte grammar. No
 local re-encoding.** A source's subtree is:

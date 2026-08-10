@@ -17,7 +17,10 @@ Owner: Architect (/architect). Handoff: Builder (/builder), Security Auditor (/s
 - [x] Reuses existing config infrastructure (`plan_configuration_system.md`) and OCI client — no novel framework
 **Domain Tags:** infrastructure, integration, security, api
 **Supersedes:** Refines the *implementation surface and fallback model* anticipated by issue #122 (see "Decision Outcome").
-**Superseded By:** N/A
+**Superseded By:** [`adr_servable_index_snapshot.md`](./adr_servable_index_snapshot.md) — for the
+index-tree half only. Not deleted: this ADR still carries R1–R6 and the replace-never-fallback
+rationale, and predates the shipped `[mirrors]` index role, the `{registry,index}` object form, the
+mirror-suppresses-compiled-index rule, per-role `system_locked`, and field-wise merge.
 
 ---
 

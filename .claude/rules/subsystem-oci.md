@@ -17,11 +17,18 @@ digest, and logical → physical routing (a root's `repository` field). Three co
 
 1. **Determinism.** The same `ocx package install|exec <pkg>:<tag>` twice gives the same result —
    offline, and even when any online resource changed in between.
-2. **A pin moves only when named.** `ocx index update <pkg>...` moves the packages listed and
-   nothing else — not a resolve, not a catalog sync, not an update of a *different* package.
-   There is deliberately no whole-index sync: a remote index floats (packages appear, platforms
-   are added, tags move), so cloning it would stop the copy being a lock, and re-snapshotting
-   "whatever is present" is an arbitrary set nobody chose.
+2. **A pin moves only under a command the user invoked naming what to move.** `ocx index update
+   <pkg>...` moves the packages listed and nothing else. `ocx index sync <REGISTRY>...`
+   moves the set the user named by naming the registries, by enumerating **each source's catalog at
+   that instant** — an explicit operator act, never a default. Nothing else moves a pin: not a
+   listing, not an update of a *different* package, and there is no implicit whole-index sync in any
+   spelling. The one resolve that does move a pin is an explicit `--remote` one — it re-fetches and
+   rewrites the tag it touches, the same write an `ocx index update` scoped to that tag would make;
+   a **default**-mode resolve never does. `index sync` moves nothing under `oci/index/**` beyond tag
+   pins, dispatch objects and the source's `config.json`; no patch-companion and no managed-config
+   binding is recorded there, and nothing under `oci/index/**` gains the ability to record either.
+   `ocx index regenerate` moves no pin at all — it re-derives
+   `c/index.json` from the roots on disk.
 3. **GC never changes identity.** `ocx clean` may evict blob CONTENT (refetched by digest,
    byte-stable); which digest a pin resolves to is out of its reach.
 
@@ -53,7 +60,7 @@ fetched during a genuine first-resolve contributes ONLY the missing entry; every
 local-wins, silently. A resolve has nothing it may act on: it cannot take the update (violates 2)
 and cannot refuse (the committed answer is the correct one), so a diagnostic there is noise on the
 hottest path in the binary. Available updates surface exclusively through explicit staleness
-reporting — the `ocx index update` report, `ocx index catalog` — never through resolution.
+reporting — `ocx index catalog --remote` — never through resolution.
 
 Practical test for a change under `oci/index/**`: name the command the user ran, and the package
 they named. If the diff can move a pin (a tag's `content`, or a root's `repository`) for anything
@@ -130,7 +137,7 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 **Update-family (lock-scoped) routing.** `ocx update` resolves Remote-style by default and **never persists tag pointers**: `Context::update_index()` builds `Index::from_chained_lock_scoped` (mode ladder `--offline` ▸ `--frozen` ▸ `Remote` — no `Default` arm), which sets `ChainedIndex.suppress_tag_commit`. The gate skips `commit_root_tag` in `fetch_and_persist_chain`; manifest blobs still persist (content-addressed). `walk_chain` returns the persisted chain's head digest so the suppressed tag-addressed `Resolve` read-back can address the blob by digest instead of the (deliberately absent) tag pointer. `--offline`/`--frozen` keep the `PolicyBlocked` (81) contract because everything stays `Op::Resolve`. ADR: `adr_toolchain_update_family.md`.
 
-**Design note — write paths.** Local index mutation is owned by exactly four entry points: `LocalIndex::refresh_tags` (called from `ocx index update`; grows a package's root + dispatch objects, A2/A3), `LocalIndex::persist_dispatch` (single dispatch-object write per chain fetch — never walks child manifests, A3), `LocalIndex::commit_root_tag` (`pub(super)`, the derived root-document tag writer outside `refresh_tags`), and `LocalIndex::commit_published_root` (`pub(super)`, its published counterpart — merges within a `RootScope`). Both root writers merge; neither replaces. `commit_root_tag` and `commit_published_root` are called from `ChainedIndex::fetch_and_persist_chain`, and `commit_published_root` additionally from `refresh_published`. Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_root_tag` step because `ocx.lock` is canonical.
+**Design note — write paths.** Local index mutation is owned by exactly four entry points: `LocalIndex::refresh_tags` (called from `ocx index update` and `ocx index sync`, both through the one shared fan-out in `command/index_common.rs`; grows a package's root + dispatch objects, A2/A3), `LocalIndex::persist_dispatch` (single dispatch-object write per chain fetch — never walks child manifests, A3), `LocalIndex::commit_root_tag` (`pub(super)`, the derived root-document tag writer outside `refresh_tags`), and `LocalIndex::commit_published_root` (`pub(super)`, its published counterpart — merges within a `RootScope`). Both root writers merge; neither replaces. `commit_root_tag` and `commit_published_root` are called from `ChainedIndex::fetch_and_persist_chain`, and `commit_published_root` additionally from `refresh_published`. Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_root_tag` step because `ocx.lock` is canonical.
 
 **`LocalWritePolicy` — how much a `Resolve` may write.** `ChainedIndex` carries a `LocalWritePolicy` (replaces the former `suppress_tag_commit` bool), a descending ladder of local-index mutation independent of `ChainMode`:
 
@@ -245,7 +252,7 @@ the one published-root writer, and it merges within `RootScope`:
 | Scope | Written by | Adopts | Leaves alone |
 |---|---|---|---|
 | `RootScope::Tag(t)` | `ocx index update pkg:t`, every grow-on-resolve | `tags[t]` | every sibling pin, `repository`, every package-level field |
-| `RootScope::Package` | `ocx index update pkg` (bare) | every tag the remote lists + package-level fields (routing) | any tag only the local copy holds |
+| `RootScope::Package` | `ocx index update pkg` (bare), and `ocx index sync <REGISTRY>` for every package the registry's catalog names | every tag the remote lists + package-level fields (routing) | any tag only the local copy holds |
 
 **Neither scope deletes.** A tag the remote stopped listing survives locally with its pinned
 digest, both provenance kinds — `commit_root_tags` (derived) always upserted, and
@@ -349,7 +356,7 @@ emits tens of identical lines.
 `ChainedIndex::candidate_sources(id) -> Vec<(&Index, bool)>` is the one place the question is asked;
 the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — the
 declaration is the index operator's, and `name_segments` is **not** a security control (an older
-client ignores it; the yank gate, obs-digest verify and terminal stop delegate nothing to it).
+client ignores it; the yank gate, dispatch-object digest verify and terminal stop delegate nothing to it).
 
 **Provenance is per REGISTRY, jurisdiction per NAME.** `IndexImpl::serves_registry(&str)` (sync,
 no I/O) is the ownership primitive behind `ChainedIndex::kind_for_registry`; `kind_for(id)` delegates
@@ -358,14 +365,19 @@ never per-name, so every name under a published registry reports `Published` reg
 Deriving provenance from a per-name predicate would flip a declined name to `Derived` and silently
 drop the published root's catalog cross-check. There is no placeholder identifier anywhere.
 
-**There is no catalog sync.** `ocx index update <pkg>...` fetches the named packages' roots and
-nothing else — no `c/index.json` fetch, no diff, no report about other packages. A named update
-performs exactly its named work.
+**There is no *implicit* catalog sync.** `ocx index update <pkg>...` fetches the named packages'
+roots and nothing else. `ocx index sync <REGISTRY>...` reads each source's catalog **to choose the
+set**, then performs exactly the same per-package work through the same bounded loop. `ocx index regenerate` fetches nothing: it
+rebuilds the local catalog from the local `p/` tree. Neither form reports on a package it was not
+asked about.
 
 **The local `c/index.json` is AUTHORED, not mirrored.** Its entries are `sha256(local root bytes)`,
 written by `CatalogTransaction::write_root` — the only writer — in the same transaction that writes
 the root. Nothing is ever persisted from a remote catalog, so the root/catalog straddle that the
-old sync's keep-the-stale-row logic existed to avoid cannot arise.
+old sync's keep-the-stale-row logic existed to avoid cannot arise. `ocx index regenerate` is the
+operation that restores the catalog to a pure derivation of `p/` when it has drifted — re-deriving
+every entry from the roots on disk rather than writing from a fetch — which is the only way an entry
+naming a removed root is ever cleared.
 `OcxIndex::fetch_catalog` reads the site's listing live and persists nothing; it exists for
 `ocx index catalog --remote`.
 
@@ -383,20 +395,21 @@ sidecar was removed and why no last-observed-remote digest replaced it.
 no-op leaves the tree byte- and mtime-identical, and it opportunistically deletes a
 `c/index.json.etag` left by an older ocx.
 
-`LocalIndex::refresh_tags` stays jurisdiction-unaware: `ocx index update` picks the source that
-will answer for each package before calling it, and reroutes a name the index declines to the
+`LocalIndex::refresh_tags` stays jurisdiction-unaware: the shared refresh loop
+(`command/index_common.rs`, behind both `ocx index update` and `ocx index sync`) picks the source
+that will answer for each package before calling it, and reroutes a name the index declines to the
 registry.
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`
 re-serialization. The digest is recomputed from those bytes and verified against the
 source-claimed digest before the write commits (`DataError` on mismatch, CWE-345 class).
-`ocx index update <pkg>` writes per tag in a fixed order — dispatch object into `o/` → root
-document (atomic rename) → catalog entry (atomic rename) — each step idempotent; a crash between
-any two steps recovers on the next read/update. The catalog entry is exactly `sha256(root bytes)`:
-a read-time mismatch is an **inconsistency**, recovered by re-derivation (info/debug log), never a
-hard error. `DataError` is reserved for genuine corruption recomputation cannot fix — an
-unparseable root, a dispatch object whose bytes disagree with its own `o/` filename, a failed
-`repository` cross-check. A later catalog sync finding a *different remote* digest for an
+`ocx index update <pkg>` and `ocx index sync <REGISTRY>` write per tag in a fixed order — dispatch
+object into `o/` → root document (atomic rename) → catalog entry (atomic rename) — each step
+idempotent; a crash between any two steps recovers on the next read/update. The catalog entry is
+exactly `sha256(root bytes)`: a read-time mismatch is an **inconsistency**, recovered by
+re-derivation (info/debug log), never a hard error. `DataError` is reserved for genuine corruption
+recomputation cannot fix — an unparseable root, a dispatch object whose bytes disagree with its own
+`o/` filename, a failed `repository` cross-check. A later catalog sync finding a *different remote* digest for an
 already-snapshotted package reports staleness ("update available"), never an error.
 
 **Version choice, not lock offline-ness.** `LocalIndex` resolves a *version choice* — a tag, a

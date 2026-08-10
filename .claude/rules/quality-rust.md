@@ -169,6 +169,42 @@ See `quality-core.md` for universal YAGNI. Rust applications:
 
 - **Test-only methods**: prefer separate `#[cfg(test)] impl Foo { ... }` block before `mod tests`, not scattered `#[cfg(test)]` on individual methods mixed into production `impl`. Keeps production surface clear, makes test scaffolding explicit.
 
+### Structural guards (source-text assertions)
+
+A structural guard — a test that asserts over a module's own source text rather than its behavior,
+for a property no behavioral test can observe (a call that must not exist, an ordering, a code shape
+that must not recur) — is real coverage, but it fails in ways a behavioral test cannot. Observed on
+real guards, not hypothesized:
+
+- **Scope it to where the defect can actually occur, not to the function whose name matches the
+  contract.** A guard scanning only the caller's source text is blind to a swallow that happens one
+  call down, inside a callee the caller invokes correctly — the guard is not weak, it is watching the
+  wrong function. Trace the call graph to the line that could actually violate the contract before
+  deciding what source text to scan.
+- **Strip comments before scanning.** A denylist that quotes the forms it forbids — the right thing
+  for a comment to do — matches its own comment. Filter `//`-prefixed lines out of the scanned text
+  first, or the guard fails on itself the moment someone documents the very form it refuses.
+- **A needle can silently stop matching.** A literal string tied to one exact source layout (a call
+  chain at a specific line width) stops matching the moment `cargo fmt`, or any refactor, rewraps it —
+  and a guard that matches nothing still reports green, which reads as coverage while providing none.
+  Where a guard's meaning depends on the needle matching at least once, assert the match count is
+  non-zero, not only that a forbidden count is absent.
+- **A count-form guard (`body.matches(X).count() == body.matches(Y).count()`) is a budget, not a
+  pairing.** It only proves the totals agree, so one unpaired `X` plus one compensating `Y` anywhere
+  else in the file satisfies it at, e.g., 1 == 1 — a raw, unsanitized call paired with an unrelated
+  sanitized one elsewhere passes. Prefer scanning each call site and asserting the required form
+  applies *there*, or extract the behavior into a seam a real test can exercise.
+- **A negative assertion (`!body.contains(X)`) fails silently where a positive one fails loudly.** A
+  denylist cannot enumerate every way to write the forbidden shape — a UFCS receiver instead of a
+  method call, an equivalent combinator under a different name, a helper function that hides the whole
+  pattern behind one call, a positional format argument that satisfies a needle-count comparison
+  without carrying the value the needle was meant to catch. Treat a denylist as a tripwire for the
+  likely accident, not as the contract itself.
+
+None of this argues against structural guards — a genuinely absent behavior has no other test to
+write. It argues for writing them as narrowly and adversarially as a reviewer would try to defeat
+them, and for reaching for a behavioral seam first whenever one can be extracted.
+
 ---
 
 ## Cross-Platform Path Handling
