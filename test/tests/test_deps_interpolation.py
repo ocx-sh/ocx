@@ -258,16 +258,19 @@ def test_package_push_rejects_undeclared_dep_ref(
     )
 
 
-def test_launcher_exec_validates_metadata_via_validmetadata(
+def test_launcher_exec_refuses_an_undeclared_dep_token_at_composition(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ):
-    """``ocx launcher exec <package-root>`` must run the on-disk metadata
-    through ``ValidMetadata::try_from`` so an undeclared ``${deps.X.installPath}``
-    token fails fast at consumption time.
+    """``ocx launcher exec <package-root>`` must refuse an undeclared
+    ``${deps.X.installPath}`` token in the on-disk metadata at consumption
+    time.
 
     The setup mutates the metadata.json of an installed package to inject an
-    undeclared dep token. The ``launcher exec`` resolution path centralizes
-    ``ValidMetadata::try_from`` against on-disk metadata, so the input must
+    undeclared dep token. Reading a package no longer refuses an unresolvable
+    token — ``adr_interpolation_token_grammar.md`` D14 moved that check off
+    ``ValidMetadata::try_from``, which every ingress path runs — but
+    ``launcher exec`` *composes* the package's env (``resolve_env``), and
+    composition is on the refusing side of D14. So the input must still
     surface a ``DataError`` (exit 65) naming the undeclared dep.
     """
     pkg = published_package
@@ -281,7 +284,7 @@ def test_launcher_exec_validates_metadata_via_validmetadata(
     assert metadata_path.exists(), f"metadata.json must exist at {metadata_path}"
 
     # Inject an undeclared ${deps.NAME.installPath} reference. The dep is NOT
-    # declared in `dependencies`, so a ValidMetadata round-trip must reject it.
+    # declared in `dependencies`, so composing this package's env must reject it.
     poisoned = {
         "type": "bundle", "version": 1, "env": [
             {
@@ -297,7 +300,7 @@ def test_launcher_exec_validates_metadata_via_validmetadata(
         "launcher", "exec", str(pkg_root), "--", "echo", check=False, format=None,
     )
     assert result.returncode == 65, (
-        f"launcher exec with metadata that fails ValidMetadata must exit 65 (DataError); "
+        f"launcher exec on metadata whose env fails to compose must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()}"
     )
     assert "undeclared_dep_xyz" in result.stderr, (
@@ -375,25 +378,26 @@ def test_package_push_rejects_unsupported_field(
 def test_uppercase_dep_name_token_rejected_at_consumption(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ):
-    """``${deps.Python.installPath}`` (uppercase NAME) is caught as an unknown
-    placeholder and rejected with exit 65 at consumption time.
+    """``${deps.Python.installPath}`` (uppercase NAME) is rejected as an
+    unknown token with exit 65 at consumption time.
 
-    Contract: the dep-token regex ``DEP_TOKEN_PATTERN`` uses ``[a-z0-9][a-z0-9_-]*``
-    so ``Python`` does not match — the token is not treated as a dep reference.
-    After ``${installPath}`` is stripped, ``UNKNOWN_TOKEN_RE`` matches the
-    leftover ``${deps.Python.installPath}`` as an unknown placeholder and
-    ``ValidMetadata::try_from`` returns ``DataError``.
+    Contract: a dependency ``NAME`` must satisfy the shared slug grammar
+    (``[a-z0-9][a-z0-9_-]*`` plus a length bound), so ``Python`` is not a
+    usable name. An unusable name leaves no namespace to attribute a field
+    error to, so the scanner classifies the whole ``${…}`` as
+    ``UnknownToken`` rather than as a dependency reference
+    (``adr_interpolation_token_grammar.md`` D1).
 
     Verification approach: install a package, mutate its ``metadata.json`` to
     inject the uppercase token (bypassing publish-time push validation), then
-    invoke ``ocx launcher exec <pkg_root>`` — which runs ``ValidMetadata::try_from``
-    at consumption time — and assert exit 65 with the placeholder appearing
-    verbatim in the error output.
+    invoke ``ocx launcher exec <pkg_root>`` — which composes the package's env
+    (``resolve_env``), the refusing side of D14 — and assert exit 65 with the
+    token appearing verbatim in the error output.
 
     This test documents that the uppercase-name case does not panic, produce a
     confusing "dep not found" message (``UnknownDependencyRef``), or silently
-    pass through — it produces a clear ``UnknownPlaceholder`` error naming
-    the exact token.
+    pass through — it produces a clear unknown-token error naming the exact
+    token.
     """
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
@@ -405,10 +409,10 @@ def test_uppercase_dep_name_token_rejected_at_consumption(
     metadata_path = pkg_root / "metadata.json"
     assert metadata_path.exists(), f"metadata.json must exist at {metadata_path}"
 
-    # Inject ``${deps.Python.installPath}`` — uppercase NAME not matched by
-    # DEP_TOKEN_PATTERN, so it falls through to UNKNOWN_TOKEN_RE. No
-    # `dependencies` entry is included; the token is checked after dep-token
-    # stripping, so it is irrelevant whether Python is declared.
+    # Inject ``${deps.Python.installPath}`` — an uppercase NAME fails the slug
+    # grammar, so the scanner never reads this as a dep reference at all. No
+    # `dependencies` entry is included: the name is rejected before any
+    # declared-dep lookup, so it is irrelevant whether Python is declared.
     poisoned = {
         "type": "bundle",
         "version": 1,
@@ -448,12 +452,12 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     direct dep but does NOT declare T. R's installed ``metadata.json`` is then
     mutated to reference ``${deps.<T>.installPath}``.
 
-    ``ocx launcher exec <R_root>`` runs ``ValidMetadata::try_from`` against R's
-    on-disk metadata. ``validate_env_tokens`` iterates R's *direct* deps only
-    (just D), so T is not found → ``UnknownDependencyRef`` → exit 65.
+    ``ocx launcher exec <R_root>`` composes R's env from its on-disk metadata
+    (``resolve_env``), and the resolver is handed R's *direct* dep contexts
+    only (just D), so T is not found → ``UnknownDependencyRef`` → exit 65.
 
     This is a more direct exercise of Contract 17 than the indirect path through
-    ``test_launcher_exec_validates_metadata_via_validmetadata``, which uses a
+    ``test_launcher_exec_refuses_an_undeclared_dep_token_at_composition``, which uses a
     package with no deps at all. Here T genuinely exists in the registry and is
     transitively reachable — proving the check operates on the direct-dep
     namespace, not the full transitive closure.

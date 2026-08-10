@@ -230,7 +230,7 @@ def test_deps_skips_installed_dependency_with_unknown_env_modifier_type(
     time, so the on-disk corruption has to happen after a valid install),
     then hand-corrupts the already-installed dependency's `metadata.json` —
     the same technique `test_deps_interpolation.py::
-    test_launcher_exec_validates_metadata_via_validmetadata` uses to reach
+    test_launcher_exec_refuses_an_undeclared_dep_token_at_composition` uses to reach
     consumption-time `ValidMetadata` validation.
     """
     leaf_repo = f"{unique_repo}_leaf"
