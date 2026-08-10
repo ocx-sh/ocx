@@ -731,6 +731,8 @@ Anything the copy is missing fails closed instead of reaching the network: [`--o
 - **Bare identifier** (e.g., `cmake`) — downloads every tag.
 - **Tagged identifier** (e.g., `cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
 
+To refresh a whole registry rather than one package, [`ocx index sync <REGISTRY>`][cmd-index-sync] refreshes every package that registry's own catalog lists, each as if named bare.
+
 On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local index has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
 
 ### Packages published through `index.ocx.sh` {#offline-public-index}
@@ -1139,6 +1141,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-deselect]: ./reference/command-line.md#package-deselect
 [cmd-uninstall]: ./reference/command-line.md#package-uninstall
 [cmd-index-update]: ./reference/command-line.md#index-update
+[cmd-index-sync]: ./reference/command-line.md#index-sync
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
 [cmd-package-announce]: ./reference/command-line.md#package-announce

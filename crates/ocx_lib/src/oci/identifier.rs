@@ -80,6 +80,35 @@ impl Identifier {
         parse_internal(s, default_registry)
     }
 
+    /// Validates a bare repository path against the grammar [`parse`] enforces
+    /// on the repository half of an identifier.
+    ///
+    /// For callers that take a repository from a foreign source and use it
+    /// **verbatim** — a catalog key read off an index someone else authored,
+    /// say, which [`new_registry`] then adopts without parsing. Parsing such a
+    /// string and discarding the result is not this check: `parse` splits the
+    /// tag and digest off *before* the uppercase, length and character-class
+    /// guards run, so `ns/pkg:<anything>` passes as the repository `ns/pkg`
+    /// while the caller goes on to use the whole string. This applies every
+    /// guard to the string as given, and additionally rejects a `.` or `..`
+    /// segment, which `parse` catches earlier via its own whole-input pass.
+    ///
+    /// [`parse`]: Self::parse
+    /// [`new_registry`]: Self::new_registry
+    ///
+    /// # Errors
+    ///
+    /// [`IdentifierError`] whose `input` is `repository` itself.
+    pub fn validate_repository(repository: &str) -> Result<(), IdentifierError> {
+        match repository_error_kind(repository) {
+            Some(kind) => Err(IdentifierError {
+                input: repository.to_string(),
+                kind,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Returns a new identifier with the given tag, dropping any existing digest.
     ///
     /// The digest is dropped because changing the tag semantically creates a
@@ -426,18 +455,55 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
         kind: IdentifierErrorKind::InvalidFormat,
     })?;
 
-    // Validate repository.
-    if repository.chars().any(|c| c.is_ascii_uppercase()) {
+    // Validate repository. Reported against the whole input, which is what the
+    // caller passed and what every existing error message quotes.
+    if let Some(kind) = repository_error_kind(&repository) {
         return Err(IdentifierError {
             input: input.to_string(),
-            kind: IdentifierErrorKind::UppercaseRepository,
+            kind,
         });
     }
+
+    Ok(Identifier {
+        registry,
+        repository,
+        tag,
+        digest,
+    })
+}
+
+/// The reason `repository` is not a legal repository path, or `None`.
+///
+/// The single statement of the repository grammar: [`parse_internal`] applies it
+/// to the repository it decomposed, [`Identifier::validate_repository`] applies
+/// it to a string a caller means to use verbatim. Returns the *kind* rather than
+/// a full error so each caller can quote the input the user actually gave.
+///
+/// Extracting it widened `parse_internal` by one rule: the `.`/`..` segment
+/// check used to run only in `validate_segments`, which
+/// [`Identifier::parse`] and [`Identifier::parse_with_default_registry`] call
+/// and [`FromStr`] does not. So `"ocx.sh/ns/../evil".parse::<Identifier>()`
+/// was `Ok` with a traversing repository and is now
+/// [`IdentifierErrorKind::DirectoryTraversal`]. Deliberate — a traversing
+/// repository is never a legal one, and the two entry points disagreeing about
+/// that is the defect, not the fix. Every kind classifies to exit 65, so no exit
+/// code moves; only the accepted-input set narrows.
+fn repository_error_kind(repository: &str) -> Option<IdentifierErrorKind> {
+    if repository.chars().any(|c| c.is_ascii_uppercase()) {
+        return Some(IdentifierErrorKind::UppercaseRepository);
+    }
     if repository.len() > MAX_REPOSITORY_LENGTH {
-        return Err(IdentifierError {
-            input: input.to_string(),
-            kind: IdentifierErrorKind::RepositoryTooLong,
-        });
+        return Some(IdentifierErrorKind::RepositoryTooLong);
+    }
+    // A `.`/`..` segment is charset-legal (`.` is a permitted byte), so the
+    // traversal check cannot be folded into the byte scan below. `parse` reaches
+    // this via `validate_segments` on the whole input first; a caller validating
+    // a bare repository has no other guard, and `..` in a repository is what
+    // walks a request URL out of an index's declared base path.
+    for segment in repository.split('/') {
+        if segment == "." || segment == ".." {
+            return Some(IdentifierErrorKind::DirectoryTraversal);
+        }
     }
     // Character-class guard (OCI distribution spec repository grammar,
     // narrowed to what the uppercase check above doesn't already cover): each
@@ -449,18 +515,9 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
         .split('/')
         .any(|segment| segment.is_empty() || !segment.bytes().all(is_repository_segment_byte))
     {
-        return Err(IdentifierError {
-            input: input.to_string(),
-            kind: IdentifierErrorKind::InvalidFormat,
-        });
+        return Some(IdentifierErrorKind::InvalidFormat);
     }
-
-    Ok(Identifier {
-        registry,
-        repository,
-        tag,
-        digest,
-    })
+    None
 }
 
 /// Whether `byte` is a legal character inside one `/`-separated repository segment.
@@ -964,6 +1021,95 @@ mod tests {
     fn parse_with_default_registry_rejects_dotdot_segment() {
         let err = Identifier::parse_with_default_registry("ocx.sh/../evil", "ocx.sh").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    // ── validate_repository — the verbatim-use guard ────────────────────────
+
+    /// The defect this exists for: `parse` splits the tag off *before* the
+    /// repository guards run, so a caller that parses a foreign string, discards
+    /// the result, and then uses the string verbatim has validated a
+    /// decomposition of its input and not its input.
+    #[test]
+    fn from_str_applies_the_traversal_rule_the_parse_entry_points_apply() {
+        // `FromStr` reaches `parse_internal` without `validate_segments`, so
+        // until the grammar was extracted these were `Ok` with a traversing
+        // repository while `Identifier::parse` refused them. Two entry points
+        // disagreeing about whether `..` is a legal path segment is the defect;
+        // this pins the agreement rather than the old asymmetry.
+        // Not `"../evil"`: a leading segment carrying a dot is read as the
+        // registry, so that one decomposes to the legal repository `evil` and is
+        // a hostname question, not a traversal one.
+        for traversing in ["ocx.sh/ns/../evil", "ns/../../evil", "ns/./pkg"] {
+            let Err(error) = traversing.parse::<Identifier>() else {
+                panic!("`{traversing}` traverses and must not parse as an identifier");
+            };
+            assert!(
+                matches!(error.kind, IdentifierErrorKind::DirectoryTraversal),
+                "`{traversing}` must be refused as traversal, not as some other grammar fault: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_repository_rejects_what_parsing_a_decomposition_would_admit() {
+        for admitted in [
+            // A right-to-left override in the tag half: `parse` reports the
+            // repository `ns/pkg` and success, and the caller uses the whole
+            // string. This is the CWE-150 shape, one layer earlier.
+            "ns/pkg:\u{202e}gnp.exe",
+            "ns/pkg:\nX-Injected: 1",
+            "ns/pkg:latest",
+            // The digest half is split off just as early.
+            "ns/pkg@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            assert!(
+                Identifier::parse_with_default_registry(admitted, "ocx.sh").is_ok(),
+                "precondition: `{admitted}` is exactly what parsing admits today"
+            );
+            assert!(
+                Identifier::validate_repository(admitted).is_err(),
+                "`{admitted}` is not a legal repository path and must not be used as one"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_repository_applies_every_guard_to_the_string_as_given() {
+        let long = "x".repeat(MAX_REPOSITORY_LENGTH + 1);
+        for (repository, expected) in [
+            ("ns/../evil", IdentifierErrorKind::DirectoryTraversal),
+            ("./ns/pkg", IdentifierErrorKind::DirectoryTraversal),
+            ("ns/PKG", IdentifierErrorKind::UppercaseRepository),
+            (long.as_str(), IdentifierErrorKind::RepositoryTooLong),
+            ("ns//pkg", IdentifierErrorKind::InvalidFormat),
+            ("", IdentifierErrorKind::InvalidFormat),
+            ("ns/pk g", IdentifierErrorKind::InvalidFormat),
+            ("ns/pkg\u{202e}", IdentifierErrorKind::InvalidFormat),
+        ] {
+            let Err(error) = Identifier::validate_repository(repository) else {
+                panic!("`{repository}` must be refused");
+            };
+            assert_eq!(
+                std::mem::discriminant(&error.kind),
+                std::mem::discriminant(&expected),
+                "`{repository}` refused for the wrong reason: {:?}",
+                error.kind
+            );
+            assert_eq!(error.input, repository, "the error must quote the string as given");
+        }
+    }
+
+    #[test]
+    fn validate_repository_accepts_the_shapes_a_real_catalog_key_takes() {
+        // `foo.bar/pkg` matters: a dotted first segment is a legal namespace,
+        // and it is exactly what `parse` would have misread as a registry. This
+        // check never looks at a registry, so the ambiguity does not arise —
+        // `new_registry` pins the registry separately, so a key can no more
+        // redirect itself to another host than it can carry a tag.
+        for repository in ["cmake", "kitware/cmake", "ns/sub/pkg", "foo.bar/pkg", "a-b_c.d/e1"] {
+            Identifier::validate_repository(repository)
+                .unwrap_or_else(|error| panic!("`{repository}` is a legal catalog key: {error}"));
+        }
     }
 
     #[test]

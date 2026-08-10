@@ -164,7 +164,14 @@ use crate::prelude::StringExt;
 
 /// Convert an OCI identifier component (registry, repository, tag) into a
 /// filesystem-safe path segment using [`StringExt::to_relaxed_slug`].
-pub(crate) fn slugify(value: &str) -> String {
+///
+/// `pub` because it is not merely an internal detail: it is the key
+/// [`IndexStore`] addresses a source's subtree by, so two configured namespaces
+/// differing only in a non-`[a-zA-Z0-9._-]` character share one directory. A
+/// caller validating a source name against configuration has to compare on this
+/// form, or its verdict applies to a different subtree than the one written —
+/// see `ocx index regenerate`'s published-only guard.
+pub fn slugify(value: &str) -> String {
     value.to_relaxed_slug()
 }
 

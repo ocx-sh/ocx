@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Cross-language byte-parity conformance for the canonical root wire serializer
-//! (cross-track contract #1). Every vector under
+//! Cross-language byte-parity conformance for the three ocx-index wire documents
+//! (`adr_servable_index_snapshot.md` decision F / C-025). Every vector under
 //! `tests/fixtures/index_wire/root/` is the exact output of `ocx-sh/index`'s
 //! `bot/CONTRACTS.md` §14 Python serializer, vendored verbatim (see that
 //! directory's `README.md` — never hand-edited here). This test proves the Rust
 //! [`ocx_lib::oci::index::serialize_root`] port emits byte-identical bytes.
+//!
+//! `catalog_fixtures_round_trip_byte_exact` and `config_fixtures_round_trip_byte_exact`
+//! cover the other two documents (`serialize_catalog`, `serialize_config`) the same
+//! way, vendored from `render/normal/expected/dist/{c/index.json,config.json}`.
 //!
 //! A byte mismatch is a serializer bug — the fixtures are frozen upstream (pinned
 //! by `SOURCE_COMMIT`); fix the emitter, never the fixture.
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::oci::index::{IndexRoot, YankMarker, serialize_root};
+use ocx_lib::oci::index::{
+    CatalogDocument, IndexFormatConfig, IndexRoot, YankMarker, serialize_catalog, serialize_config, serialize_root,
+};
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index_wire")
@@ -73,6 +79,52 @@ fn root_fixtures_round_trip_byte_exact() {
         let value: serde_json::Value =
             serde_json::from_slice(&expected).expect("parse root fixture as order-preserving Value");
         let produced = serialize_root(&value);
+        assert_bytes_equal(&produced, &expected, &path.display().to_string());
+    }
+}
+
+/// Cross-language byte-parity for `c/index.json` (C-025 / S-017).
+///
+/// Each vector is a `render.py`-emitted `c/index.json`, deserialized into the
+/// typed [`CatalogDocument`] and re-serialized through [`serialize_catalog`]; a
+/// byte mismatch is a serializer bug, never a reason to edit the fixture.
+#[test]
+fn catalog_fixtures_round_trip_byte_exact() {
+    let catalog_dir = fixtures_dir().join("catalog");
+    let fixtures = json_fixtures(&catalog_dir);
+    assert!(
+        !fixtures.is_empty(),
+        "expected at least one vendored catalog fixture, found none"
+    );
+
+    for path in fixtures {
+        let expected = std::fs::read(&path).expect("read catalog fixture");
+        let document: CatalogDocument =
+            serde_json::from_slice(&expected).expect("parse catalog fixture as CatalogDocument");
+        let produced = serialize_catalog(&document);
+        assert_bytes_equal(&produced, &expected, &path.display().to_string());
+    }
+}
+
+/// Cross-language byte-parity for `config.json` (C-025 / S-017).
+///
+/// Each vector is a `render.py`-emitted `config.json`, deserialized into
+/// [`IndexFormatConfig`] and re-serialized through [`serialize_config`]; a byte
+/// mismatch is a serializer bug, never a reason to edit the fixture.
+#[test]
+fn config_fixtures_round_trip_byte_exact() {
+    let config_dir = fixtures_dir().join("config");
+    let fixtures = json_fixtures(&config_dir);
+    assert!(
+        !fixtures.is_empty(),
+        "expected at least one vendored config fixture, found none"
+    );
+
+    for path in fixtures {
+        let expected = std::fs::read(&path).expect("read config fixture");
+        let config: IndexFormatConfig =
+            serde_json::from_slice(&expected).expect("parse config fixture as IndexFormatConfig");
+        let produced = serialize_config(&config);
         assert_bytes_equal(&produced, &expected, &path.display().to_string());
     }
 }

@@ -7,6 +7,7 @@ use ocx_lib::cli::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
+use crate::api::data::sanitize_for_terminal;
 
 /// Tag listing for one or more packages, optionally including platform or variant details.
 ///
@@ -63,42 +64,49 @@ pub enum TagsData {
     Variants(BTreeMap<String, Vec<String>>),
 }
 
+impl Tags {
+    /// The plain table's second-column header — the only thing the three
+    /// [`TagsData`] variants disagree about.
+    fn plain_header(&self) -> &'static str {
+        match &self.packages {
+            TagsData::Tags(_) => "Tag",
+            TagsData::Platforms(_) => "Platform",
+            TagsData::Variants(_) => "Variant",
+        }
+    }
+
+    /// The plain table's column-major rows, already neutralized (CWE-150).
+    ///
+    /// Package names and tag/platform/variant values are read off a source's
+    /// index documents, so they are foreign-authored. Split out of
+    /// [`Printable::print_plain`] so a hostile fixture can be asserted on the
+    /// rows themselves rather than on a count of sanitizer calls in the source.
+    ///
+    /// `theme` is taken as an argument because the second column is themed: the
+    /// sanitizer runs on the value going **in**, never on `theme.tag`'s output,
+    /// which is the theme's own ANSI and would be stripped instead of the
+    /// attack. A test passes the plain theme so the rows carry no escapes of
+    /// their own.
+    fn plain_rows(&self, theme: &ocx_lib::cli::Theme) -> [Vec<String>; 2] {
+        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+        let (TagsData::Tags(packages) | TagsData::Platforms(packages) | TagsData::Variants(packages)) = &self.packages;
+        for (package, values) in packages {
+            for value in values {
+                rows[0].push(sanitize_for_terminal(package));
+                rows[1].push(theme.tag(sanitize_for_terminal(value)));
+            }
+        }
+        rows
+    }
+}
+
 impl Printable for Tags {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
-        let theme = printer.theme();
-        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        let header = match &self.packages {
-            TagsData::Tags(tags) => {
-                for (package, package_tags) in tags {
-                    for tag in package_tags {
-                        rows[0].push(package.clone());
-                        rows[1].push(theme.tag(tag));
-                    }
-                }
-                "Tag"
-            }
-            TagsData::Platforms(platforms) => {
-                for (package, platform_list) in platforms {
-                    for platform in platform_list {
-                        rows[0].push(package.clone());
-                        rows[1].push(theme.tag(platform));
-                    }
-                }
-                "Platform"
-            }
-            TagsData::Variants(variants) => {
-                for (package, variant_names) in variants {
-                    for variant in variant_names {
-                        rows[0].push(package.clone());
-                        rows[1].push(theme.tag(variant));
-                    }
-                }
-                "Variant"
-            }
-        };
         printer.print_table(
-            &["Package".into(), header.into()],
-            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+            &["Package".into(), self.plain_header().into()],
+            &self
+                .plain_rows(&printer.theme())
+                .map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
     }
 }
@@ -258,5 +266,52 @@ mod tests {
             ["darwin/arm64", "linux/amd64", "windows/amd64"],
             "inner list must be sorted"
         );
+    }
+
+    /// A name carrying every shape the finding measured: a raw ESC (the start of
+    /// a CSI sequence), a newline, a NUL, and a right-to-left override.
+    const HOSTILE: &str = "ns/\u{1b}[31mev\nil\u{0}\u{202e}gnp.exe";
+
+    /// The no-colour theme, so a row's only escapes would be ones that survived
+    /// the sanitizer rather than ones the theme added.
+    fn plain_theme() -> ocx_lib::cli::Theme {
+        ocx_lib::cli::Theme::new(false)
+    }
+
+    #[test]
+    fn every_plain_row_is_neutralized() {
+        // Behavioural, against the rows `print_table` receives, across all three
+        // variants — they share one row builder, and a variant added later that
+        // does not is exactly what this must catch. A count of sanitizer calls
+        // in the source would pass with one raw `.push(` offset by one sanitizer
+        // call that is not a row push, and would miss `.extend(...)` entirely.
+        let hostile = || package_map(&[(HOSTILE, &[HOSTILE])]);
+        let all_variants = [
+            Tags::from_tags(hostile()),
+            Tags::from_platforms(hostile()),
+            Tags::from_variants(hostile()),
+        ];
+        for tags in all_variants {
+            for column in tags.plain_rows(&plain_theme()) {
+                for cell in column {
+                    assert!(
+                        !cell
+                            .chars()
+                            .any(|c| c.is_control() || crate::api::data::is_bidi_control(c)),
+                        "tag row {cell:?} reached the terminal unneutralized"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordinary_listing_passes_through_verbatim() {
+        // The neutralization must be invisible for every name OCX itself
+        // produces, or it silently rewrites the listing.
+        let tags = Tags::from_tags(package_map(&[("kitware/cmake", &["3.31.0", "latest"])]));
+        let rows = tags.plain_rows(&plain_theme());
+        assert_eq!(rows[0], ["kitware/cmake", "kitware/cmake"]);
+        assert_eq!(rows[1], ["3.31.0", "latest"]);
     }
 }

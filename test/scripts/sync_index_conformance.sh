@@ -37,11 +37,15 @@ dir_leaves=(
 file_leaves=(
     "tag_verdicts.json|tag_verdicts.json"
     "dispatch/expected_platforms.json|dispatch/expected_platforms.json"
+    "render/normal/expected/dist/c/index.json|catalog/normal.json"
+    "render/normal/expected/dist/config.json|config/normal.json"
 )
 
 # Paths under ${src_rel} that exist upstream and are deliberately NOT vendored.
 # Every upstream path must match a leaf above or an entry here — see
-# assert_every_upstream_path_is_claimed.
+# assert_every_upstream_path_is_claimed. Claiming is OR'd there, so "render"
+# still covers the two `render/normal` files the catalog/config leaves vendor
+# above; the overlap is deliberate, and narrowing it has no syntax in this list.
 unvendored=(
     "render"               # site-render goldens: no ocx counterpart, bot-only
     "serializer/README.md" # upstream provenance notes, read at the pinned commit

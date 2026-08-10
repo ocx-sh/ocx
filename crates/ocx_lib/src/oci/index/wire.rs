@@ -22,15 +22,22 @@
 //! (`adr_oci_index_only_dispatch.md` D1).
 //!
 //! Two documents carry the format's version pin — `config.json` and the
-//! `c/index.json` envelope — so [`SUPPORTED_FORMAT_VERSION`] lives here, with
-//! the grammar, rather than beside either reader. `config.json`'s own struct
-//! (`IndexFormatConfig` in `ocx_index.rs`) stays next to its one reader.
+//! `c/index.json` envelope — so [`SUPPORTED_FORMAT_VERSION`] and the one
+//! [`gate_format_version`] that compares against it live here, with the
+//! grammar, rather than beside either reader. [`IndexFormatConfig`],
+//! `config.json`'s own struct, lives here for the same reason: it is no longer
+//! a single reader's private shape but a shared one. `OcxIndex` reads it off
+//! the wire today; `LocalIndex` will read it off disk (WP11, C-005), and the
+//! update path will **write** it (WP5, C-023) via
+//! [`serialize_config`](super::wire_writer::serialize_config)
+//! (`adr_servable_index_snapshot.md` C-001/C-025).
 //!
 //! Everything else about the format (catalog digest-diff sync, dispatch-object
 //! decode, `select_best` resolution) is downstream policy, not grammar — see
 //! `adr_index_indirection.md` Decisions A/C/F for that layer.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +47,93 @@ use crate::oci;
 /// one — `config.json` and the [`CatalogDocument`] envelope. A served value
 /// other than this is rejected (`adr_index_indirection.md` F1).
 pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
+
+/// The single wire-format version gate, and the only place
+/// [`SUPPORTED_FORMAT_VERSION`] is compared against — both documents that
+/// carry the pin route through it ([`CatalogDocument::into_packages`] for the
+/// `c/index.json` envelope, [`OcxIndex::check_format_version`](super::OcxIndex)
+/// for `config.json`), and the offline reader joins them in WP11.
+///
+/// One gate, so a fetched tree and a shipped copy can never be trusted
+/// differently (CWE-501). It takes a version, never an "was it there?" flag:
+/// an absent `config.json` is resolved to [`IndexFormatConfig::assumed_v1`] by
+/// the caller *before* the gate runs
+/// (`adr_servable_index_snapshot.md` C-004/C-005).
+///
+/// # Errors
+///
+/// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
+/// when `version` is not [`SUPPORTED_FORMAT_VERSION`].
+pub(crate) fn gate_format_version(version: u64) -> crate::Result<()> {
+    if version != SUPPORTED_FORMAT_VERSION {
+        return Err(super::error::Error::UnsupportedIndexFormat { version }.into());
+    }
+    Ok(())
+}
+
+/// `config.json` (● `{"format_version": 1}`) — the version pin and the index's
+/// own declaration of the names it can express.
+///
+/// Read once per source; an unknown `format_version` is a hard error
+/// (fail-closed, F1). An **absent** document is not an error either:
+/// [`Self::assumed_v1`] is substituted for it, so a served tree that never
+/// published a `config.json` still resolves (C-005). `OcxIndex` does that
+/// today; the offline `LocalIndex` reader joins it in WP11.
+///
+/// Forward-compatible: no `deny_unknown_fields`, so an unmodelled sibling (the
+/// withdrawn `min_ocx_version`, Decision E; or a future key) is ignored rather
+/// than fatal.
+///
+/// **Field order is load-bearing.** This type is serialized as well as parsed
+/// ([`serialize_config`](super::wire_writer::serialize_config)), and Python's
+/// `json.dumps` defaults `sort_keys=False`, so `ocx-sh/index`'s renderer
+/// (`render.py:334-338`) emits `format_version` then `name_segments`.
+/// Declaration order is that order. The type carries **no** OCX-only field —
+/// reordering or adding one is a wire break. `skip_serializing_if` on
+/// `name_segments` does *not* make an OCX-written config byte-identical to a
+/// Python-rendered one (the renderer always writes `name_segments`); it makes
+/// the two agree on form while OCX declines to guess a value it cannot derive —
+/// see [`serialize_config`](super::wire_writer::serialize_config) (C-001/C-025).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IndexFormatConfig {
+    pub format_version: u64,
+    /// Slash-separated segment count a package name must have under this index,
+    /// counted on the name **within** the namespace ([`oci::Identifier::repository`]).
+    /// `index.ocx.sh` serves `2` — its root schema pins the logical name to
+    /// `<ns>/<pkg>`, so it can never hold a root for a flat name.
+    ///
+    /// Absent = this index declares no constraint and can express every name,
+    /// which is the historical behaviour verbatim. Deliberately **not** a
+    /// security control: an older client ignores the field entirely, so nothing
+    /// about the yank gate, the dispatch-object verify, or the authoritative
+    /// stop is delegated to it — it only ever narrows what a client asks for.
+    ///
+    /// `NonZeroU32` does the validation: `0` fails deserialization into the
+    /// existing [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
+    /// path, so there is no hand-written validator to keep in sync.
+    ///
+    /// OCX never derives a value for it — `name_segments` is an operator
+    /// declaration — so a config OCX writes omits the key entirely, which is
+    /// what `skip_serializing_if` spells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_segments: Option<NonZeroU32>,
+}
+
+impl IndexFormatConfig {
+    /// The config substituted for an **absent** `config.json` — `{
+    /// format_version: 1, name_segments: None }` (C-005).
+    ///
+    /// Absence is resolved to this value *before* the version gate runs, so the
+    /// gate only ever sees a document and needs no "was it there?" parameter
+    /// (C-004). `name_segments: None` is the historical no-constraint reading:
+    /// a tree that declares nothing can express every name.
+    pub fn assumed_v1() -> Self {
+        Self {
+            format_version: SUPPORTED_FORMAT_VERSION,
+            name_segments: None,
+        }
+    }
+}
 
 /// `p/<ns>/<pkg>.json` root document (●).
 ///
@@ -149,25 +243,19 @@ impl CatalogDocument {
 
     /// Version-gates the envelope and yields the catalog map.
     ///
-    /// **Fail-closed** — the identical policy `config.json` already applies in
-    /// [`OcxIndex::check_format_version`](super::OcxIndex): an unknown version
-    /// is refused outright, never "ignore the envelope and read `packages`
-    /// anyway". One version pin, one policy, one error, whichever document
-    /// carries it. Reading a newer catalog on the strength of a field name
-    /// OCX happens to recognise is exactly the mis-parse F1 exists to prevent,
-    /// and a catalog is the listing every other read fans out from.
+    /// **Fail-closed** through the shared [`gate_format_version`] — one version
+    /// pin, one policy, one error, whichever document carries it. An unknown
+    /// version is refused outright, never "ignore the envelope and read
+    /// `packages` anyway": reading a newer catalog on the strength of a field
+    /// name OCX happens to recognise is exactly the mis-parse F1 exists to
+    /// prevent, and a catalog is the listing every other read fans out from.
     ///
     /// # Errors
     ///
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
     /// when `format_version` is not [`SUPPORTED_FORMAT_VERSION`].
     pub fn into_packages(self) -> crate::Result<CatalogIndex> {
-        if self.format_version != SUPPORTED_FORMAT_VERSION {
-            return Err(super::error::Error::UnsupportedIndexFormat {
-                version: self.format_version,
-            }
-            .into());
-        }
+        gate_format_version(self.format_version)?;
         Ok(self.packages)
     }
 }
@@ -182,6 +270,111 @@ impl CatalogDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── IndexFormatConfig (config.json) ───────────────────────────────────
+
+    /// C-001 — no `deny_unknown_fields`. A config carrying a key this ocx does
+    /// not model (the withdrawn `min_ocx_version`, a future key) parses, so a
+    /// newer index server never bricks an older client.
+    #[test]
+    fn config_tolerates_unknown_keys_for_forward_compat() {
+        let config: IndexFormatConfig = serde_json::from_str(r#"{"format_version":1,"future_key":[]}"#)
+            .expect("an unmodelled sibling key must not fail the parse");
+        assert_eq!(config.format_version, 1);
+        assert_eq!(
+            config.name_segments, None,
+            "an absent name_segments declares no constraint"
+        );
+    }
+
+    /// C-001 — `format_version` carries no serde default, so an empty document
+    /// cannot pass as version 1. Absence of the *file* reads as v1
+    /// ([`IndexFormatConfig::assumed_v1`]); an empty *document* is malformed.
+    #[test]
+    fn config_without_format_version_is_refused() {
+        serde_json::from_str::<IndexFormatConfig>("{}")
+            .expect_err("a config with no format_version must not deserialize");
+    }
+
+    /// C-001 — `NonZeroU32` is the validator. There is no hand-written range
+    /// check anywhere, so there is none to drift out of sync with the type.
+    #[test]
+    fn config_with_zero_name_segments_is_refused() {
+        serde_json::from_str::<IndexFormatConfig>(r#"{"format_version":1,"name_segments":0}"#)
+            .expect_err("name_segments 0 must fail deserialization");
+    }
+
+    /// C-001 — the value substituted for an absent `config.json` before the
+    /// version gate runs (C-005), so the gate never needs a "was it there?"
+    /// parameter.
+    #[test]
+    fn assumed_v1_is_version_one_with_no_name_segments() {
+        let config = IndexFormatConfig::assumed_v1();
+        assert_eq!(config.format_version, 1);
+        assert_eq!(
+            config.name_segments, None,
+            "a tree that declares nothing can express every name"
+        );
+    }
+
+    /// C-004 — absent is version 1, and the gate passes it. The substitution
+    /// happens before the gate, so this is the pair that makes the "no `absent`
+    /// parameter" claim hold.
+    #[test]
+    fn the_gate_passes_the_assumed_version_and_refuses_any_other() {
+        gate_format_version(IndexFormatConfig::assumed_v1().format_version)
+            .expect("the value substituted for an absent config.json must pass the gate");
+        gate_format_version(SUPPORTED_FORMAT_VERSION).expect("the supported version passes");
+
+        for version in [0, 2, u64::MAX] {
+            let error = gate_format_version(version).expect_err("any other version is refused");
+            assert!(
+                matches!(
+                    error,
+                    crate::Error::OciIndex(super::super::error::Error::UnsupportedIndexFormat { .. })
+                ),
+                "expected UnsupportedIndexFormat, got {error:?}"
+            );
+        }
+    }
+
+    /// C-004 — **one** version pin, one comparison. A second `!=` against
+    /// [`SUPPORTED_FORMAT_VERSION`] is how two readers drift into trusting the
+    /// same document differently (CWE-501), so the single-comparison property
+    /// is pinned structurally rather than left to review.
+    #[test]
+    fn only_the_gate_compares_against_the_supported_version() {
+        // ponytail: reads the source tree rather than listing sibling modules,
+        // so a file added later is covered without editing this test.
+        let mut offenders = Vec::new();
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/oci/index")];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(std::fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().path()));
+                continue;
+            }
+            for (number, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || !code.contains("SUPPORTED_FORMAT_VERSION") {
+                    continue;
+                }
+                // `<` and `>` cover `<=` / `>=` too. They are in the set because
+                // the deferred v2 change is `!=` → `<=`: a second reader added
+                // with `<=` while the gate keeps `!=` is exactly the drift this
+                // guards, and an `==`/`!=`-only scan would leave the count at 1
+                // and pass.
+                if ["==", "!=", "<", ">"].iter().any(|op| code.contains(op)) {
+                    offenders.push(format!("{}:{}", path.display(), number + 1));
+                }
+            }
+        }
+        assert_eq!(
+            offenders.len(),
+            1,
+            "within src/oci/index, exactly one comparison against SUPPORTED_FORMAT_VERSION must \
+             exist (inside gate_format_version); found: {offenders:?}"
+        );
+    }
 
     /// A syntactically valid `sha256:<hex>` digest for fixtures that need one
     /// but don't care which — `oci::Digest`'s serde requires exact-wire

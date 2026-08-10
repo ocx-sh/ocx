@@ -1457,6 +1457,54 @@ mod tests {
         );
     }
 
+    // ── C-020 regression guard: `parse_url` and `file://` ────────────────────
+    //
+    // C-020 corrects an earlier design-spec draft that claimed `parse_url`
+    // rejects every `file://` form and called for a scheme allowlist in this
+    // shared parser. Neither claim holds: `parse_url` splits on the first
+    // `://`, lower-cases the scheme, and rejects **only** an empty host — no
+    // scheme allowlist exists anywhere in it, and it is not the right layer
+    // for one (it is shared with the registry role, whose `[mirrors]` entries
+    // have no scheme restriction of their own).
+    //
+    // These two tests pin that `parse_url` was **deliberately left
+    // unchanged**. They are not, by themselves, proof that a `file://`
+    // `[mirrors]` index-role override is safe to use — it is refused, just
+    // one layer up: the closed-scheme post-override gate in
+    // `resolve_base_url` (`oci/index/ocx_index.rs`, C-018 check 2), owned by
+    // WP6. A reader who sees only `parse_url_file_scheme_with_host_parses_ok`
+    // below must not conclude `file://` is safe in `[mirrors]`; pair it
+    // mentally with WP6's gate test, per C-020's own instruction that "the
+    // pair is the contract; either alone misleads".
+
+    /// `parse_url("file://localhost/srv/x")` parses **today**, and that is
+    /// intentional: a non-empty authority (`localhost`) gives `parse_url` a
+    /// host to extract, so the generic split succeeds exactly as it would for
+    /// any other scheme. Refusing a `file://` index-role mirror is C-018
+    /// check 2's job (`resolve_base_url`'s post-override gate), not this
+    /// parser's — see C-020.
+    #[test]
+    fn parse_url_file_scheme_with_host_parses_ok() {
+        let parsed = parse_url("file://localhost/srv/x").expect("file:// with a non-empty authority must parse");
+        assert_eq!(parsed.protocol, "file");
+        assert_eq!(parsed.host, "localhost");
+        assert_eq!(parsed.path_prefix, "srv/x");
+    }
+
+    /// `parse_url("file:///srv/x")` — empty authority between the second and
+    /// third `/` — still hits the ordinary `MissingHost` guard, the one
+    /// `file://` form this parser does reject. Not a scheme check: the same
+    /// `https:///prefix` shape fails identically above
+    /// (`parse_url_errors_on_empty_host_before_prefix`).
+    #[test]
+    fn parse_url_file_scheme_empty_authority_is_missing_host() {
+        let result = parse_url("file:///srv/x");
+        assert!(
+            matches!(result, Err(MirrorConfigError::MissingHost { ref url }) if url == "file:///srv/x"),
+            "file:// with an empty authority must yield MirrorConfigError::MissingHost, got: {result:?}"
+        );
+    }
+
     /// T-A5 (resolve path): `MissingHost` surfaced through `resolve_mirror_map`
     /// must be wrapped in `InvalidEntry` naming the upstream host, parallel to the
     /// existing `resolve_errors_on_missing_url_naming_upstream` test for

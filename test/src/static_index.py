@@ -192,7 +192,20 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
     server: StaticIndexServer  # narrows the inherited Any-typed attribute
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib override name)
+        with self.server.in_flight():
+            self._serve()
+
+    def _serve(self) -> None:
         if_none_match = self.headers.get("If-None-Match")
+        # A path the test declared unservable — an origin whose catalog endpoint
+        # demands credentials, or any non-404 refusal. Distinct from an absent
+        # file on purpose: only a confirmed 404 may read as absence, and the
+        # difference between the two is what several scenarios here turn on.
+        if (status := self.server.refusals.get(self.path)) is not None:
+            self.server.requests.append(RequestRecord(self.path, if_none_match, status))
+            self.send_error(status)
+            return
+
         local_path = Path(self.translate_path(self.path))
         if not local_path.is_file():
             self.server.requests.append(RequestRecord(self.path, if_none_match, 404))
@@ -220,6 +233,15 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
         pass  # quiet test output — assertions read `server.requests` instead
 
 
+class _InFlight:
+    """A concurrency counter and its high-water mark, shareable across servers."""
+
+    def __init__(self) -> None:
+        self.peak = 0
+        self.current = 0
+        self.lock = threading.Lock()
+
+
 class StaticIndexServer(http.server.ThreadingHTTPServer):
     """A session-free `index.ocx.sh`-shaped fixture: one instance per test,
     bound to an ephemeral port, serving `root` verbatim.
@@ -228,8 +250,54 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
     def __init__(self, root: Path) -> None:
         self.root = root
         self.requests: list[RequestRecord] = []
+        # Path -> HTTP status this fixture answers instead of serving the file.
+        # Populated by tests that need an origin which refuses rather than 404s.
+        self.refusals: dict[str, int] = {}
+        # Seconds each request is held inside the handler. A static file is
+        # served far faster than a client can fan out, so with no hold the peak
+        # overlap is 1 however wide the fan-out is — the delay is what makes
+        # concurrency observable at all rather than an artefact of scheduling.
+        self.hold_seconds = 0.0
+        self._counter = _InFlight()
         handler = functools.partial(_StaticIndexHandler, directory=str(root))
         super().__init__(("127.0.0.1", 0), handler)
+
+    @property
+    def peak_in_flight(self) -> int:
+        """The high-water mark of concurrent requests, over every server sharing
+        this counter."""
+        return self._counter.peak
+
+    @peak_in_flight.setter
+    def peak_in_flight(self, value: int) -> None:
+        self._counter.peak = value
+
+    def share_in_flight_with(self, other: "StaticIndexServer") -> None:
+        """Make `other` count into THIS server's high-water mark.
+
+        A bound that spans two origins has to be measured as one number. Summing
+        each server's own peak overstates it — the two maxima need not have
+        occurred at the same instant, so a client holding a single 8-slot budget
+        can show 8 on each and sum to 16 while never exceeding 8 in total.
+        """
+        other._counter = self._counter
+
+    @contextlib.contextmanager
+    def in_flight(self) -> Iterator[None]:
+        """Counts one request as in flight for the duration of its handler, and
+        records the high-water mark in `peak_in_flight`.
+        """
+        counter = self._counter
+        with counter.lock:
+            counter.current += 1
+            counter.peak = max(counter.peak, counter.current)
+        try:
+            if self.hold_seconds:
+                time.sleep(self.hold_seconds)
+            yield
+        finally:
+            with counter.lock:
+                counter.current -= 1
 
     @property
     def base_url(self) -> str:

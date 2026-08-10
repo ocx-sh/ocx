@@ -175,6 +175,48 @@ The named index is the sole authority for its namespace — a yanked tag, a tamp
 A [derived index's][in-depth-indices-dispatch] local root document — the file `ocx index update` writes under `$OCX_HOME/index/<source>/p/<ns>/<pkg>.json` — records the package's resolved physical location as `oci://<host>/<repository>`, not `http://` or `https://`. That scheme marks the reference *kind* — "an OCI registry repository" — not a transport to dial. Transport is a host-side decision: it comes from a [`[mirrors]`](#keys-mirrors) entry's own scheme for that host, or the plain-HTTP allowance in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the pointer itself carried `http://` or `https://` instead, a publisher able to write that shared identity data could force every consumer resolving it down to plaintext — a scheme belongs to the operator who configures the host, never to data that travels with a package's identity.
 :::
 
+##### `file://` bases {#keys-registries-index-file}
+
+`index` also accepts a `file://` base, read straight off disk with no server — the consuming half of
+[serving a local index snapshot][in-depth-indices-servable]:
+
+```toml
+[registries."corp"]
+index = "file:///srv/ocx-index/corp"
+```
+
+Two requirements, checked at startup rather than at first fetch — except under
+[`--offline`][arg-offline], where no index source is built at all, so neither check runs and the
+command exits 0:
+
+- **Empty authority.** `file:///srv/ocx-index/corp` (three slashes) is a local path; `file://host/…`
+  or `file://localhost/…` is a UNC/remote form and is refused — a `file` base never dials a network.
+- **Absolute path.** A relative tail, the bare filesystem root (`file:///`), and a bare Windows drive
+  designator (`file:///C:/`) are all refused rather than silently resolving against wherever `ocx`
+  happened to be launched from.
+
+A `file` base is never host-keyed, so it is **not a valid [`[mirrors]`](#keys-mirrors) override
+target**: the index role there redirects a *host's* traffic, and a `file://` base has no host to key
+on. Point `index` itself at the path instead of trying to reach it through `[mirrors]`.
+
+Beyond the two startup checks, every fetch through a `file://` base carries the same guarantees the
+HTTPS transport has, adapted to a filesystem:
+
+- **Read-only.** There is no write path — nothing under this namespace's index base is ever created,
+  modified, or deleted through the `file://` transport.
+- **Size-bounded.** A document over the same size cap the HTTPS transport enforces is refused, not
+  silently truncated — the read is bounded by bytes actually consumed, never trusted from file
+  metadata.
+- **Symlink-contained.** A path staged with symlinks (an `rsync`, hardlink, or symlink layout) is
+  followed, but the resolved target must stay under the configured root once both are canonicalized;
+  one that resolves outside it is refused rather than served.
+- **Regular files only.** A directory, device node, FIFO, or anything else that is not a plain file is
+  refused — including a mid-read swap that would otherwise slip one past the initial check.
+
+Everything else about the namespace is unchanged: `file://` is still the [ocx-index protocol][in-depth-indices-public]
+(root document → OCI image index → platform selection), just read from a directory tree instead of
+over HTTPS, and every object is still verified against its recorded digest.
+
 #### `trusted_hosts` {#keys-registries-trusted-hosts}
 
 **Type**: array of strings (hostnames or CIDR blocks)
@@ -680,6 +722,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-indices-dispatch]: ../in-depth/indices.md#local-dispatch
 [in-depth-indices-declared-names]: ../in-depth/indices.md#public-index-declared-names
+[in-depth-indices-servable]: ../in-depth/indices.md#servable
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config

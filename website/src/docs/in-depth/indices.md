@@ -13,12 +13,12 @@ An index answers one question: which versions of a package exist, and for a chos
 
 ## One format, many copies {#format}
 
-There is exactly one index format: a `config.json` version marker, a catalog `c/index.json`, per-package root documents `p/<ns>/<pkg>.json`, and per-package dispatch objects `p/<ns>/<pkg>/o/<algo>/<hex>.json`. Every copy of an index anywhere — the hosted [index.ocx.sh][index-ocx-sh] site, a corporate mirror of it, a directory shipped inside a [DevContainer Feature][devcontainer-features], the machine-local cache under `$OCX_HOME` — is that identical layout. Copying it with `rsync`, `wget --mirror`, or `git add` produces a valid index; there is nothing to convert.
+There is exactly one index format: a `config.json` version marker, a catalog `c/index.json`, per-package root documents `p/<ns>/<pkg>.json`, and per-package dispatch objects `p/<ns>/<pkg>/o/<algo>/<hex>.json`. Every **published** copy of an index anywhere — the hosted [index.ocx.sh][index-ocx-sh] site, a corporate mirror of it, a directory shipped inside a [DevContainer Feature][devcontainer-features], the machine-local cache under `$OCX_HOME` — is that identical layout (a *derived* copy, covered below, carries no `config.json` or `c/index.json` of its own). Copying it with `rsync`, `wget --mirror`, or `git add` produces a valid index; there is nothing to convert.
 
 Indices differ along three axes, never in format:
 
 - **Location** — hosted (`index.ocx.sh` itself), mirrored (a corporate static-file proxy in front of it), shipped (a devcontainer feature, a CI artifact, a directory committed to a repository), or local to a machine (`$OCX_HOME/index/<source>/`).
-- **Provenance** — *published*: a copy of a remote ocx-index, bytes copied from it and verifiable against it (see [index.ocx.sh](#public-index)). Or *derived*: OCX builds it itself from a plain OCI registry's tags, because an ordinary OCI registry publishes no index of its own.
+- **Provenance** — *published*: a copy of a remote ocx-index, bytes copied from it and verifiable against itself (see [index.ocx.sh](#public-index)). Or *derived*: OCX builds it itself from a plain OCI registry's tags, because an ordinary OCI registry publishes no index of its own.
 - **Completeness** — a local copy is normally *partial*: [`ocx index update <pkg>`][cmd-index-update] grows it one package at a time. A full site mirror (`wget --mirror`) is just the degenerate *complete* case — same grammar, more entries.
 
 ## Remote Index {#remote}
@@ -43,11 +43,11 @@ The home is resolved in order:
 
 The home is a **collection**, not a single index: `$OCX_HOME/index/ocx.sh/`, `$OCX_HOME/index/ghcr.io/`, … one subtree per source, side by side. Pointing `--index` / `OCX_INDEX` elsewhere swaps the *whole* collection for a shipped one — never a partial overlay of the two. A shipped copy is not required to live at any particular path; a project conventionally commits one at `.ocx/index/`, but that convention is not enforced.
 
-OCX never writes a lock file inside the collection itself, wherever it lives. Cross-process locks for an index update are always homed under the machine-global `$OCX_HOME/locks`, keyed by the guarded directory's own identity — so a redirected or git-committed `.ocx/index/` copy only ever changes when [`ocx index update`][cmd-index-update] actually writes new data into it, never picks up a stray lock sidecar `git status` would flag.
+OCX never writes a lock file inside the collection itself, wherever it lives. Cross-process locks for an index update are always homed under the machine-global `$OCX_HOME/locks`, keyed by the guarded directory's own identity — so a redirected or git-committed `.ocx/index/` copy only ever changes when `ocx` actually writes new data into it, never picks up a stray lock sidecar `git status` would flag.
 
-**The local index is never updated automatically.** You decide when a source's subtree changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `cmake:3` map to the digest current at last update, not whatever the registry serves today. That is true even for a tag you have never asked for before: resolving a brand-new identifier *grows* the copy with a new root and dispatch object, but re-resolving one already on disk never silently *refreshes* it — the only way to change what an already-known tag resolves to is an explicit [`ocx index update`][cmd-index-update].
+**The local index is never updated automatically.** You decide when a source's subtree changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `cmake:3` map to the digest current at last update, not whatever the registry serves today. That is true even for a tag you have never asked for before: resolving a brand-new identifier *grows* the copy with a new root and dispatch object, but re-resolving one already on disk never silently *refreshes* it under the default mode. An explicit [`ocx index update`][cmd-index-update] is the deliberate way to move it; a [`--remote`][arg-remote] resolve of that tag is the other, since — unlike a `--remote` *query* — it re-fetches and rewrites the local copy for the tag it touches (see [Active Index](#active)).
 
-"Explicit" means *named*. An update moves the packages you list and nothing else — never a package as a side effect of moving another, and there is no whole-index sync to move them all at once. That covers the `repository` field too — the pointer deciding which physical registry a package is fetched from is part of what a copy pins, not a detail refreshed in passing. And resolution stays silent about all of it: once something is committed locally, resolving it makes no network request and tells you nothing about the remote, because there is nothing it could act on. Updates surface where you asked for them — the report after an [`ocx index update`][cmd-index-update], and [`ocx index catalog`][cmd-index-catalog] — never as a warning from a command that was doing something else.
+"Explicit" means *named*. An update moves the packages you list and nothing else — never a package as a side effect of moving another, and there is no *implicit* whole-index sync to move them all at once ([`ocx index sync`][cmd-index-sync] is the explicit one — see [Update modes](#update-modes)). That covers the `repository` field too — the pointer deciding which physical registry a package is fetched from is part of what a copy pins, not a detail refreshed in passing. And resolution stays silent about all of it: once something is committed locally, resolving it makes no network request and tells you nothing about the remote, because there is nothing it could act on. Updates surface where you asked for them — [`ocx index catalog --remote`][cmd-index-catalog] — never as a warning from a command that was doing something else.
 
 ::: info Similar to APT's package lists
 [`apt-get update`][apt-repo-format] downloads a `Packages` index from each configured mirror, listing every `.deb`'s filename and checksum. `apt-get install` then reads that local index and verifies the downloaded file against the recorded checksum — the network is only involved during an explicit refresh and the file fetch itself, not on every dependency resolution. [`ocx index update <package>`][cmd-index-update] is the explicit-refresh equivalent of `apt-get update`.
@@ -67,7 +67,35 @@ $OCX_HOME/index/ocx.sh/
         └── <hex>.json          dispatch object — filename is the object's own SHA-256
 ```
 
-A **published** source — `index.ocx.sh` or a mirror of it — copies these bytes verbatim from the hosted site; nothing is OCX-minted. Every object's filename is its own recomputed SHA-256, and every root document is verified on read against the digest its `c/index.json` catalog entry carries — a byte-tampered object fails to load rather than resolving silently ([CWE-345][cwe-345]). That is what makes "copy a mirror" work: `wget --mirror https://index.ocx.sh/` into `$OCX_HOME/index/ocx.sh/` produces a valid, *complete* copy that verifies against nothing but itself — object filenames and the catalog, no separate trust anchor.
+A **published** source — `index.ocx.sh` or a mirror of it — reaches this layout two ways, and
+"verbatim" means something different for each. A full copy (`wget --mirror`, `rsync`, a shipped
+tarball) reproduces the site byte-for-byte — every root document, every dispatch object, and
+`config.json` itself are exactly the bytes the site served. That is what makes "copy a mirror" work:
+`wget --mirror https://index.ocx.sh/` into `$OCX_HOME/index/ocx.sh/` produces a valid, *complete*
+copy that verifies against nothing but itself — object filenames and the catalog, no separate trust
+anchor.
+
+[`ocx index update`][cmd-index-update] instead grows the tree package by package, and only its
+dispatch objects are verbatim: each object's filename is its own recomputed SHA-256, decoded and
+digest-reverified but never re-encoded. Its root documents are assembled **locally** — the merge
+folds the tag(s) an invocation named, or every tag the site currently lists for a bare identifier,
+into whatever this machine already committed, then re-serializes the result. A tag-scoped
+`ocx index update cmake:3.28` therefore writes a root carrying that one tag, not the site's whole tag
+list — a valid *partial* copy in the same grammar, not a byte-for-byte one. This is also what makes
+the never-deletes rule below possible: a tag the site has since dropped survives locally because the
+local root was never a replacement for the site's, only ever a merge into it. Every dispatch object
+is verified on read against its own `o/` filename — a byte-tampered object fails to load rather than
+resolving silently ([CWE-345][cwe-345]). A root document is cross-checked against its `c/index.json`
+entry too, but that entry is a cached derivation rather than a trust anchor: a disagreement is
+repaired from the root on disk, not refused (see [Crash-safe updates](#local-crash-safety)).
+
+`config.json` follows the same split. A full copy of a site that already publishes one
+(`index.ocx.sh` does) carries it verbatim. An `ocx index update`-grown tree gets one from OCX itself:
+on the **first** successful update for a published source, OCX writes `{"format_version": 1}` if —
+and only if — nothing already exists at that path. Written locally, it is never rewritten afterward
+either — a wrong or stale `config.json` is repaired by deleting it and running `ocx index update`
+again, never by any command editing it in place. See
+[Serving a local index snapshot](#servable) for why this file existing, or not, matters.
 
 A **derived** source — any plain OCI registry, `ghcr.io` or `docker.io` or a private one — has no site to copy, so OCX writes the root document itself, in the same grammar:
 
@@ -112,7 +140,21 @@ A **later** catalog sync that finds the *remote* root digest has moved past the 
 
 **An update never deletes.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and entries the remote dropped are never removed.
 
-**Naming packages is the only mode. There is no whole-index sync, and that is deliberate.** A remote index floats by definition: packages appear, platforms get added to existing versions, tags move. A local copy is not a mirror of it — it is the set of snapshots you asked for, one deliberate `ocx index update <pkg>` at a time. "Sync everything" has no well-defined meaning against a partially materialized copy: it would either clone a floating remote (making the copy stop being a lock) or re-snapshot whatever subset happens to be present (an arbitrary set nobody chose).
+**Naming is the only mode, and there is no *implicit* whole-index sync — that is deliberate.** A
+remote index floats by definition: packages appear, platforms get added to existing versions, tags
+move. A local copy is not a mirror of it — it is the set of snapshots you asked for. Naming a package
+directly is one way to ask; [`ocx index sync <REGISTRY>`][cmd-index-sync] is the other —
+it reads that source's own catalog **at that instant** to choose the set, then does exactly the same
+per-package work as if each were named bare. Nothing else moves a pin: not a resolve, not a listing,
+not an update of a different package, and there is no spelling of "sync everything, kept in sync" —
+`index sync` is a single explicit read, not a standing subscription, and repeated runs still only
+ever add.
+
+"Sync everything, automatically" has no well-defined meaning against a partially materialized copy: it
+would either clone a floating remote (making the copy stop being a lock) or re-snapshot whatever
+subset happens to be present (an arbitrary set nobody chose). `index sync` sidesteps that by being
+a one-shot, operator-named act against one source's catalog, not a background sync — see
+[Serving a local index snapshot](#servable) for the case it exists to serve.
 
 Naming is also *who*: the index pins only packages the user named directly, so a [patch companion][user-patches-pins] — a package a descriptor names on the operator's behalf — pins in its own patch-tier state (`state/patch-companions/`) instead, and never as a local-index entry.
 
@@ -126,6 +168,123 @@ On a fresh machine, [`ocx index update`][cmd-index-update] does not need to run 
 
 Refreshing an already-cached tag or discovering every tag for a repository is still the job of [`ocx index update`][cmd-index-update]; the fallback only covers the specific tag being installed.
 
+## Serving a local index snapshot {#servable}
+
+A local index subtree — grown incrementally by [`ocx index update`][cmd-index-update], snapshotted in
+bulk by [`ocx index sync`][cmd-index-sync], or repaired by
+[`ocx index regenerate`][cmd-index-regenerate] — is not only a client-side cache. Once its
+[`config.json`](#local-layout) exists, it is a complete, self-describing copy of [the one wire
+format](#format) that any OCX client can read back: over HTTPS from any static file server, or
+straight off disk with no server at all. A curated corporate mirror is a pipeline of existing `ocx`
+commands, with no bespoke server and no `ocx-mirror` code required.
+
+### Why an OCX-grown tree could not be served before {#servable-defect}
+
+`config.json` is the format's version marker, and until it exists, serving a tree grown by
+[`ocx index update`][cmd-index-update] back to another OCX client silently failed: a `config.json`
+fetch that 404s made the client treat the whole source as **not an index** and stop before ever
+requesting a package's root document — a tree containing every package asked about reported
+not-found for all of them, with no diagnostic. `ocx index update` never wrote this file; only the
+hosted [`index.ocx.sh`][index-ocx-sh] renderer did, so a locally-grown tree never had one to begin
+with.
+
+Two changes close the gap:
+
+1. **`ocx index update` and `ocx index sync` now write `config.json`** — exactly
+   `{"format_version": 1}` — the first time either successfully refreshes a published source, if
+   nothing already exists at that path. Write-if-absent, never rewritten afterward: a copy of a site
+   that already publishes its own `config.json` is left untouched (see [Wire layout](#local-layout)).
+2. **An absent `config.json` now means "version 1", at every reader alike** — the local reader, the
+   HTTPS reader, and the [`file://`](#servable-consuming) reader. A tree with no `config.json` at
+   all — grown by an `ocx` predating this change, or hand-assembled — now resolves instead of failing
+   closed. A `config.json` that names an unsupported `format_version` is still a hard error
+   ([exit 65][exit-codes]), identically on every reader: only what *absence* means changed, never
+   what a served, unsupported version means.
+
+### Serving and consuming the tree {#servable-consuming}
+
+Once a source subtree holds every package needed — grown one package at a time, snapshotted in bulk,
+or repaired — copy it wherever it needs to go and point a consuming `ocx` at the copy two ways:
+
+- **Over HTTPS**, from any static file server — `python3 -m http.server`, nginx, an internal artifact
+  bucket. Configure [`[registries."<ns>"] index = "https://…"`][config-registries-index] as usual.
+- **Straight off disk, with no server at all**, via a `file://` base:
+
+  ```toml
+  [registries."corp"]
+  index = "file:///srv/ocx-index/corp"
+  ```
+
+  See [`file://` bases][config-registries-index-file] for the exact requirements — empty authority,
+  absolute path — and its read-only, bounded, symlink-contained guarantees. This is the shape an
+  air-gapped machine uses: no HTTP server, no TLS, and no network stack at all between the copy and
+  the consumer.
+
+Either way the served tree is read through the identical [ocx-index protocol](#public-index-pipeline)
+`index.ocx.sh` itself uses — object digests still verify, and `yanked` / `deprecated` status still
+surfaces (see [Status surfacing](#public-index-status)) — so a consuming `ocx` cannot distinguish a
+hand-run static file server, a `file://` checkout, and the hosted site.
+
+### The air-gap pipeline, end to end {#servable-air-gap}
+
+1. On a connected machine, snapshot the packages needed — named directly
+   (`ocx index update cmake ninja`), or in bulk from a source's own catalog
+   (`ocx index sync ocx.sh`).
+2. Copy `$OCX_HOME/index/<source>/` — the whole subtree, `config.json` included — onto media, into a
+   git repository, or onto a host that can reach the air-gapped network.
+3. On the air-gapped machine, point `ocx` at the copy:
+   [`[registries."<ns>"] index = "https://mirror.corp/…"`][config-registries-index] for a served
+   copy, or `index = "file:///…"` for one staged directly on disk.
+4. `ocx package install <pkg>:<tag>` resolves to the exact platform-manifest digest the connected
+   machine pinned — the copy is byte-identical to the source subtree, so nothing about resolution
+   differs from resolving against the original.
+5. That resolve only names a digest; the manifest and layer bytes behind it are content, and the
+   index never carries them (see [Dispatch objects only](#local-dispatch)). Fetching them still needs
+   a registry the air-gapped host can reach — the root document's `repository` field still points at
+   the upstream host, so route that traffic through a [`[mirrors]`][config-mirrors] **registry** role
+   pointed at a registry inside the air-gapped network, the same way any other disconnected OCI pull
+   is served. `ocx package install` then materializes the package from there.
+
+Nothing in this pipeline is `ocx-mirror`-specific. It is existing `ocx` commands, a copy step, and,
+optionally, a static file server — the index half of an air-gapped install; step 5 is the registry
+half every disconnected OCI setup already needs.
+
+### Repairing drift with `regenerate` {#servable-regenerate}
+
+`c/index.json` is derived data — every entry restates a digest the root document beside it already
+carries — and every writer except one only ever *adds* to it (see [Crash-safe updates](#local-crash-safety)).
+That leaves one drift nothing else repairs: an entry naming a package whose root document is gone,
+deleted by hand or pruned by an external tool. [`ocx index regenerate <REGISTRY>`][cmd-index-regenerate]
+re-derives the whole catalog from the `p/` tree on disk and replaces it wholesale — the one operation
+that clears such an entry. It never contacts a source and moves no pin, so [`--frozen`][arg-frozen]
+and [`--offline`][arg-offline] both permit it: [`ocx index update`][cmd-index-update] and
+[`ocx index sync`][cmd-index-sync] are the commands both flags refuse; `regenerate` is the only one
+whose *purpose* is to write, rewriting the
+catalog deliberately; [`catalog`][cmd-index-catalog] and [`list`][cmd-index-list] are permitted
+because they read the local copy — though `list` can still trigger the same read-path self-heal
+described below on an already-drifted tree, which is a write neither flag gates. It never writes
+`config.json` either — `name_segments` is an operator declaration no tree can be read for, so
+guessing one while repairing a foreign tree would be wrong.
+
+::: warning `regenerate` does not follow symlinks under `p/`
+Because the derivation walks the filesystem and the catalog it writes replaces the previous one
+**wholesale**, a symlink under `p/` is not a missing entry — it is silent removal from
+`c/index.json`. A symlinked root **document** is skipped by the walk. A symlinked **directory** is
+never queued at all, which takes every root beneath it with it in one step — a whole namespace or
+package tree can vanish from the catalog in a single `regenerate` run. The packages still resolve by
+tag, since tag resolution reads root documents directly and never through the catalog, but they
+disappear from [`ocx index catalog`][cmd-index-catalog], from [`ocx index sync`][cmd-index-sync] enumeration elsewhere,
+and from anything else that reads `c/index.json`. If a served tree deduplicates a shared package
+across locations with symlinks, `regenerate` needs the real files underneath, not links to them —
+hardlinks are unaffected, since a hard-linked file *is* a regular file to the walk.
+
+The removal is not always permanent: on a tree this machine also *resolves* — not merely serves — a
+resolve's own catalog self-heal re-adds a dropped entry the next time the package is resolved, since
+the root read behind it follows symlinks directly and the catalog is only ever a cache of what roots
+are on disk. It sticks precisely for the case this warning is written for: a tree that is served and
+never locally resolved.
+:::
+
 ## Active Index {#active}
 
 Every command that resolves a package identifier — [`ocx package install`][cmd-package-install], [`ocx package which`][cmd-which], [`ocx package exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two flags change which index is used:
@@ -136,7 +295,18 @@ Every command that resolves a package identifier — [`ocx package install`][cmd
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local index | Never |
 
-**`--remote`** forces tag and catalog lookups to query the registry directly for a single command. The local index is **not** updated. Layer data fetched under `--remote` still writes through to the [package store][in-depth-storage-packages], so the command populates that cache while bypassing the index. Use it for a one-off check — seeing currently available tags, or resolving the latest digest — without committing the tag resolution result locally.
+**`--remote`** forces tag and catalog lookups to query the registry directly for a single command,
+and the two shapes that can take it differ in what happens to the local index. A **query**
+([`index list --remote`](#index-list), [`index catalog --remote`](#index-catalog),
+[`package info --remote`][cmd-package-info]) reads the registry and reports — the local index is
+**not** updated. A **resolve** (`package install --remote`, `package exec --remote`, and similar)
+still writes, despite the flag's name: it re-fetches the tag it resolved and rewrites the local copy
+for that one tag, exactly like an [`ocx index update`][cmd-index-update] scoped to it (see
+[Two-hop fetch and caching](#public-index-caching)) — `--remote` only skips the *local-first* check,
+not the write. Layer data fetched under either shape still writes through to the
+[package store][in-depth-storage-packages]. Use a query for a one-off check without touching the
+index; a `--remote` resolve is a way to force-refresh one tag without typing
+`ocx index update <pkg>:<tag>` first.
 
 **`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that the current index and package store are self-sufficient before a build in a restricted or air-gapped environment.
 
@@ -204,6 +374,8 @@ Deciding on the served root rather than on the declaration is what keeps `name_s
 
 The field is optional and its absence means "serves every name". A private index that publishes no `name_segments` stays authoritative for every reference in its namespace, flat names included, so its refusals keep the fail-loud behaviour below unchanged. If the index cannot be reached, or serves a malformed or unrecognised `config.json`, OCX keeps it authoritative rather than assuming it serves nothing; an index outage must not silently downgrade a namespace to plain OCI.
 
+`config.json` itself being absent is the same case, not a different one: it is read as "no constraint declared", exactly like a `config.json` present but without `name_segments` (see [Serving a local index snapshot](#servable) for what this replaced — a missing `config.json` used to make the whole source unreadable rather than merely unconstrained).
+
 ::: warning An index that breaks fails loud, not silent
 A namespace that names an index in [`[registries.<name>]`][config-registries] — `ocx.sh` by default — has that source as its authority for every name it [can hold](#public-index-declared-names): a yanked tag, a tampered index object, an unrecognized `config.json` version, or the endpoint being unreachable all surface as a hard error, never a silent drop to a registry that happens to serve a repository under the same name. So an `index.ocx.sh` outage blocks `ocx.sh/…` resolution rather than quietly resolving it somewhere else. Namespaces on other registries are untouched.
 
@@ -229,7 +401,7 @@ $OCX_HOME/index/ocx.sh/
 ├── config.json
 ├── c/index.json
 └── p/kitware/
-    ├── cmake.json              root doc — copied verbatim from the hosted site
+    ├── cmake.json              root doc — assembled locally from snapshotted tags, not a verbatim copy
     └── cmake/o/sha256/
         └── <index-digest>.json   OCI image index, verbatim (immutable)
 ```
@@ -280,15 +452,18 @@ Canonical tags are a pure registry-side safety net scoped to `ocx package push` 
 
 ## The `update` family {#update-family}
 
-Three OCX commands share the `update` verb. Each refreshes exactly one record, and confusing them means refreshing the wrong one.
+Four OCX commands share the `update` verb. Each refreshes exactly one record, and confusing them means refreshing the wrong one.
 
 | Command | Refreshes |
 |---|---|
 | [`ocx index update`][cmd-index-update] | The local index at [`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`][arg-index] |
 | [`ocx self update`][cmd-self-update] | The managed ocx installation itself |
+| [`ocx config update`][cmd-config-update] | The managed-config snapshot |
 | [`ocx update`][cmd-update] | A project's `ocx.lock` |
 
-`ocx update` never writes to the local index — `ocx.lock` is its only canonical record. Re-resolving a project's pinned tools does not change what `cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
+A fifth command belongs to the family without carrying the verb: [`ocx index sync`][cmd-index-sync] refreshes the same record `ocx index update` does, over a whole registry's catalog rather than a named list of packages.
+
+`ocx update` never writes a **tag pointer** into the local index — `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`, content-addressed and pinning nothing, so that write moves no tag. Re-resolving a project's pinned tools therefore does not change what `cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
 
 ## See Also
 
@@ -296,6 +471,8 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 - [Storage][in-depth-storage] — the local index's home relative to the other stores under `$OCX_HOME`
 - [Versioning][in-depth-versioning] — tag mutability, locking by digest, `_` build suffix
 - [Configuration][in-depth-configuration] — `[registries]` and `[mirrors]` config-driven defaults
+- [`file://` bases][config-registries-index-file] — the exact requirements for consuming a
+  [servable snapshot](#servable) with no server at all
 
 <!-- external -->
 [oci-dist-tag]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
@@ -318,6 +495,8 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 [cmd-which]: ../reference/command-line.md#which
 [cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-index-update]: ../reference/command-line.md#index-update
+[cmd-index-sync]: ../reference/command-line.md#index-sync
+[cmd-index-regenerate]: ../reference/command-line.md#index-regenerate
 [cmd-index-catalog]: ../reference/command-line.md#index-catalog
 [cmd-index-list]: ../reference/command-line.md#index-list
 [cmd-package-push]: ../reference/command-line.md#package-push
@@ -327,11 +506,14 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 [cmd-config-push]: ../reference/command-line.md#config-push
 [cmd-package-info]: ../reference/command-line.md#package-info
 [cmd-self-update]: ../reference/command-line.md#self-update
+[cmd-config-update]: ../reference/command-line.md#config-update
 [cmd-update]: ../reference/command-line.md#update
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [arg-remote]: ../reference/command-line.md#arg-remote
 [arg-offline]: ../reference/command-line.md#arg-offline
+[arg-frozen]: ../reference/command-line.md#arg-frozen
 [arg-index]: ../reference/command-line.md#arg-index
+[exit-codes]: ../reference/command-line.md#exit-codes
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
@@ -342,6 +524,7 @@ Three OCX commands share the `update` verb. Each refreshes exactly one record, a
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
 [config-registries]: ../reference/configuration.md#keys-registries
 [config-registries-index]: ../reference/configuration.md#keys-registries-index
+[config-registries-index-file]: ../reference/configuration.md#keys-registries-index-file
 [config-precedence]: ../reference/configuration.md#precedence
 [config-managed]: ../reference/configuration.md#keys-managed
 [reference-platforms-compatibility]: ../reference/platforms.md#compatibility

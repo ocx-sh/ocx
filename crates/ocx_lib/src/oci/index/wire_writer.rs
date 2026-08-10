@@ -1,20 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Canonical wire-format serializer for the ocx-index root document.
+//! Canonical wire-format serializer for every ocx-index document OCX writes.
 //!
-//! **Byte authority: `ocx-sh/index` `bot/CONTRACTS.md` §14** ("Root serializer —
-//! client-facing byte-exact spec"). This module is the Rust port of that repo's
-//! `validate_entry.py::serialize_package_root`; its output must match the Python
-//! reference byte-for-byte, proven by the `index_wire_conformance` integration
-//! test against the vendored golden fixtures
-//! (`crates/ocx_lib/tests/fixtures/index_wire/root/`).
+//! **Byte authority: `ocx-sh/index`** — `bot/CONTRACTS.md` §14 ("Root
+//! serializer — client-facing byte-exact spec") for the root, and `render.py`
+//! for the other two. This module is the Rust port of that repo's
+//! `validate_entry.py::serialize_package_root`; its output must match the
+//! Python reference byte-for-byte.
 //!
-//! One document is ever serialized by OCX: the human-diffable
-//! `p/<ns>/<pkg>.json` root ([`serialize_root`]). What a tag points at is a
-//! registry's own OCI image index, stored byte-for-byte as it was served — the
-//! index writes no object shapes of its own, so there is nothing else here to
-//! emit (`adr_oci_index_only_dispatch.md` D1).
+//! That match is **proven for the root only**: the `index_wire_conformance`
+//! integration test drives the vendored golden vectors under
+//! `crates/ocx_lib/tests/fixtures/index_wire/root/` (plus the CPython escape
+//! truth table under `.../cpython/`) through [`serialize_root`]. Cross-language
+//! parity fixtures for the catalog and the config are **pending in WP7
+//! (C-025)**. Until they land, those two serializers are pinned only by the
+//! hand-written expectations in this module's tests — literals read off
+//! `render.py` by a human, not bytes any Python run emitted.
+//!
+//! Three documents are serialized by OCX, all through the one formatter below
+//! (`adr_servable_index_snapshot.md` decision F / C-025):
+//!
+//! - the human-diffable `p/<ns>/<pkg>.json` root ([`serialize_root`]),
+//! - the `c/index.json` catalog ([`serialize_catalog`]), and
+//! - `config.json` ([`serialize_config`]).
+//!
+//! What a tag points *at* is not among them: it is a registry's own OCI image
+//! index, stored byte-for-byte as it was served — the index writes no object
+//! shapes of its own (`adr_oci_index_only_dispatch.md` D1).
 //!
 //! The form is Python `json.dumps(data, indent=2, sort_keys=False,
 //! ensure_ascii=True)` plus a single trailing `\n`. Everything structural about
@@ -30,6 +43,8 @@ use std::io;
 use serde::Serialize;
 use serde_json::ser::{CharEscape, Formatter, PrettyFormatter};
 
+use super::wire::{CatalogDocument, IndexFormatConfig};
+
 /// Byte-exact package-root serialization (CONTRACTS §14).
 ///
 /// The input is an **order-preserving** [`serde_json::Value`] — parse the committed
@@ -42,10 +57,69 @@ use serde_json::ser::{CharEscape, Formatter, PrettyFormatter};
 /// Output: 2-space indent, insertion-order fields, `\uXXXX` for every non-ASCII
 /// scalar, a single trailing `\n`. Empty `{}` / `[]` emit inline.
 pub fn serialize_root(root: &serde_json::Value) -> Vec<u8> {
+    python_json(root)
+}
+
+/// Byte-exact `c/index.json` serialization (`render.py:309`).
+///
+/// Output: `json.dumps(indent=2, sort_keys=False, ensure_ascii=True)` form plus
+/// a single trailing `\n` — the same [`PythonJson`] emitter [`serialize_root`]
+/// uses, not a second one.
+///
+/// This will replace `serde_json::to_vec_pretty` at the one catalog writer,
+/// `CatalogTransaction::commit` (`index_store.rs:1029`), when WP5 switches it
+/// over; `to_vec_pretty`'s output diverges from the Python renderer by the
+/// trailing newline — one byte, but a full-file diff on every render of a tree
+/// the two implementations share. `ensure_ascii` is
+/// vacuous here (`PACKAGE_ID_RE` in `validate_entry.py:70-72` restricts catalog
+/// keys to `[a-z0-9]` plus separators, so a non-ASCII key is unreachable
+/// upstream); it comes free with the shared formatter and still matters for
+/// roots (C-025).
+///
+/// [`CatalogDocument`]'s field order — `format_version` then `packages` — is
+/// the emitted order: `sort_keys=False` on both sides.
+pub fn serialize_catalog(catalog: &CatalogDocument) -> Vec<u8> {
+    python_json(catalog)
+}
+
+/// Byte-exact `config.json` serialization (`render.py:334-338`).
+///
+/// Output: `json.dumps(indent=2, sort_keys=False, ensure_ascii=True)` form plus
+/// a single trailing `\n`, through the same [`PythonJson`] emitter as the other
+/// two documents. `config.json` has no string field at all, so `ensure_ascii`
+/// is vacuous here.
+///
+/// The two producers agree on **form** and differ on **content**. Form: the
+/// two-space indent, `": "`, `","`, `sort_keys=False` declaration order, and
+/// the one trailing newline are the same on both sides. Content: `render.py`
+/// emits `name_segments` from a module constant (`NAME_SEGMENTS = 2`,
+/// `core/render.py:46`) **unconditionally**, so the reference never renders
+/// `{"format_version": 1}` — while that is exactly what OCX writes, because
+/// `name_segments` is an operator declaration OCX cannot derive from a tree and
+/// omitting it is honest where guessing `2` would not be. That omission is
+/// [`IndexFormatConfig::name_segments`]'s `skip_serializing_if`; [`IndexFormatConfig`]
+/// carries no OCX-only field either way.
+///
+/// No churn follows from the difference: C-023 writes this config only when the
+/// file is **absent**, and `regenerate` never writes one at all, so the two
+/// producers never write the same file.
+pub fn serialize_config(config: &IndexFormatConfig) -> Vec<u8> {
+    python_json(config)
+}
+
+/// The one emitter behind all three public serializers.
+///
+/// Generic over `T: Serialize` rather than taking [`serde_json::Value`]: the
+/// catalog and config are modelled types, and routing them through a `Value`
+/// would re-sort or re-shape what the wire pins. Roots stay a `Value` because
+/// they carry human-governed fields OCX does not model and must ride through
+/// verbatim.
+fn python_json<T: Serialize>(document: &T) -> Vec<u8> {
     let mut out = Vec::new();
     let mut serializer = serde_json::Serializer::with_formatter(&mut out, PythonJson::new());
-    root.serialize(&mut serializer)
-        .expect("serializing a Value into a Vec cannot fail");
+    document
+        .serialize(&mut serializer)
+        .expect("serializing an index document into a Vec cannot fail");
     out.push(b'\n');
     out
 }
@@ -144,7 +218,142 @@ impl Formatter for PythonJson<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::num::NonZeroU32;
+
     use super::*;
+
+    // ── C-025 · one formatter, three documents ───────────────────────────────
+    //
+    // Every assertion below is on the emitted **bytes**. Parsing the output and
+    // comparing structures cannot see a trailing newline, an indent width, or a
+    // field order — which is the entire divergence this contract closes.
+
+    /// C-001/C-025 — `skip_serializing_if` omits an absent `name_segments`
+    /// entirely, so the config the update path will write is exactly
+    /// `{"format_version": 1}` rather than a superset of it carrying a `null`.
+    /// This is a hand-written expectation, not cross-language parity: the
+    /// Python renderer never emits these bytes (it always writes
+    /// `name_segments`) — see [`serialize_config`] for why the two producers
+    /// differ on content and never collide.
+    #[test]
+    fn config_omits_an_absent_name_segments() {
+        let bytes = serialize_config(&IndexFormatConfig {
+            format_version: 1,
+            name_segments: None,
+        });
+        assert_eq!(
+            String::from_utf8(bytes).expect("config.json is ASCII"),
+            "{\n  \"format_version\": 1\n}\n"
+        );
+    }
+
+    /// C-001 — declaration order is wire order (`sort_keys=False` on both
+    /// sides, `render.py:334-338`). Asserted on the bytes: a parsed comparison
+    /// discards the very ordering the contract pins, so it would be vacuous.
+    #[test]
+    fn config_emits_format_version_before_name_segments() {
+        let bytes = serialize_config(&IndexFormatConfig {
+            format_version: 1,
+            name_segments: NonZeroU32::new(2),
+        });
+        assert_eq!(
+            String::from_utf8(bytes).expect("config.json is ASCII"),
+            "{\n  \"format_version\": 1,\n  \"name_segments\": 2\n}\n"
+        );
+    }
+
+    /// C-025 — `c/index.json` in Python `indent=2` form: two-space indent,
+    /// `": "` between key and value, `","` between items, one trailing newline.
+    /// `serde_json::to_vec_pretty` — the emitter being replaced — produces this
+    /// layout without the final byte.
+    #[test]
+    fn catalog_emits_the_python_indent_two_form() {
+        let packages = BTreeMap::from([
+            ("kitware/cmake".to_string(), "sha256:1111".to_string()),
+            ("stable/tool".to_string(), "sha256:2222".to_string()),
+        ]);
+        let bytes = serialize_catalog(&CatalogDocument::new(packages));
+        assert_eq!(
+            String::from_utf8(bytes).expect("a catalog of ASCII package ids is ASCII"),
+            "{\n  \"format_version\": 1,\n  \"packages\": {\n    \"kitware/cmake\": \"sha256:1111\",\n    \"stable/tool\": \"sha256:2222\"\n  }\n}\n"
+        );
+    }
+
+    /// C-025 — an index with nothing published yet still emits the envelope,
+    /// with the empty map inline (`{}`), exactly as `json.dumps` renders an
+    /// empty container under `indent=2`.
+    #[test]
+    fn catalog_with_no_packages_emits_an_inline_empty_object() {
+        let bytes = serialize_catalog(&CatalogDocument::new(BTreeMap::new()));
+        assert_eq!(
+            String::from_utf8(bytes).expect("an empty catalog is ASCII"),
+            "{\n  \"format_version\": 1,\n  \"packages\": {}\n}\n"
+        );
+    }
+
+    /// C-025 — exactly one trailing `\n` on every document. The catalog's
+    /// missing newline is the whole divergence being closed; a second one would
+    /// be just as wrong, and `\n\n` is what a naive `push(b'\n')` on top of an
+    /// already-terminated emitter produces.
+    #[test]
+    fn every_document_ends_with_exactly_one_newline() {
+        let documents: [(&str, Vec<u8>); 3] = [
+            ("root", serialize_root(&serde_json::json!({ "format_version": 1 }))),
+            ("catalog", serialize_catalog(&CatalogDocument::new(BTreeMap::new()))),
+            (
+                "config",
+                serialize_config(&IndexFormatConfig {
+                    format_version: 1,
+                    name_segments: None,
+                }),
+            ),
+        ];
+        for (document, bytes) in documents {
+            let text = String::from_utf8(bytes).expect("ensure_ascii output is ASCII");
+            assert!(
+                text.ends_with('\n'),
+                "{document} must end with a trailing newline, got {text:?}"
+            );
+            assert!(
+                !text.ends_with("\n\n"),
+                "{document} must end with exactly one newline, got {text:?}"
+            );
+        }
+    }
+
+    /// C-025 — the catalog and the root emit the same bytes for the same
+    /// document.
+    ///
+    /// Both halves assert against one literal, so what this genuinely catches
+    /// is either emitter drifting off the Python form — plus the root
+    /// characterization, that generalizing the private body did not move
+    /// `serialize_root`'s bytes. It does **not** observe that the two share one
+    /// formatter: a byte-identical second emitter would pass it. That is a
+    /// structural property, and the only thing that pins it is the one-line
+    /// body of [`serialize_catalog`].
+    #[test]
+    fn catalog_and_root_emit_the_same_bytes() {
+        let catalog = CatalogDocument::new(BTreeMap::from([(
+            "kitware/cmake".to_string(),
+            "sha256:1111".to_string(),
+        )]));
+        let expected =
+            "{\n  \"format_version\": 1,\n  \"packages\": {\n    \"kitware/cmake\": \"sha256:1111\"\n  }\n}\n";
+
+        let through_root = serialize_root(&serde_json::to_value(&catalog).expect("a catalog is a JSON object"));
+        assert_eq!(
+            String::from_utf8(through_root).expect("the root emitter emits ASCII"),
+            expected,
+            "serialize_root's bytes must be unchanged"
+        );
+
+        let through_catalog = serialize_catalog(&catalog);
+        assert_eq!(
+            String::from_utf8(through_catalog).expect("the catalog emitter emits ASCII"),
+            expected
+        );
+    }
 
     // ── ensure_ascii truth table (via the public entry point) ────────────────
 

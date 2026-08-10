@@ -9,10 +9,19 @@ certify whatever ocx does, which is the failure mode the corpus exists to preven
 ## Layout
 
 - `root/*.json` — `PackageRoot` vectors in the pretty-printed root form (2-space
-  indent, insertion-order fields, one trailing newline). The root document is the
-  only shape OCX serializes, so these are asserted **byte-exact**:
+  indent, insertion-order fields, one trailing newline), asserted **byte-exact**:
   `index_wire_conformance.rs::root_fixtures_round_trip_byte_exact` re-serializes
   each vector through `oci::index::serialize_root` and compares bytes.
+- `catalog/normal.json`, `config/normal.json` — `c/index.json` and `config.json`
+  vectors, one case each (C-025/S-017). All 8 `render/<case>` cases upstream emit
+  byte-identical `config.json` and structurally identical `c/index.json` (same
+  shape, differing only in the one packages key/digest), so a single case proves
+  the shared `PythonJson` formatter for both documents; more would repeat the same
+  assertion. No upstream `render/<case>` renders a multi-package or an empty
+  catalog, so those shapes are pinned only by `wire_writer.rs`'s own unit tests,
+  not by cross-language parity. Asserted byte-exact by `index_wire_conformance.rs`'s
+  `catalog_fixtures_round_trip_byte_exact` (`oci::index::serialize_catalog`) and
+  `config_fixtures_round_trip_byte_exact` (`oci::index::serialize_config`).
 - `tag_verdicts.json` — `{tag, reserved, why}` rows for the reserved-tag rule
   (`adr_oci_index_only_dispatch.md` D7). `tag_verdicts.rs` drives every row
   through both `Tag::is_reserved` and `Tag::is_reserved_str`. Reservation spans
@@ -52,14 +61,6 @@ It is not vendored — read it at the pinned commit in `ocx-sh/index`.
 ## Provenance & re-sync
 
 - `SOURCE_COMMIT` pins the `ocx-sh/index` commit these bytes came from.
-- **Pending re-pin:** `root/with-variants.json` was vendored ahead of its
-  upstream merge (the `variants` root field, `ocx-sh/index` PR). It is
-  therefore the one vector `SOURCE_COMMIT` does *not* yet name. Re-run
-  `test/scripts/sync_index_conformance.sh --ref main` once that PR lands, which
-  re-pins the whole tree; until then a bare re-run will report it as drift.
-  Announce must not write the `variants` field to a real index before that
-  merge either — the index CI's byte gate rejects a field its own serializer
-  does not know.
 - `test/scripts/sync_index_conformance.sh` re-vendors: a bare re-run verifies
   against the pin, `--ref <ref>` vendors and re-pins, `--check` compares the
   vendored tree against `ocx-sh/index@main` without writing to it. It prints the
