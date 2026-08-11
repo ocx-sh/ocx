@@ -177,3 +177,27 @@ research-axes:
   something directly observed seconds earlier. Make the failure loud — guard
   every watcher with an explicit failure branch rather than inferring success
   from empty output.
+- **PARKED (owner decision, 2026-08-11): `/hex-plan high` for ocx-sh/ocx#183**
+  (zip layer media type). Discover + Research complete (7 workers); Design never
+  started and no plan artifact or ADR exists. Research rejected the issue's stated
+  digest-identity rationale, so #183 is parked pending a vendor-checksum metadata
+  field rather than reframed as ordinary archive-format support. Do not resume it
+  as a media-type feature — a resume starts from the checksum field.
+  - Research persisted: `.claude/artifacts/research_zip_layer_oci_precedent.md`,
+    `research_zip_artifact_classes.md`, `research_zip_streaming_constraints.md`.
+  - Key constraints for whoever resumes: media-type legality is settled and cheap
+    (artifact manifests impose no layer-format rule; Sylabs/WASM precedent).
+    Streaming zip is disqualified — buffer→verify→parse via central directory
+    only, PLUS local-vs-central cross-validation, because CVE-2025-54368 (uv)
+    shows one digest can parse two ways. Port `read_entry_capped` from
+    ocx-mirror `crates/ocx_python/src/repack.rs` for bomb caps. Zip cannot carry
+    the exec bit reliably (protobuf#10301) so a post-extract mode policy is
+    mandatory. `adr_layer_layout_config.md` binds: existing tar publishes must
+    stay byte-identical.
+  - Related landed work: "package test refuses a layer archive it cannot name a
+    media type for" made unrecognized layer extensions a hard error in
+    `pull_local::stage_layers`; its regression test pins "zip is refused" and
+    must be deliberately flipped if the decision is ever revisited.
+  - Note for next `/hex-init`: `worker-researcher` has no Write tool, so
+    "persist a research artifact" instructions cannot be followed by that role —
+    the orchestrator must persist, or the role needs Write.
