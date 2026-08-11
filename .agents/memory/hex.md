@@ -76,3 +76,81 @@ research-axes:
 - **Note for the next `/hex-init`:** a worker went idle without delivering its report and
   had to be pulled with `SendMessage`; treat "idle" as "not reported" and pull, do not
   assume completion.
+- Plan `.claude/state/plans/plan_package_integrations.md` — package
+  `integrations`, [ocx-sh/ocx#221](https://github.com/ocx-sh/ocx/issues/221),
+  branch `soraka`. **Complete, awaiting merge.** Two review rounds
+  (`/swarm-review` max, then `/hex-review` high) plus two fix rounds; Codex `sol`
+  returned `approve, no material findings` on the final state. `task verify`
+  exit 0 (2011 acceptance). Deferred, filed as
+  [ocx-sh/ocx#306](https://github.com/ocx-sh/ocx/issues/306): the patch overlay
+  re-emits a shared dependency's *env* entries, because base roots and companions
+  are composed by separate `compose` passes that share no `seen` set. The
+  `integrations` carrier was fixed surgically (merge-site dedup keyed on the
+  **stripped** identifier); unifying the two passes needs its own ADR.
+- **The single highest-value review lesson of this feature:** the cross-model
+  (Codex) pass found the one defect the entire 8-worker Claude panel missed — a
+  duplicate-row regression the fix round had just introduced. Twice now the
+  adversary has produced the run's most valuable finding. Never treat it as the
+  optional last layer.
+- **Corollary, learned the same run:** a reviewer that "confirms" a finding is
+  not evidence. Round 2's architect asserted D16 ratified the shipped wire key;
+  it ratified the opposite, and only opening the ADR settled it. Round 1's spec
+  reviewer marked the merge-site dedup CLOSED while the architect found it broken
+  on the advisory-tag axis. Open the file before relaying a claim either way.
+- **Dead gate (repo finding, 2026-08-09, unfixed):**
+  `.claude/tests/test_ai_config.py::TestPlanStatusBlock` filters candidates to
+  git-tracked files, but `.gitignore:39` ignores all of `.claude/state/` — so
+  the set is always empty and its three real assertions skip in every worktree,
+  reporting "fresh checkout where no plans exist", a cause never observed.
+  29 plan files on disk, 0 tracked. Plan Status blocks are effectively
+  hand-verified. Out of scope when found; owner notified.
+- **Protocol drift:** `meta-ai-config.md` "Plan Status Protocol" enumerates only
+  `/swarm-*` values for the `Step` field; hex plans write `/hex-plan → …`.
+  Accurate but outside the enumeration `/next` and `/finalize` read.
+- **Perspective gap for the next `/hex-init` — reproduced across two rounds:**
+  7 review-shaped workers produced 1 full report (researcher) and 1 partial
+  (the Codex adversary, which nonetheless found the single most valuable
+  defect of the run). reviewer:spec / reviewer:security / architect returned
+  nothing in round 1, and re-spawning security + architect in round 2 with
+  explicit "your final message IS the deliverable" briefs reproduced the
+  failure exactly. Two SendMessage pulls each changed nothing.
+  **The pattern:** workers whose output is a *file* deliver through the file
+  (all 5 Discover explorers delivered; the ADR author wrote 1287 lines but
+  never returned a summary); workers whose only output is a *report* go idle.
+  Practical consequence for an orchestrator: verify load-bearing claims
+  yourself and treat review-panel delivery as unreliable — in this run the
+  necessity of the constitution deviation, the DoS bound, the traceability
+  coverage and a CWE-451 finding in C-005 all had to be established directly.
+  **FIX CONFIRMED (2026-08-09, execute phase):** give the reviewer a *file* as
+  its deliverable — "write findings to `<path>`, append each the moment you
+  confirm it, reply with just the path and a one-line verdict". An 8th
+  review-shaped worker, same opus model and same task as one that had just
+  idled twice, produced a full 16-contract sweep this way: 1 blocking gap and
+  4 notes, including five acceptance scenarios that were Unchecked Green
+  because the stub threads `Vec::new()` instead of `unimplemented!()`. The
+  incremental-append instruction is load-bearing — it makes a partial run still
+  worth something. Make this the default shape for every review spawn.
+- **Session-outage recovery (2026-08-09, proven):** a killed session loses every
+  subagent *process* but keeps their *file edits* — the working tree is the
+  durable artifact. Recover by re-running the phase gate and reading what
+  actually compiled, never by re-spawning the original brief blind: the stub
+  worker died ~90% done, and a blind re-spawn would have redone finished work.
+  Checkpoint the instant a gate goes green (`task checkpoint`); this run went
+  through two outages with the stub uncommitted.
+- **The command proxy fabricates line numbers and collapses grep output.**
+  Observed repeatedly this run: `grep -n` returning `"N matches in 1F"` with
+  mangled bodies instead of matching lines, and — worse — an `awk` call
+  reporting a match at line 2092 of a file that is 1767 lines long. A
+  verification step that trusts that output is worse than no verification,
+  because it reads as evidence. When a line number or match count is
+  load-bearing, cross-check it (`wc -l`, a second tool, or the Read tool,
+  which is not proxied) before acting on it.
+- **`git grep` is blind to untracked files.** During a stub phase the newest
+  file is untracked by definition, so `git grep -c '<symbol>'` reports zero and
+  reads as "the worker did nothing". Cost one false accusation and one wasted
+  worker spawn here. Use plain `grep -rn` to verify anything a stub phase
+  created, and prefer the compiler's own output over a text search.
+- Displaced pointer: `.claude/state/current_plan.md` previously named
+  `plan_testing_hardening.md` (branch `testing-hardening`, phase 4 complete,
+  awaiting PR #287 which was closed unmerged — its fixes are unlanded, so that
+  plan is stale-but-unfinished, not done).

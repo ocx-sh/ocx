@@ -138,4 +138,17 @@ Status values, category tags, bounded sets = enums with `Display` and `Serialize
 
 `toolchain_env.rs` never reads `ocx.toml` directly — it goes through the project resolution path via `Context`.
 
+## Attribution Envelope Shapes — Two Names for the Same Concept
+
+`EnvVars` (`api/data/env.rs`) and `SurfaceOut` (`api/data/package_inspect.rs`) both carry a
+`integrations` array attributing declared vendor-namespaced blocks to the package that declared
+them — but they use **two different wire shapes** for it, and a new consumer must not conflate them:
+
+- **Flat envelope** (`ocx env` / `ocx package env`): `IntegrationAttribution { namespace, package, payload }` — the payload-carrying sibling of `BinaryAttribution`. `payload` is the interpolated `serde_json::Value` payload; key order is fixed (`namespace`, `package`, `payload`).
+- **Closure envelope** (`ocx package inspect --closure`): `SurfaceOut.integrations: Vec<NamespaceAttribution>` — a dedicated type, NOT a reuse of `BinaryAttribution`. `NamespaceAttribution { namespace, package }` is the payload-free sibling of `IntegrationAttribution`: same `namespace` key, same `Option<String>` `package`, no `payload` — a closure node is not installed and `${installPath}` has no concrete payload yet. `binaries` and `entrypoints` on the SAME `SurfaceOut` keep `BinaryAttribution` and its `name` key — that split is deliberate: `name`/`BinaryAttribution` is a PATH-resolving claim, `namespace`/`NamespaceAttribution` is a keyed payload declaration, and keeping the two shapes apart stops a consumer's `select(.namespace=="…")` filter from ever matching a binary row by accident.
+
+`from_pairs` projects the admitted-set pairs into each shape (`IntegrationAttribution::from_pairs` /
+`NamespaceAttribution::from_pairs`) — the same pattern the `binaries`/`entrypoints` arrays
+already follow. See `adr_package_integrations.md` C-014/C-016.
+
 The `app/project_context.rs` module provides `load_project_with_lock` — the shared prologue consumed by `pull.rs`, `run.rs`, and `env.rs`.
