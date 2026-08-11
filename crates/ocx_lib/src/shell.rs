@@ -1512,6 +1512,11 @@ mod tests {
     // and a hand-written expectation could drift from the primitive.
 
     /// `(ambient, value, separator)` triples every live list test drives.
+    ///
+    /// Gated with the tests that read it: every `live_*` consumer is
+    /// `#[cfg(unix)]`, so on Windows this and `folded` below would be dead
+    /// items and `-D warnings` turns `dead_code` into a build error.
+    #[cfg(unix)]
     const LIST_CASES: &[(&str, &str, &str)] = &[
         ("", "-ea", " "),           // empty ambient — no leading separator
         ("-Xmx1g", "-ea", " "),     // plain append
@@ -1552,6 +1557,7 @@ mod tests {
         ("x", "a\rb", " "),
     ];
 
+    #[cfg(unix)]
     fn folded(existing: &str, value: &str, separator: &str) -> String {
         crate::utility::list::append_unique(existing, value, separator)
     }
