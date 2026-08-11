@@ -109,15 +109,35 @@ impl ProgressManager {
         PARENT_BAR.try_with(|p| p.clone()).ok()
     }
 
-    /// Places `bar` in the `MultiProgress`. When a parent scope is
-    /// active the bar is inserted directly after its parent so it renders
-    /// as a child; otherwise it is appended top-level. Returns whether
-    /// the bar is nested (for indent styling). A disabled manager
-    /// detaches the bar so updates are cheap no-ops.
+    /// Places `bar` in the `MultiProgress` and reports whether it is nested
+    /// (for indent styling). A disabled manager detaches the bar so updates
+    /// are cheap no-ops.
+    ///
+    /// Nesting is **styling only**: the bar is always appended, never
+    /// positioned relative to its parent. `MultiProgress::insert_after`
+    /// unwraps `parent.index()`, which is `None` whenever the parent is not a
+    /// member of this `MultiProgress`. Two real productions:
+    ///
+    /// - [`inherit_scope`] carries the parent across a `tokio::spawn`, so the
+    ///   parent's [`Guard`] can finish — dropping it from the `MultiProgress` —
+    ///   before the spawned task attaches its child. Observed as an abort in
+    ///   `ocx package exec --lazy-mode always` on a real terminal.
+    /// - A [`disabled`](Self::disabled) manager detaches its bars, so its
+    ///   spinner is the active parent while an enabled manager attaches the
+    ///   child. `materialize_deferred` swaps managers exactly that way.
+    ///
+    /// A membership pre-check cannot close it: `index()` is private to
+    /// `indicatif`, and the public `is_hidden`/`is_finished` pair still leaves
+    /// the window where the parent finishes between the check and
+    /// `insert_after` re-reading the index. Losing that race aborts the user's
+    /// tool invocation, so the positional API is dropped altogether — `add`
+    /// cannot fail this way. Children keep their indent prefix; the only loss
+    /// is adjacency, a child rendering at the bottom rather than directly
+    /// beneath its parent.
     fn attach(&self, bar: indicatif::ProgressBar) -> (indicatif::ProgressBar, bool) {
         match &self.multi {
             Some(multi) => match Self::parent() {
-                Some(parent) => (multi.insert_after(&parent, bar), true),
+                Some(_) => (multi.add(bar), true),
                 None => (multi.add(bar), false),
             },
             None => {
@@ -480,6 +500,44 @@ mod span_free_tests {
         while let Some(joined) = tasks.join_next().await {
             joined.expect("nested-bar task must not panic (ADR adr_progress_architecture)");
         }
+    }
+
+    /// A parent in scope that is not a member of the attaching
+    /// `MultiProgress` must not abort the process.
+    ///
+    /// Reported from `ocx package exec --lazy-mode always` on a real terminal:
+    /// `insert_after` unwrapped `parent.index()`, and `extract_layer_inner`
+    /// creates its byte bar inside an [`inherit_scope`] whose captured parent
+    /// had already finished. Backtrace: `insert_after` ← `attach` ← `bytes` ←
+    /// `extract_layer_inner` ← `inherit_scope`.
+    ///
+    /// The state is built from the second production — a detached parent from
+    /// a disabled manager, an enabled manager attaching the child — because it
+    /// needs no scheduling race to reproduce. `disabled()` sets a hidden draw
+    /// target, so the parent is a non-member either way, which is the input
+    /// `insert_after` could not survive.
+    ///
+    /// The sibling test above cannot catch this: it keeps every parent alive
+    /// and uses one manager. Neither can the acceptance suite, which never
+    /// gives ocx a TTY — `ProgressMode::detect().stderr` is false there, the
+    /// manager is `disabled()`, and `attach` never reaches an insert at all.
+    #[tokio::test]
+    async fn a_child_whose_parent_is_not_in_this_multi_does_not_panic() {
+        let detached = ProgressManager::disabled();
+        let rendering = ProgressManager::hidden();
+
+        let parent = detached.spinner("parent outside any MultiProgress");
+        assert!(
+            parent.0.pb.is_hidden(),
+            "a disabled manager's bar must be detached, or this test proves nothing"
+        );
+
+        parent
+            .scope(async {
+                let child = rendering.bytes("child attached by a different manager", 8);
+                child.callback()(8);
+            })
+            .await;
     }
 
     #[tokio::test]
