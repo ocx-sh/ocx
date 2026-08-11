@@ -25,7 +25,7 @@ no new propagation machinery.
 
 | Format | Mechanism | Namespacing | Validation of contents | Notes |
 |---|---|---|---|---|
-| **devcontainer.json** | `integrations` object | free vendor key, no registry | none — unknown key silently ignored | schema is literally `{"type": "object"}` + a note to pick a unique sub-key |
+| **devcontainer.json** | `customizations` object | free vendor key, no registry | none — unknown key silently ignored | schema is literally `{"type": "object"}` + a note to pick a unique sub-key |
 | **Cargo** | `[package.metadata.<tool>]`, `[workspace.metadata]` | tool name, convention only | none — exempted from the unused-key warning **by name** | `cargo-deb`, `docs.rs`, `wasm-pack`, `dist`, `cargo-binstall` |
 | **PEP 621 / 518** | `[tool.<name>]` | PyPI project name | none in `[tool.*]`; `[project]` **forbids** unknown keys | the strict-core + open-annex split, stated normatively |
 | **npm** | arbitrary top-level keys | **none** | none | the control group — see failure modes |
@@ -73,7 +73,7 @@ right answer only for data OCX itself acts on.
 - **Two overlapping mechanisms for one job** — SPDX carries both `ExternalRef` and a
   CycloneDX-compatible `properties` bag; OCI carries both annotations and referrers.
   Neither pairing is deprecated, so every implementer must support both.
-- **Punted merge semantics** — the devcontainer spec says outright: *"For `integrations`…
+- **Punted merge semantics** — the devcontainer spec says outright: *"For `customizations`…
   merging is left to the tools."* Two conformant implementors may therefore disagree about
   the same namespace. This is the one thing OCX must not inherit.
 
@@ -128,7 +128,7 @@ conflict gate that would otherwise have looked natural next to the existing
 
 Two lineages, no single standard:
 
-- **`devcontainer.json` + `integrations.<vendor>`** — the de-facto answer for "which
+- **`devcontainer.json` + `customizations.<vendor>`** — the de-facto answer for "which
   container, which tools", read by **seven** independent implementors: VS Code, GitHub
   Codespaces, JetBrains Gateway, Zed, Coder, DevPod, Daytona. Joining costs nothing: pick a
   key, document it (JetBrains simply started writing `integrations.jetbrains`).

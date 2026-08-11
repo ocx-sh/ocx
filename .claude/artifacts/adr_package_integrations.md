@@ -63,7 +63,7 @@ side-channel file consumers must know to look for.
 
 The surveyed answer ([`research_package_integrations.md`](./research_package_integrations.md))
 is unanimous: reserve a **name pattern**, refuse to validate inside it. Ten
-ecosystems do exactly this (`devcontainer.json` `integrations`, Cargo
+ecosystems do exactly this (`devcontainer.json` `customizations`, Cargo
 `[package.metadata.<tool>]`, PEP 621 `[tool.<name>]`, OCI `annotations`, k8s
 annotations, Helm/Artifact Hub, CycloneDX `properties`, Nix `passthru`). The
 one thing nobody got right — and the one thing OCX cannot punt on, because
@@ -187,9 +187,11 @@ decision #221 rejected. **One row per (package, namespace) pair** — array
 length exceeding distinct-namespace count is the structural guarantee that
 nothing merged.
 
-The name imports one expectation OCX refuses, and the docs must defuse it in
-the first sentence (#221): devcontainer's `integrations` **merges**; ours
-concatenates.
+~~The name imports one expectation OCX refuses, and the docs must defuse it in
+the first sentence (#221): devcontainer's `customizations` **merges**; ours
+concatenates.~~ **Superseded by the 2026-08-11 rename** (see the decision log):
+the field is `integrations`, devcontainer's is `customizations`, so there is no
+imported expectation left to defuse and the docs carry no such paragraph.
 
 ---
 
@@ -888,7 +890,7 @@ commit must also carry:
 | Surface | Action |
 |---|---|
 | `website/src/public/schemas/metadata/v1.json` | regenerate — `task schema:generate` |
-| `website/src/docs/reference/metadata.md` | new `integrations` section. **First sentence must defuse the imported expectation** (#221): devcontainer's `integrations` merges, ours concatenates. Then: field table, namespace convention (reverse-DNS, not enforced), caps (raise-only), "OCX never interprets this". **Second expectation to defuse, added by the Amendment**: a payload's `${…}` is OCX's, not the consumer's — a pasted devcontainer or VS Code block needs every token doubled (`$${workspaceFolder}`), and the reference must show the doubled form in every worked example, including the Windows `${self.installPath:posix}` one. Token grammar itself is documented once, in the interpolation reference — not restated per carrier |
+| `website/src/docs/reference/metadata.md` | new `integrations` section. ~~**First sentence must defuse the imported expectation** (#221)~~ — void after the 2026-08-11 rename: the names no longer collide (devcontainer's key is `customizations`), so the section opens on the problem the field solves, and the merge contrast is one comparison callout under **No Merge, Ever**. Then: field table, namespace convention (reverse-DNS, not enforced), caps (raise-only), "OCX never interprets this". **Second expectation to defuse, added by the Amendment**: a payload's `${…}` is OCX's, not the consumer's — a pasted devcontainer or VS Code block needs every token doubled (`$${workspaceFolder}`), and the reference must show the doubled form in every worked example, including the Windows `${self.installPath:posix}` one. Token grammar itself is documented once, in the interpolation reference — not restated per carrier |
 | `website/src/docs/reference/env-composition.md` | the composed `integrations` array, its ordering, the no-merge rule, interface-surface-only |
 | `website/src/docs/reference/command-line.md` | `ocx env` / `ocx package env` JSON envelope gains a fourth array; `package inspect --closure` surface gains `integrations` |
 | `.claude/rules/subsystem-package.md` | Module Map row for `metadata/integrations.rs`; Metadata Schema tree |
