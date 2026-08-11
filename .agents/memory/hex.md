@@ -154,3 +154,26 @@ research-axes:
   `plan_testing_hardening.md` (branch `testing-hardening`, phase 4 complete,
   awaiting PR #287 which was closed unmerged — its fixes are unlanded, so that
   plan is stale-but-unfinished, not done).
+- **A silent subagent is not a failed one — and not a finished one either**
+  (execution session, 2026-08-11; sharpens the older "treat idle as not
+  reported" note above with a second dataset). `wincheck`, `winfix`,
+  `pubreview`, `conflict-core` and `conflict-cli` all signalled idle and never
+  delivered, including after explicit pulls naming the exact output contract;
+  `conflict-docs` delivered a first-rate report unprompted. Same models, same
+  session — so delivery is not a model property and cannot be planned around.
+- **So audit the refs, not the report.** `winfix` had produced two sound
+  commits; reading its diff directly — rather than waiting on a report it never
+  sent — is what surfaced a defect *that diff introduced*. `conflict-core`
+  resolved its last hunk correctly in the window between one grep and the next.
+  The work is observable without the agent's cooperation: `git log`,
+  `git status`, marker counts, and a compile. Check those first, pull second.
+- **Corollary — the orchestrator's own checks lie the same way.** Three in one
+  session returned a passing result while being structurally incapable of
+  failing: `${PIPESTATUS[0]}` (zsh uses `$pipestatus`, expands empty),
+  `find -newermt '-75 seconds'` (`find` is `bfs` here and rejects it — error to
+  stderr, empty stdout read as "settled"), and `for f in $FILES` (zsh does not
+  word-split unquoted parameters, so `stat` got one giant filename and the
+  sentinel survived as "settled"). Each was caught only because it contradicted
+  something directly observed seconds earlier. Make the failure loud — guard
+  every watcher with an explicit failure branch rather than inferring success
+  from empty output.
