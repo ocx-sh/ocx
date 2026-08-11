@@ -255,7 +255,14 @@ impl ShimBinStore {
                 // `SHIM_BYTES` this call staged, so the winner's blob is this
                 // call's answer too; the staged temp is already gone with the
                 // failed publish, leaving no litter behind.
-                Err(error) if published.exists() => {
+                //
+                // Only the absent-publish path may converge this way. A failed
+                // `OverTornBlob` replace must NOT report success: the file at
+                // `published` is then the torn blob this call set out to
+                // repair, still there, and every `<name>.exe` hardlinked from
+                // it executes a truncated PE. Existence is evidence of a
+                // winner only when this call had no evidence the file was wrong.
+                Err(error) if publish == Publish::OnlyIfAbsent && published.exists() => {
                     crate::log::debug!(
                         "Shim blob {} was published concurrently ({error}); keeping the winner's file.",
                         published.display()
