@@ -20,3 +20,10 @@ packages/multi-layer-app/layer-app/
 packages/patches/*/out/
 packages/patches/*/build/
 packages/patches/*/metadata.json
+
+# Toolchain-tier demo projects: the `ocx.toml` files are committed, the locks
+# they resolve to are not (digests change on every push).
+projects/*/ocx.lock
+
+# Managed-config payload staged by scripts/setup-integrations.sh.
+managed-config/

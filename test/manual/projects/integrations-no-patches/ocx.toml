@@ -1,0 +1,34 @@
+# Same bindings as ../integrations, with the patch tier opted out.
+#
+# `no-patches` is a PROJECT setting, not a CLI flag — the OCI tier
+# (`ocx package env`) has no opt-out at all. This directory is the A/B partner
+# of ../integrations: run `ocx --format json env` in both and diff the
+# `integrations` array to see the companion's row appear and disappear.
+#
+# EVERY ADMITTED PACKAGE is opted out, not just the three bindings — and
+# `custom-leaf` is in the list even though nothing binds it directly. The
+# rig's global descriptor matches `*`, so the corp-ca-bundle companion
+# attaches to every package the composition admits, including transitive
+# interface deps; the composition then dedupes the companion's contribution
+# by (package, namespace). One un-opted-out admitted package is therefore
+# enough to keep the row. Opting out the bindings alone proves nothing.
+#
+# `custom-private` is absent by design: a private dep is not admitted onto
+# the consumer's surface, so no descriptor ever attaches to it.
+
+[tools]
+custom-tool = "localhost:5000/dojo/custom-tool:1.0.0"
+custom-other = "localhost:5000/dojo/custom-other:1.0.0"
+base-tool = "localhost:5000/patches/base-tool:1.0.0"
+
+[package."localhost:5000/patches/base-tool"]
+no-patches = true
+
+[package."localhost:5000/dojo/custom-tool"]
+no-patches = true
+
+[package."localhost:5000/dojo/custom-other"]
+no-patches = true
+
+[package."localhost:5000/dojo/custom-leaf"]
+no-patches = true

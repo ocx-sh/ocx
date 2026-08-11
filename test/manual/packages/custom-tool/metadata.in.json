@@ -1,0 +1,48 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    },
+    {
+      "key": "CUSTOM_TOOL_HOME",
+      "type": "constant",
+      "value": "${installPath}",
+      "visibility": "public"
+    }
+  ],
+  "dependencies": [
+    {
+      "identifier": "@@LEAF_FQ@@",
+      "visibility": "interface",
+      "name": "leaf"
+    },
+    {
+      "identifier": "@@PRIVATE_FQ@@",
+      "visibility": "private",
+      "name": "hidden"
+    }
+  ],
+  "entrypoints": {
+    "custom-tool": {}
+  },
+  "integrations": {
+    "com.microsoft.vscode": {
+      "declaredBy": "custom-tool",
+      "settings": {
+        "customTool.executable": "${self.installPath}/bin/custom-tool"
+      },
+      "extensions": ["ocx.custom-tool"]
+    },
+    "com.jetbrains": {
+      "declaredBy": "custom-tool",
+      "sdkPath": "${deps.leaf.installPath}",
+      "plugins": ["sh.ocx.custom-tool"]
+    }
+  }
+}
