@@ -1079,7 +1079,7 @@ def test_self_env_token_in_baked_args_is_refused_at_runtime(
     )
     ocx.plain("package", "install", "--select", pkg.short)
 
-    package_root = Path(ocx.json("package", "which", pkg.short)[pkg.short])
+    package_root = Path(ocx.json("package", "which", pkg.short)[pkg.short]["path"])
     metadata_path = package_root / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["entrypoints"] = {"hello": {"args": ["${self.env.TOOL_HOME}"]}}

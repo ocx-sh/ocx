@@ -3018,10 +3018,22 @@ mod wire_grammar_tests {
         tokio::fs::create_dir_all(good.parent().unwrap()).await.unwrap();
         tokio::fs::write(&good, b"{}").await.unwrap();
 
-        // `p/kitware/<0xff>.json` — nothing on a POSIX filesystem makes a
-        // filename valid UTF-8.
+        // `p/kitware/<0xff>.json` — a POSIX filename is a byte string, so
+        // nothing makes this one valid UTF-8.
         let bad = good.parent().unwrap().join(OsStr::from_bytes(b"\xff.json"));
-        tokio::fs::write(&bad, b"{}").await.unwrap();
+        if let Err(refused) = tokio::fs::write(&bad, b"{}").await {
+            // APFS validates filenames as UTF-8 and rejects these bytes
+            // outright, so the state under test cannot exist on a macOS
+            // volume. Observed, not assumed via `target_os`: the assertion
+            // below still runs on any filesystem that does accept the name,
+            // and a refusal for any other reason (a wrong parent path) reds
+            // here instead of passing as this carve-out.
+            assert!(
+                good.parent().is_some_and(std::path::Path::exists),
+                "only the non-UTF-8 component may be refused; the parent must exist: {refused}"
+            );
+            return;
+        }
 
         let err = s
             .list_wire_repositories("ocx.sh")
@@ -3041,7 +3053,16 @@ mod wire_grammar_tests {
         // `p/<0xff>/cmake.json` — the failure is in a directory component, not
         // the stem, so it takes the walk's other lossy path.
         let namespace = s.wire_source_dir("ocx.sh").join("p").join(OsStr::from_bytes(b"\xff"));
-        tokio::fs::create_dir_all(&namespace).await.unwrap();
+        if let Err(refused) = tokio::fs::create_dir_all(&namespace).await {
+            // Same APFS carve-out as the stem test above — observed rather
+            // than gated on `target_os`, and narrowed to the one component
+            // the filesystem can legitimately refuse.
+            assert!(
+                namespace.parent().is_some_and(std::path::Path::exists),
+                "only the non-UTF-8 component may be refused; the parent must exist: {refused}"
+            );
+            return;
+        }
         tokio::fs::write(namespace.join("cmake.json"), b"{}").await.unwrap();
 
         let err = s

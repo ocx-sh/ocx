@@ -376,7 +376,17 @@ def test_offline_install_missing_blobs_exits_policy_blocked(
 # which the read-path SSRF floor refuses a loopback physical target — and a
 # home with no index configuration has no source to hold a `trusted_hosts`
 # exemption, so there would be no way to allow it.
-_INDIRECTED_NAMESPACE = "127.0.0.1:5000"
+def _indirected_namespace(registry: str) -> str:
+    """The `127.0.0.1` spelling of the loopback test registry.
+
+    Derived from the `registry` fixture rather than written out, because the
+    host port is configurable (`OCX_TEST_REGISTRY_PORT`, see CONTRIBUTING.md).
+    A literal `127.0.0.1:5000` would keep resolving on a machine whose test
+    registry moved — to whatever else holds 5000 there.
+    """
+    host, _, port = registry.rpartition(":")
+    assert host and port.isdigit(), f"registry fixture must be host:port; got {registry!r}"
+    return f"127.0.0.1:{port}"
 
 
 def _registry_status(registry: str, repo: str, reference: str) -> int:
@@ -428,17 +438,18 @@ def test_indirected_install_from_copied_store_without_index_configuration(
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
+    indirected_namespace = _indirected_namespace(ocx.registry)
     logical_repository = f"{unique_repo}/absent"
-    logical_id = f"{_INDIRECTED_NAMESPACE}/{logical_repository}:1.0.0"
+    logical_id = f"{indirected_namespace}/{logical_repository}:1.0.0"
 
     # The warm home is the only one that knows the index site exists.
     (ocx.ocx_home / "config.toml").write_text(
-        f'[registries."{_INDIRECTED_NAMESPACE}"]\n'
+        f'[registries."{indirected_namespace}"]\n'
         f'index = "{index_server.base_url}"\n'
         f'trusted_hosts = ["127.0.0.1"]\n'
     )
     ocx.env["OCX_INSECURE_REGISTRIES"] = (
-        f"{ocx.registry},{_INDIRECTED_NAMESPACE},{index_server.host}"
+        f"{ocx.registry},{indirected_namespace},{index_server.host}"
     )
 
     static_index.write_config(index_server.root)
@@ -446,7 +457,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
         index_server.root,
         repository=logical_repository,
         tag="1.0.0",
-        physical_repository=f"oci://{_INDIRECTED_NAMESPACE}/{pkg.repo}",
+        physical_repository=f"oci://{indirected_namespace}/{pkg.repo}",
         platform_digest=leaf_digest,
         os=os_name,
         architecture=arch_name,
@@ -473,7 +484,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
     _copy_store(ocx.ocx_home, fresh_home, exclude="layers")
     assert not (fresh_home / "layers").exists(), "precondition: the fresh home must have no layers"
     copied_root = (
-        fresh_home / "index" / registry_dir(_INDIRECTED_NAMESPACE) / "p" / f"{logical_repository}.json"
+        fresh_home / "index" / registry_dir(indirected_namespace) / "p" / f"{logical_repository}.json"
     )
     assert copied_root.is_file(), "precondition: the copied index must carry the committed root document"
 
@@ -481,7 +492,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
     # Transport policy only — the loopback registry speaks plain HTTP. No
     # `config.toml` is written, so the fresh home has no index source, no
     # `trusted_hosts`, and no knowledge that `index_server` exists.
-    fresh.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{_INDIRECTED_NAMESPACE}"
+    fresh.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{indirected_namespace}"
     assert not (fresh_home / "config.toml").exists(), "the fresh home must carry no configuration"
     served_before = len(index_server.requests)
 
@@ -491,7 +502,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
         f"configuration; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     assert_symlink_exists(
-        _candidate_current_path(fresh_home, _INDIRECTED_NAMESPACE, logical_repository),
+        _candidate_current_path(fresh_home, indirected_namespace, logical_repository),
         "the install must create the current symlink under the LOGICAL name",
     )
     assert (fresh_home / "layers").is_dir(), (
