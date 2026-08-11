@@ -27,7 +27,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 
 | Fixture | Scope | Purpose |
 |---------|-------|---------|
-| `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose) |
+| `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose; port override `OCX_TEST_REGISTRY_PORT`, mirror `OCX_TEST_MIRROR_PORT`) |
 | `ocx_binary` | session | Path to compiled `ocx` binary |
 | `ocx_home` | function | Isolated temp dir for `OCX_HOME` |
 | `ocx` | function | `OcxRunner` instance with test isolation |

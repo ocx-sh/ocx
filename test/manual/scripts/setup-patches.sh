@@ -227,7 +227,19 @@ push_patch_pkg base-java
 # (`<patch-registry>/global:__ocx.patch`). The two base-specific descriptors
 # layer per-package companions on top of it.
 
-DESCRIPTORS="${PKG_ROOT}/descriptors"
+# The committed descriptors name their companions and match globs fully
+# qualified, and they were authored against the default `localhost:5000`. A
+# registry moved off that port (OCX_TEST_REGISTRY_PORT — see CONTRIBUTING.md)
+# would leave them pointing at a host that either answers with someone else's
+# content or not at all, and a `required: true` companion turns that into a
+# fail-closed resolve error. Render them against the registry actually in use
+# instead of publishing the literals.
+DESCRIPTORS="$(mktemp -d "${TMPDIR:-/tmp}/ocx-patch-descriptors-XXXXXX")"
+trap 'rm -rf -- "${DESCRIPTORS}"' EXIT
+for descriptor in "${PKG_ROOT}"/descriptors/*.json; do
+    sed "s|localhost:5000|${OCX_DEFAULT_REGISTRY}|g" "${descriptor}" \
+        >"${DESCRIPTORS}/$(basename "${descriptor}")"
+done
 
 # 3a. Global corp CA bundle (match="*", required=true) — applies to every base.
 ocx_step "publishing global corp-ca-bundle descriptor (match=*, required=true)"

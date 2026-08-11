@@ -1,8 +1,32 @@
+# Host ports are configurable so a machine already running a `registry:2` on
+# 5000 — another checkout of this repo, an unrelated project, a leftover
+# container — does not silently take over this suite's registry. The container
+# ports never move; only the host side binds elsewhere.
+#
+#   OCX_TEST_REGISTRY_PORT   primary registry (default 5000)
+#   OCX_TEST_MIRROR_PORT     mirror registry  (default 5001)
+#
+# Set them for `task test` and the whole suite follows: `test/conftest.py`
+# derives the `REGISTRY` / `MIRROR_REGISTRY` defaults from the same two
+# variables, `test/taskfile.yml` derives `OCX_INSECURE_REGISTRIES`, and
+# `helpers.start_registry` inherits the environment when it shells out to
+# `docker compose`. Documented in `CONTRIBUTING.md`.
+#
+# The bench profile below is deliberately NOT parametrized: `test/bench/
+# harness.py` reads its own `REGISTRY_URL` / `PROXY_HOST` / `TOXIPROXY_API_URL`
+# overrides, so moving only the compose side would bind one port and dial
+# another.
+#
+# The failure this prevents is quiet rather than loud: with 5000 already taken,
+# the `registry` service still starts, just with no published port, so
+# `localhost:5000` reaches the other project's registry. The suite publishes its
+# own fixtures before reading them and mostly passes — against a registry it did
+# not start, which it then fills with test packages.
 services:
   registry:
     image: registry:2
     ports:
-      - "5000:5000"
+      - "${OCX_TEST_REGISTRY_PORT:-5000}:5000"
 
   # Mirror registry — a second registry:2 instance used by test_mirror.py to
   # simulate a corporate artifact-manager remote/proxy repository.  Session-
@@ -12,7 +36,7 @@ services:
   mirror-registry:
     image: registry:2
     ports:
-      - "5001:5000"
+      - "${OCX_TEST_MIRROR_PORT:-5001}:5000"
 
   # toxiproxy — TCP proxy with programmable toxics (bandwidth throttle,
   # latency injection) used by the bench harness (test/bench/) to simulate

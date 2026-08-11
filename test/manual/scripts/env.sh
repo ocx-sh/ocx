@@ -11,8 +11,11 @@
 # shell and breaks prompts that reference unset variables (e.g. VSCode's
 # `RPROMPT` integration).
 
-export OCX_DEFAULT_REGISTRY=localhost:5000
-export OCX_INSECURE_REGISTRIES=localhost:5000
+# Port follows the same knob `test/docker-compose.yml` binds with, so a shell
+# configured for a registry moved off 5000 (see CONTRIBUTING.md) talks to the
+# container that was actually started rather than to whatever else holds 5000.
+export OCX_DEFAULT_REGISTRY="localhost:${OCX_TEST_REGISTRY_PORT:-5000}"
+export OCX_INSECURE_REGISTRIES="${OCX_DEFAULT_REGISTRY}"
 
 # Disposable OCX_HOME under test/manual/ (gitignored) — manual experiments
 # never collide with the user's daily ~/.ocx state.

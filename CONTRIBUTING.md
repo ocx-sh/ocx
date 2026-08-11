@@ -45,6 +45,29 @@ task test:parallel     # run tests in parallel with pytest-xdist
 
 Acceptance tests live in `test/` and use pytest against a real OCI registry.
 
+The suite binds two `registry:2` containers to `localhost:5000` (primary) and
+`localhost:5001` (mirror). If either port is already taken — another checkout of
+this repo, an unrelated project's registry — move them:
+
+```sh
+export OCX_TEST_REGISTRY_PORT=5010
+export OCX_TEST_MIRROR_PORT=5011
+task test
+```
+
+One variable per service drives all three consumers: the host side of the port
+mapping in `test/docker-compose.yml`, the `REGISTRY` / `MIRROR_REGISTRY`
+defaults in `test/conftest.py`, and `OCX_INSECURE_REGISTRIES` in
+`test/taskfile.yml`. Setting `REGISTRY` / `MIRROR_REGISTRY` directly still wins
+over both, which is how CI points the suite at an already-running registry.
+
+Do this rather than leaving the conflict in place. Compose does not fail loudly
+on a taken port — the `registry` service comes up with *no* published port, and
+`localhost:5000` then reaches the other project's registry instead. The suite
+pushes its own fixtures before reading them, so most of it still passes; what
+you get is a green run against a registry you did not start, littered with this
+suite's test packages.
+
 ## Code Style
 
 ```sh

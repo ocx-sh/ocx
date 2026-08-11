@@ -19,8 +19,13 @@ from src.runner import OcxRunner
 # Session hooks
 # ---------------------------------------------------------------------------
 
-# Default address for the mirror registry (second registry:2 service).
-_DEFAULT_MIRROR_REGISTRY = "localhost:5001"
+# Default addresses for the two registry:2 services, derived from the same
+# port knobs `docker-compose.yml` binds with. A machine that already runs
+# something on 5000 (another checkout, an unrelated project) exports
+# OCX_TEST_REGISTRY_PORT once and compose, the taskfile and these defaults all
+# move together. An explicit REGISTRY / MIRROR_REGISTRY still wins over both.
+_DEFAULT_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_REGISTRY_PORT', '5000')}"
+_DEFAULT_MIRROR_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_MIRROR_PORT', '5001')}"
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
@@ -43,7 +48,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         return
-    registry = os.environ.get("REGISTRY", "localhost:5000")
+    registry = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(registry)
     # Mirror registry: best-effort start alongside the main registry; both
     # are declared in the same docker-compose.yml so a single `docker compose
@@ -72,7 +77,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def registry() -> str:
-    addr = os.environ.get("REGISTRY", "localhost:5000")
+    addr = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(addr)
     return addr
 
