@@ -1292,8 +1292,10 @@ def test_integrations_interpolation_end_to_end(
     value = row["payload"]
 
     which = ocx.json("package", "which", pkg.short)
-    root = which.get(pkg.short) if isinstance(which, dict) else which
-    assert root, f"`ocx package which {pkg.short}` must return a package root; got {which!r}"
+    root = which[pkg.short]["path"]
+    assert which[pkg.short]["kind"] == "package", (
+        f"an installed package must locate as a materialized root, not a shim; got {which!r}"
+    )
     expected_content = str(Path(root) / "content")
 
     assert value["C_Cpp.default.compilerPath"] == f"{expected_content}/bin/clang", value
@@ -1301,8 +1303,10 @@ def test_integrations_interpolation_end_to_end(
     assert value["sdk"] == "${installPath}", value
 
     dep_which = ocx.json("package", "which", dep.short)
-    dep_root = dep_which.get(dep.short) if isinstance(dep_which, dict) else dep_which
-    assert dep_root, f"`ocx package which {dep.short}` must return the dep's package root; got {dep_which!r}"
+    dep_root = dep_which[dep.short]["path"]
+    assert dep_which[dep.short]["kind"] == "package", (
+        f"the dependency must locate as a materialized root, not a shim; got {dep_which!r}"
+    )
     expected_dep_content = str(Path(dep_root) / "content")
     assert value["depCompilerPath"] == f"{expected_dep_content}/bin/clang", value
     # Sanity: the two content paths must genuinely differ — otherwise the

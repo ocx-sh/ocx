@@ -49,6 +49,19 @@ test/manual/scripts/teardown-patches.sh
 This removes all packages, descriptors, and the local `.ocx-home` snapshot
 so a fresh `setup-patches.sh` run starts from scratch.
 
+It does **not** clear the registry's reserved global patch slot, and this rig's
+global descriptor matches `*` — so it keeps attaching a companion to every base
+in that registry, including the ones `test/tests/test_patches.py` publishes. The
+acceptance suite's `@patch_global_slot` tests then fail on this rig's companion
+value. Before the next `task test`, recreate the containers:
+
+```sh
+cd test && docker compose down && docker compose up -d
+```
+
+Nothing is mounted, so that discards all registry state — which every suite
+republishes on its next run.
+
 ---
 
 ## Use-Case 1 — CORP CA BUNDLE (global, required)

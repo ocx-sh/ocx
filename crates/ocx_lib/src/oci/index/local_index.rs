@@ -3400,9 +3400,20 @@ mod tests {
         // ETIMEDOUT from a network filesystem carries the same kind. The OS
         // error number is what separates it from ocx's own synthesized wait
         // timeout — absorbing it would turn a failed NFS write into a success.
+        //
+        // The numeric code for that timeout is per-platform (ETIMEDOUT is 110
+        // on Linux, 60 on Darwin; Windows reaches the kind through its own
+        // codes), so the candidate that actually maps to `TimedOut` here is
+        // discovered rather than assumed — a hardcoded 110 lands on
+        // `Uncategorized` off Linux and fails the prerequisite below for a
+        // reason that has nothing to do with the behaviour under test.
+        let os_timeout = [110, 60, 10060, 121]
+            .into_iter()
+            .find(|code| std::io::Error::from_raw_os_error(*code).kind() == std::io::ErrorKind::TimedOut)
+            .expect("this platform must map some OS error number to ErrorKind::TimedOut");
         let nfs = crate::error::file_error(
             std::path::Path::new("/x/config.json"),
-            std::io::Error::from_raw_os_error(110),
+            std::io::Error::from_raw_os_error(os_timeout),
         );
         assert_eq!(nfs_kind(&nfs), std::io::ErrorKind::TimedOut, "prerequisite: same kind");
         assert!(

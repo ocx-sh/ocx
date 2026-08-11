@@ -294,6 +294,14 @@ Set the patch rig up first (`test/manual/scripts/setup-patches.sh`, which also
 installs the bases so companions are discovered), then compose the same base
 both ways:
 
+> **The patch rig writes to the registry's reserved global slot.** Its global
+> descriptor matches `*`, so it attaches a companion to *every* base in that
+> registry — including the ones `test/tests/test_patches.py` publishes. Running
+> the acceptance suite against the same registry afterwards fails the
+> `@patch_global_slot` tests with the manual rig's companion value. Recreate the
+> containers (`docker compose down && docker compose up -d`) before the next
+> `task test`; `teardown-patches.sh` does not clear the slot.
+
 ```sh
 $OCX --format json package env --lazy-mode never  patches/base-tool:1.0.0
 $OCX --format json package env --lazy-mode always patches/base-tool:1.0.0
