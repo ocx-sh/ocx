@@ -852,17 +852,13 @@ fn repository_key(identifier: &Identifier) -> String {
     format!("{}/{}", identifier.registry(), identifier.repository())
 }
 
-/// Resolve the `lazy-mode` ladder for one **project-tier** tool (plan contract
-/// C-006, [#302](https://github.com/ocx-sh/ocx/issues/302)).
+/// Fill the **project-tier** `lazy-mode` ladder for one tool (plan contract
+/// C-006, [#302](https://github.com/ocx-sh/ocx/issues/302)) — the five tiers
+/// `--lazy-mode` ▸ `[package."<id>"]` ▸ `[group.<g>]` ▸ toolchain ▸
+/// `OCX_LAZY_MODE`, unresolved.
 ///
-/// Applies the full five-tier order — `--lazy-mode` ▸ `[package."<id>"]` ▸
-/// `[group.<g>]` ▸ toolchain ▸ `OCX_LAZY_MODE` ▸ floor `Never` — by filling a
-/// [`LazyModeLadder`] and resolving it. The floor lives in `resolve()` and
-/// nowhere else: every tier read here is an `Option`, and `None` means
-/// *inherit*, never `Never`.
-///
-/// Resolution goes through [`LazyModeLadder::resolve_for_host`], so on Windows
-/// the answer is [`LazyMode::Never`] whatever the tiers say — scenario S-010.
+/// Every tier is an `Option`, and `None` means *inherit*, never `Never`: the
+/// floor lives in [`LazyModeLadder::resolve`] and nowhere else.
 ///
 /// `group` is the selected group the binding came from (`Origin::Group(name)`);
 /// `None` for a positional package, which has no group tier. `cli` is the
@@ -872,6 +868,34 @@ fn repository_key(identifier: &Identifier) -> String {
 /// The package tier is matched on `registry/repository` with tag and digest
 /// excluded ([`ProjectConfig::package_settings`]) — the only rule the wire
 /// permits, since a config author cannot know the digest a lock pins.
+///
+/// Split from [`lazy_mode_for_tool`] so which-config-tier-feeds-which-slot is
+/// assertable independently of the host's shim-support floor: on Windows the
+/// resolved answer is `Never` for every input, so a test driving the resolving
+/// form there proves nothing about this wiring — the same reason
+/// [`LazyModeLadder::resolve`] is split from
+/// [`LazyModeLadder::resolve_for_host`] one layer down.
+pub fn lazy_mode_ladder_for_tool(
+    config: &ProjectConfig,
+    identifier: &Identifier,
+    group: Option<&str>,
+    cli: Option<LazyMode>,
+) -> LazyModeLadder {
+    LazyModeLadder {
+        cli,
+        package: config.package_settings(identifier).and_then(|s| s.lazy_mode),
+        group: group.and_then(|name| config.groups.get(name)).and_then(|g| g.lazy_mode),
+        toolchain: config.lazy_mode,
+        environment: LazyMode::from_env(),
+    }
+}
+
+/// Resolve the `lazy-mode` ladder for one **project-tier** tool — the form
+/// every production caller uses.
+///
+/// [`lazy_mode_ladder_for_tool`] fills the tiers; resolution goes through
+/// [`LazyModeLadder::resolve_for_host`], so on Windows the answer is
+/// [`LazyMode::Never`] whatever the tiers say — scenario S-010.
 ///
 /// Lives here, with the config it reads, because this contract makes
 /// `ProjectConfig` the owner of tiers 2-4. The OCI-tier sibling —
@@ -883,14 +907,7 @@ pub fn lazy_mode_for_tool(
     group: Option<&str>,
     cli: Option<LazyMode>,
 ) -> LazyMode {
-    LazyModeLadder {
-        cli,
-        package: config.package_settings(identifier).and_then(|s| s.lazy_mode),
-        group: group.and_then(|name| config.groups.get(name)).and_then(|g| g.lazy_mode),
-        toolchain: config.lazy_mode,
-        environment: LazyMode::from_env(),
-    }
-    .resolve_for_host()
+    lazy_mode_ladder_for_tool(config, identifier, group, cli).resolve_for_host()
 }
 
 #[cfg(test)]
