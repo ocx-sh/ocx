@@ -14,3 +14,9 @@ include = [
   "**/ocx.toml",
 ]
 url = "https://ocx.sh/schemas/project/v1.json"
+
+[[rule]]
+include = [
+  "**/ocx.lock",
+]
+url = "https://ocx.sh/schemas/project-lock/v3.json"

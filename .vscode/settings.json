@@ -5,6 +5,11 @@
     // Exclude the Rust build dir from Coverage Gutters' recursive search.
     // lcov.info lives at the workspace root, so this speeds up file discovery.
     "coverage-gutters.ignoredPathGlobs": "**/{node_modules,venv,.venv,vendor,target}/**",
+    // ocx.lock is TOML; without this the TOML extension never opens it, so the
+    // `**/ocx.lock` schema rule in taplo.toml can never fire.
+    "files.associations": {
+        "ocx.lock": "toml",
+    },
     // Hide Python build artifacts from the explorer.
     "files.exclude": {
         "**/__pycache__": true,

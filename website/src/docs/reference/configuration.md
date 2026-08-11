@@ -720,7 +720,7 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 |------|------------|
 | `config.toml` (any tier) | [`https://ocx.sh/schemas/config/v1.json`][schema-config] |
 | `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
-| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v2.json`][schema-project-lock] |
+| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v3.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
 
@@ -764,7 +764,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 <!-- schemas -->
 [schema-config]: https://ocx.sh/schemas/config/v1.json
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-project-lock]: https://ocx.sh/schemas/project-lock/v2.json
+[schema-project-lock]: https://ocx.sh/schemas/project-lock/v3.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
 
