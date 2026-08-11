@@ -600,12 +600,19 @@ mod tests {
 
         for name in names {
             let exe = dest.join(format!("{name}.exe"));
-            assert_eq!(
-                tokio::fs::read(&exe).await.unwrap(),
-                MUTATED,
+            let bytes = tokio::fs::read(&exe).await.unwrap();
+            // `assert!` on the same equality rather than `assert_eq!`: a failing
+            // `assert_eq!` renders the whole file as a byte array, and the file
+            // is the megabyte-scale shim PE — enough output to truncate the CI
+            // log at the point the diagnosis is needed. The length is the datum
+            // that tells the two outcomes apart.
+            assert!(
+                bytes == MUTATED,
                 "`{name}.exe` must share the store blob's inode — an in-place \
                  mutation of the blob is visible through a hardlink and \
-                 invisible through a copy"
+                 invisible through a copy; read {} bytes, expected {}",
+                bytes.len(),
+                MUTATED.len()
             );
         }
     }

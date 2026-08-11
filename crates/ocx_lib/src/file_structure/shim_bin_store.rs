@@ -70,9 +70,7 @@ fn shim_digest() -> &'static oci::Digest {
 /// No black-box input produces that state, because the pre-check and the
 /// re-check test the same condition (target present): whatever makes the
 /// re-check succeed also makes the pre-check short-circuit, and only a real
-/// interleaving separates them. Off Windows there is not even a failure to
-/// observe — `persist_temp_file` reduces to `rename(2)`, which replaces an
-/// existing target silently.
+/// interleaving separates them.
 #[cfg(any(test, feature = "__testing"))]
 fn simulated_lost_race(root: &Path) -> bool {
     std::env::var_os(LOST_PUBLISH_RACE_SEAM).is_some_and(|armed| Path::new(&armed) == root)
@@ -83,12 +81,33 @@ fn simulated_lost_race(_root: &Path) -> bool {
     false
 }
 
+/// What [`ShimBinStore::ensure`]'s pre-check found, and therefore what its
+/// publish is allowed to do to a file already sitting at the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publish {
+    /// The pre-check found nothing readable. Any file at the target by rename
+    /// time is a concurrent winner carrying byte-identical content, and
+    /// replacing it would swap in a fresh file record — orphaning the one every
+    /// `<name>.exe` that winner already hardlinked points at, which is exactly
+    /// the shared inode #301 exists to guarantee. Publish only if still absent.
+    OnlyIfAbsent,
+    /// The pre-check found a blob whose length is not the embedded one. This
+    /// call has positive evidence the file there is wrong, so it replaces it —
+    /// the one case where losing the winner's record is the point.
+    OverTornBlob,
+}
+
 /// Atomically publishes the staged blob, or — when the seam above is armed —
 /// discards it and reports the failure a lost race produces. Twinned rather
 /// than branched inline so a release build carries no simulated-failure path
 /// at all.
 #[cfg(any(test, feature = "__testing"))]
-fn publish_staged(temp: tempfile::NamedTempFile, target: &Path, lost_race: bool) -> std::io::Result<()> {
+fn publish_staged(
+    temp: tempfile::NamedTempFile,
+    target: &Path,
+    lost_race: bool,
+    publish: Publish,
+) -> std::io::Result<()> {
     if lost_race {
         // Drop the staged temp first: a genuine failed persist consumes and
         // drops it too, so the seam leaves the same filesystem state behind.
@@ -97,12 +116,24 @@ fn publish_staged(temp: tempfile::NamedTempFile, target: &Path, lost_race: bool)
             "{LOST_PUBLISH_RACE_SEAM}: simulated publish failure"
         )));
     }
-    crate::utility::fs::persist_temp_file(temp, target)
+    publish_with(temp, target, publish)
 }
 
 #[cfg(not(any(test, feature = "__testing")))]
-fn publish_staged(temp: tempfile::NamedTempFile, target: &Path, _lost_race: bool) -> std::io::Result<()> {
-    crate::utility::fs::persist_temp_file(temp, target)
+fn publish_staged(
+    temp: tempfile::NamedTempFile,
+    target: &Path,
+    _lost_race: bool,
+    publish: Publish,
+) -> std::io::Result<()> {
+    publish_with(temp, target, publish)
+}
+
+fn publish_with(temp: tempfile::NamedTempFile, target: &Path, publish: Publish) -> std::io::Result<()> {
+    match publish {
+        Publish::OnlyIfAbsent => crate::utility::fs::persist_temp_file_if_absent(temp, target),
+        Publish::OverTornBlob => crate::utility::fs::persist_temp_file(temp, target),
+    }
 }
 
 /// Content-addressed store for the embedded `ocx-shim` executable blob.
@@ -144,16 +175,22 @@ impl ShimBinStore {
     /// writer publishes the same bytes to the same path — a losing concurrent
     /// writer converges on the winner's file rather than corrupting it.
     ///
-    /// Convergence is the caller's job, not the publish primitive's:
-    /// [`crate::utility::fs::persist_temp_file`] reports an already-present
-    /// target as a **failure** by design, because for a mutable destination
-    /// that file may hold different content. This store's destination is
-    /// content-addressed, so the dance `finalize_layer_dir`
-    /// (`package_manager/tasks/layer_staging.rs`) runs for layer directories
-    /// applies verbatim: pre-check the target, publish, and on a
-    /// publish failure re-check — present ⇒ the race was lost and the winner's
-    /// file is byte-identical, absent ⇒ propagate. It takes no lock; two
-    /// writers of the same bytes need no mutual exclusion.
+    /// Convergence is the caller's job, not the publish primitive's: the dance
+    /// `finalize_layer_dir` (`package_manager/tasks/layer_staging.rs`) runs for
+    /// layer directories applies verbatim — pre-check the target, publish, and
+    /// on a publish failure re-check: present ⇒ the race was lost and the
+    /// winner's file is byte-identical, absent ⇒ propagate. It takes no lock;
+    /// two writers of the same bytes need no mutual exclusion.
+    ///
+    /// A pre-check that found **nothing** publishes through
+    /// [`crate::utility::fs::persist_temp_file_if_absent`], not the replacing
+    /// form. Identical bytes are not enough here: `persist`'s rename swaps in a
+    /// fresh file record, so a loser replacing the winner's blob orphans the
+    /// record every `<name>.exe` hardlinked from it, and mutating the store's
+    /// blob afterwards (an `ocx` upgrade, a re-sign) would no longer reach
+    /// them — one inode per name instead of one inode per store, which is the
+    /// #301 property inverted. `generate()` publishes one launcher per declared
+    /// name concurrently, so this is the ordinary path, not an edge case.
     ///
     /// # Errors
     ///
@@ -162,6 +199,7 @@ impl ShimBinStore {
     pub async fn ensure(&self) -> Result<PathBuf> {
         let target = self.path(shim_digest());
         let lost_race = simulated_lost_race(&self.root);
+        let mut publish = Publish::OnlyIfAbsent;
 
         // Pre-check: the blob is content-addressed, so a file already at this
         // path is the file this call would write — provided it is whole.
@@ -178,12 +216,15 @@ impl ShimBinStore {
                 Ok(metadata) if crate::shim::published_blob_is_intact(metadata.len(), crate::shim::SHIM_BYTES) => {
                     return Ok(target);
                 }
-                Ok(metadata) => crate::log::debug!(
-                    "Published shim blob {} is {} bytes, expected {}; republishing over the torn write.",
-                    target.display(),
-                    metadata.len(),
-                    crate::shim::SHIM_BYTES.len()
-                ),
+                Ok(metadata) => {
+                    crate::log::debug!(
+                        "Published shim blob {} is {} bytes, expected {}; republishing over the torn write.",
+                        target.display(),
+                        metadata.len(),
+                        crate::shim::SHIM_BYTES.len()
+                    );
+                    publish = Publish::OverTornBlob;
+                }
                 // Same lossy contract the previous existence probe had: an
                 // unreadable target is treated as absent and the publish below
                 // decides. A genuine I/O fault resurfaces there with context.
@@ -207,7 +248,7 @@ impl ShimBinStore {
             std::io::Write::write_all(&mut temp, crate::shim::SHIM_BYTES)?;
             temp.as_file().sync_data()?;
 
-            match publish_staged(temp, &published, lost_race) {
+            match publish_staged(temp, &published, lost_race, publish) {
                 Ok(()) => Ok(()),
                 // A concurrent `ensure()` published between this call's
                 // pre-check and its rename. Its file carries the same
@@ -477,19 +518,20 @@ mod tests {
     }
 
     /// C-001 (corrected 2026-08-10): concurrent callers must all converge on
-    /// `Ok(path)`. `persist_temp_file` treats an already-present target as a
-    /// **failure**, so an implementation that propagates its publish error
-    /// hands a loser an I/O error instead of the winner's blob; the required
-    /// dance re-checks the target on publish failure and returns `Ok` when it
-    /// is present (`finalize_layer_dir`, `tasks/layer_staging.rs:27-64`).
+    /// `Ok(path)`. A publish that found nothing at its pre-check refuses to
+    /// replace an already-present target (`persist_temp_file_if_absent`), so a
+    /// loser's publish **fails** on every host; an implementation that
+    /// propagates that error hands the loser an I/O error instead of the
+    /// winner's blob. The required dance re-checks the target on publish
+    /// failure and returns `Ok` when it is present (`finalize_layer_dir`,
+    /// `tasks/layer_staging.rs:27-64`).
     ///
     /// The race is genuine, not simulated: there is no black-box input that
     /// forces "publish fails AND the target exists" deterministically, because
     /// the pre-check and the re-check test the same condition — only a real
-    /// interleaving separates them. This test therefore cannot go red on
-    /// demand against a naive implementation on a host whose `rename(2)`
-    /// silently replaces an existing target; it is red-capable where the
-    /// publish genuinely fails (Windows) and is never falsely red anywhere.
+    /// interleaving separates them. So the row is red-capable but not
+    /// red-on-demand: with 16 concurrent callers a loser is near-certain, never
+    /// guaranteed. It is never falsely red.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn ensure_converges_when_called_concurrently() {
         const CALLERS: usize = 16;
@@ -531,11 +573,77 @@ mod tests {
         );
     }
 
+    /// C-001 / #301: a loser must leave the winner's **file**, not merely its
+    /// bytes.
+    ///
+    /// `persist` is a rename, so a loser that publishes anyway swaps a fresh
+    /// file record in at the target and orphans the winner's — and on Windows
+    /// every generated `<name>.exe` is a hardlink to whichever record was there
+    /// when its own `ensure()` returned. The store then holds one record per
+    /// caller instead of one record per store, which is the #301 property
+    /// inverted. Byte-equality cannot see it: every record carries the same
+    /// `SHIM_BYTES`. An in-place mutation of the surviving blob can.
+    ///
+    /// The shape is `launcher::generate`'s: publish, then immediately link,
+    /// once per declared name, all concurrently, against a **cold** store —
+    /// the state where every caller's pre-check finds nothing and they all
+    /// publish. Runs on every host, because the property belongs to the store
+    /// and `std::fs::hard_link` shares a record on NTFS and POSIX alike; the
+    /// Windows-only `generate_hardlinks_every_exe_to_the_one_shared_store_blob`
+    /// is the same property observed one layer up.
+    ///
+    /// Red-capable but not red-on-demand, same caveat as the row above: 16
+    /// concurrent cold callers make a loser near-certain, never guaranteed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ensure_never_replaces_a_blob_an_earlier_caller_already_linked() {
+        /// Content no `ensure()` can have written, so reading it back through a
+        /// link proves that link still names the store's own blob.
+        const MUTATED: &[u8] = b"mutated-through-the-shared-record";
+        const CALLERS: usize = 16;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ocx-shim");
+        let links = tmp.path().join("links");
+        std::fs::create_dir_all(&links).unwrap();
+        let store = ShimBinStore::new(root.clone());
+
+        let mut callers = tokio::task::JoinSet::new();
+        for caller in 0..CALLERS {
+            let store = store.clone();
+            let link = links.join(format!("name-{caller}.exe"));
+            callers.spawn(async move {
+                let published = store.ensure().await?;
+                crate::hardlink::create(&published, &link)?;
+                crate::Result::Ok(link)
+            });
+        }
+
+        let mut linked = Vec::with_capacity(CALLERS);
+        while let Some(joined) = callers.join_next().await {
+            linked.push(
+                joined
+                    .expect("the publish-and-link task must not panic")
+                    .expect("every caller must publish and link"),
+            );
+        }
+
+        let published = store.ensure().await.unwrap();
+        std::fs::write(&published, MUTATED).expect("the store blob must be writable in place");
+
+        for link in linked {
+            assert_eq!(
+                std::fs::read(&link).unwrap(),
+                MUTATED,
+                "{} must still name the store's blob — a loser that replaced the \
+                 published file left this link on an orphaned record",
+                link.display()
+            );
+        }
+    }
+
     /// C-001 (b) — the re-check leg, which
-    /// `ensure_converges_when_called_concurrently` documents it cannot reach
-    /// on this host: off Windows `persist_temp_file` reduces to `rename(2)`,
-    /// which replaces an existing target silently, so a lost race raises no
-    /// error to recover from. The `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam
+    /// `ensure_converges_when_called_concurrently` can only reach by winning a
+    /// genuine interleaving. The `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam
     /// puts `ensure()` in exactly the state a loser is in — pre-check saw
     /// nothing, publish then failed — and both outcomes of the re-check are
     /// observed here, which is what makes the green mean something: with the
