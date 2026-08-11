@@ -1,0 +1,22 @@
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:265765ec6777e3f8769c5a12c9a8d127dfc3fcaf11b22c81f75fadc0514fb0ba"
+generated_by = "ocx 0.5.8"
+generated_at = "2026-08-11T15:51:45Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "localhost:5000/t_da5a15bc_kitware/cmake"
+
+[tool.platforms]
+"linux/amd64" = "sha256:95ef0586b1fab05c25a21417492ded8f1d0455270e0fd709091dd23966972759"
+
+[[tool]]
+name = "uv"
+group = "default"
+repository = "localhost:5000/t_da5a15bc_astral-sh/uv"
+
+[tool.platforms]
+"linux/amd64" = "sha256:446493f66cdaf3524fc45b059746083054d5da06b4acbb1cf087632afb1fd2f0"

@@ -1,0 +1,6 @@
+#:schema https://ocx.sh/schemas/project/v1.json
+# OCX project toolchain — managed by `ocx add` / `ocx remove`
+
+[tools]
+cmake = "localhost:5000/t_da5a15bc_kitware/cmake:4.2.0"
+uv = "localhost:5000/t_da5a15bc_astral-sh/uv:0.10.0"
