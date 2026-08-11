@@ -170,11 +170,12 @@ where
 /// Atomically publish a written [`tempfile::NamedTempFile`] to `target` via
 /// `persist`, retrying on Windows transient lock/access errors.
 ///
-/// The single cross-platform atomic-publish primitive: callers write content
-/// into a `NamedTempFile` in the destination directory, then hand it here to
-/// rename it into place. Used by [`BlobStore::write_blob`](crate::file_structure::BlobStore)
+/// The cross-platform atomic-publish primitive: callers write content into a
+/// `NamedTempFile` in the destination directory, then hand it here to rename it
+/// into place. Used by [`BlobStore::write_blob`](crate::file_structure::BlobStore)
 /// (content-addressed blobs) and `ocx self activate` (the version-stamped
-/// completion file).
+/// completion file). [`persist_temp_file_if_absent`] is the sibling for a
+/// destination whose file identity, not just its content, must survive a race.
 ///
 /// On Windows, `persist` (a rename) over a just-written destination can fail
 /// with `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5) when
@@ -194,6 +195,59 @@ where
 /// Blocking — `NamedTempFile` is synchronous; call from `spawn_blocking` inside
 /// async code.
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
+    persist_with_retry(tmp, target, Existing::Replaced)
+}
+
+/// [`persist_temp_file`], except that an already-present `target` is left
+/// alone and its presence reported as an error.
+///
+/// For a destination whose file **identity** matters — not merely its bytes —
+/// `persist`'s replace semantics are the wrong primitive: it is a rename with
+/// `MOVEFILE_REPLACE_EXISTING` on Windows and a plain `rename(2)` elsewhere, so
+/// a losing racer silently swaps in a fresh file record and orphans the one the
+/// winner published. Anything already hardlinked from that record keeps pointing
+/// at the orphan. [`ShimBinStore`](crate::file_structure::ShimBinStore) is the
+/// motivating caller: every generated `<name>.exe` on Windows hardlinks the one
+/// published shim blob, so "same bytes" is not enough — they must be the same
+/// file.
+///
+/// The caller decides what an existing target means. A content-addressed
+/// destination reads the resulting error as "a concurrent writer won, and its
+/// file is byte-identical to mine" and converges on it.
+///
+/// Blocking, same as [`persist_temp_file`].
+pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
+    persist_with_retry(tmp, target, Existing::Kept)
+}
+
+/// What a publish does when `target` already exists at rename time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    /// Replace it (`NamedTempFile::persist`).
+    Replaced,
+    /// Keep it and fail (`NamedTempFile::persist_noclobber`).
+    Kept,
+}
+
+/// The one publish implementation behind [`persist_temp_file`] and
+/// [`persist_temp_file_if_absent`], carrying the Windows transient-retry
+/// schedule both share.
+fn persist_with_retry(
+    tmp: tempfile::NamedTempFile,
+    target: &std::path::Path,
+    existing: Existing,
+) -> std::io::Result<()> {
+    fn publish(
+        tmp: tempfile::NamedTempFile,
+        target: &std::path::Path,
+        existing: Existing,
+    ) -> Result<(), tempfile::PersistError> {
+        match existing {
+            Existing::Replaced => tmp.persist(target).map(|_| ()),
+            Existing::Kept => tmp.persist_noclobber(target).map(|_| ()),
+        }
+    }
+
     #[cfg(windows)]
     {
         let mut tmp_opt = Some(tmp);
@@ -204,8 +258,8 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
                 std::thread::sleep(jittered_backoff(backoff));
             }
             let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
-            match temp_file.persist(target) {
-                Ok(_) => return Ok(()),
+            match publish(temp_file, target, existing) {
+                Ok(()) => return Ok(()),
                 Err(persist_err) => {
                     if is_transient_windows_error(&persist_err.error) {
                         tmp_opt = Some(persist_err.file);
@@ -224,7 +278,7 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
     }
     #[cfg(not(windows))]
     {
-        tmp.persist(target).map(|_| ()).map_err(|e| e.error)
+        publish(tmp, target, existing).map_err(|e| e.error)
     }
 }
 
