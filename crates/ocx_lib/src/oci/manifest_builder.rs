@@ -227,6 +227,7 @@ mod tests {
             env: Env::default(),
             dependencies: Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         })
     }
 

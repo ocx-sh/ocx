@@ -13,7 +13,7 @@ use crate::{
     oci::index::{IndexOperation, SelectResult},
     package::{
         install_info::InstallInfo,
-        metadata::{binary::BinaryName, entrypoint::EntrypointName, env::entry::Entry},
+        metadata::{binary::BinaryName, entrypoint::EntrypointName, env::entry::Entry, integrations::IntegrationEntry},
     },
     package_manager::{self, composer, error::PackageError, error::PackageErrorKind},
     patch::PatchDescriptor,
@@ -136,8 +136,41 @@ mod patch_overlay_tests {
     }
 }
 
-/// Map from an admitted identifier to the companion INTERFACE env entries
-/// emitted under it, each paired with the [`PatchProvenance`] that admitted it.
+/// What a companion contributes under one admitted base: its INTERFACE env
+/// entries, each paired to the [`PatchProvenance`] that admitted it, plus its
+/// declared `integrations`.
+///
+/// Both carriers ride together deliberately: `integrations` is not a special
+/// case of the patch tier. A companion is a package loaded into the
+/// environment, so it contributes every carrier a package contributes
+/// (`adr_package_integrations.md` C-017).
+pub struct CompanionOverlay {
+    pub entries: Vec<(Entry, PatchProvenance)>,
+    pub integrations: Vec<(oci::PinnedIdentifier, IntegrationEntry)>,
+}
+
+/// What a companion's one-time projection produced, cached per companion
+/// identifier for the remaining admitted bases.
+///
+/// Not the contribution itself: a projection is emitted into the overlay of the
+/// FIRST matching admitted base at the moment it is computed, so every later
+/// base needs only to know whether that happened. A rule matching N admitted
+/// bases must not land the same companion N times (N duplicate JSON entries, N
+/// shell exports, N PATH prepends).
+enum CompanionOutcome {
+    /// Projected, and emitted under the first matching base. Either half of the
+    /// contribution may have been empty — a private-only companion emits no
+    /// entries, and declaring no integrations is the common case — which is
+    /// still distinct from [`Missing`](Self::Missing).
+    Projected,
+    /// Genuinely missing: not installed locally, lookup failed, or composition
+    /// failed. The required-companion fail-closed check re-fires on every cache
+    /// hit for this outcome, so the cache can never bypass it.
+    Missing,
+}
+
+/// Map from an admitted identifier to the companion contributions emitted
+/// under it.
 ///
 /// A companion matching multiple admitted bases is emitted under the FIRST
 /// matching base only; a base whose companions were all emitted under an
@@ -145,7 +178,7 @@ mod patch_overlay_tests {
 ///
 /// Built offline from local `PatchTagMap` + `BlobStore` state (no network).
 /// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
-pub type SitePatchSet = HashMap<oci::PinnedIdentifier, Vec<(Entry, PatchProvenance)>>;
+pub type SitePatchSet = HashMap<oci::PinnedIdentifier, CompanionOverlay>;
 
 /// Which CLI tier a caller resolves env for, and what that caller contributes
 /// on top of the package-composed set. Forced at every env-resolution site.
@@ -411,16 +444,18 @@ impl ResolvedChain {
 }
 
 /// Admitted-set claim attribution for `ocx env` / `ocx package env`'s
-/// `binaries` / `entrypoints` JSON arrays.
+/// `binaries` / `entrypoints` / `integrations` JSON arrays.
 ///
 /// A straight passthrough of `ComposeOutput::admitted_binaries` /
-/// `admitted_entrypoints` — each pair names a declared claim together with
-/// the admitted [`oci::PinnedIdentifier`] that contributed it. See
-/// `adr_declared_binaries_metadata.md` §4 Decision A.
+/// `admitted_entrypoints` / `admitted_integrations` — each pair names a
+/// declared claim together with the admitted [`oci::PinnedIdentifier`] that
+/// contributed it. See `adr_declared_binaries_metadata.md` §4 Decision A and
+/// `adr_package_integrations.md` C-013.
 #[derive(Debug, Clone, Default)]
-pub struct AdmittedBinaries {
+pub struct AdmittedClaims {
     pub binaries: Vec<(oci::PinnedIdentifier, BinaryName)>,
     pub entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
+    pub integrations: Vec<(oci::PinnedIdentifier, IntegrationEntry)>,
 }
 
 /// Resolves the physical transport identifier for a logical pinned reference.
@@ -771,14 +806,15 @@ impl PackageManager {
         self_view: bool,
         scope: EnvScope,
         platform: &oci::Platform,
-    ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedBinaries)> {
+    ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)> {
         // Convert the scope to its opt-out set exactly once; the overlay logic
         // below (and `build_site_patch_set`) keeps consuming a plain reference.
         let no_patches = scope.opt_out();
         let out = composer::compose(packages, &self.file_structure().packages, self_view).await?;
-        let attribution = AdmittedBinaries {
+        let mut attribution = AdmittedClaims {
             binaries: out.admitted_binaries,
             entrypoints: out.admitted_entrypoints,
+            integrations: out.admitted_integrations,
         };
         let mut entries = out.entries;
         let compose_count = entries.len();
@@ -791,14 +827,60 @@ impl PackageManager {
         //
         // When `self.patches` is `None` this block is a no-op and
         // `entries` is byte-identical to the pre-Phase-4 output.
-        if let Some(mut patch_set) = self.build_site_patch_set(&out.admitted, no_patches, platform).await? {
+        //
+        // A companion's `integrations` join the base packages' on the SAME
+        // `AdmittedClaims` array, behind the same `integrations_cross` gate. The
+        // gate is a property of the carrier — interface-surface-only, at every
+        // depth — not of who declared it, so computing it once here covers base and
+        // companion alike and `ocx env --self` carries no integrations from any
+        // contributor. A companion-specific branch would be exactly the exceptional
+        // rule C-017 exists to refuse.
+        //
+        // It is threaded INTO `build_site_patch_set` rather than re-checked on the
+        // way out: a discarded payload must never be resolved, because resolution
+        // asserts each `${deps.*}` content directory exists and would fail a
+        // required companion over a value this surface does not carry.
+        let collect_integrations = composer::integrations_cross(self_view);
+        if let Some(mut patch_set) = self
+            .build_site_patch_set(&out.admitted, no_patches, platform, collect_integrations)
+            .await?
+        {
+            // D2/C-012: one row per (package, namespace) across the WHOLE
+            // composition. The base roots and each companion are composed by
+            // SEPARATE `compose` calls, and each dedups only within itself — so a
+            // dependency reachable from both a base root and a companion, or from
+            // two companions, arrives here twice. Seeded from the base's rows so
+            // they win, and the skip never reorders what survives: base rows first,
+            // then companion rows in admitted-set visit order.
+            // Keyed on the STRIPPED identifier, because `compose` strips advisory
+            // tags at every one of its own dedup sites (`composer.rs`, and the
+            // admitted set records stripped identifiers). The pairs themselves do
+            // not: a root contributes `root.identifier().clone()`, tag included. So
+            // a package reachable from a base under one advisory tag and from a
+            // companion under another produces two keys that differ only by a tag
+            // `compose` already considers irrelevant — and the row a consumer must
+            // see once arrives twice, with two different `package` strings. Only
+            // the KEY is stripped; the emitted attribution keeps the identifier the
+            // contributor named.
+            let mut seen_integrations: HashSet<(oci::PinnedIdentifier, String)> = attribution
+                .integrations
+                .iter()
+                .map(|(identifier, entry)| (identifier.strip_advisory(), entry.namespace.clone()))
+                .collect();
             for admitted_id in &out.admitted {
                 // `remove` instead of `get`: patch_set is consumed here and not used
                 // afterwards, so moving entries out eliminates the per-entry String clone.
-                if let Some(companion_entries) = patch_set.remove(admitted_id) {
-                    for (entry, entry_provenance) in companion_entries {
+                if let Some(overlay) = patch_set.remove(admitted_id) {
+                    for (entry, entry_provenance) in overlay.entries {
                         entries.push(entry);
                         provenance.push(entry_provenance);
+                    }
+                    // Empty by construction when the gate is off — nothing was
+                    // collected upstream — so no second gate is needed here.
+                    for (identifier, entry) in overlay.integrations {
+                        if seen_integrations.insert((identifier.strip_advisory(), entry.namespace.clone())) {
+                            attribution.integrations.push((identifier, entry));
+                        }
                     }
                 }
             }
@@ -853,11 +935,21 @@ impl PackageManager {
     /// every admitted identifier including transitive deps, because rules
     /// match by identifier string.  Full transitive package-specific
     /// discovery is a Phase 5 `ocx patch sync` concern.
+    ///
+    /// `collect_integrations` is the CALLER's surface gate
+    /// ([`composer::integrations_cross`]), forwarded to each companion
+    /// projection. The projection itself is always composed at `self_view =
+    /// false` (no private leak), so it cannot derive the gate — and resolving a
+    /// payload the caller will discard is not free: resolution asserts every
+    /// `${deps.*}` content directory exists, so a companion naming an
+    /// uninstalled dependency would fail a composition whose surface carries no
+    /// integrations at all.
     async fn build_site_patch_set(
         &self,
         admitted: &[oci::PinnedIdentifier],
         no_patches: &std::collections::BTreeSet<String>,
         platform: &oci::Platform,
+        collect_integrations: bool,
     ) -> crate::Result<Option<SitePatchSet>> {
         // No patch tier configured → no overlay; output is byte-identical to pre-Phase-4.
         let Some(patches) = self.patches() else {
@@ -918,34 +1010,18 @@ impl PackageManager {
         // companion (N = admitted set size).  The cache below keys by companion
         // `Identifier` so each (companion, required) pair is projected exactly once.
         //
-        // Cache value semantics:
-        //   `None`           — companion genuinely missing / not installed locally.
-        //                      Required-companion fail-closed check fires on every
-        //                      cache hit for None to ensure a required companion that
-        //                      was missing on the first lookup also fails on subsequent
-        //                      admitted identifiers (no silent bypass via the cache).
-        //   `Some(Vec<_>)`   — companion present; projection may be empty (all-private
-        //                      vars filtered by interface surface), which is fine.
+        // It dedups the *emission* by the same stroke, and carries no payload for
+        // that: a projection lands in the overlay of the admitted base that
+        // computed it — the first one the rule matched — so every later base has
+        // nothing to re-read, only [`CompanionOutcome`] to consult.
         //
-        // NOTE: the cache intentionally stores `None` for lookup failures (not-installed
-        // or lookup-error) to avoid repeated failed lookups. The required-fail-closed
-        // path re-checks on every cache hit for `None`, so it cannot be bypassed.
-        let mut companion_projection_cache: HashMap<oci::Identifier, Option<Vec<Entry>>> = HashMap::new();
-
-        // Cross-base emission dedup. The projection cache above dedups the *compute*;
-        // this set dedups the *emission*. A rule matching N admitted bases (a global
-        // `match: "*"` over a multi-package `ocx package env`, a project `ocx env`, or a
-        // base plus its admitted transitive deps) would otherwise land the same companion
-        // N times in the overlay — N duplicate JSON entries, N shell exports, N PATH
-        // prepends. First matching admitted base wins and carries the provenance.
+        // Keyed by the full identifier (registry/repo:tag), so the same repository
+        // at two different tags stays two companions.
         //
-        // Keyed by the full identifier (registry/repo:tag), so the same repository at two
-        // different tags stays two entries.
-        //
-        // Deliberately does NOT gate the fail-closed paths: a required companion that is
-        // missing must still fail on every base, whether or not an earlier base already
-        // emitted (or failed to emit) it.
-        let mut emitted_companions: HashSet<oci::Identifier> = HashSet::new();
+        // Deliberately does NOT gate the fail-closed paths: a required companion
+        // that is missing must still fail on every base, whether or not an earlier
+        // base already failed on it.
+        let mut companion_projection_cache: HashMap<oci::Identifier, CompanionOutcome> = HashMap::new();
 
         // ── Step 3: Iterate admitted identifiers, collect companions per identifier. ──
         //
@@ -1120,9 +1196,12 @@ impl PackageManager {
             // Each projected entry is paired with its `PatchProvenance` (the rule glob
             // that admitted this companion for this base + the companion id). The rule
             // glob is per (base, companion) — read from `companion_entry.rule_match` —
-            // while the projected entries are companion-only, so the cache stores bare
-            // `Vec<Entry>` and provenance is attached at extend time.
-            let mut companion_entries: Vec<(Entry, PatchProvenance)> = Vec::new();
+            // while the projection itself is companion-only, so provenance is attached
+            // as the projection lands in this base's overlay.
+            let mut companion_overlay = CompanionOverlay {
+                entries: Vec::new(),
+                integrations: Vec::new(),
+            };
             for companion_entry in &companions {
                 let companion_id = &companion_entry.identifier;
                 // Provenance factory for every entry this companion contributes to the
@@ -1132,18 +1211,17 @@ impl PackageManager {
                     companion: companion_id.clone(),
                 };
 
-                // Cache hit: distinguish "missing" (None) from "present, possibly empty"
-                // (Some(entries)).
+                // Cache hit: an earlier admitted base already resolved this
+                // companion, and emitted it there if it was present.
                 //
-                // A required companion that was missing on a prior admitted-id lookup
-                // must STILL fail closed here — caching None means "genuinely not
+                // A required companion that was missing on that lookup must STILL
+                // fail closed here — a cached `Missing` means "genuinely not
                 // installed", not "safe to skip". Without this re-check a required
                 // companion that is absent would silently bypass the fail-closed gate
                 // on every admitted identifier after the first.
-                if let Some(cached_projection) = companion_projection_cache.get(companion_id) {
-                    match cached_projection {
-                        None => {
-                            // Genuinely missing — re-apply the required check.
+                if let Some(outcome) = companion_projection_cache.get(companion_id) {
+                    match outcome {
+                        CompanionOutcome::Missing => {
                             if companion_entry.required {
                                 return Err(crate::Error::from(
                                     crate::package_manager::error::PackageErrorKind::RequiredCompanionFailed {
@@ -1154,14 +1232,9 @@ impl PackageManager {
                             }
                             // Optional and missing — skip (already logged on first encounter).
                         }
-                        Some(entries) => {
-                            // Present (projection may be empty for all-private companions).
-                            // Emit only for the FIRST admitted base that matched it.
-                            if emitted_companions.insert(companion_id.clone()) {
-                                companion_entries
-                                    .extend(entries.iter().cloned().map(|entry| (entry, make_provenance())));
-                            }
-                        }
+                        // Already emitted under the FIRST admitted base that matched
+                        // it; a second emission here is the cross-base duplicate.
+                        CompanionOutcome::Projected => {}
                     }
                     continue;
                 }
@@ -1176,9 +1249,9 @@ impl PackageManager {
                 let companion_install_info = match self.find_companion_local(companion_id, platform).await {
                     Ok(Some(info)) => info,
                     Ok(None) => {
-                        // Cache None = genuinely missing, so the required-fail-closed check
-                        // fires again on every cache hit (not bypassed by the cache).
-                        companion_projection_cache.insert(companion_id.clone(), None);
+                        // Cache `Missing` = genuinely missing, so the required-fail-closed
+                        // check fires again on every cache hit (not bypassed by the cache).
+                        companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                         if companion_entry.required {
                             // C7: required companion not installed locally → fail closed.
                             // The companion was supposed to be installed by Phase 3 discovery.
@@ -1217,26 +1290,48 @@ impl PackageManager {
                             companion_id,
                             admitted_id
                         );
-                        // Cache None (missing/failed) so subsequent admitted IDs skip the
-                        // lookup — the required-fail-closed check will still fire on cache
-                        // hits because None means "genuinely missing".
-                        companion_projection_cache.insert(companion_id.clone(), None);
+                        // Cache `Missing` (missing/failed) so subsequent admitted IDs skip
+                        // the lookup — the required-fail-closed check will still fire on
+                        // cache hits because `Missing` means "genuinely missing".
+                        companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                         continue;
                     }
                 };
 
                 // Project interface surface only (self_view=false — invariant: no private leak).
+                //
+                // C-017: `out.entries` AND `out.admitted_integrations` are both
+                // read here. A companion is a package loaded into the environment,
+                // so it contributes every carrier a package contributes and gets no
+                // exceptional rules. Attribution rides the pair's own
+                // `PinnedIdentifier` — the companion's, never the base's — so a
+                // consumer can always tell site policy from what it asked for.
+                //
+                // `admitted_binaries` / `admitted_entrypoints` stay discarded, and
+                // that is not an inconsistency: both are PATH-shaped claims about
+                // executables the overlay never puts on PATH, so admitting them
+                // would advertise binaries no consumer can reach.
+                //
+                // `collect_integrations` is the OUTER composition's gate, not
+                // this projection's: the projection is pinned to the interface
+                // surface, so deriving the gate here would resolve payloads on
+                // every env resolution only to discard them under `--self`.
                 let companion_arc = std::sync::Arc::new(companion_install_info);
-                match composer::compose(std::slice::from_ref(&companion_arc), package_store, false).await {
+                match composer::compose_companion(&companion_arc, package_store, collect_integrations).await {
                     Ok(out) => {
-                        // Store Some(entries) — companion is present (may have zero interface
-                        // vars, which is fine — private-only companions produce an empty vec).
-                        // Cache Some(empty) is distinct from None (missing).
-                        companion_projection_cache.insert(companion_id.clone(), Some(out.entries.clone()));
-                        // Emit only for the FIRST admitted base that matched it.
-                        if emitted_companions.insert(companion_id.clone()) {
-                            companion_entries.extend(out.entries.into_iter().map(|entry| (entry, make_provenance())));
-                        }
+                        // This IS the first admitted base that matched the companion —
+                        // reaching a cache miss proves no earlier base emitted it — so
+                        // the contribution is moved straight into this base's overlay
+                        // and the cache records only that it happened.
+                        //
+                        // Either half may be empty (private-only companions produce no
+                        // entries, and declaring no integrations is the common case);
+                        // empty is still `Projected`, never `Missing`.
+                        companion_overlay
+                            .entries
+                            .extend(out.entries.into_iter().map(|entry| (entry, make_provenance())));
+                        companion_overlay.integrations.extend(out.admitted_integrations);
+                        companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Projected);
                     }
                     Err(error) => {
                         if companion_entry.required {
@@ -1254,15 +1349,18 @@ impl PackageManager {
                             companion_id,
                             admitted_id
                         );
-                        // Cache None (composition failed) — if this companion is required
-                        // for another admitted identifier, the cache-hit path will fail closed.
-                        companion_projection_cache.insert(companion_id.clone(), None);
+                        // Cache `Missing` (composition failed) — if this companion is
+                        // required for another admitted identifier, the cache-hit path
+                        // will fail closed.
+                        companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                     }
                 }
             }
 
-            if !companion_entries.is_empty() {
-                patch_set.insert(admitted_id.clone(), companion_entries);
+            // Both halves are checked: a companion that declares integrations but
+            // no interface env var still has something to contribute under this base.
+            if !companion_overlay.entries.is_empty() || !companion_overlay.integrations.is_empty() {
+                patch_set.insert(admitted_id.clone(), companion_overlay);
             }
         }
 
@@ -2842,6 +2940,24 @@ mod phase4_spec_tests {
         std::fs::write(pkg_path.join("resolve.json"), resolved_json).unwrap();
     }
 
+    /// Write a package directory with caller-supplied `metadata.json`.
+    ///
+    /// The escape hatch behind [`seed_package_in_store`] and
+    /// [`seed_package_with_constant_var`]: a fixture needing a carrier neither
+    /// models — a `integrations` block, a declared dependency — supplies the
+    /// whole document instead of growing another parameter onto those two.
+    pub(super) fn seed_package_with_metadata(
+        store: &PackageStore,
+        id: &PinnedIdentifier,
+        resolved: &ResolvedPackage,
+        metadata: &serde_json::Value,
+    ) {
+        let pkg_path = store.path(id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        std::fs::write(pkg_path.join("metadata.json"), metadata.to_string()).unwrap();
+        std::fs::write(pkg_path.join("resolve.json"), serde_json::to_string(resolved).unwrap()).unwrap();
+    }
+
     /// Build a minimal `InstallInfo` backed by a real on-disk content dir.
     fn make_install_info(dir: &std::path::Path, repo: &str, hex_char: char, resolved: ResolvedPackage) -> InstallInfo {
         let id = pinned(repo, hex_char);
@@ -2852,6 +2968,7 @@ mod phase4_spec_tests {
             env: metadata_env::Env::default(),
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let pkg_root = dir.join(repo);
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -2892,6 +3009,7 @@ mod phase4_spec_tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let pkg_root = dir.join(repo);
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -4794,6 +4912,7 @@ mod phase4_spec_tests {
                 env,
                 dependencies: crate::package::metadata::dependency::Dependencies::default(),
                 entrypoints: crate::package::metadata::entrypoint::Entrypoints::default(),
+                integrations: Default::default(),
             });
             let pkg_path = store.path(&companion_pinned);
             std::fs::create_dir_all(pkg_path.join("content")).unwrap();
@@ -4835,6 +4954,7 @@ mod phase4_spec_tests {
                 env,
                 dependencies: crate::package::metadata::dependency::Dependencies::default(),
                 entrypoints: crate::package::metadata::entrypoint::Entrypoints::default(),
+                integrations: Default::default(),
             });
             let pkg_path = store.path(&root_id);
             std::fs::create_dir_all(pkg_path.join("content")).unwrap();
@@ -5620,11 +5740,7 @@ mod phase4_spec_tests {
         patch_config: &crate::config::patch::ResolvedPatchConfig,
         seed_package: bool,
     ) -> (&'static str, &'static str) {
-        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
-        use crate::oci::Algorithm;
-
         let store = manager.file_structure().packages.clone();
-        let blob_store = manager.file_structure().blobs.clone();
         let tag_store = manager.file_structure().clone();
 
         let companion_digest = sha256('c');
@@ -5646,10 +5762,32 @@ mod phase4_spec_tests {
         }
 
         seed_companion_pin(&tag_store, &companion_tag_id, &companion_digest);
+        seed_global_descriptor(manager, patch_config, &[&companion_tag_id]).await;
 
+        ("CA_BUNDLE", "/etc/ssl/certs/ca-bundle.crt")
+    }
+
+    /// Seed the global `__ocx.patch` descriptor as `LookedHasDescriptor`, with a
+    /// single catch-all rule (`*`) naming every companion in `companion_tag_ids`.
+    ///
+    /// Writes the blobs `build_site_patch_set` reads back offline: the layer
+    /// carrying the descriptor document, the manifest pointing at it, and the
+    /// tag-store record naming that manifest digest.
+    pub(super) async fn seed_global_descriptor(
+        manager: &PackageManager,
+        patch_config: &crate::config::patch::ResolvedPatchConfig,
+        companion_tag_ids: &[&Identifier],
+    ) {
+        use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
+        use crate::oci::Algorithm;
+
+        let blob_store = manager.file_structure().blobs.clone();
+        let tag_store = manager.file_structure().clone();
+
+        let packages: Vec<String> = companion_tag_ids.iter().map(|id| id.to_string()).collect();
         let descriptor_json = serde_json::json!({
             "version": 1,
-            "rules": [{ "match": "*", "packages": [companion_tag_id.to_string()] }]
+            "rules": [{ "match": "*", "packages": packages }]
         })
         .to_string();
         let layer_bytes = descriptor_json.as_bytes();
@@ -5676,8 +5814,6 @@ mod phase4_spec_tests {
         )
         .await
         .unwrap();
-
-        ("CA_BUNDLE", "/etc/ssl/certs/ca-bundle.crt")
     }
 
     /// Build a root `InstallInfo` (no deps) seeded in `store`.
@@ -5826,6 +5962,407 @@ mod phase4_spec_tests {
                 || err_str.contains("ca-bundle")
                 || err_str.contains("RequiredCompanionFailed"),
             "offline_view fail-closed error must reference the required companion; got: {err_str}"
+        );
+    }
+
+    // ── C-012 / D2: one integrations row per (package, namespace) ───────────
+    //
+    // The base roots and every companion are composed by SEPARATE `compose`
+    // calls, and each dedups only within itself. A package reachable from two
+    // of those calls therefore arrives at the merge site twice, so the
+    // one-row-per-(package, namespace) contract is owned by the merge, not by
+    // any single compose.
+
+    /// Seed `store` with a dependency that declares exactly one integrations
+    /// namespace, and return it together with the TC that reaches it.
+    fn seed_shared_customizing_dep(store: &PackageStore) -> (PinnedIdentifier, ResolvedPackage) {
+        let shared_dep = pinned("shareddep", 'd');
+        seed_package_with_metadata(
+            store,
+            &shared_dep,
+            &ResolvedPackage::new(),
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "integrations": { "vendor.shared": { "declared-by": "shareddep" } },
+            }),
+        );
+        (shared_dep.clone(), tc_reaching(&shared_dep))
+    }
+
+    /// A transitive closure whose single PUBLIC dependency is `identifier`.
+    fn tc_reaching(identifier: &PinnedIdentifier) -> ResolvedPackage {
+        ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: identifier.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        }
+    }
+
+    /// The same package at the same digest, named with an advisory tag.
+    ///
+    /// Two packages may reach one dependency under different advisory tags —
+    /// `zlib:1.3@X` from one, `zlib:1@X` from the other — which is the whole
+    /// meaning of "advisory". Both compose calls emit the TAG-BEARING
+    /// identifier on the row (`composer.rs:376`, `:458`), so a merge-site dedup
+    /// keyed on the raw identifier sees two packages where there is one.
+    ///
+    /// The package store keys on registry + digest, so the tagged name loads the
+    /// same seeded package.
+    fn with_advisory_tag(identifier: &PinnedIdentifier, tag: &str) -> PinnedIdentifier {
+        // `clone_with_tag` drops the digest and `clone_with_digest` keeps the
+        // tag, so this order — and only this order — yields both.
+        let tagged = PinnedIdentifier::try_from(
+            identifier
+                .as_identifier()
+                .clone_with_tag(tag)
+                .clone_with_digest(identifier.digest()),
+        )
+        .unwrap();
+        assert_eq!(
+            tagged.digest(),
+            identifier.digest(),
+            "the tagged name must keep the digest"
+        );
+        assert_eq!(tagged.tag(), Some(tag), "the tagged name must carry the advisory tag");
+        assert_ne!(
+            tagged, *identifier,
+            "the two names must differ, or the fixture proves nothing"
+        );
+        assert_eq!(
+            tagged.strip_advisory(),
+            identifier.strip_advisory(),
+            "the two names must differ ONLY by the advisory tag"
+        );
+        tagged
+    }
+
+    /// Install a companion at `name` whose transitive closure is `resolved`, and
+    /// return the tag identifier the descriptor rule names it by paired with the
+    /// pinned identifier its own contributions are attributed to.
+    ///
+    /// The companion declares one namespace of its own, `vendor.companion`, so a
+    /// test can prove the projection engaged: a count over a namespace the base
+    /// also reaches cannot tell "deduped to one row" from "the companion never
+    /// contributed", and an optional companion that fails to resolve is
+    /// warn-skipped in silence.
+    ///
+    /// The returned pin keeps the advisory tag, because that is what
+    /// `resolve_companion_pinned` attributes a companion's rows to; the package
+    /// store keys on registry + digest, so seeding is unaffected either way.
+    fn seed_companion_with_tc(
+        manager: &PackageManager,
+        name: &str,
+        hex_char: char,
+        resolved: &ResolvedPackage,
+    ) -> (Identifier, PinnedIdentifier) {
+        let digest = sha256(hex_char);
+        let tag_id = Identifier::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
+        let pinned_id = PinnedIdentifier::try_from(tag_id.clone_with_digest(digest.clone())).unwrap();
+        seed_package_with_metadata(
+            &manager.file_structure().packages,
+            &pinned_id,
+            resolved,
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "integrations": { "vendor.companion": { "declared-by": name } },
+            }),
+        );
+        seed_companion_pin(manager.file_structure(), &tag_id, &digest);
+        (tag_id, pinned_id)
+    }
+
+    /// Count the composed rows attributing `namespace` to `identifier`.
+    /// Counted by package identity, advisory tag ignored — the contract is one
+    /// row per (package, namespace), and two advisory tags on one digest are one
+    /// package. A tag-sensitive count would report 1 for each of two rows that
+    /// name the same package differently, which is the duplicate itself.
+    fn integration_rows(attribution: &super::AdmittedClaims, identifier: &PinnedIdentifier, namespace: &str) -> usize {
+        attribution
+            .integrations
+            .iter()
+            .filter(|(id, entry)| id.strip_advisory() == identifier.strip_advisory() && entry.namespace == namespace)
+            .count()
+    }
+
+    /// A dependency reachable from BOTH a base root and a patch companion
+    /// contributes its integrations exactly once.
+    ///
+    /// The base compose admits the dep and emits its row; the companion's own
+    /// projection admits the very same dep and emits it again. Neither compose
+    /// can see the other's `seen` set, so without dedup at the merge the
+    /// consumer receives the identical (package, namespace) row twice — a D2 /
+    /// C-012 violation that reads as two independent declarations.
+    ///
+    /// The two legs reach the dep under DIFFERENT advisory tags, which is the
+    /// axis the merge-site key turns on: rows carry the tag-bearing identifier,
+    /// so a key that does not strip the tag sees two packages. This leg pins the
+    /// seed side of the dedup (base rows seed the set, the companion's row is
+    /// tested against it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dep_reachable_from_a_base_and_a_companion_contributes_one_row() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let (shared_dep, reaching_tc) = seed_shared_customizing_dep(&store);
+        let companion_tc = tc_reaching(&with_advisory_tag(&shared_dep, "1"));
+        let (companion_tag_id, companion_pinned) = seed_companion_with_tc(&manager, "ca-bundle", 'c', &companion_tc);
+        seed_global_descriptor(&manager, &config, &[&companion_tag_id]).await;
+
+        // The base root reaches the same dependency through its own TC.
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', reaching_tc));
+
+        let (_entries, _compose_count, _provenance, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("resolve_env_with_attribution must succeed");
+
+        assert_eq!(
+            integration_rows(&attribution, &shared_dep, "vendor.shared"),
+            1,
+            "a dep reachable from both the base and a companion must contribute one row, not one per compose; \
+             rows: {:?}",
+            attribution.integrations
+        );
+
+        // Positive control, deliberately asserted AFTER the dedup count: the base
+        // root alone already emits that one `vendor.shared` row, so `== 1` is
+        // equally satisfied by a companion that never engaged — and this tier is
+        // `required: false`, so a companion that fails to resolve or project is
+        // warn-skipped without a trace. Only a namespace nothing but the companion
+        // declares separates "deduped" from "never contributed".
+        assert_eq!(
+            integration_rows(&attribution, &companion_pinned, "vendor.companion"),
+            1,
+            "the companion projection must have engaged and contributed its own namespace, \
+             or the dedup assertion above proves nothing; rows: {:?}",
+            attribution.integrations
+        );
+    }
+
+    /// Two companions reaching one shared dependency contribute its
+    /// integrations once between them.
+    ///
+    /// Same defect as `a_dep_reachable_from_a_base_and_a_companion_contributes_one_row`
+    /// with the base removed: the duplication is between two companion
+    /// projections, both landing in the SAME overlay under one admitted base,
+    /// so it survives any dedup keyed on the companion identifier.
+    ///
+    /// The two companions reach the dep under different advisory tags, pinning
+    /// the insert side of the merge-site key: nothing seeded the set here, so
+    /// both rows are tested against each other rather than against a base row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_companions_reaching_one_dep_contribute_one_row() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let (shared_dep, reaching_tc) = seed_shared_customizing_dep(&store);
+        let tagged_tc = tc_reaching(&with_advisory_tag(&shared_dep, "1"));
+        let (first, _) = seed_companion_with_tc(&manager, "ca-bundle", 'c', &reaching_tc);
+        let (second, _) = seed_companion_with_tc(&manager, "proxy-config", 'e', &tagged_tc);
+        seed_global_descriptor(&manager, &config, &[&first, &second]).await;
+
+        // The base itself declares nothing and reaches nothing — both rows can
+        // only come from the two companion projections.
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (_entries, _compose_count, _provenance, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("resolve_env_with_attribution must succeed");
+
+        assert_eq!(
+            integration_rows(&attribution, &shared_dep, "vendor.shared"),
+            1,
+            "two companions sharing one dep must contribute its row once; rows: {:?}",
+            attribution.integrations
+        );
+    }
+
+    // ── C-017 / H-1: the --self surface never resolves a discarded payload ────
+
+    /// Under `--self` the composition carries zero integrations, so a
+    /// companion's payload must never be resolved — not resolved and then
+    /// discarded.
+    ///
+    /// Payload resolution asserts that every `${deps.*}` content directory
+    /// exists. The companion projection is pinned to the interface surface and
+    /// so cannot derive the caller's gate; while it collected unconditionally, a
+    /// payload naming an uninstalled dependency failed the projection outright —
+    /// a hard error for this `required` tier, and a silent drop of the
+    /// companion's env entries for an optional one. This reaches the launcher
+    /// hot path, which composes with `self_view = true`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_payload_naming_an_absent_dep_does_not_fail_the_self_surface() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        let dir = TempDir::new().unwrap();
+        // `required` so a failed projection is a hard error rather than a
+        // warn-skip: the regression is then a returned `Err`, not a silence.
+        let config = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+
+        // Declared but never installed: its content directory does not exist,
+        // which is exactly what payload resolution asserts.
+        let absent_dep = pinned("absentdep", 'a');
+        let companion_digest = sha256('c');
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_metadata(
+            &manager.file_structure().packages,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "env": [{ "key": "COMPANION_VAR", "type": "constant", "value": "present", "visibility": "interface" }],
+                "dependencies": [{ "identifier": absent_dep.to_string(), "visibility": "public" }],
+                "integrations": { "vendor.example": { "path": "${deps.absentdep.installPath}" } },
+            }),
+        );
+        seed_companion_pin(manager.file_structure(), &companion_tag_id, &companion_digest);
+        seed_global_descriptor(&manager, &config, &[&companion_tag_id]).await;
+
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (entries, _compose_count, _provenance, attribution) = manager
+            .resolve_env_with_attribution(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("the --self surface carries no integrations, so a payload it discards must never be resolved");
+
+        assert!(
+            attribution.integrations.is_empty(),
+            "--self must carry no integrations from any contributor; got: {:?}",
+            attribution.integrations
+        );
+        assert!(
+            entries.iter().any(|e| e.key == "COMPANION_VAR"),
+            "the companion's interface env var must still compose — the suppressed carrier is the only thing dropped; \
+             entries: {entries:?}"
+        );
+    }
+
+    // ── C7: the projection cache records "missing", never "safe to skip" ──────
+
+    /// Record a descriptor naming `companion_tag_id` with an explicit per-rule
+    /// `required` flag at `descriptor_id`'s patch-descriptor path.
+    ///
+    /// [`seed_global_descriptor`] omits the flag, so the tier's own `required`
+    /// decides; a fixture that needs the two to differ per base writes its own.
+    async fn seed_descriptor_with_required(
+        manager: &PackageManager,
+        descriptor_id: &Identifier,
+        companion_tag_id: &Identifier,
+        required: bool,
+    ) {
+        use super::super::patch_discovery::PatchTagMap;
+        use crate::oci::Algorithm;
+
+        let blob_store = manager.file_structure().blobs.clone();
+        let layer_bytes = serde_json::json!({
+            "version": 1,
+            "rules": [{ "match": "*", "packages": [companion_tag_id.to_string()], "required": required }]
+        })
+        .to_string()
+        .into_bytes();
+        let layer_digest = Algorithm::Sha256.hash(&layer_bytes);
+        let manifest_bytes = serde_json::json!({
+            "schemaVersion": 2,
+            "layers": [{"mediaType": "application/octet-stream", "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string()
+        .into_bytes();
+        let manifest_digest = Algorithm::Sha256.hash(&manifest_bytes);
+        blob_store
+            .write_blob(PATCH_REGISTRY, &manifest_digest, &manifest_bytes)
+            .await
+            .unwrap();
+        blob_store
+            .write_blob(PATCH_REGISTRY, &layer_digest, &layer_bytes)
+            .await
+            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &manager.file_structure().patch_descriptor_path(descriptor_id),
+            &manifest_digest.to_string(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A companion that is OPTIONAL for the first admitted base and REQUIRED for a
+    /// later one must still fail closed on the later base.
+    ///
+    /// This is the only shape in which the required re-check on a cache HIT can
+    /// fire. Whenever the companion is required at its first encounter, the
+    /// fail-closed arm on the lookup itself fires and no second base is ever
+    /// reached — which is what `fix3_required_companion_missing_fails_closed_even_on_cache_hit`
+    /// and `f6_pkg_specific_descriptor_overrides_global_companion_required_flag`
+    /// actually exercise, both of them through the cache MISS path. Here the first
+    /// base warn-skips the companion and caches it as missing, so the re-check on
+    /// the cached value is the only thing left to catch the second base's
+    /// requirement: cached "missing" means genuinely not installed, never "an
+    /// earlier base already decided this one is safe to skip".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_missing_for_an_optional_base_still_fails_closed_on_a_later_required_base() {
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        use super::super::patch_discovery::{global_descriptor_id, patch_descriptor_id};
+
+        let dir = TempDir::new().unwrap();
+        // Tier optional, so each rule's own `required` flag decides.
+        let config = ResolvedPatchConfig {
+            required: false,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        // Named by both descriptors, never installed locally.
+        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        // Global rule, optional: the first admitted base warn-skips it.
+        seed_descriptor_with_required(&manager, &global_descriptor_id(&config), &companion_tag_id, false).await;
+
+        let alpha = seed_root_arc(&store, "alpha", 'a');
+        let beta_id = pinned("beta", 'b');
+        let beta = seed_root_arc(&store, "beta", 'b');
+        // Package-specific rule for `beta` alone, required: evaluated on a cache hit.
+        seed_descriptor_with_required(
+            &manager,
+            &patch_descriptor_id(&config, beta_id.as_identifier()),
+            &companion_tag_id,
+            true,
+        )
+        .await;
+
+        let result = manager
+            .resolve_env(
+                &[alpha, beta],
+                false,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a companion cached as missing for an optional base must still fail closed for a base that requires it; \
+             got Ok({:?})",
+            result.ok()
         );
     }
 }

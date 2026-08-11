@@ -497,6 +497,7 @@ mod tests {
             env: metadata_env::Env::default(),
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         std::fs::write(
             pkg_path.join("resolve.json"),

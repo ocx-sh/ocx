@@ -125,10 +125,11 @@ pub struct InspectClosure {
     pub conflicts: ClosureConflicts,
 }
 
-/// One projected surface of a closure — the aggregate of binaries, entrypoints
-/// and env keys admitted on a single visibility axis. Built by
-/// [`project_surface`] for both the interface (consumer) and private (internal)
-/// axes; the two differ only in the admission + env-crossing predicate.
+/// One projected surface of a closure — the aggregate of binaries, entrypoints,
+/// env keys and integration namespaces admitted on a single visibility axis.
+/// Built by [`project_surface`] for both the interface (consumer) and private
+/// (internal) axes; the two differ only in the admission + carrier-crossing
+/// predicates.
 #[derive(Debug, Default)]
 pub struct Surface {
     /// Binary claims from every admitted node, attributed to the declaring
@@ -140,6 +141,13 @@ pub struct Surface {
     /// omitted — it is `${installPath}`-templated and only known post-install;
     /// the summary answers "which env keys would be set", not "to what".
     pub env: Vec<(oci::PinnedIdentifier, ClosureEnvVar)>,
+    /// Integration NAMESPACE keys each admitted node declares, attributed to
+    /// it. Payload-free on purpose: a closure node is not installed, so
+    /// `${installPath}` has no value and an interpolated payload would be a
+    /// half-truth — the same reason `env` omits values. Interface surface only
+    /// (`composer::integrations_cross`), so the private projection is always
+    /// empty.
+    pub integrations: Vec<(oci::PinnedIdentifier, String)>,
     /// `false` iff at least one admitted node has UNDECLARED binaries
     /// (`ClosureNode.binaries == None`). Entrypoints are always complete.
     pub binaries_complete: bool,
@@ -191,6 +199,9 @@ pub struct ClosureNode {
     /// interface (`has_interface`) and private (`has_private`) surface
     /// projections can filter per-axis at aggregate time.
     pub env: Vec<ClosureEnvVar>,
+    /// The node's declared integration namespace keys, in `BTreeMap` order.
+    /// Keys only — see [`Surface::integrations`] for why no payload.
+    pub integrations: Vec<String>,
     /// The node's own declared dependency edges (as authored).
     pub dependencies: Vec<ClosureEdge>,
     pub is_root: bool,
@@ -584,24 +595,30 @@ async fn walk_closure(
 }
 
 /// Projects one surface of the closure — the aggregate of binaries,
-/// entrypoints and env keys admitted on a single visibility axis. `self_view`
-/// selects the surface exactly as it does for the composer: `false` =
-/// interface (consumer, `ocx env`), `true` = private (self, `ocx env --self`).
+/// entrypoints, env keys and integration namespaces admitted on a single
+/// visibility axis. `self_view` selects the surface exactly as it does for the
+/// composer: `false` = interface (consumer, `ocx env`), `true` = private (self,
+/// `ocx env --self`).
 ///
 /// Every admission / crossing decision is delegated to the shared
-/// `composer::{dep_admitted, carrier_crosses}` predicates — the SAME surface
-/// algebra the runtime env command uses (see the module comment on
-/// `composer.rs`) — so a surface here equals what the composer emits. Inspect
-/// adds only the metadata-only concern the env command has no need for:
-/// `binaries_complete`. Node admission is [`admitted_on_surface`] (root
-/// always, dep iff `dep_admitted`); each carrier then crosses under its
-/// visibility — env vars their declared one, entry points
-/// [`metadata::Entrypoints::IMPLICIT_VISIBILITY`], binaries claims
-/// [`metadata::Binaries::IMPLICIT_VISIBILITY`].
+/// `composer::{dep_admitted, carrier_crosses, integrations_cross}`
+/// predicates — the SAME surface algebra the runtime env command uses (see the
+/// module comment on `composer.rs`) — so a surface here equals what the
+/// composer emits. Inspect adds only the metadata-only concern the env command
+/// has no need for: `binaries_complete`. Node admission is
+/// [`admitted_on_surface`] (root always, dep iff `dep_admitted`); each carrier
+/// then crosses under its visibility — env vars their declared one, entry
+/// points [`metadata::Entrypoints::IMPLICIT_VISIBILITY`], binaries claims
+/// [`metadata::Binaries::IMPLICIT_VISIBILITY`] — except integrations, whose
+/// crossing is structural rather than visibility-derived and therefore routes
+/// through `composer::integrations_cross` instead.
 fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
     let mut binaries = Vec::new();
     let mut entrypoints = Vec::new();
     let mut env = Vec::new();
+    // Populated under `composer::integrations_cross(self_view)` — the shared
+    // predicate `compose` uses, so the two views cannot disagree.
+    let mut integrations = Vec::new();
     let mut binaries_complete = true;
     for node in nodes.iter().filter(|node| admitted_on_surface(node, self_view)) {
         if composer::carrier_crosses(metadata::Binaries::IMPLICIT_VISIBILITY, node.is_root, self_view) {
@@ -627,11 +644,26 @@ fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
                 .filter(|var| composer::carrier_crosses(var.visibility, node.is_root, self_view))
                 .map(|var| (node.identifier.clone(), var.clone())),
         );
+        // The edge term stays algebraic (ADR `adr_package_integrations.md`
+        // §4.4): a dep contributes integrations iff `dep_admitted(effective,
+        // /* self_view = */ false)`. Reaching this loop already required
+        // `admitted_on_surface(node, self_view)`, and `integrations_cross` is
+        // false whenever `self_view` is true — so the surviving case is exactly
+        // the interface edge, with no second gate to drift from the first. The
+        // identical composition `compose` performs at its two collection sites.
+        if composer::integrations_cross(self_view) {
+            integrations.extend(
+                node.integrations
+                    .iter()
+                    .map(|namespace| (node.identifier.clone(), namespace.clone())),
+            );
+        }
     }
     Surface {
         binaries,
         entrypoints,
         env,
+        integrations,
         binaries_complete,
     }
 }
@@ -1044,6 +1076,7 @@ fn fold_effective_visibility(
                     .map(|entries| entries.names().cloned().collect())
                     .unwrap_or_default(),
                 env: closure_env_vars(metadata),
+                integrations: closure_integrations(metadata),
                 dependencies: edges.clone(),
                 is_root: false,
             }
@@ -1061,6 +1094,7 @@ fn fold_effective_visibility(
             .map(|entries| entries.names().cloned().collect())
             .unwrap_or_default(),
         env: closure_env_vars(root_metadata),
+        integrations: closure_integrations(root_metadata),
         dependencies: root_edges,
         is_root: true,
     });
@@ -1090,6 +1124,22 @@ fn closure_env_vars(metadata: &ValidMetadata) -> Vec<ClosureEnvVar> {
             },
             visibility: var.visibility,
         })
+        .collect()
+}
+
+/// A node's own declared integration NAMESPACE keys, in `BTreeMap` order.
+///
+/// Keys only — the payload is deliberately absent for the same reason
+/// [`closure_env_vars`] drops env values: a closure node is not installed, so
+/// `${installPath}` has no value and an interpolated payload would be a
+/// half-truth. Unfiltered, like `closure_env_vars`; the surface gate
+/// (`composer::integrations_cross`) applies at aggregate time in
+/// [`project_surface`].
+fn closure_integrations(metadata: &ValidMetadata) -> Vec<String> {
+    metadata
+        .integrations()
+        .iter()
+        .map(|(namespace, _)| namespace.to_owned())
         .collect()
 }
 

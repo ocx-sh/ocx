@@ -76,6 +76,7 @@ def _make_project(
     bin_name: str = "tool",
     *,
     no_bin_scan: bool = False,
+    integrations: dict | None = None,
 ) -> tuple[Path, str]:
     """Publish a package, create a locked + pulled project, return (project_dir, fq).
 
@@ -83,11 +84,15 @@ def _make_project(
     default Auto-mode scan never fills a `binaries` claim from `bin_name`'s
     interface-visible executable — for fixtures that must stay genuinely
     claim-less.
+
+    ``integrations``: sets the published package's metadata sidecar
+    ``integrations`` map (``adr_package_integrations.md``).
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
     make_package(
-        ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name], no_bin_scan=no_bin_scan
+        ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name],
+        no_bin_scan=no_bin_scan, integrations=integrations,
     )
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
@@ -1187,6 +1192,156 @@ def test_env_default_plus_named_group_composes_both(ocx: OcxRunner, tmp_path: Pa
     assert keys == ["PATH", home["default"], "PATH", home["lint"]], (
         f"default+lint composition order must be [PATH, default HOME, PATH, "
         f"lint HOME]; got {keys}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Package `integrations` (adr_package_integrations.md) — toolchain-tier
+# scenarios S-003, S-005, and the cross-tier parity scenario S-002b. The
+# rest of the acceptance coverage (S-001, S-002, S-004, S-006 through S-009,
+# S-011, S-012, S-014) lives in test_env.py; the patch-companion scenario
+# (S-013) lives in test_patches.py.
+# ---------------------------------------------------------------------------
+
+
+def test_env_json_integrations_ordered_across_roots(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """S-003: a project whose lock pins three tools, two of which declare
+    integrations, composes the same shared `EnvVars` shape as the OCI tier
+    (C-014). `[tools]` is a `BTreeMap<String, Identifier>`
+    (`project/config.rs:33`), so composition visits bindings in
+    lexicographic BINDING-NAME order, NOT file-declaration order and NOT
+    the integration's own namespace order — the `ocx.toml` lines below
+    declare ``c_tool`` before ``a_tool`` before ``b_tool``, so a
+    declaration-order implementation would emit ``c_tool`` first and fail
+    the assertion below. The two declaring bindings are deliberately given
+    namespaces whose alphabetical order is the REVERSE of their
+    binding-name order (``a_tool`` -> ``com.example.zz-a-tool``, ``c_tool``
+    -> ``com.example.aa-c-tool``), so a namespace-sorting implementation
+    would emit ``aa-c-tool`` before ``zz-a-tool`` and also fail. The
+    non-declaring ``b_tool`` proves its absence does not shift the order
+    of the two that do.
+    """
+    bindings: list[tuple[str, str | None]] = [
+        ("c_tool", "com.example.aa-c-tool"),  # binding-name order: last; namespace order: first
+        ("a_tool", "com.example.zz-a-tool"),  # binding-name order: first; namespace order: last
+        ("b_tool", None),  # no integrations
+    ]
+    lines = ["[tools]"]
+    for binding, namespace in bindings:
+        short = uuid4().hex[:8]
+        repo = f"t_{short}_te_s3_{binding}"
+        kwargs = {"integrations": {namespace: {"k": binding}}} if namespace else {}
+        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"], **kwargs)
+        lines.append(f'{binding} = "{ocx.registry}/{repo}:1.0.0"')
+
+    project = tmp_path / "proj_s3_order"
+    project.mkdir()
+    _write_ocx_toml(project, "\n".join(lines) + "\n")
+    assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "env"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+    )
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    data = json.loads(result.stdout)
+
+    namespaces_in_order = [row["namespace"] for row in data["integrations"]]
+    assert namespaces_in_order == ["com.example.zz-a-tool", "com.example.aa-c-tool"], (
+        f"integrations must appear in binding-name order (a_tool before "
+        f"c_tool), NOT namespace-sort order (which would put aa-c-tool "
+        f"first) and NOT declaration order (which would put c_tool first); "
+        f"the non-declaring middle tool contributes no row; "
+        f"got {namespaces_in_order}"
+    )
+
+
+def test_env_shell_and_ci_exclude_integrations(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-005 / C-018 (toolchain tier): neither `ocx env --shell` nor
+    `ocx env --ci` carries integration data — both sinks return before
+    `EnvVars` is even constructed, mirroring the OCI-tier contract."""
+    marker = "TE_SHOULD_NOT_LEAK_a1b2"
+    project, _ = _make_project(
+        ocx, tmp_path, "integrations_shell_ci",
+        integrations={"com.example.te-probe": {"marker": marker}},
+    )
+
+    # Positive control: the fixture genuinely declares an integration, so
+    # the structured (JSON) path must see it — without this, the negative
+    # assertions below pass just as well against a fixture that declares
+    # nothing at all.
+    json_result = _run(ocx, project, "--format", "json", "env")
+    assert json_result.returncode == EXIT_SUCCESS, json_result.stderr
+    json_namespaces = [row["namespace"] for row in json.loads(json_result.stdout)["integrations"]]
+    assert "com.example.te-probe" in json_namespaces, (
+        f"sanity: the fixture must actually declare the namespace; got {json_namespaces}"
+    )
+
+    shell_result = _run(ocx, project, "env", "--shell=bash")
+    assert shell_result.returncode == EXIT_SUCCESS, shell_result.stderr
+    # Positive control: the shell channel must actually emit the guaranteed
+    # PATH export (the fixture's tool binding) — otherwise "no leak" passes
+    # vacuously against a channel that emitted nothing at all.
+    assert "export PATH=" in shell_result.stdout, shell_result.stdout
+    assert marker not in shell_result.stdout, shell_result.stdout
+    assert "com.example.te-probe" not in shell_result.stdout, shell_result.stdout
+
+    ci_result = _run(ocx, project, "env", "--ci=gitlab")
+    assert ci_result.returncode == EXIT_SUCCESS, ci_result.stderr
+    # Positive control: the GitLab JSON-lines sink must carry the
+    # guaranteed PATH entry — otherwise "no leak" passes vacuously against
+    # an empty export.
+    ci_names = {
+        json.loads(line)["name"] for line in ci_result.stdout.splitlines() if line.strip()
+    }
+    assert "PATH" in ci_names, f"sanity: PATH must be present in the CI export; got {ci_names}"
+    assert marker not in ci_result.stdout, ci_result.stdout
+    assert "com.example.te-probe" not in ci_result.stdout, ci_result.stdout
+
+
+def test_integrations_tier_parity_between_env_and_package_env(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """S-002b: the identical namespace filter works, unchanged, against both
+    `ocx --format json env` (project tier) and
+    `ocx --format json package env <id>` (OCI tier) — one shared `EnvVars`
+    type (C-014), no case distinction, no shape difference (#221)."""
+    project, fq = _make_project(
+        ocx, tmp_path, "tier_parity",
+        integrations={"com.microsoft.vscode": {"extensions": ["rust-lang.rust-analyzer"]}},
+    )
+
+    def _filtered(args: list[str], cwd: Path) -> list[object]:
+        result = subprocess.run(
+            [str(ocx.binary), "--format", "json", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=dict(ocx.env),
+        )
+        assert result.returncode == EXIT_SUCCESS, (
+            f"ocx --format json {' '.join(args)} must succeed; "
+            f"rc={result.returncode}\nstderr:\n{result.stderr}"
+        )
+        return [
+            row["payload"]
+            for row in json.loads(result.stdout)["integrations"]
+            if row["namespace"] == "com.microsoft.vscode"
+        ]
+
+    project_filtered = _filtered(["env"], project)
+    package_filtered = _filtered(["package", "env", fq], project)
+
+    assert project_filtered, "the project tier must carry at least one matching row"
+    assert project_filtered == package_filtered, (
+        f"the identical namespace filter must agree on both tiers; "
+        f"project={project_filtered!r} package={package_filtered!r}"
     )
 
 

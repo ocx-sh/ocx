@@ -145,6 +145,12 @@ struct ClosureDepOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     binaries: Option<Vec<String>>,
     entrypoints: Vec<String>,
+    /// The dep's own declared integration namespace keys, lexicographically
+    /// ordered. Keys only — a closure node is not installed, so
+    /// `${installPath}` has no value and an interpolated payload would be a
+    /// half-truth. Always present, `[]` when the dep declares none: absent and
+    /// empty are the same state here (unlike `binaries`' tri-state).
+    integrations: Vec<String>,
     /// The dep's own declared dependency edges (as authored) — lets a consumer
     /// rebuild the DAG from the flat list.
     dependencies: Vec<ClosureEdgeOut>,
@@ -170,7 +176,8 @@ struct SurfacesOut {
     private: SurfaceOut,
 }
 
-/// One projected surface — binaries/entrypoints/env admitted on a single axis.
+/// One projected surface — binaries/entrypoints/env/integrations admitted on
+/// a single axis.
 #[derive(Serialize)]
 struct SurfaceOut {
     binaries: Vec<BinaryAttribution>,
@@ -179,6 +186,11 @@ struct SurfaceOut {
     /// declaring package. Values are omitted — they are `${installPath}`-
     /// templated and only concrete after install.
     env: Vec<EnvVarAttribution>,
+    /// Integration namespace keys each admitted node declares, attributed to
+    /// the declaring package. Payload-free — a closure node is not installed,
+    /// so `${installPath}` has no value and the payload would be a half-truth,
+    /// the same reason [`SurfaceOut::env`] omits values.
+    integrations: Vec<NamespaceAttribution>,
     /// `false` iff any admitted node has undeclared `binaries`
     /// ("couldn't determine \u{2260} determined zero"). Entrypoints have no
     /// such flag — the entrypoint map keys are always authoritative.
@@ -217,6 +229,36 @@ impl EnvVarAttribution {
     }
 }
 
+/// One integration namespace a closure node declares, attributed to the
+/// declaring package. The field is `namespace` — the same word the flat
+/// `ocx env` / `ocx package env` envelope uses (`IntegrationAttribution`), so
+/// one concept has one key spelling across both surfaces
+/// (`adr_package_integrations.md` D16).
+///
+/// No `value`: the closure envelope is payload-free — see [`SurfaceOut::env`]
+/// for the same reason applied to env values.
+#[derive(Serialize)]
+struct NamespaceAttribution {
+    namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+}
+
+impl NamespaceAttribution {
+    /// Projects admitted `(identifier, namespace key)` pairs into the wire
+    /// shape — the payload-free sibling of
+    /// [`IntegrationAttribution::from_pairs`](crate::api::data::env::IntegrationAttribution::from_pairs).
+    fn from_pairs(pairs: &[(oci::PinnedIdentifier, String)]) -> Vec<Self> {
+        pairs
+            .iter()
+            .map(|(identifier, namespace)| Self {
+                namespace: namespace.clone(),
+                package: Some(identifier.to_string()),
+            })
+            .collect()
+    }
+}
+
 /// Install/compose-gate conditions detected over the interface projection
 /// (Codex C2). Both arrays always present; empty means the surface is
 /// realizable. Inspect stays a view, not a gate — exit 0 either way.
@@ -244,10 +286,10 @@ struct RepositoryConflictOut {
 
 /// Projects a lib-level metadata closure into the wire shape — one `closure`
 /// object with `deps` (non-root nodes in transitive-closure order), the two
-/// `surface` projections, and interface-projection `conflicts`. The surface
-/// attribution arrays reuse [`BinaryAttribution::from_pairs`] — the same
-/// `(PinnedIdentifier, T: Display)` projection `ocx env` / `ocx package env`
-/// already use for their admitted-set attribution arrays.
+/// `surface` projections, and interface-projection `conflicts`. Each surface
+/// attribution array is a `from_pairs` projection of the admitted-set pairs —
+/// the same `(PinnedIdentifier, claim)` shape `ocx env` / `ocx package env`
+/// already use for their attribution arrays.
 fn project_closure(closure: InspectClosure) -> ClosureOut {
     let InspectClosure {
         nodes,
@@ -278,6 +320,7 @@ fn surface_out(surface: Surface) -> SurfaceOut {
         binaries: BinaryAttribution::from_pairs(&surface.binaries),
         entrypoints: BinaryAttribution::from_pairs(&surface.entrypoints),
         env: EnvVarAttribution::from_pairs(&surface.env),
+        integrations: NamespaceAttribution::from_pairs(&surface.integrations),
         binaries_complete: surface.binaries_complete,
     }
 }
@@ -297,6 +340,7 @@ fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
             .binaries
             .map(|binaries| binaries.iter().map(ToString::to_string).collect()),
         entrypoints: node.entrypoints.iter().map(ToString::to_string).collect(),
+        integrations: node.integrations,
         dependencies: node.dependencies.into_iter().map(closure_edge_out).collect(),
     }
 }
@@ -982,6 +1026,10 @@ fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
         let leaves = surface.env.iter().map(env_var_attribution_leaf).collect();
         children.push(Node::branch("env", leaves));
     }
+    if !surface.integrations.is_empty() {
+        let leaves = surface.integrations.iter().map(namespace_attribution_leaf).collect();
+        children.push(Node::branch("integrations", leaves));
+    }
     if !surface.binaries_complete {
         // Wording matters: the trigger is an UNDECLARED claim (key absent), not
         // a declared-empty one — `binaries: []` asserts zero and keeps the
@@ -998,8 +1046,21 @@ fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
 /// full pinned identifier would otherwise repeat once per binary per package —
 /// a 3-dependency, 5-binary closure prints it 15 times.
 fn binary_attribution_leaf(attribution: &BinaryAttribution) -> Node {
-    let leaf = Node::leaf(attribution.name.clone());
-    match &attribution.package {
+    attribution_leaf(&attribution.name, attribution.package.as_deref())
+}
+
+/// Renders one [`NamespaceAttribution`] as a leaf — the namespace key, and the
+/// declaring package's short name when known. Never the payload: the closure
+/// envelope carries none (`adr_package_integrations.md` D15/D16).
+fn namespace_attribution_leaf(attribution: &NamespaceAttribution) -> Node {
+    attribution_leaf(&attribution.namespace, attribution.package.as_deref())
+}
+
+/// The shape every surface attribution leaf shares: the claimed name, noted
+/// with the owning package's short name when attribution is known.
+fn attribution_leaf(name: &str, package: Option<&str>) -> Node {
+    let leaf = Node::leaf(name);
+    match package {
         Some(package) => leaf.with_note(attribution_name(package)),
         None => leaf,
     }
@@ -1130,6 +1191,7 @@ mod tests {
             env: Env::default(),
             dependencies: Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         })
     }
 
@@ -1251,6 +1313,7 @@ mod tests {
             binaries: None,
             entrypoints: vec![],
             env: vec![],
+            integrations: vec![],
             dependencies: vec![],
             is_root: false,
         }
@@ -1264,6 +1327,7 @@ mod tests {
             binaries: None,
             entrypoints: vec![],
             env: vec![],
+            integrations: vec![],
             dependencies: vec![],
             is_root: true,
         }
@@ -1276,6 +1340,7 @@ mod tests {
             binaries: vec![],
             entrypoints: vec![],
             env,
+            integrations: vec![],
             binaries_complete,
         }
     }
@@ -1299,6 +1364,7 @@ mod tests {
             binaries: vec![],
             entrypoints: vec![],
             env: vec![],
+            integrations: vec![],
             binaries_complete,
         }
     }
@@ -1518,6 +1584,36 @@ mod tests {
         assert_eq!(find("named-claim-dep")["binaries"], serde_json::json!(["x"]));
     }
 
+    /// C-016: a `deps` entry's `integrations` is a plain array — always
+    /// present, `[]` when the dep declares none (unlike `binaries`' tri-state,
+    /// there is no `skip_serializing_if` here). Pins that contract so adding
+    /// one later reds this test instead of silently dropping the key on a
+    /// consumer that always reads it.
+    #[test]
+    fn json_closure_dep_integrations_present_as_empty_array_when_none_declared() {
+        let root = pinned("root", 'a');
+        let dep = pinned("dep", 'b');
+        let closure = closure_of(
+            vec![dep_node(dep, Visibility::PUBLIC), root_node(root.clone())],
+            empty_surface(true),
+            empty_surface(true),
+        );
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+        let dep_entry = &value["closure"]["deps"][0];
+        assert_eq!(
+            dep_entry["integrations"],
+            serde_json::json!([]),
+            "a dep declaring no integrations must still carry the key as an empty array, \
+             never omitted: {dep_entry}"
+        );
+    }
+
     /// `closure.surface` carries BOTH the `interface` and `private`
     /// projections (each with the four keys), and `closure.conflicts` is
     /// always present — never omitted, even when empty.
@@ -1641,6 +1737,82 @@ mod tests {
         );
     }
 
+    /// D16: the closure surface spells the attributed key `namespace` — the
+    /// same word the flat `ocx env` / `ocx package env` envelope uses — and
+    /// carries no payload.
+    ///
+    /// The literal key is asserted, not just the pair's presence: a consumer
+    /// filters with `select(.namespace=="...")`, and `jq` answers `null` for a
+    /// missing key instead of erroring, so a regression to `name` would be
+    /// silent on the consumer side.
+    #[test]
+    fn json_closure_surface_integrations_key_is_namespace() {
+        let root = pinned("root", 'a');
+        let interface = Surface {
+            integrations: vec![(root.clone(), "com.example.tool".to_string())],
+            ..empty_surface(true)
+        };
+        let closure = closure_of(vec![root_node(root.clone())], interface, empty_surface(true));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+        let integrations = value["closure"]["surface"]["interface"]["integrations"]
+            .as_array()
+            .expect("closure.surface.interface.integrations is an array");
+        let entry = integrations
+            .first()
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("one admitted namespace projects one row: {integrations:?}"));
+
+        assert_eq!(
+            entry.get("namespace").and_then(serde_json::Value::as_str),
+            Some("com.example.tool"),
+            "the namespace key is spelled `namespace`, matching the flat env envelope: {entry:?}"
+        );
+        assert!(
+            !entry.contains_key("name"),
+            "`name` is the binaries/entrypoints spelling and must not appear here: {entry:?}"
+        );
+        assert!(
+            !entry.contains_key("value"),
+            "the closure envelope is payload-free: {entry:?}"
+        );
+        assert!(
+            entry
+                .get("package")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains("root"),
+            "the row attributes to the declaring package: {entry:?}"
+        );
+    }
+
+    /// The array is always present, `[]` when nothing declares a namespace —
+    /// absent and empty are not two states here (unlike `deps[].binaries`).
+    #[test]
+    fn json_closure_surface_integrations_present_as_empty_array() {
+        let root = pinned("root", 'a');
+        let closure = closure_of(vec![root_node(root.clone())], empty_surface(true), empty_surface(true));
+        let report = PackageInspect::new(
+            "test".into(),
+            test_identifier(),
+            test_platform(),
+            manifest_result(root, Some(closure)),
+        );
+        let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
+        for axis in ["interface", "private"] {
+            assert_eq!(
+                value["closure"]["surface"][axis]["integrations"],
+                serde_json::json!([]),
+                "surface.{axis}.integrations must be an empty array, never omitted"
+            );
+        }
+    }
+
     // ── Plain render ──────────────────────────────────────────────────────
 
     /// Recursively flattens a rendered [`Node`] into its raw label + text
@@ -1679,6 +1851,7 @@ mod tests {
             effective_visibility: visibility.to_string(),
             binaries: None,
             entrypoints: vec![],
+            integrations: vec![],
             dependencies: vec![],
         }
     }
@@ -1807,8 +1980,9 @@ mod tests {
         );
     }
 
-    /// A labelled `surface` branch renders declared binaries/entrypoints/env as
-    /// leaves and, when `binaries_complete == false`, an incompleteness note.
+    /// A labelled `surface` branch renders declared
+    /// binaries/entrypoints/env/integrations as leaves and, when
+    /// `binaries_complete == false`, an incompleteness note.
     #[test]
     fn surface_node_renders_binaries_entrypoints_env_and_incomplete_note() {
         let surface = SurfaceOut {
@@ -1817,6 +1991,10 @@ mod tests {
             env: EnvVarAttribution::from_pairs(&[(
                 pinned("cmake", 'a'),
                 env_var("CMAKE_ROOT", ModifierKind::Constant, Visibility::PUBLIC),
+            )]),
+            integrations: NamespaceAttribution::from_pairs(&[(
+                pinned("cmake", 'a'),
+                "com.microsoft.vscode".to_string(),
             )]),
             binaries_complete: false,
         };
@@ -1841,6 +2019,10 @@ mod tests {
             "an exposed env key renders as a leaf under the env branch: {joined}"
         );
         assert!(
+            joined.contains("com.microsoft.vscode"),
+            "a declared integration namespace renders as a leaf: {joined}"
+        );
+        assert!(
             joined.contains("binaries incomplete: at least one admitted package leaves binaries undeclared"),
             "binaries_complete=false renders the undeclared-claim note verbatim — \
              the wording must name the UNDECLARED case, not read as declared-zero: {joined}"
@@ -1860,6 +2042,7 @@ mod tests {
                 pinned("toolchain/cmake", 'a'),
                 env_var("CMAKE_ROOT", ModifierKind::Constant, Visibility::PUBLIC),
             )]),
+            integrations: vec![],
             binaries_complete: true,
         };
         let node = surface_node("interface", &surface);

@@ -200,6 +200,7 @@ def make_package(
     bin_exec: dict[str, bool] | None = None,
     no_bin_scan: bool = False,
     extra_push_args: list[str] | None = None,
+    integrations: dict[str, object] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -264,6 +265,13 @@ def make_package(
         Extra flags appended to the ``ocx package push`` invocation (e.g.
         ``["--no-canonical-tag"]``), after ``-n``/``--cascade`` and before
         ``-i``.
+    integrations:
+        Sets the metadata sidecar's ``integrations`` map (namespace ->
+        opaque JSON payload, `adr_package_integrations.md`). Omit entirely
+        (default) to leave the field undeclared — absent and empty are the
+        same wire state (D13), unlike ``binaries``. Passed straight through
+        to ``ocx package create``, unresolved (interpolation tokens survive
+        verbatim until composed).
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -345,6 +353,8 @@ def make_package(
         metadata_obj["dependencies"] = dependencies
     if binaries is not _UNSET:
         metadata_obj["binaries"] = binaries
+    if integrations is not None:
+        metadata_obj["integrations"] = integrations
     metadata_path.write_text(json.dumps(metadata_obj))
 
     # Create bundles.  For multi-layer packages, build one bundle per layer:
@@ -476,6 +486,7 @@ def make_package_with_entrypoints(
     env: list[dict] | None = None,
     extra_files: dict[str, str] | None = None,
     bin_exec: dict[str, bool] | None = None,
+    integrations: dict[str, object] | None = None,
 ) -> PackageInfo:
     """Publish a test package whose metadata declares ``entrypoints``.
 
@@ -512,6 +523,9 @@ def make_package_with_entrypoints(
         every name in ``bins`` does).  A ``False`` entry builds the shadow-rule
         fixture at the launcher hop: an entrypoint whose dispatch target the
         package ships but cannot run.  POSIX only — Windows has no exec bit.
+    integrations:
+        Sets the metadata sidecar's ``integrations`` map. See
+        ``make_package``'s parameter of the same name.
     """
     if isinstance(entrypoints, list):
         for n in entrypoints:
@@ -563,6 +577,8 @@ def make_package_with_entrypoints(
     }
     if dependencies:
         metadata_obj["dependencies"] = dependencies
+    if integrations is not None:
+        metadata_obj["integrations"] = integrations
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"

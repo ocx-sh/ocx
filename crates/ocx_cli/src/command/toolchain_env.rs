@@ -66,9 +66,9 @@ use std::sync::Arc;
 use clap::Parser;
 use ocx_lib::{
     env,
-    oci::{PinnedIdentifier, Platform},
-    package::metadata::{BinaryName, EntrypointName, env::entry::Entry},
-    package_manager::PatchProvenance,
+    oci::Platform,
+    package::metadata::env::entry::Entry,
+    package_manager::{AdmittedClaims, PatchProvenance},
     project::{ALL_GROUP, DEFAULT_GROUP, ProjectLock, compose_tool_set, expand_all_keyword, lock::lock_path_for},
 };
 
@@ -228,7 +228,7 @@ impl ToolchainEnv {
         // Phase 4 overlay from local state and return the boundary: the global
         // path's `offline_view` preserves the patch tier (only the network is
         // disabled), so already-installed companions overlay the global env too.
-        let (mut entries, patch_start, provenance, admitted_binaries, admitted_entrypoints) = if context.global() {
+        let (mut entries, patch_start, provenance, attribution) = if context.global() {
             // OFFLINE lock-pinned resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             //
@@ -252,10 +252,8 @@ impl ToolchainEnv {
             // PROJECT tier (the `else` arm) stays strict throughout: an explicit
             // project's missing/stale/corrupt `ocx.lock` IS an error.
             match resolve_global_pinned_env(&context, &target, self.groups.names(), &env_overrides).await {
-                Ok(Some((entries, patch_start, provenance, binaries, entrypoints))) => {
-                    (entries, patch_start, provenance, binaries, entrypoints)
-                }
-                Ok(None) => (Vec::new(), 0, Vec::new(), Vec::new(), Vec::new()),
+                Ok(Some((entries, patch_start, provenance, claims))) => (entries, patch_start, provenance, claims),
+                Ok(None) => (Vec::new(), 0, Vec::new(), AdmittedClaims::default()),
                 Err(error) => return Err(error),
             }
         } else {
@@ -336,16 +334,9 @@ impl ToolchainEnv {
                 no_patches: ctx.config.no_patches_repositories(),
                 env: project_env,
             };
-            let (entries, patch_start, provenance, attribution) = manager
+            manager
                 .resolve_env_with_attribution(&infos, false, scope, &target)
-                .await?;
-            (
-                entries,
-                patch_start,
-                provenance,
-                attribution.binaries,
-                attribution.entrypoints,
-            )
+                .await?
         };
 
         // W-11: settle each `list` entry's separator before any downstream
@@ -410,12 +401,16 @@ impl ToolchainEnv {
             ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
         }
 
-        let binaries = api::data::env::BinaryAttribution::from_pairs(&admitted_binaries);
-        let entrypoints = api::data::env::BinaryAttribution::from_pairs(&admitted_entrypoints);
+        let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
+        let entrypoints = api::data::env::BinaryAttribution::from_pairs(&attribution.entrypoints);
+        let integrations = api::data::env::IntegrationAttribution::from_pairs(&attribution.integrations);
 
-        context
-            .api()
-            .report(&api::data::env::EnvVars::new(env_data, binaries, entrypoints))?;
+        context.api().report(&api::data::env::EnvVars::new(
+            env_data,
+            binaries,
+            entrypoints,
+            integrations,
+        ))?;
 
         Ok(ExitCode::SUCCESS)
     }
@@ -475,25 +470,17 @@ impl ToolchainEnv {
 /// lock, nothing materialised) return `Ok(None)`, not `Err`. Never contacts the
 /// network.
 ///
-/// The last two tuple elements are the admitted-set `binaries`/`entrypoints`
-/// claim attribution (`AdmittedBinaries::binaries` / `::entrypoints`,
-/// `adr_declared_binaries_metadata.md` §4 Decision A), returned as raw
-/// `(identifier, name)` pairs rather than the `ocx_lib` struct so this
-/// `ocx_cli`-local signature only names already-public leaf types.
+/// The last tuple element is the admitted-set claim attribution
+/// ([`AdmittedClaims`] — `binaries`, `entrypoints`, `integrations`;
+/// `adr_declared_binaries_metadata.md` §4 Decision A and
+/// `adr_package_integrations.md` C-013), passed through as the one public
+/// `ocx_lib` struct rather than one raw pair vector per claim kind.
 pub(crate) async fn resolve_global_pinned_env(
     context: &crate::app::Context,
     target: &Platform,
     groups: &[String],
     env_overrides: &[Entry],
-) -> anyhow::Result<
-    Option<(
-        Vec<Entry>,
-        usize,
-        Vec<PatchProvenance>,
-        Vec<(PinnedIdentifier, BinaryName)>,
-        Vec<(PinnedIdentifier, EntrypointName)>,
-    )>,
-> {
+) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
     let home = context.file_structure().root();
     let global_config = home.join("ocx.toml");
     let global_lock_path = lock_path_for(&global_config);
@@ -591,16 +578,11 @@ pub(crate) async fn resolve_global_pinned_env(
         no_patches,
         env: project_env,
     };
-    let (entries, patch_start, provenance, attribution) = manager
-        .resolve_env_with_attribution(&infos, false, scope, target)
-        .await?;
-    Ok(Some((
-        entries,
-        patch_start,
-        provenance,
-        attribution.binaries,
-        attribution.entrypoints,
-    )))
+    Ok(Some(
+        manager
+            .resolve_env_with_attribution(&infos, false, scope, target)
+            .await?,
+    ))
 }
 
 /// Resolve the raw `-g` values into the concrete global-tier group set.

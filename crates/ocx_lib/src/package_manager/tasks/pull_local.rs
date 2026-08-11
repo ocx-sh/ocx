@@ -591,6 +591,7 @@ mod tests {
             env: Env::default(),
             dependencies: Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let platform = oci::Platform::Specific {
             os: oci::OperatingSystem::Linux,

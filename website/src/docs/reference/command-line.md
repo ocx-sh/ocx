@@ -592,7 +592,7 @@ Export the composed toolchain environment for the active project or global toolc
 
 This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
-With `--format json`, the document carries `binaries`/`entrypoints` sibling arrays alongside `entries` — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
+With `--format json`, the document carries `binaries`/`entrypoints`/`integrations` sibling arrays alongside `entries` — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
 
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
@@ -685,7 +685,7 @@ The global tier is lenient: `ocx --global env` never fails on an unconfigured or
 Print the resolved environment variables for one or more OCI-tier packages.
 
 With the root `--format plain` (default), outputs an aligned table with `Key`, `Type` and `Value` columns.
-With `--format json`, outputs `{"entries": [...], "binaries": [...], "entrypoints": [...]}` — see [`package env`](#package-env) for the full shape.
+With `--format json`, outputs `{"entries": [...], "binaries": [...], "entrypoints": [...], "integrations": [...]}` — see [`package env`](#package-env) for the full shape.
 Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
@@ -709,7 +709,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Target platform to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
-- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes]. `integrations` is always `[]` under `--self` — integrations reach only the interface surface, regardless of view.
 - `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`.
 - `--ci[=PROVIDER]`: Write the resolved environment into the CI system's persistence channel so later pipeline steps see the exported paths and variables. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects from [`GITHUB_ACTIONS`][env-github-actions] / [`GITLAB_CI`][env-gitlab-ci] (exits 64 if neither detected). Equals-form required. Mutually exclusive with `--shell`. See [CI Integration][in-depth-ci] for full walkthrough.
 - `--export-file=PATH`: Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines output to `PATH`. Requires `--ci=gitlab`; rejected with exit 64 for `--ci=github` or when given without `--ci`.
@@ -3319,6 +3319,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
         "identifier": "registry/zlib@sha256:bbbb…",
         "effective_visibility": "public",
         "entrypoints": ["zfmt"],
+        "integrations": ["com.jetbrains"],
         "dependencies": []
       },
       {
@@ -3327,6 +3328,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
         "effective_visibility": "private",
         "binaries": ["gcc", "g++"],
         "entrypoints": [],
+        "integrations": [],
         "dependencies": [
           { "identifier": "registry/zlib@sha256:bbbb…", "visibility": "public", "name": "zlib" }
         ]
@@ -3343,6 +3345,10 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
           { "key": "PATH", "type": "path", "package": "registry/cmake:3.28@sha256:cccc…" },
           { "key": "ZLIB_ROOT", "type": "constant", "package": "registry/zlib@sha256:bbbb…" }
         ],
+        "integrations": [
+          { "name": "com.microsoft.vscode", "package": "registry/cmake:3.28@sha256:cccc…" },
+          { "name": "com.jetbrains", "package": "registry/zlib@sha256:bbbb…" }
+        ],
         "binaries_complete": false
       },
       "private": {
@@ -3358,6 +3364,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
           { "key": "GCC_HOME", "type": "constant", "package": "registry/gcc@sha256:dddd…" },
           { "key": "ZLIB_ROOT", "type": "constant", "package": "registry/zlib@sha256:bbbb…" }
         ],
+        "integrations": [],
         "binaries_complete": false
       }
     },
@@ -3373,6 +3380,7 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 - `effective_visibility` — the entry's [visibility][reference-visibility] as composed from the root, down every path that reaches it.
 - `binaries` — the same tri-state as [Executables][reference-binaries]: the key is absent when the publisher never declared the field, `[]` when the publisher declared zero, and a populated array when names are declared.
 - `entrypoints` — the entry's own declared [entry-point][guide-entry-points] launcher names. Independent of `binaries`: a package may declare either, both, or neither. A binary is a raw executable the package puts on `PATH`; an entry point is a named launcher that runs one with a fixed argument prefix — the two are separate axes, not a 1:1 pairing. Above, `zlib` declares an entry point but no binaries; `gcc` declares binaries but no entry point.
+- `integrations` — the entry's own declared [integration namespace][reference-integrations] keys, lexicographically ordered, `[]` when it declares none (absent and empty are the same state here, unlike `binaries`'s undeclared/declared-empty tri-state). Keys only, no payload — a closure node is not installed, the same reason `env` above carries no values.
 - `dependencies` — the entry's own declared edges (as authored, not composed), each carrying its `visibility` and dependency `name` — enough to reconstruct the DAG from the flat list.
 
 `closure.surface` projects the same node set two ways — the two environments the package participates in, each equal to what the runtime composer emits:
@@ -3387,10 +3395,11 @@ The two surfaces overlap by design, and the overlap is deliberate, not redundant
 - Binaries carry an implicit `public` visibility — raw executables serve consumers and the package's own shims alike — so the reference's own binaries, like its `public` env vars, appear in both surfaces.
 - Env crossing is asymmetric, matching the composer. The reference's own vars cross on the surface's axis (its `interface`/`public` vars on `interface`, its `private`/`public` vars on `private`). A **dependency**, however, contributes only its *interface-side* vars on either surface — a dependency's own `private` var is that dependency's internal detail and never crosses the edge into this package, so it appears on neither surface.
 
-Each surface carries three attributed arrays plus a completeness flag:
+Each surface carries four attributed arrays plus a completeness flag:
 
 - `binaries` / `entrypoints` — what lands on `PATH` on that axis, each entry `{ name, package }` naming the declaring package.
 - `env` — the environment keys exposed on that axis, each entry `{ key, type, package }` plus a `separator` field present only when `type` is `list`. `type` is `path`, `constant`, or `list`; the value is omitted because it is `${installPath}`-templated and only concrete once the package is installed — the summary answers *which* keys would be set, not *to what*.
+- `integrations` — the [integration namespaces][reference-integrations] each admitted package declares, each entry `{ name, package }` — `name` holds the namespace, never the payload (a closure node is not installed, so there is nothing concrete to interpolate a payload against). This reuses the same `{ name, package }` shape `binaries`/`entrypoints` use above, not the `{ namespace, package, payload }` shape the flat [`package env`][cmd-package-env] array carries — the two field names for the same concept belong to two different envelopes. One entry per (namespace, package) pair, never merged. **Interface surface only**: `private.integrations` is always `[]`, and a dependency still needs an interface-reaching edge to contribute at all — `gcc`'s `private` edge above contributes to neither surface, while `zlib`'s `public` edge and the reference's own root position admit their namespaces to `interface` (`cmake` contributes `com.microsoft.vscode` the same way it contributes its own `cc` entrypoint).
 - `binaries_complete` — `false` iff some admitted node on that axis left `binaries` **undeclared** (the key absent from its metadata). A declared-empty claim (`"binaries": []`) is the opposite of a gap — the publisher asserts *zero* binaries — and keeps the aggregate complete; an unknown claim never silently counts as zero. Above, both surfaces admit `zlib` (undeclared) so both read `false` even though `gcc` declared its own claim.
 
 `closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable.
@@ -3485,6 +3494,9 @@ registry/cmake:3.28@sha256:cccc…
         │   ├── env
         │   │   ├── PATH · path · cmake
         │   │   └── ZLIB_ROOT · constant · zlib
+        │   ├── integrations
+        │   │   ├── com.microsoft.vscode · cmake
+        │   │   └── com.jetbrains · zlib
         │   └── binaries incomplete: at least one admitted package leaves binaries undeclared
         └── private
             ├── binaries
@@ -3502,6 +3514,8 @@ registry/cmake:3.28@sha256:cccc…
 Surface entries attribute each claim to its owning package by short name — the same name the `deps` branch above uses as its label, so `deps` reads as the legend for the whole surface. The full pinned identifier appears once per dependency there rather than once per claim; a three-dependency, five-binary closure would otherwise repeat an 89-character pin thirty times. `--format json` attributes by full identifier in both places.
 
 Here `gcc`'s direct edge is `private` — it never reaches the interface surface, so `cc` (the reference's own entrypoint) and `zfmt` (`zlib`, reachable by a separate `public` edge) are the only entries under `interface`, while `private` drops `cc` (the reference does not go through its own launcher) and gains `gcc`'s two binaries. Both surfaces flag `binaries incomplete`: the reference itself and `zlib` never declare a `binaries` claim on either axis they're admitted to, and completeness requires every admitted node to have declared — `gcc`'s own `["gcc"]` claim does not offset it.
+
+`integrations` renders only under `interface` here — `cmake` and `zlib` both contribute a namespace and both reach the interface axis, while `private` never gets a `integrations` branch at all (an empty array renders no branch, the same convention every other section here follows). `gcc` declares no integrations in this example, but the point holds even if it did: its `private` edge would keep them off both surfaces.
 
 An entrypoint or repository conflict, when present, renders as its own branch directly under `closure` with one child per colliding party — the one place the view spends vertical space, because it fires exactly when there is a decision to make:
 
@@ -3711,9 +3725,13 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 Print the resolved environment variables for one or more OCI-tier packages.
 
-Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty. Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
+Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...], "integrations": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty.
 
-In plain format, the `Key`/`Type`/`Value` table itself is unchanged — a hint line follows it summarizing availability whenever any binaries or entry points are admitted, e.g. `5 binaries available (cmake, ctest, cpack, ...); use --format json for the full list`. Neither array ever appears in `--shell`/`--ci` output — those channels emit only shell-export lines / CI sink writes.
+`integrations` is a fourth top-level sibling array of `{"namespace": "...", "package": "...", "value": ...}` objects — one row per (declaring package, [integration namespace][reference-integrations]) pair, `value` the interpolated payload OCX never interprets or merges. Two packages declaring the same namespace produce two rows, never one merged row — a row count exceeding the distinct-namespace count is the visible proof nothing merged. The array is present, with attribution, even for a single root package — it is never collapsed to a bare object or omitted. Like `binaries`/`entrypoints`, it is always `[]` under `--self` (integrations reach only the interface surface a consumer sees) and never appears in `--shell`/`--ci` output. See [Integrations][reference-integrations] for the field's grammar, size caps, and interpolation rules.
+
+Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
+
+In plain format, the `Key`/`Type`/`Value` table itself is unchanged — a hint line follows it summarizing availability whenever any binaries, entry points, or integration namespaces are admitted, e.g. `5 binaries available (cmake, ctest, cpack, ...); 2 integration namespaces (com.jetbrains, com.microsoft.vscode); use --format json for the full list`. The integrations clause names namespace keys only — payloads never render in plain output, for the same reason the `entries` table gained no fourth column. None of the three arrays ever appears in `--shell`/`--ci` output — those channels emit only shell-export lines / CI sink writes.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
@@ -3737,7 +3755,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 |------|-------|-------------|
 | `-p`, `--platform` | | Target platform to consider. |
 | `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
-| `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). |
+| `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). `integrations` is always `[]` under `--self` — integrations reach only the interface surface, regardless of view. |
 | `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |
 | `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
 | `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
@@ -4464,6 +4482,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- reference (package-create --bin-scan / env binaries+entrypoints attribution) -->
 [reference-binaries]: ./metadata.md#executables
 [reference-binaries-none-vs-empty]: ./metadata.md#executables-none-vs-empty
+[reference-integrations]: ./metadata.md#integrations
 [reference-env-path]: ./metadata.md#env-path
 [reference-env-visibility]: ./metadata.md#env-entry-visibility
 [reference-env-self-alias]: ./metadata.md#env-interpolation-self

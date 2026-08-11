@@ -226,6 +226,63 @@ mod tests {
         );
     }
 
+    /// `Integrations` (C-002) needs no manual `JsonSchema` impl — the plain
+    /// `#[derive(schemars::JsonSchema)]` on the `BTreeMap<String, Value>`
+    /// newtype already emits the exact contract the ADR requires:
+    /// `{"type":"object","additionalProperties":true}`, no `properties`, no
+    /// `propertyNames` restriction (the namespace grammar is enforced at
+    /// `ValidMetadata`, never by the schema). This pins that shape so a future
+    /// schemars upgrade or a change to the newtype that drifted from it is
+    /// caught here rather than silently publishing a stricter schema than the
+    /// parser accepts. `integrations` itself is additive-optional, the same
+    /// as `binaries` — see
+    /// `metadata_schema_pins_binaries_field_as_optional_string_array` above.
+    #[test]
+    fn metadata_schema_pins_integrations_as_an_open_object_map() {
+        let schema = schema_for("metadata").expect("metadata schema exists");
+        let value: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+        let defs = value.get("$defs").expect("schema has $defs");
+
+        let bundle = defs.get("AuthoringBundle").expect("authoring bundle def");
+        let integrations_property = bundle
+            .pointer("/properties/integrations")
+            .expect("bundle must declare a `integrations` property");
+
+        let required = bundle
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("bundle def has a `required` array");
+        assert!(
+            !required.iter().any(|v| v.as_str() == Some("integrations")),
+            "`integrations` must be additive-optional, not required: {required:?}"
+        );
+
+        let name = integrations_property
+            .get("$ref")
+            .and_then(|r| r.as_str())
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            .expect("`integrations` must $ref its own def");
+        let integrations_def = defs
+            .get(name)
+            .unwrap_or_else(|| panic!("$ref target {name} missing from $defs"));
+
+        assert_eq!(
+            integrations_def.get("type").and_then(|v| v.as_str()),
+            Some("object"),
+            "`Integrations` must resolve to a JSON object"
+        );
+        assert_eq!(
+            integrations_def.get("additionalProperties").and_then(|v| v.as_bool()),
+            Some(true),
+            "`Integrations` must accept any namespace key with any value — the namespace \
+             grammar and size caps are enforced at `ValidMetadata`, never expressed in the schema"
+        );
+        assert!(
+            integrations_def.get("properties").is_none(),
+            "`Integrations` must declare no fixed `properties` — every key is a publisher namespace"
+        );
+    }
+
     /// `separator` is required on the wire for a `list` entry: no human is
     /// present when metadata is read, and a wrongly assumed separator fails
     /// silently in the consuming tool. The Rust field is `Option` only so the

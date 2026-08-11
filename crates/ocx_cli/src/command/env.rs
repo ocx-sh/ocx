@@ -200,12 +200,16 @@ impl Env {
 
         let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
         let entrypoints = api::data::env::BinaryAttribution::from_pairs(&attribution.entrypoints);
+        let integrations = api::data::env::IntegrationAttribution::from_pairs(&attribution.integrations);
 
         // Structured report. Format is a context-level concern (root
         // `--format`); this command does not override it.
-        context
-            .api()
-            .report(&api::data::env::EnvVars::new(all_entries, binaries, entrypoints))?;
+        context.api().report(&api::data::env::EnvVars::new(
+            all_entries,
+            binaries,
+            entrypoints,
+            integrations,
+        ))?;
 
         Ok(ExitCode::SUCCESS)
     }

@@ -35,6 +35,7 @@ use crate::{
             dependency::DependencyName,
             entrypoint::{EntrypointName, Entrypoints},
             env::{dep_context::DependencyContext, entry::Entry, modifier::ModifierKind, resolver::EnvResolver},
+            integrations::{INTEGRATION_TOKENS, IntegrationEntry},
             template::SelfEnvScope,
         },
         resolved_package::ResolvedPackage,
@@ -92,6 +93,19 @@ pub struct ComposeOutput {
     /// `Metadata::entrypoints()`. Consumed by `ocx env` / `ocx package
     /// env`'s `entrypoints` JSON array.
     pub admitted_entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)>,
+
+    /// Declared `integrations` contributed by each admitted identifier.
+    ///
+    /// Interface surface only — always empty when `self_view == true`
+    /// ([`integrations_cross`]), and likewise empty whenever the caller
+    /// suppressed collection ([`compose_companion`]). Payloads are interpolated
+    /// with the DECLARING package's own `${installPath}`. Ordered: each root's
+    /// admitted deps in topological order, then the root; cross-root dedup
+    /// applies, so a shared dep contributes once **within this compose call** —
+    /// a caller merging two calls' outputs owns the dedup across them. Within
+    /// one package, lexicographic by namespace. See
+    /// `adr_package_integrations.md` C-012.
+    pub admitted_integrations: Vec<(oci::PinnedIdentifier, IntegrationEntry)>,
 }
 
 // ── Surface algebra: the single source of truth ─────────────────────────────
@@ -171,6 +185,24 @@ pub(crate) fn carrier_crosses(carrier: metadata::visibility::Visibility, is_root
     }
 }
 
+/// Whether the integrations carrier crosses onto the requested surface.
+///
+/// Interface surface only, at EVERY depth: `--self` composes zero
+/// integrations. This is a SURFACE-LEVEL rule, not a visibility one — no
+/// `Visibility` value produces it under [`carrier_crosses`] (proof: ADR
+/// `adr_package_integrations.md` §4.1, the four-cell truth table). Homed
+/// here, beside the algebra it deviates from, so `compose` and
+/// `inspect::project_surface` share the one implementation the surface
+/// contract requires.
+///
+/// Takes no `is_root`: the answer is the same at every depth, and a parameter
+/// the body ignores is a lie about the rule. The EDGE term is unchanged and
+/// stays algebraic — a dependency contributes integrations iff
+/// `dep_admitted(effective, /* self_view = */ false)`.
+pub(crate) fn integrations_cross(self_view: bool) -> bool {
+    !self_view
+}
+
 /// Compose the runtime env from one or more root packages.
 ///
 /// Reads each root's pre-built TC from `resolve.json` (single read per root),
@@ -198,6 +230,60 @@ pub(crate) async fn compose(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
     self_view: bool,
+) -> crate::Result<ComposeOutput> {
+    compose_gated(roots, store, self_view, integrations_cross(self_view)).await
+}
+
+/// Compose ONE package as a standalone root whose output is overlaid onto a
+/// different composition — the patch tier's companion projection.
+///
+/// Two inputs differ from [`compose`], and neither is derivable from the other:
+///
+/// - `self_view` is pinned to `false`. The overlay must never leak the
+///   companion's private surface, even when the composition it lands in is the
+///   `--self` one. Pinned by
+///   `no_private_leak_companion_private_var_absent_even_under_self_view`.
+/// - `collect_integrations` is the OUTER composition's gate, supplied by the
+///   caller. Deriving it from the pinned `self_view` would make it
+///   unconditionally true, so payloads would be resolved on every env
+///   resolution and then discarded — and a payload naming a dependency whose
+///   content directory is absent would fail the whole projection (hard-erroring
+///   a required companion, warn-skipping an optional one along with its env
+///   entries) on a surface contractually required to carry zero integrations.
+///
+/// A named wrapper rather than a fourth parameter on [`compose`]: it keeps two
+/// adjacent booleans off every call site, and states the `self_view = false`
+/// invariant once here instead of at each caller. This suppresses COMPUTE only
+/// — with the gate on, the surface is byte-identical to [`compose`]'s.
+///
+/// # Errors
+///
+/// As [`compose`].
+pub(crate) async fn compose_companion(
+    companion: &Arc<InstallInfo>,
+    store: &PackageStore,
+    collect_integrations: bool,
+) -> crate::Result<ComposeOutput> {
+    compose_gated(
+        std::slice::from_ref(companion),
+        store,
+        /* self_view = */ false,
+        collect_integrations,
+    )
+    .await
+}
+
+/// The composition itself, with the integrations carrier gated by an explicit
+/// input rather than re-derived from `self_view`.
+///
+/// Private: every caller goes through [`compose`] (gate derived from the
+/// surface, the normal case) or [`compose_companion`] (gate supplied by the
+/// outer composition).
+async fn compose_gated(
+    roots: &[Arc<InstallInfo>],
+    store: &PackageStore,
+    self_view: bool,
+    collect_integrations: bool,
 ) -> crate::Result<ComposeOutput> {
     // Multi-root collision gate. Single-root case is already covered at
     // install time by `check_entrypoints`; cross-root collisions can only
@@ -231,6 +317,10 @@ pub(crate) async fn compose(
     // surface gate. See `adr_declared_binaries_metadata.md` §4 Decision A.
     let mut admitted_binaries: Vec<(oci::PinnedIdentifier, BinaryName)> = Vec::new();
     let mut admitted_entrypoints: Vec<(oci::PinnedIdentifier, EntrypointName)> = Vec::new();
+    // Interface-surface-only carrier, gated by `integrations_cross` rather
+    // than the visibility algebra (ADR §4.1) — collected at the same two sites
+    // as the claims above.
+    let mut admitted_integrations: Vec<(oci::PinnedIdentifier, IntegrationEntry)> = Vec::new();
 
     // Pre-compute root keys (stripped identifiers) so a TC entry that is
     // also an explicit root is deferred to the root-emission pass instead
@@ -344,6 +434,31 @@ pub(crate) async fn compose(
             // own dep paths independently.
             let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store);
 
+            // The edge term stays algebraic (ADR §4.4): a dep contributes
+            // integrations iff `dep_admitted(effective, /* self_view = */
+            // false)`. Reaching this loop already required
+            // `dep_admitted(effective, self_view)`, and the gate is false
+            // whenever `self_view` is true — so the surviving case is exactly
+            // the interface edge, with no second gate to drift from the first.
+            // Interpolation uses the DECLARING package's own `${installPath}`
+            // and its own dep contexts, both already in hand: zero extra I/O.
+            if collect_integrations {
+                // `INTEGRATION_TOKENS`, not the resolver's `Usage::Environment`
+                // default: this is the gate for the class, and the publish-time
+                // check shares the constant. A hostile registry never runs that
+                // check, so a `${self.env.*}` in a published payload meets only
+                // this one — and its `private` value must not reach an
+                // interface-surface JSON payload.
+                let resolver = metadata::template::TemplateResolver::new(&dep_content, &dep_dep_contexts)
+                    .usage(INTEGRATION_TOKENS);
+                admitted_integrations.extend(
+                    meta.integrations()
+                        .resolve(&resolver)?
+                        .into_iter()
+                        .map(|entry| (dep_id.clone(), entry)),
+                );
+            }
+
             emit_dep_path_block(
                 &meta,
                 &dep_pkg,
@@ -394,6 +509,25 @@ pub(crate) async fn compose(
 
             let root_content = root.dir().content();
 
+            // Structural, not algebraic: no `Visibility` constant reproduces
+            // "interface surface at every depth" (ADR §4.1), so the root's
+            // integrations are gated by `integrations_cross` alone — the
+            // one predicate `inspect::project_surface` shares, applied by
+            // whichever entry point supplied `collect_integrations`.
+            if collect_integrations {
+                // Same capability set as the dependency site above — one rule,
+                // applied wherever a payload is resolved.
+                let resolver = metadata::template::TemplateResolver::new(&root_content, &root_dep_contexts)
+                    .usage(INTEGRATION_TOKENS);
+                admitted_integrations.extend(
+                    root.metadata()
+                        .integrations()
+                        .resolve(&resolver)?
+                        .into_iter()
+                        .map(|entry| (root.identifier().clone(), entry)),
+                );
+            }
+
             emit_root_path_block(
                 root.metadata(),
                 root.dir(),
@@ -410,6 +544,7 @@ pub(crate) async fn compose(
         admitted,
         admitted_binaries,
         admitted_entrypoints,
+        admitted_integrations,
     })
 }
 
@@ -893,7 +1028,7 @@ mod tests {
 
     use super::{
         DependencyError, DigestConflict, check_entrypoints, check_repo_digest_conflicts, collect_repo_digest_conflicts,
-        compose, emit_dep_path_block, emit_root_path_block,
+        compose, compose_companion, emit_dep_path_block, emit_root_path_block, integrations_cross,
     };
 
     const REGISTRY: &str = "example.com";
@@ -919,6 +1054,7 @@ mod tests {
             env: metadata_env::Env::default(),
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         InstallInfo::new(
             id,
@@ -957,6 +1093,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let pkg_root = dir.join(repo);
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -985,6 +1122,7 @@ mod tests {
             env: metadata_env::Env::default(),
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
         let pkg_root = dir.join(repo);
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -1859,6 +1997,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("root");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -1917,6 +2056,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("root2");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -2660,6 +2800,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("root");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -3033,6 +3174,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
 
         let pkg_root = dir.path().join("dep");
@@ -3113,6 +3255,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("dep2");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -3190,6 +3333,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("root");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -3261,6 +3405,7 @@ mod tests {
             env,
             dependencies: dependency::Dependencies::default(),
             entrypoints,
+            integrations: Default::default(),
         });
         let pkg_root = dir.path().join("root_self");
         std::fs::create_dir_all(pkg_root.join("content")).unwrap();
@@ -3721,6 +3866,7 @@ mod tests {
             env: builder.build(),
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: metadata::Integrations::default(),
         })
     }
 
@@ -4154,6 +4300,188 @@ mod tests {
         assert!(
             !value_of(&entries, "B").contains(&*installed.to_string_lossy()),
             "the dependency's install path must not appear — that would mean the output was rescanned"
+        );
+    }
+
+    // ── C-011: integrations_cross — interface-surface-only carrier ────────
+    //
+    // ADR `adr_package_integrations.md` §4.1's four-cell truth table.
+    // `integrations_cross` takes only `self_view` — no `is_root` — because
+    // the answer is the same at every depth (a lie a parameter the body
+    // ignores would tell); the root and dep cells below therefore exercise
+    // the identical call, documenting all four ADR rows explicitly.
+
+    #[test]
+    fn integrations_cross_root_interface_surface_is_true() {
+        assert!(integrations_cross(/* self_view = */ false));
+    }
+
+    #[test]
+    fn integrations_cross_root_private_surface_is_false() {
+        assert!(!integrations_cross(/* self_view = */ true));
+    }
+
+    #[test]
+    fn integrations_cross_dep_interface_surface_is_true() {
+        assert!(integrations_cross(/* self_view = */ false));
+    }
+
+    #[test]
+    fn integrations_cross_dep_private_surface_is_false() {
+        assert!(!integrations_cross(/* self_view = */ true));
+    }
+
+    // ── C-017 / H-1: the companion projection's integrations gate ──────────
+
+    /// A companion projection composed with integrations SUPPRESSED must not
+    /// resolve the payloads at all — not resolve-then-discard.
+    ///
+    /// The projection is pinned to `self_view = false` (no private leak), so it
+    /// cannot derive the caller's gate; before the explicit input it collected
+    /// unconditionally. Resolution asserts every `${deps.*}` content directory
+    /// exists, so a payload naming an uninstalled dependency failed the WHOLE
+    /// projection — on a `--self` composition that carries zero integrations.
+    ///
+    /// Both outcomes are demonstrated on the one fixture: the gate ON leg proves
+    /// the payload really is resolved (and really can fail), so the gate OFF
+    /// leg's success is suppression rather than an inert fixture.
+    #[tokio::test]
+    async fn compose_companion_with_integrations_suppressed_skips_payload_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        // Declared, never installed: `store.content(..)` names a directory that
+        // does not exist, which is exactly what `${deps.*}` resolution asserts.
+        let absent_dep = pinned("absentdep", 'd');
+        // `from_str`, not `from_value`: `Visibility` deserializes from a
+        // borrowed string, which `serde_json::Value` cannot supply.
+        let metadata: metadata::Metadata = serde_json::from_str(
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "dependencies": [{ "identifier": absent_dep.to_string(), "visibility": "public" }],
+                "integrations": { "vendor.example": { "path": "${deps.absentdep.installPath}" } },
+            })
+            .to_string(),
+        )
+        .expect("fixture metadata parses");
+        let companion = Arc::new(InstallInfo::new(
+            pinned("companion", 'c'),
+            metadata,
+            ResolvedPackage::new(),
+            crate::file_structure::PackageDir {
+                dir: dir.path().join("companion"),
+            },
+        ));
+
+        let collected = compose_companion(&companion, &store, /* collect_integrations = */ true).await;
+        assert!(
+            collected.is_err(),
+            "fixture check: collecting integrations must resolve the payload and fail on the absent dependency"
+        );
+
+        let suppressed = compose_companion(&companion, &store, /* collect_integrations = */ false)
+            .await
+            .expect("a suppressed carrier must not be resolved, so the absent dependency cannot fail the projection");
+        assert!(
+            suppressed.admitted_integrations.is_empty(),
+            "suppressed projection must carry no integrations: {:?}",
+            suppressed.admitted_integrations
+        );
+    }
+
+    // ── H-2: `${self.env.*}` is gated at COMPOSE, not only at publish ────────
+    //
+    // `validate_integration_tokens` runs inside `validate_for_publish`, which
+    // a hostile registry never runs — so compose meets a published payload's
+    // tokens with only its own capability set. Both resolver sites therefore
+    // carry `INTEGRATION_TOKENS`, one test each, because they are two
+    // independent call sites that can regress separately.
+    //
+    // Each asserts WHICH refusal, not merely that one happened: the composer
+    // supplies no self-env scope, so an ungated resolver also fails here — as
+    // `UndefinedSelfEnvRef`, indistinguishable from a gate unless the message is
+    // read. That coincidence is one edit (`.with_self_env(&declared_before)`
+    // "for consistency") away from resolving instead, which would put a value
+    // the publisher declared `private` into an interface-surface JSON payload
+    // (CWE-200). `integrations.rs` holds the sibling unit test that supplies a
+    // scope which DOES define the key, so the gate is proven independent of it.
+
+    /// Dependency site: a dep's payload carrying `${self.env.*}` is refused by
+    /// the capability gate.
+    #[tokio::test]
+    async fn compose_gates_a_self_env_token_in_a_dependency_integrations_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let dep_id = pinned("dep", 'd');
+        let dep_resolved = ResolvedPackage::new();
+        let pkg_path = store.path(&dep_id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        let meta = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "integrations": { "vendor.example": { "token": "${self.env.SECRET}" } },
+        });
+        std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
+        std::fs::write(
+            pkg_path.join("resolve.json"),
+            serde_json::to_string(&dep_resolved).unwrap(),
+        )
+        .unwrap();
+
+        let root_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dep_id,
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+        let root = Arc::new(make_install_info("root", 'r', root_resolved));
+
+        // `let Err(..) else`, not `expect_err`: `ComposeOutput` is not `Debug`.
+        let Err(err) = compose(&[root], &store, /* self_view = */ false).await else {
+            panic!("a self-env token in a dependency's payload must be refused");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("not permitted"),
+            "expected the capability gate's refusal, not an undefined-reference one: {message}"
+        );
+    }
+
+    /// Root site: a root's own payload carrying `${self.env.*}` is refused by
+    /// the capability gate. Exercised through `compose_companion`, which reaches
+    /// the root branch with no store seeding.
+    #[tokio::test]
+    async fn compose_gates_a_self_env_token_in_a_root_integrations_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let metadata: metadata::Metadata = serde_json::from_str(
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "integrations": { "vendor.example": { "token": "${self.env.SECRET}" } },
+            })
+            .to_string(),
+        )
+        .expect("fixture metadata parses");
+        let root = Arc::new(InstallInfo::new(
+            pinned("root", 'r'),
+            metadata,
+            ResolvedPackage::new(),
+            crate::file_structure::PackageDir {
+                dir: dir.path().join("root"),
+            },
+        ));
+
+        let Err(err) = compose_companion(&root, &store, /* collect_integrations = */ true).await else {
+            panic!("a self-env token in the root's own payload must be refused");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("not permitted"),
+            "expected the capability gate's refusal, not an undefined-reference one: {message}"
         );
     }
 }

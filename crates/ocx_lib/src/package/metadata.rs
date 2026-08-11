@@ -9,6 +9,7 @@ pub mod bundle;
 pub mod dependency;
 pub mod entrypoint;
 pub mod env;
+pub mod integrations;
 pub mod slug;
 pub mod template;
 pub mod validation;
@@ -16,6 +17,8 @@ pub mod visibility;
 
 // Re-export binary public API so callers can use `metadata::Binaries` etc.
 pub use binary::{Binaries, BinaryError, BinaryName};
+// Re-export integrations public API so callers can use `metadata::Integrations` etc.
+pub use integrations::{IntegrationEntry, Integrations};
 // Re-export entrypoint public API so callers can use `metadata::Entrypoint` etc.
 pub use entrypoint::{Entrypoint, EntrypointError, EntrypointName, Entrypoints};
 // Re-export the two validation entry points so callers reach both through
@@ -79,6 +82,17 @@ impl Metadata {
     pub fn binaries(&self) -> Option<&binary::Binaries> {
         match self {
             Metadata::Bundle(bundle) => bundle.binaries.as_ref(),
+        }
+    }
+
+    /// The declared `integrations` map.
+    ///
+    /// Never `Option` — an empty map IS the "declares none" answer, since
+    /// absent and empty are the same wire state. Mirrors
+    /// [`Metadata::dependencies`], not [`Metadata::binaries`].
+    pub fn integrations(&self) -> &integrations::Integrations {
+        match self {
+            Metadata::Bundle(bundle) => &bundle.integrations,
         }
     }
 }

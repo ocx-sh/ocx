@@ -32,6 +32,12 @@ At `ocx run` time, OCX fetches the descriptor, identifies the matching companion
 composes their `interface` environment entries on top of the base package's entries. The
 base package is never modified.
 
+A companion's `integrations` block, if it declares one, contributes the same way any
+package's does — attributed to the companion's own identifier, never merged into anything
+the base or another companion declared. See [Patch Companions Contribute
+Too][env-composition-integrations-companions] in the environment composition reference
+for the row shape and ordering rules.
+
 ```json
 {
   "version": 1,
@@ -132,6 +138,13 @@ Plain output adds a `Source` column naming the companion and the descriptor rule
 admitted it (e.g. `corp/jdk-trust:1.0 (rule: ocx.sh/java:*)`) for every companion-sourced
 entry; JSON output carries the same provenance as `"source": { "kind": "patch", "rule": "...",
 "companion": "..." }`.
+
+A companion's `integrations` row needs none of that provenance machinery. It appears in
+plain `ocx env` / `ocx package env` JSON output **unconditionally** — no `--show-patches`
+flag, no `source` object. Attribution is simply the row's own `package` field, the same
+field every package's integrations row carries whether or not a patch tier is involved.
+See [Patch Companions Contribute Too][env-composition-integrations-companions] in the
+environment composition reference.
 
 To ask the same question about a base without reading through the full composed
 environment, use [`ocx patch why`][cmd-patch-why]:
@@ -505,6 +518,7 @@ For the full field reference, see the [`[patches]` configuration section][config
 <!-- env composition -->
 [env-composition]: ../reference/env-composition.md
 [env-composition-patch-opt-out]: ../reference/env-composition.md#patch-opt-out-scope
+[env-composition-integrations-companions]: ../reference/env-composition.md#integrations-companions
 
 <!-- commands -->
 [cmd-patch]: ../reference/command-line.md#patch

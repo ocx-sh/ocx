@@ -38,6 +38,7 @@ use super::bundle::{Bundle, Version};
 use super::dependency::{Dependencies, DependencyError};
 use super::entrypoint::Entrypoints;
 use super::env;
+use super::integrations::Integrations;
 
 /// OCX package metadata in authoring (sidecar) form.
 ///
@@ -99,6 +100,12 @@ pub struct AuthoringBundle {
     /// `adr_declared_binaries_metadata.md` §1, §2.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Binaries>,
+
+    /// Vendor-namespaced configuration blocks. Mirrors
+    /// [`Bundle::integrations`] exactly — [`AuthoringMetadata::to_published`]
+    /// copies it through unchanged, so there is no authoring-form delta here.
+    #[serde(default, skip_serializing_if = "Integrations::is_empty")]
+    pub integrations: Integrations,
 }
 
 impl AuthoringMetadata {
@@ -157,6 +164,7 @@ impl AuthoringMetadata {
                     dependencies: Dependencies::new(dependencies)?,
                     entrypoints: bundle.entrypoints.clone(),
                     binaries: bundle.binaries.clone(),
+                    integrations: bundle.integrations.clone(),
                 }))
             }
         }
@@ -440,6 +448,44 @@ mod tests {
         assert!(
             published.binaries().is_none(),
             "an undeclared binaries field must stay None through to_published, never default to Some(empty)"
+        );
+    }
+
+    // ── integrations: straight pass-through in to_published ───────
+    //
+    // There is no authoring-form delta here — `to_published`'s struct literal
+    // carries `integrations: bundle.integrations.clone()` verbatim. Nothing
+    // else in this crate would notice the field being dropped from that
+    // literal: `Integrations` is `Default`, so an omitted line still
+    // compiles and every published blob silently loses its declared payloads.
+
+    #[test]
+    fn declared_integrations_survive_to_published() {
+        let metadata = parse(
+            r#"{"type":"bundle","version":1,
+                "integrations":{"com.microsoft.vscode":{"extensions":["rust-lang.rust-analyzer"]}}}"#,
+        );
+
+        let published = metadata.to_published().unwrap();
+        let payload = published
+            .integrations()
+            .get("com.microsoft.vscode")
+            .expect("to_published must carry the declared integrations through");
+        assert_eq!(
+            payload,
+            &serde_json::json!({ "extensions": ["rust-lang.rust-analyzer"] }),
+            "the payload must cross unchanged — OCX never interprets it"
+        );
+    }
+
+    #[test]
+    fn absent_integrations_stays_empty_through_to_published() {
+        let metadata = parse(r#"{"type":"bundle","version":1}"#);
+
+        let published = metadata.to_published().unwrap();
+        assert!(
+            published.integrations().is_empty(),
+            "absent and empty are the same state — never a phantom namespace"
         );
     }
 }

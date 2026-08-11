@@ -281,6 +281,7 @@ mod tests {
             env: metadata_env::Env::default(),
             dependencies: dependency::Dependencies::default(),
             entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
         });
         Info {
             identifier,
