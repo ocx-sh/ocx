@@ -519,8 +519,13 @@ mod tests {
             .expect_err("a resolved value edged by its separator must be refused");
         let message = error.to_string();
         assert!(message.contains("PARTS"), "must name the var: {message}");
+        // The diagnostic renders the value with `{value:?}` (see
+        // `package::error::Error::SeparatorEdgedListValue`), so the needle is
+        // Debug-formatted too — a Windows path's backslashes are escaped in the
+        // message and a `Display`-formatted needle matches nothing there.
+        let rendered = format!("{:?}", edged.to_string_lossy());
         assert!(
-            message.contains(&edged.to_string_lossy().to_string()),
+            message.contains(&rendered),
             "must show the resolved value, which is what the parse gate could not see: {message}"
         );
     }

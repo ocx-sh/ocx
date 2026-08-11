@@ -493,11 +493,31 @@ mod tests {
     }
 
     /// Without `--self`, an explicit `always` is exactly what the flag is for.
+    ///
+    /// Host-gated, with its Windows half below rather than a `cfg!(windows)`
+    /// expectation inside one row: an assertion that restates the production
+    /// `cfg!` agrees with the code on every host, including one where the code
+    /// is wrong (the convention `ocx_lib::lazy` establishes for the floor).
+    #[cfg(not(windows))]
     #[test]
     fn lazy_mode_always_survives_when_the_self_view_is_not_selected() {
         assert_eq!(
             resolved_lazy_mode(Some(LazyMode::Always), false).expect("no --self, no contradiction"),
             LazyMode::Always
+        );
+    }
+
+    /// The Windows half of the row above. Nothing composes lazily there this
+    /// phase (S-010: the `.shimref` reader ships, the producer does not), and
+    /// that floor is applied by the ladder before `--self` is even consulted —
+    /// so an explicit `always` composes eagerly whether or not `--self` was
+    /// passed, and the sibling's `Always` is simply not a reachable answer.
+    #[cfg(windows)]
+    #[test]
+    fn lazy_mode_always_composes_eagerly_on_windows_without_the_self_view() {
+        assert_eq!(
+            resolved_lazy_mode(Some(LazyMode::Always), false).expect("no --self, no contradiction"),
+            LazyMode::Never
         );
     }
 

@@ -294,28 +294,35 @@ mod tests {
     /// `join("org").join("project")` produce equal paths, and `components()`
     /// splits on `/` on Windows too, so the only observable difference is the
     /// rendered separator. The `cfg(windows)` assertion is where that clause
-    /// actually has teeth; it cannot be exercised on this suite's hosts.
+    /// actually has teeth.
     #[test]
     fn path_splits_a_nested_repository_into_separate_components() {
-        let store = ShimStore::new("/ocx/shims");
+        let root = Path::new("/ocx/shims");
+        let store = ShimStore::new(root);
         let path = store.path(&pinned("example.com", "org/project/sub/tool"));
 
         assert_eq!(
             path,
-            layout(
-                Path::new("/ocx/shims"),
-                "example.com",
-                &["org", "project", "sub", "tool"]
-            ),
+            layout(root, "example.com", &["org", "project", "sub", "tool"]),
             "C-003: every repository segment is its own path component, in order"
         );
 
+        // Only the part `path()` BUILDS may be inspected for separators: the
+        // POSIX-shaped store root is this test's own fixture, and on Windows it
+        // renders its own `/` no matter how the segments below it were joined —
+        // asserting over the whole path would fail on the root and say nothing
+        // about the repository.
         #[cfg(windows)]
-        assert!(
-            !path.to_string_lossy().contains('/'),
-            "C-003: a literal `/` join leaves mixed separators on Windows: {}",
-            path.display()
-        );
+        {
+            let built = path
+                .strip_prefix(root)
+                .expect("`path()` is rooted at the store root it was constructed with");
+            assert!(
+                !built.to_string_lossy().contains('/'),
+                "C-003: a literal `/` join leaves mixed separators on Windows: {}",
+                built.display()
+            );
+        }
     }
 
     #[test]

@@ -1524,14 +1524,28 @@ fn unavailable_locally(kind: &PackageErrorKind) -> bool {
     }
 }
 
-/// Resolve the `lazy-mode` ladder for one **OCI-tier** package (plan contract
-/// C-006).
+/// Fill the **OCI-tier** `lazy-mode` ladder (plan contract C-006), unresolved.
 ///
 /// Two tiers, not five: `--lazy-mode` ▸ `OCX_LAZY_MODE` ▸ floor `Never`. The
 /// three config tiers live in `ocx.toml`, and an OCI-tier command
 /// (`ocx package env`, `ocx package exec`) reads no `ocx.toml` at any tier —
 /// so they are absent here rather than silently ignored, which is the same
 /// reason `lazy-report` has no group tier.
+///
+/// Split from [`lazy_mode_for_package`] for the same reason
+/// [`project::lazy_mode_ladder_for_tool`](crate::project::lazy_mode_ladder_for_tool)
+/// is split from its resolving form: the tier order is host-independent, and on
+/// Windows the resolved answer is `Never` for every input.
+pub fn lazy_mode_ladder_for_package(cli: Option<LazyMode>) -> LazyModeLadder {
+    LazyModeLadder {
+        cli,
+        environment: LazyMode::from_env(),
+        ..LazyModeLadder::default()
+    }
+}
+
+/// Resolve the `lazy-mode` ladder for one **OCI-tier** package — the form every
+/// production caller uses.
 ///
 /// The project-tier sibling is
 /// [`project::lazy_mode_for_tool`](crate::project::lazy_mode_for_tool), which
@@ -1541,12 +1555,7 @@ fn unavailable_locally(kind: &PackageErrorKind) -> bool {
 /// Resolution goes through [`LazyModeLadder::resolve_for_host`], so on Windows
 /// the answer is [`LazyMode::Never`] whatever the tiers say — scenario S-010.
 pub fn lazy_mode_for_package(cli: Option<LazyMode>) -> LazyMode {
-    LazyModeLadder {
-        cli,
-        environment: LazyMode::from_env(),
-        ..LazyModeLadder::default()
-    }
-    .resolve_for_host()
+    lazy_mode_ladder_for_package(cli).resolve_for_host()
 }
 
 // ── Specification tests (Phase 3) ───────────────────────────────────────────
@@ -5080,13 +5089,13 @@ mod tests {
     // `lazy_mode_for_tool` is imported from `project`, not `super`: C-006's
     // F-10 decision puts the project-tier ladder assembler with the config it
     // reads. Its OCI-tier sibling reads no config and stays in this module.
-    use crate::project::{ProjectConfig, lazy_mode_for_tool};
+    use crate::project::{ProjectConfig, lazy_mode_for_tool, lazy_mode_ladder_for_tool};
 
     // `Entry` is already in scope from the `${self.env.KEY}` section above.
     use super::{
         ComposeOmission, ComposeRequest, ComposeRoots, Concurrency, LazyAdvisory, LazyMode, Materialization,
-        ModifierKind, PackageManager, ShimDir, emit_shim_slot, lazy_mode_for_package, synth_shim_path_for,
-        tc_entry_object_data,
+        ModifierKind, PackageManager, ShimDir, emit_shim_slot, lazy_mode_for_package, lazy_mode_ladder_for_package,
+        synth_shim_path_for, tc_entry_object_data,
     };
 
     // ── Fixtures ────────────────────────────────────────────────────────────
@@ -5184,6 +5193,19 @@ mod tests {
             ChainMode::Offline,
         );
         PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// The value a `${installPath}/bin` carrier resolves to for a package whose
+    /// content tree is `content`.
+    ///
+    /// Built by substituting into the template STRING, which is what
+    /// `EnvResolver` does — so the separator before `bin` stays the template's
+    /// own `/` on every host. `content.join("bin")` renders a `\` on Windows and
+    /// matches nothing the resolver ever emits (`quality-rust.md`
+    /// "Cross-Platform Path Handling": build the expectation the way the code
+    /// builds the value, never with a hand-picked separator).
+    fn declared_bin(content: &std::path::Path) -> String {
+        format!("{}/bin", content.display())
     }
 
     /// The `PATH` values in emit (push) order — the projection every C-012
@@ -5339,7 +5361,7 @@ mod tests {
             pushed,
             vec![
                 shim.bin().to_string_lossy().into_owned(),
-                root.dir().content().join("bin").to_string_lossy().into_owned(),
+                declared_bin(&root.dir().content()),
                 root.dir().entrypoints().to_string_lossy().into_owned(),
             ],
             "push order must be [shim bin/] [declared bin/] [entrypoints/] — which RESOLVES as \
@@ -5578,7 +5600,7 @@ mod tests {
             resolved_order,
             vec![
                 root.dir().entrypoints().to_string_lossy().into_owned(),
-                root.dir().content().join("bin").to_string_lossy().into_owned(),
+                declared_bin(&root.dir().content()),
                 shim.bin().to_string_lossy().into_owned(),
             ],
             "resolved PATH for a deferred root must be entrypoints/ > bin/ > shims/ (C-012)"
@@ -5899,6 +5921,13 @@ mod tests {
     // the tiers in the wrong order — or consults none — answers `Never` and
     // reds; the construction also makes each row deterministic regardless of
     // the ambient `OCX_LAZY_MODE`.
+    //
+    // The rows drive the ladder ASSEMBLERS and resolve with the pure
+    // `resolve()`, never `resolve_for_host()`. Which config tier feeds which
+    // ladder slot is a host-independent contract, but the host form answers
+    // `Never` for every input on Windows (S-010) — so a row driving it would be
+    // green there whatever the wiring did, which is no check at all. The host
+    // floor gets its own two-halved row at the end of this block.
 
     fn tool_identifier() -> Identifier {
         Identifier::new_registry("ns/tool", REGISTRY).clone_with_tag("1.2.3")
@@ -5948,7 +5977,7 @@ mod tests {
         );
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), Some(LazyMode::Always)),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), Some("ci"), Some(LazyMode::Always)).resolve(),
             LazyMode::Always
         );
     }
@@ -5963,7 +5992,7 @@ mod tests {
         );
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), Some("ci"), None).resolve(),
             LazyMode::Always
         );
     }
@@ -5975,12 +6004,12 @@ mod tests {
         let config = ladder_config(Some(LazyMode::Never), Some(("ci", LazyMode::Always)), None);
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), Some("ci"), None).resolve(),
             LazyMode::Always,
             "the selected group's tier applies"
         );
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), None, None).resolve(),
             LazyMode::Never,
             "a positional package has no group tier, so the toolchain tier answers"
         );
@@ -5992,7 +6021,7 @@ mod tests {
         let config = ladder_config(Some(LazyMode::Always), None, None);
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), None, None).resolve(),
             LazyMode::Always
         );
     }
@@ -6008,7 +6037,7 @@ mod tests {
         );
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), None, None).resolve(),
             LazyMode::Always
         );
     }
@@ -6024,7 +6053,7 @@ mod tests {
         );
 
         assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&config, &tool_identifier(), None, None).resolve(),
             LazyMode::Never
         );
     }
@@ -6038,7 +6067,7 @@ mod tests {
         env.set("OCX_LAZY_MODE", "always");
 
         assert_eq!(
-            lazy_mode_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None).resolve(),
             LazyMode::Always
         );
     }
@@ -6051,7 +6080,7 @@ mod tests {
         env.remove("OCX_LAZY_MODE");
 
         assert_eq!(
-            lazy_mode_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None),
+            lazy_mode_ladder_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None).resolve(),
             LazyMode::Never
         );
     }
@@ -6065,20 +6094,71 @@ mod tests {
 
         env.set("OCX_LAZY_MODE", "never");
         assert_eq!(
-            lazy_mode_for_package(Some(LazyMode::Always)),
+            lazy_mode_ladder_for_package(Some(LazyMode::Always)).resolve(),
             LazyMode::Always,
             "the CLI flag outranks the environment tier"
         );
 
         env.set("OCX_LAZY_MODE", "always");
         assert_eq!(
-            lazy_mode_for_package(None),
+            lazy_mode_ladder_for_package(None).resolve(),
             LazyMode::Always,
             "the environment tier answers when the flag is absent"
         );
 
         env.remove("OCX_LAZY_MODE");
-        assert_eq!(lazy_mode_for_package(None), LazyMode::Never, "the floor is Never");
+        assert_eq!(
+            lazy_mode_ladder_for_package(None).resolve(),
+            LazyMode::Never,
+            "the floor is Never"
+        );
+    }
+
+    // ── S-010: both tier wrappers resolve through the HOST form ─────────────
+    //
+    // The rows above drive the ladder assemblers, so nothing there would notice
+    // a wrapper that called `resolve()` instead of `resolve_for_host()`. These
+    // two do, and they are host-gated halves rather than one `cfg!(windows)`
+    // expectation: an assertion that restates the production `cfg!` agrees with
+    // the code on every host, including one where the code is wrong. Each half
+    // asserts a literal and runs on the host it describes (the convention
+    // `lazy.rs` establishes for the floor itself).
+    //
+    // The ladder asks for `always` at the toolchain tier, which outranks
+    // `OCX_LAZY_MODE`, so neither half depends on ambient process state.
+
+    #[cfg(windows)]
+    #[test]
+    fn both_tier_wrappers_compose_eagerly_on_windows() {
+        let config = ladder_config(Some(LazyMode::Always), None, None);
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Never,
+            "S-010: the project tier composes eagerly until the Windows shim producer lands"
+        );
+        assert_eq!(
+            lazy_mode_for_package(Some(LazyMode::Always)),
+            LazyMode::Never,
+            "S-010: and so does the OCI tier, even for the most specific tier there is"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn both_tier_wrappers_answer_the_ladder_where_a_shim_producer_exists() {
+        let config = ladder_config(Some(LazyMode::Always), None, None);
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Always,
+            "the host floor is Windows-only; elsewhere the project tier answers its ladder"
+        );
+        assert_eq!(
+            lazy_mode_for_package(Some(LazyMode::Always)),
+            LazyMode::Always,
+            "and so does the OCI tier"
+        );
     }
 
     // ── WP-8 Implement: the two rows Specify deferred ───────────────────────
