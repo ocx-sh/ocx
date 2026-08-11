@@ -17,17 +17,19 @@ test/manual/
 ├── README.md                 ← this file
 ├── PATCHES.md                ← patch tier: companions, descriptors, freeze/sync
 ├── INTEGRATIONS.md         ← `integrations`: what it prints, with real output
+├── SHIMS.md                  ← lazy loading: shim trees, first-use materialize, clean/re-add
 ├── packages/                 ← source trees, one per package shape
 ├── projects/                 ← toolchain-tier demo projects (ocx.toml + generated lock)
 ├── scripts/
-│   ├── env.sh                ← source to point at localhost:5000
+│   ├── env.sh                ← source to point at localhost:5000 (or $OCX_TEST_REGISTRY_PORT)
 │   ├── bootstrap.sh          ← idempotent build + push of every package
 │   ├── teardown.sh           ← rm -rf $OCX_HOME (with confirm)
 │   ├── setup-patches.sh      ← patch rig: companions, bases, descriptors, config
 │   ├── teardown-patches.sh   ← remove patch rig state
 │   ├── setup-integrations.sh     ← integrations rig (delegates to setup-patches.sh)
 │   ├── show-integrations.sh      ← nine-section guided output tour (asserts, not just prints)
-│   └── teardown-integrations.sh  ← remove integrations rig state
+│   ├── teardown-integrations.sh  ← remove integrations rig state
+│   └── show-shims.sh         ← lazy-loading tour in a throwaway OCX_HOME (asserts each contract)
 ├── announce-e2e/             ← Track D announce gate against the REAL index
 │   ├── README.md             ← runbook, prerequisites, per-driver walkthrough
 │   ├── PLAYBOOKS.md          ← three failure playbooks
