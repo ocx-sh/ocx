@@ -5960,8 +5960,6 @@ mod phase4_spec_tests {
     /// tested against it).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dep_reachable_from_a_base_and_a_companion_contributes_one_row() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = test_patch_config();
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -6016,8 +6014,6 @@ mod phase4_spec_tests {
     /// both rows are tested against each other rather than against a base row.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_companions_reaching_one_dep_contribute_one_row() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = test_patch_config();
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -6061,8 +6057,6 @@ mod phase4_spec_tests {
     /// hot path, which composes with `self_view = true`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_companion_payload_naming_an_absent_dep_does_not_fail_the_self_surface() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         // `required` so a failed projection is a hard error rather than a
         // warn-skip: the regression is then a returned `Err`, not a silence.
@@ -6177,8 +6171,6 @@ mod phase4_spec_tests {
     /// earlier base already decided this one is safe to skip".
     #[tokio::test(flavor = "multi_thread")]
     async fn a_companion_missing_for_an_optional_base_still_fails_closed_on_a_later_required_base() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{global_descriptor_id, patch_descriptor_id};
 
         let dir = TempDir::new().unwrap();
