@@ -281,12 +281,12 @@ mod install_info_identifier_tests {
 pub use concurrency::Concurrency;
 pub use error::DependencyError;
 pub use tasks::clean::{CleanResult, CleanedObject};
-pub use tasks::common::WireSelectionOutcome;
+pub use tasks::common::{ClosureEdge, ClosureEnvVar, ClosureNode, WireSelectionOutcome};
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::{
-    ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, EntrypointConflict, InspectClosure, InspectOptions,
-    InspectResult, RepositoryConflict, Surface,
+    ClosureConflicts, EntrypointConflict, InspectClosure, InspectOptions, InspectResult, RepositoryConflict, Surface,
 };
+pub use tasks::lazy_advisory::LazyAdvisory;
 pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
 pub use tasks::patch_discovery::PatchDiscoveryMode;
 pub use tasks::patch_publish::PatchPublishReport;

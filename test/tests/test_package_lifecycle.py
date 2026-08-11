@@ -69,4 +69,4 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     # candidate symlink which also targets the package root, so resolving
     # the symlink lands on the same directory.
     find_result = ocx.json("package", "which", short)
-    assert Path(find_result[short]) == candidate.resolve()
+    assert Path(find_result[short]["path"]) == candidate.resolve()

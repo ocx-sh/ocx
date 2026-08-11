@@ -170,16 +170,19 @@ pub enum ProjectErrorKind {
     /// because for the handful of files written against the old shape this
     /// error IS the migration instruction.
     #[error(
-        "group '{group}' declares tool binding '{binding}' directly; tool bindings belong under [group.{group}.tools] — [group.{group}] holds only the `tools` and `env` sub-tables"
+        "group '{group}' declares tool binding '{binding}' directly; tool bindings belong under [group.{group}.tools] — [group.{group}] holds the `tools` and `env` sub-tables and the `lazy-mode` setting"
     )]
     GroupHoldsDirectBinding { group: String, binding: String },
 
-    /// A `[group.<name>]` table declares a sub-table other than `tools` or
-    /// `env` — typically a typo (`[group.ci.tolos]`).
+    /// A `[group.<name>]` table declares a key other than the `tools` / `env`
+    /// sub-tables or the `lazy-mode` setting — typically a typo
+    /// (`[group.ci.tolos]`, `lazy-mod`).
     ///
     /// Rejected rather than ignored: silently dropping an unrecognized key
     /// would make a whole tool set vanish with no signal.
-    #[error("group '{group}' declares unknown section '{key}'; expected `tools` or `env`")]
+    #[error(
+        "group '{group}' declares unknown key '{key}'; expected the `tools` or `env` sub-tables, or the `lazy-mode` setting"
+    )]
     UnknownGroupSection { group: String, key: String },
 
     /// An `[env]` key matches the reserved `OCX_*` / `__OCX_*` namespace.

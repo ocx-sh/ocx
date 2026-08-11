@@ -49,15 +49,16 @@ pub struct CleanResult {
     pub temp: Vec<PathBuf>,
 }
 
-/// Resolve a locked tool's per-platform leaf digests into the set of
-/// package-store root digests it pins, presence-gated against the on-disk
-/// package store.
+/// Resolve a locked tool's per-platform leaf digests into the set of root
+/// digests it pins, presence-gated against every tier the GC roots from.
 ///
-/// Each leaf in `platforms` maps directly to a package-store key
+/// Each leaf in `platforms` maps directly to a store key
 /// (`repository.clone_with_digest(leaf)`) — no index-blob read needed, since
 /// the lock stores platform-manifest digests directly (never the outer
 /// image-index digest). Presence-gating means a single-platform machine does
-/// not root phantom (never-pulled) platform leaves.
+/// not root phantom (never-pulled) platform leaves; see
+/// [`leaf_present_in_any_tier`] for why the gate spans two tiers rather than
+/// only the package store.
 async fn collect_tool_roots(
     repository: &oci::Identifier,
     platforms: &std::collections::BTreeMap<String, oci::Digest>,
@@ -70,12 +71,33 @@ async fn collect_tool_roots(
             Ok(p) => p,
             Err(_) => continue,
         };
-        let pkg_path = file_structure.packages.path(&child_pinned);
-        if crate::utility::fs::path_exists_lossy(&pkg_path).await {
+        if leaf_present_in_any_tier(file_structure, &child_pinned).await {
             roots.push(child_pinned);
         }
     }
     roots
+}
+
+/// Is this lock-pinned leaf present on this machine in any tier the GC roots
+/// from — materialized as a package, or deferred as a shim?
+/// (plan contract C-014, [#302](https://github.com/ocx-sh/ocx/issues/302))
+///
+/// This is the widened form of the gate [`collect_tool_roots`] applies to every
+/// per-platform leaf. The narrow, package-only gate is a **silent shim
+/// collector**: a deferred tool has no package directory by construction, so its
+/// pin is dropped from [`ProjectRootDigests`] before the reachability graph ever
+/// sees it, and the shim directory the lock still pins is collected on the next
+/// `ocx clean`.
+///
+/// It stays a gate rather than becoming unconditional because the gate is what
+/// keeps a phantom (never-pulled, foreign-platform) leaf out of the dry-run
+/// report — `PackageManager::clean` turns every attribution key into a row. The
+/// two tiers are probed independently and the graph re-checks each against the
+/// walked entry set, so a pin present in one tier and absent in the other roots
+/// only the tier that exists.
+async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &oci::PinnedIdentifier) -> bool {
+    crate::utility::fs::path_exists_lossy(&file_structure.packages.path(leaf)).await
+        || crate::utility::fs::path_exists_lossy(&file_structure.shims.path(leaf)).await
 }
 
 /// Enumerates live registered projects from the flat symlink ledger, reads each
@@ -549,15 +571,150 @@ repository = "localhost:5000/shfmt"
         registry: &str,
         digest_hex: &str,
     ) -> oci::PinnedIdentifier {
-        let pinned = oci::PinnedIdentifier::try_from(
-            oci::Identifier::new_registry(repository, registry)
-                .clone_with_digest(oci::Digest::Sha256(digest_hex.to_string())),
-        )
-        .unwrap();
+        let pinned = pinned_leaf(repository, registry, digest_hex);
         tokio::fs::create_dir_all(file_structure.packages.path(&pinned))
             .await
             .unwrap();
         pinned
+    }
+
+    /// The `PinnedIdentifier` a `repository`/leaf-digest pair in the fixtures
+    /// above resolves to, with nothing seeded on disk.
+    fn pinned_leaf(repository: &str, registry: &str, digest_hex: &str) -> oci::PinnedIdentifier {
+        oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry(repository, registry)
+                .clone_with_digest(oci::Digest::Sha256(digest_hex.to_string())),
+        )
+        .unwrap()
+    }
+
+    /// The leaf digest both lock fixtures pin for `cmake`.
+    const CMAKE_LEAF_HEX: &str = "aaaa0000000000000000000000000000000000000000000000000000000000bb";
+
+    /// Pre-create the shim directory for `pinned` — its `bin/` child is the
+    /// completeness marker (C-022), and its presence is the whole on-disk
+    /// evidence a deferred tool leaves behind.
+    async fn seed_pinned_shim_dir(file_structure: &FileStructure, pinned: &oci::PinnedIdentifier) {
+        tokio::fs::create_dir_all(file_structure.shims.shim_dir(pinned).bin())
+            .await
+            .unwrap();
+    }
+
+    // ── C-014: the presence gate accepts either tier ──────────────────────
+
+    /// C-014 trap (2): a deferred tool has no package directory by
+    /// construction. The package-only gate drops its pin before the
+    /// reachability graph ever sees it, and the shim the lock still pins is
+    /// collected on the next `ocx clean`.
+    #[tokio::test]
+    async fn leaf_present_in_any_tier_accepts_a_deferred_leaf_with_only_a_shim_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let leaf = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        seed_pinned_shim_dir(&file_structure, &leaf).await;
+
+        assert!(
+            !file_structure.packages.path(&leaf).exists(),
+            "precondition: nothing is materialized — this is the 'install nothing, compose \
+             lazily' state"
+        );
+        assert!(
+            leaf_present_in_any_tier(&file_structure, &leaf).await,
+            "C-014: a shim directory satisfies presence for a lock-pinned leaf"
+        );
+    }
+
+    /// The widened gate must not lose the tier it already had.
+    #[tokio::test]
+    async fn leaf_present_in_any_tier_accepts_a_materialized_leaf_with_only_a_package_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let leaf = seed_pinned_package_dir(&file_structure, "cmake", "localhost:5000", CMAKE_LEAF_HEX).await;
+
+        assert!(
+            !file_structure.shims.path(&leaf).exists(),
+            "precondition: no shim exists for a materialized tool"
+        );
+        assert!(
+            leaf_present_in_any_tier(&file_structure, &leaf).await,
+            "a package directory still satisfies presence"
+        );
+    }
+
+    /// It stays a **gate**: a foreign-platform or never-pulled leaf is absent
+    /// from both tiers and must not become a root, or `PackageManager::clean`
+    /// renders a nonexistent path as a held object in `--dry-run`.
+    #[tokio::test]
+    async fn leaf_present_in_any_tier_rejects_a_leaf_absent_from_both_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let leaf = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+
+        assert!(
+            !leaf_present_in_any_tier(&file_structure, &leaf).await,
+            "a pin present in neither tier is not present"
+        );
+    }
+
+    /// The same contract one layer up, where it actually bites: with only a
+    /// shim directory on disk, `collect_project_roots` must still surface the
+    /// lock's pinned digest as a GC root.
+    #[tokio::test]
+    async fn collect_roots_includes_a_deferred_tools_leaf_with_only_a_shim_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+        tokio::fs::write(ocx_home.join("ocx.lock"), LOCK_WITH_ONE_TOOL)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
+
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let leaf = pinned_leaf("cmake", "localhost:5000", CMAKE_LEAF_HEX);
+        seed_pinned_shim_dir(&file_structure, &leaf).await;
+        assert!(
+            !file_structure.packages.path(&leaf).exists(),
+            "precondition: the tool is deferred, not materialized"
+        );
+
+        let roots = match collect_project_roots(&ocx_home, &file_structure).await.unwrap() {
+            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
+        };
+
+        let digest_strs: Vec<String> = roots
+            .iter()
+            .flat_map(|root| root.digests.iter().map(|pinned| pinned.to_string()))
+            .collect();
+        assert!(
+            digest_strs.iter().any(|entry| entry.contains("sha256:aaaa0000")),
+            "C-014: a deferred tool's pin must survive the presence gate; got: {digest_strs:?}"
+        );
+    }
+
+    /// Negative control for the widened gate: with neither tier on disk the
+    /// pin is still dropped. An unconditional gate would pass this pin through
+    /// and put a path that does not exist into the dry-run report.
+    #[tokio::test]
+    async fn collect_roots_excludes_a_leaf_absent_from_both_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+        tokio::fs::write(ocx_home.join("ocx.lock"), LOCK_WITH_ONE_TOOL)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
+
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let roots = match collect_project_roots(&ocx_home, &file_structure).await.unwrap() {
+            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
+        };
+
+        assert_eq!(roots.len(), 1, "the global lock still contributes an entry");
+        assert!(
+            roots[0].digests.is_empty(),
+            "but it pins nothing on this machine; got: {:?}",
+            roots[0].digests.iter().map(|p| p.to_string()).collect::<Vec<_>>()
+        );
     }
 
     /// `collect_project_roots` includes the pinned digest from

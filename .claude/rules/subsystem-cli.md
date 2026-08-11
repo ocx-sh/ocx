@@ -150,6 +150,39 @@ struct — never read the two raw booleans at the call site.
   the struct's resolution method, so the mode name (not two independently-checked flags)
   is what call sites and tests reason about.
 
+## Cross-Cutting: `--lazy-mode` / `--lazy-report` (deferred tools)
+
+`--lazy-mode <never|always>` is flattened from `options::LazyMode` into the **seven**
+env-composing commands, and **only** those seven. Never read the raw field at a call site —
+`LazyMode::mode()` returns the ladder's *top tier* (`Option`, where `None` means "inherit", never
+"resolves to `never`"), which is fed to `lazy::LazyModeLadder::cli`.
+
+| Command | Tier | Why it takes the flag |
+|---|---|---|
+| `ocx env` | project | composes |
+| `ocx run` | project | composes, then spawns |
+| `ocx pull` | project | pre-warms; a deferred tool is skipped rather than pulled |
+| `ocx direnv export` | project | composes — the `ocx.toml` tiers defer a tool with no flag typed at all, so a direnv-composed environment that ignored `lazy-mode` would differ from the `ocx env` one for the same project |
+| `ocx package env` | OCI | composes |
+| `ocx package exec` | OCI | composes, then spawns |
+| `ocx package which` | OCI | reports the path a name would resolve to, which the policy selects |
+
+**`ocx package install` and `ocx package select` never accept it** (an unknown-argument usage
+error): both write the `candidates/` + `current` symlink namespace, and a symlink must never point
+at a shim directory, so they always materialize.
+
+`--lazy-report <silent|progress>` is a **separate, four-tier ladder** and lives on
+`ocx launcher shim` — the process that actually materializes — not on the composing commands. It
+has no `[group.<g>]` tier: `lazy-mode` is resolved while composing, where the selected group is
+known, but `lazy-report` is resolved in a separate process that receives only a pinned identifier
+and a basename and cannot learn which group composed the tool. A settable-but-unreadable tier is
+the defect, so it is absent rather than ignored.
+
+Both value grammars are **case-sensitive** (nothing sets `Arg::ignore_case`); only the env-var
+readers `LazyMode::from_env` / `LazyReport::from_env` fold case, and both warn-and-fall-back on an
+unrecognized value rather than erroring — an invalid tier is *absent*, so the rest of the ladder
+still applies.
+
 ## Cross-Cutting: `--env` Per-Invocation Override
 
 `--env KEY[:TYPE]=VALUE` is flattened from `options::EnvOverride` into **every** command that

@@ -362,6 +362,55 @@ consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>
 - `--current`: a version must be selected first (via [`select`](#select) or [`install --select`](#install)). Digest identifiers are rejected. The tag portion of the identifier is ignored — only registry and repository are used to locate the symlink.
 - `--candidate` and `--current` are mutually exclusive.
 
+### `--lazy-mode` {#arg-lazy-mode}
+
+Available on the seven commands that compose or pre-warm an environment: [`env`](#env-root), [`run`](#run), [`pull`](#pull), [`direnv export`](#direnv-export), [`package env`](#env), [`package exec`](#exec), and [`package which`](#which). Not available on [`package install`](#package-install) or [`package select`](#package-select) — those are the only two commands that write the [candidate/current symlink namespace](#path-resolution), and a symlink must never point at a shim directory.
+
+Controls when a declared tool's content downloads: now, or on first use.
+
+| Value | Behavior |
+|-------|----------|
+| `never` (default) | Compose eagerly — content is materialized before the tool reaches `PATH`. |
+| `always` | Compose a shim — the tool's declared names are on `PATH` immediately; content downloads the first time one of those names runs. |
+
+`--lazy-mode` is the top tier of a five-level resolution ladder, most specific first:
+
+| Tier | Source |
+|------|--------|
+| 1 | `--lazy-mode` on the invoked command |
+| 2 | `[package."<id>"]` in [`ocx.toml`][config-project-package] |
+| 3 | `[group.<name>]` in [`ocx.toml`][config-project-groups] |
+| 4 | The toolchain-level `lazy-mode` key in `ocx.toml` |
+| 5 | [`OCX_LAZY_MODE`][env-ocx-lazy-mode] |
+| — | Floor: `never` |
+
+An omitted flag leaves the CLI tier absent, letting the more general tiers speak — it never means `never`. See [Deferred Tools][in-depth-lazy-loading] for the full lifecycle, and [`ocx package which`](#which) below for how a deferred tool reports its on-disk `kind`.
+
+::: tip Windows composes eagerly regardless of this flag
+`lazy-mode` has no effect on Windows in this release — a tool resolved to `always` composes eagerly instead, with a debug-level log noting why. See [Deferred Tools][in-depth-lazy-loading] for the current state of Windows shim support.
+:::
+
+### `--lazy-report` {#arg-lazy-report}
+
+Controls whether a deferred tool's first-invocation download renders progress. Declared on exactly one subcommand in the whole CLI — the hidden `ocx launcher shim` verb that a generated shim launcher execs into, never one a user types directly.
+
+| Value | Behavior |
+|-------|----------|
+| `silent` (default) | No progress channel is opened. |
+| `progress` | Render progress on the controlling terminal; falls back to `silent` where none is reachable (a Docker build, a CI runner, anything under `setsid`). |
+
+It cannot be a flag on any of the seven composing commands above: the process that renders it is a separate one, spawned by the generated launcher long after the composing command exec'd away, so a value given at compose time has no route to the process that would use it. It resolves instead through its own four-tier ladder — one tier shorter than `--lazy-mode`'s, since there is no group to consult once composition is over:
+
+| Tier | Source |
+|------|--------|
+| 1 | `--lazy-report` (on `ocx launcher shim` only) |
+| 2 | `[package."<id>"]` in `ocx.toml` |
+| 3 | The toolchain-level `lazy-report` key in `ocx.toml` |
+| 4 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] |
+| — | Floor: `silent` |
+
+See [Deferred Tools][in-depth-lazy-loading] for why `lazy-report` has no `[group.<name>]` tier.
+
 ## Commands
 
 ### `add` {#add}
@@ -595,7 +644,7 @@ Export the composed toolchain environment for the active project or global toolc
 
 This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
-With `--format json`, the document carries `binaries`/`entrypoints`/`integrations` sibling arrays alongside `entries` — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
+With `--format json`, the document carries `binaries`/`entrypoints`/`integrations` sibling arrays alongside `entries`, plus an `advisories` array for any [deferred tool][in-depth-lazy-loading] in the composition — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
 
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
@@ -614,6 +663,7 @@ ocx env [OPTIONS]
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx run`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
 | `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
@@ -777,7 +827,7 @@ The package root is the directory containing the package's `content/` and `entry
 
 By default the content-addressed object-store package root is returned. The `--candidate` and `--current` modes return the stable install symlink path; those symlinks themselves target the package root, so traversal works the same through them. See [Path Resolution](#path-resolution) for the trade-off between modes.
 
-No downloading is performed — the package must already be installed.
+Never downloads anything, whether or not [`--lazy-mode`](#arg-lazy-mode) is passed — this command only reports what already exists on disk. Every entry also names which **kind** of directory it found: `package` for a materialized package root, or `shim` for a tool composed with `--lazy-mode always` whose content has not downloaded yet. Once such a tool has been used once, its content is on disk and the entry reports `package` again. `--candidate` and `--current` always report `package`, because the install symlinks they resolve are only ever written for materialized content. See [Deferred Tools][in-depth-lazy-loading] for the full lifecycle.
 
 **Usage**
 
@@ -793,13 +843,16 @@ ocx package which [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Platform to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- [`--lazy-mode`](#arg-lazy-mode): Report a deferred tool's shim directory instead of refusing it — see below. Has no effect together with `--candidate`/`--current`, which always report a materialized package.
 - `-h`, `--help`: Print help information.
+
+**JSON shape (breaking, pre-1.0):** the value under each requested identifier is now an object, `{"path": "...", "kind": "package"|"shim"}`, rather than a bare path string. Plain output gains a matching `Kind` column.
 
 ::: tip
 Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx package which --candidate --format json kitware/cmake:3.28 | jq -r '.["kitware/cmake:3.28"]')
+cmake_root=$(ocx package which --candidate --format json kitware/cmake:3.28 | jq -r '.["kitware/cmake:3.28"].path')
 ```
 :::
 
@@ -858,6 +911,7 @@ ocx direnv export [OPTIONS]
 
 - `--group <NAME>` / `-g`: Scope composition to the named group(s), same grammar as [`ocx run -g`](#run). Omitted, the scope is the top-level `[tools]` table and its `[env]` — a group's `[env]` is otherwise unreachable from an `.envrc`.
 - `--env <KEY[:TYPE[:SEP]]=VALUE>`: Set an environment variable for this invocation only, same grammar as [`ocx run --env`](#run). A relative `path` value resolves against the directory ocx runs in, which under direnv is the directory holding `.envrc`.
+- [`--lazy-mode <MODE>`](#arg-lazy-mode): Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. Without it, a project declaring `lazy-mode = "always"` in `ocx.toml` would still compose eagerly here even though [`ocx env`](#env-root) defers it — `ocx direnv export` composes through the same ladder as every other env-composing command, so the environment does not depend on which command opened the shell.
 - `--pull` / `--no-pull`: `--pull` (default) installs a missing tool on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
 - `-h`, `--help`: Print help information.
 
@@ -1719,6 +1773,7 @@ ocx pull [OPTIONS]
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; the reserved name `all` expands to `default` + every declared `[group.*]`. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a tool the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx run` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1738,6 +1793,10 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 **Lock mtime touch**
 
 After a successful pull, `ocx pull` re-saves `ocx.lock` with byte-identical content so the file's mtime advances. This re-fires [`ocx direnv`](#direnv) `watch_file ocx.lock`, ensuring direnv refreshes the shell environment once the object store is warmed. The save is skipped under `--dry-run`.
+
+Outside `--dry-run`, plain output is a three-column `Package` / `Kind` / `Path` table, one row per pulled tool; `--format json` is a matching object keyed by pinned identifier, `{"path": "...", "kind": "package"|"shim"}`. A tool the `lazy-mode` ladder resolved to `never` reports its materialized package root and `kind: "package"`; a tool resolved to `always` reports the generated shim directory this run created and `kind: "shim"` — no package root exists for it yet. See [Deferred Tools][in-depth-lazy-loading].
+
+One reserved key sits beside the identifier keys: `advisories`, the same array [`ocx env`](#env-root) and [`ocx package env`](#package-env) publish — `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per deferred tool whose declared metadata could not be fully validated. Always present, empty unless a tool composed with `--lazy-mode always` raised one; warning-only, and written to stderr as well so the plain channel carries it too. No pinned identifier can collide with the key, since every other key is a `registry/repository@sha256:...` string.
 
 #### Dry-run preview {#pull-dry-run}
 
@@ -1788,6 +1847,7 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--help` | `-h` | Print help information. | — |
 
@@ -3721,6 +3781,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `-p`, `--platform` | | Target platform to consider. |
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front; the requested command's own invocation is what triggers materialization if it names one of the deferred package's entries. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. | *(inherit from `OCX_LAZY_MODE`; there is no `ocx.toml` to consult on this OCI-tier command)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
 | `-h`, `--help` | | Print help information. |
 
@@ -3728,9 +3789,11 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 Print the resolved environment variables for one or more OCI-tier packages.
 
-Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...], "integrations": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty.
+Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...], "integrations": [...], "advisories": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty.
 
 `integrations` is a fourth top-level sibling array of `{"namespace": "...", "package": "...", "value": ...}` objects — one row per (declaring package, [integration namespace][reference-integrations]) pair, `value` the interpolated payload OCX never interprets or merges. Two packages declaring the same namespace produce two rows, never one merged row — a row count exceeding the distinct-namespace count is the visible proof nothing merged. The array is present, with attribution, even for a single root package — it is never collapsed to a bare object or omitted. Like `binaries`/`entrypoints`, it is always `[]` under `--self` (integrations reach only the interface surface a consumer sees) and never appears in `--shell`/`--ci` output. See [Integrations][reference-integrations] for the field's grammar, size caps, and interpolation rules.
+
+`advisories` is a fifth top-level sibling array of `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per [deferred tool][in-depth-lazy-loading] whose declared metadata could not be fully validated at compose time (`key` is present only for the two variants that name an environment variable) — always present, empty unless a package composed with [`--lazy-mode always`](#arg-lazy-mode) triggered one; warning-only, never a compose failure.
 
 Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 
@@ -3759,6 +3822,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | `-p`, `--platform` | | Target platform to consider. |
 | `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
 | `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). `integrations` is always `[]` under `--self` — integrations reach only the interface surface, regardless of view. |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front. Has no effect together with `--candidate`/`--current`, which always resolve a materialized package. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. |
 | `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |
 | `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
 | `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
@@ -4387,9 +4451,13 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-indices-update]: ../in-depth/indices.md#update-modes
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-indices-servable]: ../in-depth/indices.md#servable
+[in-depth-lazy-loading]: ../in-depth/lazy-loading.md
+[in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
+[env-ocx-lazy-mode]: ./environment.md#ocx-lazy-mode
+[env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
 [env-no-color]: ./environment.md#external-no-color
 [env-clicolor]: ./environment.md#external-clicolor
 [env-clicolor-force]: ./environment.md#external-clicolor-force
@@ -4424,6 +4492,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
 [config-project-env]: ./configuration.md#project-config-env
+[config-project-package]: ./configuration.md#project-config-package
+[config-project-groups]: ./configuration.md#project-config-groups
 [config-schemas]: ./configuration.md#schemas
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config

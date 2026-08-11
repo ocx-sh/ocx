@@ -46,11 +46,19 @@ impl BlobDir {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
+    /// Test-only write counter, shared by every clone of this store. See
+    /// [`Self::write_call_count`].
+    #[cfg(test)]
+    write_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl BlobStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            #[cfg(test)]
+            write_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     /// The root directory of the blob store.
@@ -146,12 +154,12 @@ impl BlobStore {
 
     /// Shared tempfile + atomic-rename publish body for [`Self::write_blob`]
     /// (behind its check-first fast path) and [`Self::replace_blob`]
-    /// (unconditional) — one write body, no copy-pasted logic. Increments
-    /// [`WRITE_BLOB_CALL_COUNT`] (test-only) once per genuine write attempt,
-    /// whichever public entry point triggered it.
+    /// (unconditional) — one write body, no copy-pasted logic. Bumps this
+    /// store's test-only write counter ([`Self::write_call_count`]) once per
+    /// genuine write attempt, whichever public entry point triggered it.
     async fn persist_bytes(&self, target: &Path, bytes: &[u8]) -> crate::Result<()> {
         #[cfg(test)]
-        WRITE_BLOB_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.write_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let parent = target
             .parent()
             .ok_or_else(|| crate::error::file_error(target, std::io::Error::other("blob data path has no parent")))?
@@ -281,33 +289,29 @@ fn classify_blob_dir(dir: &Path, _depth: usize) -> crate::utility::fs::WalkDecis
     crate::utility::fs::WalkDecision::descend_skip(BLOB_SKIP_NAMES)
 }
 
-/// Test-only call counter on `BlobStore::write_blob`.
-///
-/// Used by `PullCoordinator::stage_blob_bytes` coalescing tests to assert
-/// the singleflight dedup actually fires (the leader executes exactly once,
-/// waiters short-circuit). Without this instrumentation, content-addressing
-/// alone makes "both calls return Ok" a passing condition even when no
-/// dedup happens — masking a regression that would otherwise cost a
-/// duplicate download per concurrent caller.
-///
-/// The counter is process-global. Tests that read it for assertion MUST
-/// acquire [`WRITE_BLOB_TEST_LOCK`] to serialise against sibling tests
-/// that also call `write_blob` (e.g. the Windows-cfg `write_blob_retries_*`
-/// tests). `cargo test` parallelises within a single test binary, so the
-/// static would otherwise be racy.
+/// Test-only write instrumentation, scoped to one store instance.
 #[cfg(test)]
-pub(crate) static WRITE_BLOB_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Test-binary-local serializer for the `WRITE_BLOB_CALL_COUNT` static. Held
-/// for the duration of any test that reads the counter as an assertion, or
-/// that calls `write_blob` while such a test might be running.
-///
-/// Uses `tokio::sync::Mutex` (not `std::sync::Mutex`) because every consumer
-/// is a `#[tokio::test]` that awaits blob I/O while holding the guard. A
-/// std-sync guard across `.await` is a Block-tier anti-pattern per
-/// `quality-rust.md` (`clippy::await_holding_lock`).
-#[cfg(test)]
-pub(crate) static WRITE_BLOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+impl BlobStore {
+    /// How many genuine write attempts this store (and every clone of it) has
+    /// performed — one per [`Self::write_blob`] call that got past the
+    /// check-first fast path, plus every [`Self::replace_blob`] call.
+    ///
+    /// Used by `PullCoordinator::stage_blob_bytes` coalescing tests to assert
+    /// the singleflight dedup actually fires (the leader executes exactly
+    /// once, waiters short-circuit). Without this instrumentation,
+    /// content-addressing alone makes "both calls return Ok" a passing
+    /// condition even when no dedup happens — masking a regression that would
+    /// otherwise cost a duplicate download per concurrent caller.
+    ///
+    /// The count lives on the store, not in a process-global static, so a
+    /// sibling test writing blobs into its own store can never perturb it.
+    /// `cargo test` parallelises within a single test binary, and a global
+    /// counter made this assertion a race against every unrelated
+    /// blob-writing test in the crate.
+    pub(crate) fn write_call_count(&self) -> usize {
+        self.write_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -588,10 +592,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test(flavor = "multi_thread")]
     async fn write_blob_retries_on_sharing_violation_then_succeeds() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // which reads `WRITE_BLOB_CALL_COUNT` as an assertion. See the
-        // `WRITE_BLOB_TEST_LOCK` doc-comment.
-        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
         // Open the eventual CAS path with std::fs::File::open (no FILE_SHARE_DELETE)
         // so that a rename over it will trigger ERROR_SHARING_VIOLATION (32).
         // Then race a write_blob. The retry-with-backoff loop should eventually
@@ -628,7 +628,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test(flavor = "multi_thread")]
     async fn write_blob_returns_ok_when_target_exists_after_retry_exhaustion() {
-        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
         // Simulate the scenario where retry exhaustion occurs but the target
         // file is created by a concurrent writer. The idempotent re-check
         // should return Ok(()).
@@ -650,7 +649,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test(flavor = "multi_thread")]
     async fn launcher_child_can_read_blob_data_during_concurrent_other_write() {
-        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
         // F1 cannot-recur proof: spawn a writer for digest A and simultaneously
         // open blob A's data file (if already written) with bare File::open.
         // There is no LockFileEx on the data file after BlobGuard removal, so

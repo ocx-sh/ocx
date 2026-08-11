@@ -1,9 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Move-to-front deduplication for `PATH`-style environment values.
+//! Move-to-front deduplication and segment removal for `PATH`-style
+//! environment values.
 
 use std::ffi::{OsStr, OsString};
+
+/// Drops every occurrence of `value` from a `PATH`-style value.
+///
+/// The inverse of [`move_to_front`] minus the prepend, and it shares that
+/// function's splitting, empty-segment dropping and exact-segment comparison —
+/// so a directory added by one is removed by the other.
+///
+/// The caller is a security guard, not a convenience: `ocx launcher shim` must
+/// resolve the invoked name on a `PATH` that no longer contains the shim
+/// directory it was itself invoked from. Leaving it there makes a name the
+/// package claimed but does not ship resolve back to the shim launcher, and
+/// the following `execvp` re-enters the same process forever.
+///
+/// **Precondition** (same as [`move_to_front`]): `value` is a single directory
+/// containing no `PATH_SEPARATOR`. Comparison is exact — deliberately, so that
+/// it matches the emitted shell snippets — which means a segment naming the
+/// same directory by a different string survives untouched: a trailing slash, a
+/// symlink alias, a root spelled one way by the composing process and another
+/// way by the invoked one. This function is therefore not a containment check
+/// and must not be read as one. Callers that must fail closed re-check the
+/// *resolved* answer against the resolved directory, which is the only
+/// comparison those spellings collapse under.
+pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
+    let mut result = OsString::with_capacity(existing.len());
+    for segment in std::env::split_paths(existing) {
+        let segment = segment.into_os_string();
+        if segment.is_empty() || segment == value {
+            continue;
+        }
+        if !result.is_empty() {
+            result.push(crate::env::PATH_SEPARATOR);
+        }
+        result.push(segment);
+    }
+    result
+}
 
 /// Move-to-front dedup for a `PATH`-style value.
 ///
@@ -66,7 +103,7 @@ pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
 
 #[cfg(test)]
 mod tests {
-    use super::move_to_front;
+    use super::{move_to_front, remove_segment};
     use crate::env::PATH_SEPARATOR as SEP;
     use std::ffi::{OsStr, OsString};
 
@@ -145,5 +182,50 @@ mod tests {
         // the existing entries are still de-duplicated of empties.
         assert_eq!(mtf(&join(&["/a", "", "/b"]), ""), join(&["/a", "/b"]));
         assert_eq!(mtf(OsStr::new(""), ""), OsString::new());
+    }
+
+    fn rm(existing: &OsStr, value: &str) -> OsString {
+        remove_segment(existing, OsStr::new(value))
+    }
+
+    #[test]
+    fn removes_the_named_segment_from_any_position() {
+        assert_eq!(rm(&join(&["/a", "/b", "/c"]), "/b"), join(&["/a", "/c"]));
+        assert_eq!(rm(&join(&["/b", "/a"]), "/b"), OsString::from("/a"));
+        assert_eq!(rm(&join(&["/a", "/b"]), "/b"), OsString::from("/a"));
+    }
+
+    #[test]
+    fn removes_every_occurrence_and_drops_empties() {
+        // A duplicated shim slot must not survive as a second chance to loop.
+        assert_eq!(rm(&join(&["/b", "/a", "", "/b"]), "/b"), OsString::from("/a"));
+    }
+
+    #[test]
+    fn removing_the_only_segment_yields_empty() {
+        assert_eq!(rm(&join(&["/b"]), "/b"), OsString::new());
+    }
+
+    #[test]
+    fn absent_segment_leaves_the_rest_intact() {
+        assert_eq!(rm(&join(&["/a", "/b"]), "/zz"), join(&["/a", "/b"]));
+    }
+
+    #[test]
+    fn partial_path_is_not_removed() {
+        // The exact-segment rule `move_to_front` uses, in the other direction:
+        // removing `/usr/bin` must not take `/usr/bin/extra` with it.
+        assert_eq!(
+            rm(&join(&["/usr/bin/extra", "/usr/bin"]), "/usr/bin"),
+            OsString::from("/usr/bin/extra")
+        );
+    }
+
+    #[test]
+    fn undoes_move_to_front() {
+        // The two are inverses on the segment they share, which is what the
+        // shim guard relies on: the composer adds the slot, the guard drops it.
+        let with = mtf(&join(&["/a", "/b"]), "/shim");
+        assert_eq!(remove_segment(&with, OsStr::new("/shim")), join(&["/a", "/b"]));
     }
 }

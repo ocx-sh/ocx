@@ -158,6 +158,53 @@ impl IntegrationAttribution {
     }
 }
 
+/// One advisory raised while composing a **deferred** tool, in wire shape.
+///
+/// `kind` is the machine discriminator — a consumer branches on it and never
+/// on `message`, which is the human rendering of the same fact. `key` is
+/// present only for the two variants that name an environment variable.
+///
+/// Advisories are warning-only and never fail a compose. They exist because a
+/// deferred tool's declared metadata can describe something that will not
+/// substitute cleanly until its content materializes; reaching a log alone
+/// would make them unreadable to the tooling this product is a backend for.
+#[derive(Serialize)]
+pub struct LazyAdvisoryReport {
+    pub kind: &'static str,
+    pub package: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub message: String,
+}
+
+impl LazyAdvisoryReport {
+    /// Projects the library's advisories into the wire shape, preserving the
+    /// order the composer raised them in.
+    pub fn from_advisories(advisories: &[ocx_lib::package_manager::LazyAdvisory]) -> Vec<Self> {
+        use ocx_lib::package_manager::LazyAdvisory;
+        advisories
+            .iter()
+            .map(|advisory| {
+                let (kind, package, key) = match advisory {
+                    LazyAdvisory::InstallPathRootedNonPathVar { package, key } => {
+                        ("install-path-rooted-non-path-var", package, Some(key.clone()))
+                    }
+                    LazyAdvisory::UndeclaredBinaries { package } => ("undeclared-binaries", package, None),
+                    LazyAdvisory::CombinedPathValue { package, key } => {
+                        ("combined-path-value", package, Some(key.clone()))
+                    }
+                };
+                Self {
+                    kind,
+                    package: package.to_string(),
+                    key,
+                    message: advisory.to_string(),
+                }
+            })
+            .collect()
+    }
+}
+
 /// Resolved environment variables for one or more packages, in declaration order.
 ///
 /// Each entry carries its [`ModifierKind`] so callers can apply the correct operation:
@@ -179,13 +226,18 @@ impl IntegrationAttribution {
 /// (`adr_package_integrations.md` C-014), never collapsed for a single root. The `entries`
 /// envelope is the canonical shape shared with `ci export` so consumers can branch on a single
 /// shape; `binaries`, `entrypoints` and `integrations` are top-level siblings, not nested
-/// inside `entries`.
+/// inside `entries`. `advisories` is the fourth such sibling — always present, empty unless a
+/// deferred tool raised something; warning-only, and a consumer branches on its `kind`, never
+/// on `message`.
 #[derive(Serialize)]
 pub struct EnvVars {
     pub entries: Vec<EnvEntry>,
     pub binaries: Vec<BinaryAttribution>,
     pub entrypoints: Vec<BinaryAttribution>,
     pub integrations: Vec<IntegrationAttribution>,
+    /// Advisories raised for the **deferred** tools in this composition —
+    /// always present, empty whenever nothing was deferred. Warning-only.
+    pub advisories: Vec<LazyAdvisoryReport>,
 }
 
 impl EnvVars {
@@ -200,7 +252,20 @@ impl EnvVars {
             binaries,
             entrypoints,
             integrations,
+            advisories: Vec::new(),
         }
+    }
+
+    /// Attaches the deferred-composition advisories, returning `self` for
+    /// chaining after [`new`](Self::new).
+    ///
+    /// A separate step rather than a fourth constructor argument: only a
+    /// command that composes lazily has any to attach, and every other call
+    /// site says so by not calling this.
+    #[must_use]
+    pub fn with_advisories(mut self, advisories: Vec<LazyAdvisoryReport>) -> Self {
+        self.advisories = advisories;
+        self
     }
 }
 

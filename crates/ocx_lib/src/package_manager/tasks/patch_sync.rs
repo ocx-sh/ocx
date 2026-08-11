@@ -734,8 +734,6 @@ mod tests {
     /// (the advance case): together they pin both directions of the counter.
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_patches_descriptors_updated_stays_zero_when_digest_unchanged() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config();
 
@@ -993,8 +991,6 @@ mod tests {
     /// Traces: Phase 5C D2 — Sync re-fetches LookedHasDescriptor.
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_mode_refetches_looked_has_descriptor_state() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config();
 
@@ -1205,8 +1201,6 @@ mod tests {
     /// Traces: Phase 5C D1 — descriptors_updated counter.
     #[tokio::test(flavor = "multi_thread")]
     async fn tdd_d1_descriptors_updated_gt_zero_after_digest_advance() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config();
 
@@ -1364,8 +1358,6 @@ mod tests {
     /// Traces: Phase 5C D1 — tag-store advance after sync.
     #[tokio::test(flavor = "multi_thread")]
     async fn tdd_d1_tag_store_updated_to_new_digest_after_sync() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config();
 
@@ -1515,8 +1507,6 @@ mod tests {
     /// Traces: plan_patch_review_fixes T1 — deferred re-sync advance.
     #[tokio::test(flavor = "multi_thread")]
     async fn tdd_t1_required_companion_failure_does_not_advance_descriptor_digest() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         // test_patch_config() has required = true (tier default), so an unmarked
         // companion is required; we also mark the rule required to be explicit.
@@ -1743,8 +1733,6 @@ mod tests {
     /// Traces: plan_patch_review_fixes A1 hybrid commit — eager leg; C7 fail-closed.
     #[tokio::test(flavor = "multi_thread")]
     async fn a3_first_discovery_required_failure_advances_tag_and_compose_fails_closed() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config(); // required = true at tier level.
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
@@ -1852,8 +1840,6 @@ mod tests {
     /// Traces: plan_patch_review_fixes A1 hybrid commit — deferred leg (mixed).
     #[tokio::test(flavor = "multi_thread")]
     async fn a4_resync_required_failure_keeps_digest_v1_with_mixed_companions() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         // Tier required=false so the per-rule `required` flags decide companion posture.
         let patch_config = ResolvedPatchConfig {
@@ -1952,8 +1938,6 @@ mod tests {
     /// shared accumulator).
     #[tokio::test(flavor = "multi_thread")]
     async fn a5_both_scope_resync_required_failure_rolls_back_both_advances() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         let patch_config = test_patch_config(); // required = true at tier level.
         let fs = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
@@ -2094,8 +2078,6 @@ mod tests {
     /// Traces: plan_patch_review_fixes A1 hybrid commit — corrupt-cache heal (eager leg).
     #[tokio::test(flavor = "multi_thread")]
     async fn a6_corrupt_prior_descriptor_heals_eagerly_and_compose_fails_closed() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let tmp = TempDir::new().unwrap();
         // Tier required=false so the per-rule `required: true` flag decides posture.
         let patch_config = ResolvedPatchConfig {

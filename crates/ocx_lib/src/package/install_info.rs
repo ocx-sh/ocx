@@ -1,9 +1,77 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{file_structure::PackageDir, oci};
+use std::sync::Arc;
+
+use crate::{
+    file_structure::{PackageDir, ShimDir},
+    oci,
+};
 
 use super::{metadata, resolved_package::ResolvedPackage};
+
+/// Everything a **deferred** tool contributes to composition that a
+/// materialized package does not (plan contracts C-012 / C-013 / C-020,
+/// [#302](https://github.com/ocx-sh/ocx/issues/302)).
+///
+/// A deferred tool is composed onto `PATH` with no package directory on disk:
+/// its content materializes on the first invocation of one of its generated
+/// launchers. Everything the composer needs is therefore either a *path* it can
+/// compute (`PackageDir` is pure path arithmetic over the pinned identifier) or
+/// a *carrier* it must read from somewhere other than the package directory —
+/// and this struct is that somewhere.
+///
+/// **Deferral is an input, never a probe.** Nothing here is derived by asking
+/// the filesystem whether a package directory exists: C-013 fixes the composed
+/// env as a function of (lock, `lazy-mode`, metadata availability) alone, so a
+/// composer that decided by probing would emit one env before the first
+/// invocation and a different one after — the exact variance S-005 asserts is
+/// absent.
+#[derive(Debug, Clone)]
+pub struct DeferredComposition {
+    /// The generated shim directory (C-003 / C-008).
+    ///
+    /// Its `bin/` — never its root — is the PATH entry the composer pushes
+    /// **first** for this root, which under the consumer's prepend semantics
+    /// makes it the *lowest*-precedence entry of the block (C-012).
+    shim: ShimDir,
+
+    /// The tool's transitive closure, each member's metadata already read from
+    /// the ref-linked config blob rather than from a package directory (C-020).
+    ///
+    /// Ordered deps-before-dependents and aligned with the synthesized
+    /// [`InstallInfo::resolved`]`().dependencies` of the owning root, so the
+    /// composer walks a deferred root's TC exactly as it walks a materialized
+    /// one. Each member is itself an `InstallInfo` whose `dir()` names a
+    /// package directory that does not exist yet — the one the shim will
+    /// materialize into, and the one `${installPath}` must already resolve to.
+    closure: Vec<Arc<InstallInfo>>,
+}
+
+impl DeferredComposition {
+    /// Binds a shim directory to the closure its carriers were read from.
+    pub fn new(shim: ShimDir, closure: Vec<Arc<InstallInfo>>) -> Self {
+        Self { shim, closure }
+    }
+
+    /// The generated shim directory whose `bin/` the composer pushes first.
+    pub fn shim(&self) -> &ShimDir {
+        &self.shim
+    }
+
+    /// The closure member for `identifier`, matched on the advisory-stripped
+    /// identifier (the same key the composer dedups TC entries by).
+    ///
+    /// `None` means the composer reached a TC entry this closure does not
+    /// carry, which is the C-020 defect condition — a consumer must surface it,
+    /// never fall back to reading a package directory that does not exist.
+    pub fn member(&self, identifier: &oci::PinnedIdentifier) -> Option<&Arc<InstallInfo>> {
+        let wanted = identifier.strip_advisory();
+        self.closure
+            .iter()
+            .find(|member| member.identifier().strip_advisory() == wanted)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InstallInfo {
@@ -19,6 +87,17 @@ pub struct InstallInfo {
     /// pointing a host's `candidates/{tag}` slot at a foreign-platform root
     /// (issue #179).
     platform: Option<oci::Platform>,
+
+    /// Set iff this root is a **deferred** tool — composed onto `PATH` with no
+    /// package directory on disk (plan contract C-012).
+    ///
+    /// `None` on every other path, which is every path but the lazy compose-root
+    /// builder, so no existing consumer changes behaviour. A consumer that
+    /// writes an install symlink, or otherwise assumes `dir()` exists, must
+    /// refuse a `Some` — a `candidates/{tag}` link pointing at a directory the
+    /// shim has not created yet is a dangling install (C-021 keeps
+    /// `--lazy-mode` off `install`/`select` for the same reason).
+    deferred: Option<Arc<DeferredComposition>>,
 }
 
 impl InstallInfo {
@@ -34,7 +113,26 @@ impl InstallInfo {
             resolved,
             dir,
             platform: None,
+            deferred: None,
         }
+    }
+
+    /// Marks this root as deferred, returning `self` for chaining after
+    /// [`new`](Self::new) — the sibling of [`with_platform`](Self::with_platform).
+    ///
+    /// The only producer is the lazy compose-root builder
+    /// (`composer::PackageManager::compose_roots`); nothing else may mint a
+    /// root whose package directory does not exist.
+    #[must_use]
+    pub fn with_deferred(mut self, deferred: DeferredComposition) -> Self {
+        self.deferred = Some(Arc::new(deferred));
+        self
+    }
+
+    /// The deferred composition for this root, or `None` when it is an
+    /// ordinary materialized package.
+    pub fn deferred(&self) -> Option<&DeferredComposition> {
+        self.deferred.as_deref()
     }
 
     /// Records the platform this install resolved to, returning `self` for

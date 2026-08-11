@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use crate::{api, conventions::*, options};
 use clap::Parser;
 use ocx_lib::env;
+use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
 use ocx_lib::shell::Shell;
 
 /// Print the resolved environment variables for one or more installed packages.
@@ -28,6 +29,12 @@ pub struct Env {
     ///
     /// Generated launchers embed `--self`; avoid passing it directly unless
     /// building a launcher equivalent.
+    ///
+    /// Cannot be combined with `--lazy-mode always`: a generated shim is a
+    /// launcher, launchers are consumer-facing, and a package's private view
+    /// bypasses them, so those two ask for contradictory things (exit 64).
+    /// `--lazy-mode never` agrees with this view and is accepted, as is an
+    /// `always` coming from `OCX_LAZY_MODE`, which composes eagerly.
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
@@ -39,6 +46,20 @@ pub struct Env {
 
     #[clap(flatten)]
     content_path: options::ContentPath,
+
+    /// Top tier of the `lazy-mode` ladder for every package this command
+    /// composes.
+    ///
+    /// `always` composes a package as a generated shim: its declared names
+    /// reach `PATH` immediately and its content downloads on first use. The
+    /// shim directory sits *below* the package's own `entrypoints/` and `bin/`
+    /// in the composed `PATH`, so the same exported environment stops routing
+    /// through it once the first invocation has materialized the package.
+    ///
+    /// Only this flag and `OCX_LAZY_MODE` apply here: the `ocx.toml` tiers
+    /// belong to the toolchain commands, and this one reads no project file.
+    #[clap(flatten)]
+    lazy_mode: options::LazyMode,
 
     /// Package identifiers to resolve the environment for.
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -97,6 +118,27 @@ pub struct Env {
 }
 
 impl Env {
+    /// The materialization policy this command applies to a package whose
+    /// `lazy-mode` resolved to `never`.
+    ///
+    /// `--candidate` / `--current` root the composed values in the stable
+    /// install-symlink namespace instead of the object store, so they select a
+    /// different resolver — restated here as the library's vocabulary so the
+    /// lazy split reuses this command's existing policy rather than growing a
+    /// second one beside it.
+    ///
+    /// A **deferred** package has no install symlink and cannot acquire one
+    /// (`ocx package install` / `select` do not accept `--lazy-mode`, C-021),
+    /// so `--candidate`/`--current` combined with a deferred package is a
+    /// contradiction. It is refused as a usage error before anything resolves,
+    /// rather than silently honouring one of the two — see [`Self::execute`].
+    fn materialization(&self) -> Materialization {
+        match self.content_path.symlink_kind() {
+            Some(kind) => Materialization::Symlink(kind),
+            None => Materialization::Install,
+        }
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
         // usage error before the (potentially slow) find-or-install resolution.
@@ -114,16 +156,31 @@ impl Env {
 
         let manager = context.manager();
 
-        let info = if let Some(kind) = self.content_path.symlink_kind() {
-            manager.find_symlink_all(identifiers, kind).await?
-        } else {
-            manager
-                .find_or_install_all(identifiers, platform.clone(), context.concurrency())
-                .await?
-        };
-
-        let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
-            info.into_iter().map(std::sync::Arc::new).collect();
+        let materialization = self.materialization();
+        let mode = resolved_lazy_mode(self.lazy_mode.mode(), self.self_view)?;
+        // `--candidate`/`--current` root the composed values in the stable
+        // install-symlink namespace precisely so they survive package updates.
+        // A deferred package has no such symlink and cannot acquire one, so the
+        // two requests contradict each other; honouring either silently is the
+        // worse failure, and a malformed invocation is 64.
+        if mode == ocx_lib::lazy::LazyMode::Always && matches!(materialization, Materialization::Symlink(_)) {
+            return Err(ocx_lib::cli::UsageError::new(
+                "--candidate/--current cannot be combined with a lazy-mode of 'always': a deferred package has no install symlink to root values in",
+            )
+            .into());
+        }
+        let requests: Vec<ComposeRequest> = identifiers
+            .into_iter()
+            .map(|identifier| ComposeRequest { identifier, mode })
+            .collect();
+        let composed = manager
+            .compose_roots(&requests, &platform, materialization, context.concurrency())
+            .await?;
+        for advisory in &composed.advisories {
+            context.ui().warn(advisory.to_string());
+        }
+        let advisories = composed.advisories;
+        let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> = composed.roots;
         // `resolve_env_with_attribution` additionally surfaces the admitted-set
         // `binaries`/`entrypoints` claim attribution for the structured report's
         // `binaries`/`entrypoints` arrays; the patch boundary is used the same
@@ -204,12 +261,10 @@ impl Env {
 
         // Structured report. Format is a context-level concern (root
         // `--format`); this command does not override it.
-        context.api().report(&api::data::env::EnvVars::new(
-            all_entries,
-            binaries,
-            entrypoints,
-            integrations,
-        ))?;
+        context.api().report(
+            &api::data::env::EnvVars::new(all_entries, binaries, entrypoints, integrations)
+                .with_advisories(api::data::env::LazyAdvisoryReport::from_advisories(&advisories)),
+        )?;
 
         Ok(ExitCode::SUCCESS)
     }

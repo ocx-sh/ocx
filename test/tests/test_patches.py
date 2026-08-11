@@ -1343,7 +1343,7 @@ def test_launcher_digest_matched_opt_out_respects_system_required(
     ocx.plain("package", "install", base_pkg.short)
 
     which = ocx.json("package", "which", base_pkg.short)
-    pkg_root = Path(which[base_pkg.short])
+    pkg_root = Path(which[base_pkg.short]["path"])
     # The real content digest the launcher's `install_info_from_package_root`
     # derives for this base — read verbatim from the on-disk sidecar so the test
     # proves string-form agreement instead of re-deriving it independently.
@@ -2728,7 +2728,7 @@ def test_gc_collects_companion_after_base_uninstall(
     # (companion present). `package which` does not auto-install and maps each
     # identifier to its package-root path string.
     which = ocx.json("package", "which", companion.short)
-    companion_path = Path(which[companion.short])
+    companion_path = Path(which[companion.short]["path"])
     assert companion_path.exists(), (
         f"setup: companion package dir must exist while its base is installed: {companion_path}"
     )

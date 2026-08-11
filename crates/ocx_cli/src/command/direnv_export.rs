@@ -6,8 +6,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{
     env, oci,
-    package_manager::collect_applied,
-    project::{DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, load_project_state},
+    package_manager::composer::{ComposeRequest, Materialization},
+    project::{
+        DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, lazy_mode_for_tool, load_project_state,
+    },
     shell,
 };
 
@@ -54,6 +56,20 @@ pub struct DirenvExport {
 
     #[clap(flatten)]
     pull: options::Pull,
+
+    /// Top tier of the `lazy-mode` ladder for every tool this command exports.
+    ///
+    /// `always` exports a tool as a generated shim: its declared names reach
+    /// `PATH` immediately and its content downloads the first time one of them
+    /// runs. Without this, a project declaring `lazy-mode = "always"` would get
+    /// shims under `ocx env` and eager content under direnv: one project with
+    /// two environments depending on which door you came through.
+    ///
+    /// A tool whose metadata is not already local is noted on stderr and
+    /// omitted, exactly as a not-materialised tool is. This command never fails
+    /// a prompt.
+    #[clap(flatten)]
+    lazy_mode: options::LazyMode,
 }
 
 impl DirenvExport {
@@ -114,49 +130,101 @@ impl DirenvExport {
             expanded = vec![DEFAULT_GROUP.to_owned()];
         }
 
-        // Probe the local object store first through an offline `PackageManager`
-        // clone: any incidental index lookup (V1 legacy locks walk the cached
-        // index->manifest chain; V2 locks read the pinned leaf directly) stays
-        // local, so a present tool resolves with no registry contact and a
-        // not-materialised tool buckets into `missing`.
-        let offline = context.manager().offline_view(context.local_index().clone());
         let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
-        let mut applied = collect_applied(&offline, &project.lock, &platform, &expanded).await?;
 
-        // Default: materialise anything the store is missing, then re-probe so
-        // the freshly-pulled tools join the export. `--no-pull` opts out and the
+        // One request per in-scope lock tool, each carrying the `lazy-mode` its
+        // ladder resolved to — the same ladder `ocx env` and `ocx run` apply, so
+        // a project cannot compose two different environments depending on
+        // which door it came through. A tool that ships no leaf for this host is
+        // dropped here with a note: `direnv export` never fails a prompt.
+        let mut names: Vec<String> = Vec::new();
+        let mut requests: Vec<ComposeRequest> = Vec::new();
+        for tool in project.lock.tools.iter().filter(|tool| expanded.contains(&tool.group)) {
+            let Ok(identifier) = host_leaf_identifier(tool, &platform) else {
+                eprintln!("# ocx: {} ships no build for this platform; skipping", tool.name);
+                continue;
+            };
+            let mode = lazy_mode_for_tool(
+                &project.config,
+                &identifier,
+                Some(tool.group.as_str()),
+                self.lazy_mode.mode(),
+            );
+            names.push(tool.name.clone());
+            requests.push(ComposeRequest { identifier, mode });
+        }
+
+        // Probe first through an offline `PackageManager` clone: any incidental
+        // index lookup (V1 legacy locks walk the cached index->manifest chain;
+        // V2 locks read the pinned leaf directly) stays local, so a present tool
+        // resolves with no registry contact and a not-materialised one is
+        // omitted rather than fetched.
+        let offline = context.manager().offline_view(context.local_index().clone());
+        let mut composed = offline
+            .compose_roots(&requests, &platform, Materialization::LocalOnly, context.concurrency())
+            .await?;
+
+        // Default: materialise anything the probe omitted, then re-probe so the
+        // freshly-pulled tools join the export. `--no-pull` opts out and the
         // command stays strictly offline. The pull is also skipped when no
         // registry is reachable (`--offline` / no remote) so an offline shell
-        // never blocks. A tool that stays unresolvable (no host leaf, or a pull
-        // that did not produce it) survives the re-probe and is warned + omitted
-        // below — a missing tool must never fail the prompt.
-        if self.pull.enabled(true) && !applied.missing.is_empty() && !context.manager().is_offline() {
-            let missing: std::collections::HashSet<&str> = applied.missing.iter().map(String::as_str).collect();
-            let to_install: Vec<oci::Identifier> = project
-                .lock
-                .tools
+        // never blocks. Best-effort throughout: a per-prompt hook must never
+        // fail on a transient registry error, so a failed pull leaves the tools
+        // omitted and warned about rather than breaking the prompt.
+        if self.pull.enabled(true) && !composed.omitted.is_empty() && !context.manager().is_offline() {
+            // Only what the probe omitted. Handing the retry the whole set
+            // would re-run `prepare_lazy` for every tool that already composed
+            // — a second closure walk each, on a partially-warm store, because
+            // one unrelated eager tool was missing.
+            let missing: Vec<oci::Identifier> = composed
+                .omitted
                 .iter()
-                .filter(|tool| expanded.contains(&tool.group) && missing.contains(tool.name.as_str()))
-                .filter_map(|tool| host_leaf_identifier(tool, &platform).ok())
+                .map(|omission| omission.identifier.clone())
                 .collect();
-            if !to_install.is_empty() {
-                // Best-effort: a per-prompt hook must never fail on a transient
-                // registry error. A failed pull leaves the tools in `missing`,
-                // so they are warned about + omitted below rather than breaking
-                // the prompt.
-                match context
-                    .manager()
-                    .find_or_install_all(to_install, platform.clone(), context.concurrency())
-                    .await
-                {
-                    Ok(_) => applied = collect_applied(&offline, &project.lock, &platform, &expanded).await?,
-                    Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
+            let retry: Vec<ComposeRequest> = requests
+                .iter()
+                .filter(|request| missing.contains(&request.identifier))
+                .cloned()
+                .collect();
+            match context
+                .manager()
+                .compose_roots(&retry, &platform, Materialization::Install, context.concurrency())
+                .await
+            {
+                Ok(installed) => {
+                    // `roots` carries one entry per surviving request, in
+                    // request order, with no slot for an omission — so the two
+                    // sets are re-interleaved by replaying `requests` rather
+                    // than by index arithmetic over either vector alone.
+                    let mut probed = std::mem::take(&mut composed.roots).into_iter();
+                    let mut pulled = installed.roots.into_iter();
+                    composed.roots = requests
+                        .iter()
+                        .filter_map(|request| {
+                            if missing.contains(&request.identifier) {
+                                pulled.next()
+                            } else {
+                                probed.next()
+                            }
+                        })
+                        .collect();
+                    composed.advisories.extend(installed.advisories);
+                    composed.omitted = installed.omitted;
                 }
+                Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
             }
         }
 
-        for name in &applied.missing {
+        for omission in &composed.omitted {
+            let name = requests
+                .iter()
+                .position(|request| request.identifier == omission.identifier)
+                .and_then(|index| names.get(index).cloned())
+                .unwrap_or_else(|| omission.identifier.to_string());
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
+        }
+        for advisory in &composed.advisories {
+            eprintln!("# ocx: {advisory}");
         }
 
         // Stages 4-6, same assembly as `ocx run` and `ocx env`: the project's
@@ -169,7 +237,7 @@ impl DirenvExport {
             env: project_env,
         };
         let (mut entries, _, _) = offline
-            .resolve_env_with_patch_boundary(&applied.infos, false, scope, &platform)
+            .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)
             .await?;
 
         // W-11: settle each `list` entry's separator before emitting — a

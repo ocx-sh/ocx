@@ -33,6 +33,18 @@ pub enum CasTier {
     Layer,
     /// A raw content-addressed blob.
     Blob,
+    /// A generated shim directory — the on-disk form of a *deferred* tool
+    /// (plan contract C-014, [#302](https://github.com/ocx-sh/ocx/issues/302)).
+    ///
+    /// Identity-keyed rather than purely content-addressed: the repository is
+    /// part of its path, unlike the three tiers above. It is nonetheless a
+    /// first-class GC entry — it is walked, it can be collected, and, unlike a
+    /// layer or a blob, it carries **outgoing** `refs/blobs/` edges.
+    ///
+    /// Its liveness comes directly from the lock-pinned root set and never from
+    /// a package edge: a shim directory exists precisely when the package
+    /// directory does not, so there is no package to point at it.
+    Shim,
 }
 
 /// Returns a 2-level sharded path for the given digest, truncated to

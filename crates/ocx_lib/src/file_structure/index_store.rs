@@ -2031,39 +2031,36 @@ mod wire_grammar_tests {
         let root_bytes_v2 = minimal_root_bytes("oci://ghcr.io/kitware/cmake", &Digest::Sha256("1".repeat(64)));
         let entry_v2 = IndexStore::root_catalog_entry(&root_bytes_v2);
 
-        // Writer: acquires the transaction lock FIRST (uncontended), then —
-        // while still holding it — commits a FRESHER root (v2) and its
-        // matching catalog entry. Real lock contention (not sleep-timing)
-        // forces the reader's `begin_catalog_transaction` below to block
-        // until this writer releases, giving a deterministic interleave.
-        let s_writer = s.clone();
-        let root_path_writer = root_path.clone();
-        let root_bytes_v2_writer = root_bytes_v2.clone();
-        let entry_v2_writer = entry_v2.clone();
-        let writer = tokio::spawn(async move {
-            let mut transaction = s_writer.begin_catalog_transaction("ocx.sh").await.unwrap();
-            // Give the reader time to perform its pre-lock read (sees v1)
-            // and then block on `begin_catalog_transaction` behind this lock.
-            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            tokio::fs::write(&root_path_writer, &root_bytes_v2_writer)
-                .await
-                .unwrap();
-            transaction
-                .catalog()
-                .insert("kitware/cmake".to_string(), entry_v2_writer);
-            transaction.commit().await.unwrap();
-        });
+        // Writer: THIS task, taking the transaction lock first and uncontended
+        // — nothing else is running yet, so the acquisition order is structural
+        // rather than raced. (An earlier shape spawned the writer and gave the
+        // reader a 10 ms head start instead; under whole-suite load the spawned
+        // writer could reach the lock *after* the reader, whose post-lock
+        // re-read then legitimately saw v1 and failed the `result.bytes`
+        // assertion below — a false alarm, not a lost update.)
+        let mut transaction = s.begin_catalog_transaction("ocx.sh").await.unwrap();
 
-        // Reader: head start so it reads v1 pre-lock, before the writer's
-        // 60ms sleep elapses and overwrites the root to v2.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let result = s
-            .read_root("ocx.sh", "kitware/cmake", |_| Ok(()))
-            .await
-            .unwrap()
-            .expect("root document exists on disk");
+        // Reader: starts with the lock already held, so its recovery must block
+        // in `begin_catalog_transaction` until the commit below releases it.
+        let s_reader = s.clone();
+        let reader = tokio::spawn(async move { s_reader.read_root("ocx.sh", "kitware/cmake", |_| Ok(())).await });
 
-        writer.await.unwrap();
+        // Let the reader complete its pre-lock read (sees v1) and reach the
+        // lock before the fresher root lands. If it were somehow still short of
+        // the lock after this, it would observe the committed v2 + entry_v2 and
+        // report `Consistent` — which the `catalog_status` assertion below
+        // rejects loudly rather than passing for the wrong reason.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // Still holding the lock: publish a FRESHER root (v2) and its matching
+        // catalog entry, then release.
+        tokio::fs::write(&root_path, &root_bytes_v2).await.unwrap();
+        transaction
+            .catalog()
+            .insert("kitware/cmake".to_string(), entry_v2.clone());
+        transaction.commit().await.unwrap();
+
+        let result = reader.await.unwrap().unwrap().expect("root document exists on disk");
 
         assert_eq!(
             result.bytes, root_bytes_v2,

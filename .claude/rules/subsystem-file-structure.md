@@ -18,7 +18,7 @@ Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, as
 
 Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
-**`TagStore` deleted; `FileStructure` gains a seventh store, `index: IndexStore`.** The
+**`TagStore` deleted; `FileStructure` gains `index: IndexStore`.** The
 tag-only local index is replaced by the wire-grammar index collection (dispatch-object-only CAS —
 see `subsystem-oci.md` "LocalIndex — wire-grammar collection, dispatch-only"). `IndexStore` is
 `FileStructure`'s default machine-local index home (`root.join("index")`) — never one of the
@@ -39,6 +39,8 @@ GC-walked stores below. `LocalIndex` (the `oci::index` consumer) reads through i
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
 | `index_store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
+| `shim_store.rs` | Generated shim directories — the on-disk form of a **deferred** tool | `ShimStore`, `ShimDir` |
+| `shim_bin_store.rs` | Flat CAS for the embedded Windows `ocx-shim` executable blob | `ShimBinStore` |
 | `reference_manager.rs` | Forward symlinks + back-references for GC | `ReferenceManager` |
 
 ### Cross-cutting link primitives
@@ -62,6 +64,8 @@ pub struct FileStructure {
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
+    pub shim_bin: ShimBinStore,
+    pub shims: ShimStore,
     pub locks: PathBuf,
 }
 ```
@@ -76,8 +80,9 @@ the GC graph. Locking policy (when to lock the data file in place vs. `lock_scop
 Never `<Store>::new(root.join("blobs"))` / etc. to reach a store — that
 re-constructs a store `FileStructure` already owns, via a literal path join instead of the
 canonical accessor. Always reach a store through the already-constructed `FileStructure`
-(`FileStructure::with_root(root)` builds all seven stores in one place): `fs.blobs`,
-`fs.layers`, `fs.packages`, `fs.index`, `fs.symlinks`, `fs.state`, `fs.temp`. A literal `.join(...)`
+(`FileStructure::with_root(root)` builds all nine stores in one place): `fs.blobs`,
+`fs.layers`, `fs.packages`, `fs.index`, `fs.symlinks`, `fs.state`, `fs.temp`, `fs.shim_bin`,
+`fs.shims`. A literal `.join(...)`
 is fine when it is a genuine SUB-PATH under an already-correct store root (e.g. a scratch subdir
 under `fs.temp.root()`) — the rule is against RE-CONSTRUCTING the store, not against every join.
 The one sanctioned exception is the `--index`/`OCX_INDEX` override seam in `context.rs`, which
@@ -96,7 +101,7 @@ deleted" above.
 
 `$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
-## Seven Stores
+## Nine Stores
 
 ### BlobStore — Raw OCI blobs
 
@@ -151,6 +156,52 @@ write-through that follows a successful fetch heals it.
 
 Outside the GC reachability graph — no `CasTier` variant, never walked by `ocx clean`. ADR:
 `adr_index_indirection.md` Decision A2–A4, B1.
+
+### ShimStore — Generated shim directories (deferred tools)
+
+Layout: `{root}/shims/{registry_slug}/{repo_path}/{algorithm}/{2hex}/{30hex}/`, then the
+`PackageDir` shape inside it: `bin/` (one generated launcher per declared interface name),
+`digest`, `refs/blobs/` (forward-refs keeping the closure's config blobs reachable).
+
+A shim directory exists precisely when a tool is composed onto `PATH` **without** its content
+being materialized. Two divergences from its neighbours, both load-bearing:
+
+- **The repository IS in the path**, unlike `PackageStore`, which keys on registry + digest alone
+  for cross-repo dedup. A shim body names a *pinned identifier* and that identifier carries the
+  repository, so two repositories resolving to one digest do not share a shim tree. Built with
+  `repository_path()`, never a literal `/` join.
+- **Launchers nest under `bin/`, never at the shim root.** `binaries = ["digest", "refs"]` is a
+  legal claim, so flat launchers would overwrite the CAS marker and the refs directory, and GC
+  would then mis-classify liveness.
+
+`bin/` is also the **completeness marker**: the producer writes it last and publishes the whole
+tree by one atomic rename, so a consumer needs no further probe. `ShimStore::list_all()` classifies
+on it and its walk is **unbounded in depth** — repository segment count is variable, and GC
+collects whatever the walk fails to report, so a depth bound would silently delete live tools. No
+child may be pruned by name either (`org/refs` and `org/bin` are legal repositories).
+
+Key methods: `path(pinned_id)`, `shim_dir(pinned_id) → ShimDir`, `list_all() → Vec<ShimDir>`.
+`ShimDir` accessors: `root()`, `bin()`, `digest_file()`, `refs_blobs_dir()`.
+
+In the GC graph as `CasTier::Shim`, but **rooted directly in the lock pins** rather than reachable
+from a package: a shim exists exactly when the package directory does not, so there is no package
+to carry an edge to it. `ocx clean` retains a shim any registered project's `ocx.lock` pins;
+`--force` drops those roots and collects it, and the next compose regenerates it. Producer:
+`package_manager::tasks::prepare_lazy` (see `subsystem-package-manager.md`).
+
+### ShimBinStore — The embedded Windows shim executable
+
+Layout: `{root}/.bin/ocx-shim/<sha256-hex>.exe` — **flat, never sharded**. At most two blobs (one
+per Windows arch) ever live here, so sharding a two-entry directory is pure overhead. The hex is
+bare (no `sha256:` prefix) and the `.exe` suffix is unconditional on every build host, because the
+blob it names is always a Windows PE.
+
+`ensure()` publishes the blob only when absent, via the lock-free dance `finalize_layer_dir`
+already uses (pre-check → persist → on persist failure re-check the target). Correctness rests on
+content identity, not mutual exclusion: both racers write byte-identical bytes.
+
+Outside the three GC tiers — never walked or collected by `ocx clean`. A superseded blob (after an
+`ocx` version bump changes the digest) is orphaned litter accepted by design, like `locks/` litter.
 
 ### SymlinkStore — Install symlinks
 
@@ -233,7 +284,9 @@ GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` coveri
 
 Project-registry roots read via `ProjectRegistry::live_projects()` at the start of `ocx clean`. The ledger is the flat symlink store at `$OCX_HOME/projects/` (ADR: `adr_project_gc_symlink_ledger.md`). Each symlink's liveness is a three-state probe (`Live`/`Dead`/`Unknown`): a broken or lock-absent link is pruned silently at debug; a transiently unreachable link (`Unknown` — NFS/automount) is retained with one WARN and excluded as a root this run. There is no parse surface to corrupt — the prior `projects.json` JSON ledger and its corrupt-registry exit-78 branch are eliminated. Pass `--force` to `ocx clean` to ignore the registry and collect all packages not held by live symlinks.
 
-Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
+Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`, `Shim`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
+
+Shims registered with the **package** shape — entry *and* outgoing edges (`refs/blobs/`) — but their liveness has no package edge to inherit: a shim exists exactly when the package directory does not, so a lock pin roots the shim directory directly. Lock-pin presence is therefore satisfied by *either* tier, `packages/` or `shims/`; a package-only presence gate silently drops a deferred tool out of the root set and collects a live shim on the next sweep.
 
 `BlobStore::write_blob` / `read_blob` (stateless) are the only blob-IO entry points. Writes use `tempfile::NamedTempFile::new_in(parent)` + `sync_data` + atomic rename to the CAS path; content-addressed invariant (same digest ⟹ same bytes) means concurrent writers produce byte-equivalent output and the rename is idempotent. On Windows, `persist_with_windows_retry` wraps the rename with exponential backoff (3 retries: 100/400/800 ms ±25 % jitter) on `ERROR_SHARING_VIOLATION` (32) and `ERROR_ACCESS_DENIED` (5) — Windows Defender real-time scanning on `windows-latest` GitHub Actions runners is the dominant source of these transients (rattler `rename_with_retry` precedent). After retry exhaustion the function re-checks existence and returns Ok if the path now exists (idempotent recovery).
 

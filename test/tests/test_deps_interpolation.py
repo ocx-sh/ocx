@@ -99,7 +99,7 @@ def test_dep_install_path_resolves_to_content_dir(
     # dep's content tree (`<root>/content`), so the resolved value must
     # equal the leaf's package root joined with `content`.
     leaf_paths = ocx.json("package", "which", leaf.short)
-    expected_leaf_root = leaf_paths.get(leaf.short) if isinstance(leaf_paths, dict) else leaf_paths
+    expected_leaf_root = leaf_paths[leaf.short]["path"]
     assert expected_leaf_root, (
         f"`ocx package which {leaf.short}` must return the leaf's package root; got: {leaf_paths!r}"
     )
@@ -170,7 +170,7 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     # `ocx package which` returns the package root, so we join `content/` to compare
     # against the runtime ${installPath} value.
     c_paths = ocx.json("package", "which", c.short)
-    expected_c_root = c_paths.get(c.short) if isinstance(c_paths, dict) else c_paths
+    expected_c_root = c_paths[c.short]["path"]
     assert expected_c_root, f"`ocx package which {c.short}` returned no package root: {c_paths!r}"
     expected_c_content = str(Path(expected_c_root) / "content")
     assert resolved == expected_c_content, (
@@ -277,7 +277,7 @@ def test_launcher_exec_refuses_an_undeclared_dep_token_at_composition(
     ocx.plain("package", "install", pkg.short)
 
     install_dir = ocx.json("package", "which", pkg.short)
-    pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
+    pkg_root_str = install_dir[pkg.short]["path"]
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
     metadata_path = pkg_root / "metadata.json"
@@ -403,7 +403,7 @@ def test_uppercase_dep_name_token_rejected_at_consumption(
     ocx.plain("package", "install", pkg.short)
 
     install_dir = ocx.json("package", "which", pkg.short)
-    pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
+    pkg_root_str = install_dir[pkg.short]["path"]
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
     metadata_path = pkg_root / "metadata.json"
@@ -490,7 +490,7 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
 
     # Locate R's installed package root.
     find_result = ocx.json("package", "which", r_pkg.short)
-    r_root_str = find_result.get(r_pkg.short) if isinstance(find_result, dict) else None
+    r_root_str = find_result[r_pkg.short]["path"]
     assert r_root_str, f"`ocx package which {r_pkg.short}` must return R's package root"
     r_root = Path(r_root_str)
     metadata_path = r_root / "metadata.json"

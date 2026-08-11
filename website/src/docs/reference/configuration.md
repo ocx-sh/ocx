@@ -563,6 +563,8 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_MIRRORS`][env-mirrors] | `[mirrors]` | Env var wins per host, per role when both are set; roles/hosts absent from env var still come from config |
 | [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
 | [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] | `[managed] source` | Invocation-only override, never written back; `=""` is treated as unset |
+| [`OCX_LAZY_MODE`][env-ocx-lazy-mode] | toolchain-level `lazy-mode` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the five-level ladder — `--lazy-mode`, `[package."<id>"]`, and `[group.<name>]` all outrank both the config key and this variable; not forwarded to child processes |
+| [`OCX_LAZY_REPORT`][env-ocx-lazy-report] | toolchain-level `lazy-report` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the four-level ladder; not forwarded to child processes |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
 | [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read |
@@ -589,7 +591,7 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 
 ## Project Configuration — `ocx.toml` {#project-config}
 
-The tiers above configure ocx itself. `ocx.toml` is a different file with a different lifecycle — see the [Project Toolchain guide][user-project] for discovery and locking. This section is the schema reference for the two `ocx.toml` tables that carry environment declarations: [`[group.<name>]`](#project-config-groups) and [`[env]`](#project-config-env).
+The tiers above configure ocx itself. `ocx.toml` is a different file with a different lifecycle — see the [Project Toolchain guide][user-project] for discovery and locking. This section is the schema reference for the `ocx.toml` tables and keys that carry environment and resolve-time declarations: [`[group.<name>]`](#project-config-groups), [`[env]`](#project-config-env), [`[package."<id>"]`](#project-config-package), and the toolchain-level `lazy-mode` / `lazy-report` keys.
 
 ### `[group.<name>]` — `tools` and `env` {#project-config-groups}
 
@@ -624,7 +626,56 @@ error: group `ci` declares tool bindings directly
 
 An unrecognized sub-table (a typo such as `[group.ci.tolos]`) is rejected the same way, naming the offending key. `[group.default]` and `[group.all]` remain reserved names and are rejected at parse regardless of their contents — see [`ocx run`][cmd-run] for the full group-keyword semantics.
 
+A group also accepts an optional `lazy-mode` scalar, overriding the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] for every tool declared under that group:
+
+```toml
+[group.ci]
+lazy-mode = "always"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.11"
+```
+
+There is no group-tier `lazy-report` — see [`[package."<id>"]`](#project-config-package) below for why.
+
 This schema applies identically to the `--global` tier file at `$OCX_HOME/ocx.toml`.
+
+### `[package."<id>"]` {#project-config-package}
+
+Per-package resolve-time settings, keyed by the canonical `registry/repository[:tag]` string:
+
+```toml
+[package."ocx.sh/kitware/cmake:3.28"]
+no-patches = true
+lazy-mode  = "always"
+lazy-report = "progress"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `no-patches` | boolean | `false` | Decline the site-tier [patch][config-patches] companion overlay for this base — see [Per-package opt-out](#keys-patches-no-patches) above. |
+| `lazy-mode` | `"never"` \| `"always"` | *(inherit)* | Package-tier override of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] — the most specific config tier, only outranked by [`--lazy-mode`][arg-lazy-mode]. |
+| `lazy-report` | `"silent"` \| `"progress"` | *(inherit)* | Package-tier override of the `lazy-report` ladder. |
+
+The match for every field in this table is by canonical `registry/repository` — tag and digest are stripped, so a `[package."<id>"]` entry follows every tag of that package, not just the one written in the key.
+
+`lazy-mode` and `lazy-report` are both **excluded from `declaration_hash`** — like `no-patches`, they change *when* or *how loudly* a tool materializes, never *which* digest resolves, so editing either does not invalidate `ocx.lock`.
+
+`lazy-report` is settable here even though there is no `[group.<name>]` tier for it. `lazy-mode` is resolved while composing, when the selected group is known; `lazy-report` is resolved later, inside the separate `ocx launcher shim` process a generated shim execs into on first invocation — a process that receives only a pinned identifier and a basename, with no way to learn which group composed the tool. See [Deferred Tools][in-depth-lazy-loading] for the full ladder and lifecycle.
+
+### Toolchain-level `lazy-mode` and `lazy-report` {#project-config-toolchain-lazy}
+
+Two more bare scalar keys sit at the top level of `ocx.toml`, alongside `[tools]` — the least specific config tier of each ladder, only outranked by `[group.<name>]`, `[package."<id>"]`, and the CLI flag:
+
+```toml
+lazy-mode   = "always"
+lazy-report = "silent"
+
+[tools]
+cmake = "ocx.sh/kitware/cmake:3.28"
+```
+
+Both accept the same value sets as their `[package."<id>"]` counterparts and are excluded from `declaration_hash` for the same reason. Below both of these, [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report] are the last tier before each ladder's floor (`never` / `silent`). See [Deferred Tools][in-depth-lazy-loading] for the full five-tier `lazy-mode` ladder and the four-tier `lazy-report` ladder.
 
 ### `[env]` value grammar {#project-config-env}
 
@@ -723,10 +774,13 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [in-depth-indices-dispatch]: ../in-depth/indices.md#local-dispatch
 [in-depth-indices-declared-names]: ../in-depth/indices.md#public-index-declared-names
 [in-depth-indices-servable]: ../in-depth/indices.md#servable
+[in-depth-lazy-loading]: ../in-depth/lazy-loading.md
+[in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config
 [arg-offline]: ./command-line.md#arg-offline
+[arg-lazy-mode]: ./command-line.md#arg-lazy-mode
 [cmd-lock]: ./command-line.md#lock
 [cmd-run]: ./command-line.md#run
 [cmd-env-root]: ./command-line.md#env-root
@@ -754,6 +808,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [env-ocx-no-config-refresh]: ./environment.md#ocx-no-config-refresh
 [env-ocx-env]: ./environment.md#ocx-env
+[env-ocx-lazy-mode]: ./environment.md#ocx-lazy-mode
+[env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
 
 <!-- user guide -->
 [user-guide-managed-config]: ../user-guide.md#managed-config

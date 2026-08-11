@@ -21,6 +21,30 @@ use crate::package::metadata::{
     template::{SelfEnvScope, TemplateResolver},
 };
 
+/// Whether the package being resolved has a materialized content tree on disk.
+///
+/// The only thing this decides is whether a `required` path modifier fires its
+/// existence probe. That probe validates an **installed** tree; a deferred tool
+/// (plan contract C-013, [#302](https://github.com/ocx-sh/ocx/issues/302)) has
+/// none by construction, so its premise does not hold and it is suppressed —
+/// otherwise a package declaring `required: true` would fail compose on a cold
+/// store and succeed on a warm one, which is exactly the content-cache
+/// dependence C-013 and S-005 assert is absent. The check is not lost: the
+/// first invocation materializes through the ordinary install path and composes
+/// again with `content/` present.
+///
+/// A named type rather than a `bool` parameter deliberately — the two states
+/// are a domain fact, and `EnvResolver::with_content_state(false)` would say
+/// nothing at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentState {
+    /// The package directory exists; a `required` path is genuinely required.
+    Materialized,
+    /// The package is composed from ref-linked config blobs and will
+    /// materialize on first invocation; nothing under `content/` exists yet.
+    Deferred,
+}
+
 /// Resolves package metadata env-var templates against an install path and
 /// a dependency context map.
 ///
@@ -29,6 +53,7 @@ use crate::package::metadata::{
 pub struct EnvResolver<'a> {
     install_path: &'a Path,
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
+    content_state: ContentState,
 }
 
 impl<'a> EnvResolver<'a> {
@@ -36,7 +61,19 @@ impl<'a> EnvResolver<'a> {
         Self {
             install_path,
             dep_contexts,
+            content_state: ContentState::Materialized,
         }
+    }
+
+    /// Declares whether the package's content tree exists, returning `self` for
+    /// chaining after [`new`](Self::new).
+    ///
+    /// Only the lazy compose path passes [`ContentState::Deferred`]; every
+    /// other caller composes an installed package and keeps the default.
+    #[must_use]
+    pub fn with_content_state(mut self, content_state: ContentState) -> Self {
+        self.content_state = content_state;
+        self
     }
 
     /// Resolves a single `Var` into an [`Entry`] **that the caller is going to
@@ -56,7 +93,9 @@ impl<'a> EnvResolver<'a> {
     ///   resolution failure (unknown dep ref, unknown field, dep not installed,
     ///   undefined or ambiguous `${self.env.*}` reference).
     /// - [`crate::package::error::Error::RequiredPathMissing`] when a
-    ///   `required` path-modifier resolves to a path that does not exist.
+    ///   `required` path-modifier resolves to a path that does not exist —
+    ///   suppressed under [`ContentState::Deferred`], whose premise is that no
+    ///   content tree exists yet.
     /// - [`crate::package::error::Error::SeparatorEdgedListValue`] when a
     ///   list-modifier value *resolves* to one edged by its own separator.
     pub fn resolve(&self, var: &Var, self_env: &SelfEnvScope<Entry>) -> crate::Result<Option<Entry>> {
@@ -117,7 +156,12 @@ impl<'a> EnvResolver<'a> {
             // form, which Windows path APIs handle correctly in all contexts.
             // On POSIX and non-verbatim Windows paths the call is a no-op.
             let path = PathBuf::from(dunce::simplified(&path));
-            if emit_assertions && path_modifier.required && !path.exists() {
+            // Also suppressed for a deferred package: see [`ContentState`].
+            if emit_assertions
+                && self.content_state == ContentState::Materialized
+                && path_modifier.required
+                && !path.exists()
+            {
                 return Err(crate::package::error::Error::RequiredPathMissing(path).into());
             }
             value = path.to_string_lossy().to_string();

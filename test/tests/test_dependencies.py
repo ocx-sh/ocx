@@ -300,7 +300,7 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
 def _find_package_root(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     """Return the package root for an installed package."""
     result = ocx.json("package", "which", pkg.short)
-    return Path(result[pkg.short])
+    return Path(result[pkg.short]["path"])
 
 
 def _setup_leaf_and_app(ocx, unique_repo, tmp_path):
@@ -1468,7 +1468,7 @@ def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     find_result = ocx.json("package", "which", repo)
     assert len(find_result) == 1, f"one identifier in, one entry out: {find_result}"
     key = next(iter(find_result))
-    package_root = Path(find_result[key]).resolve()
+    package_root = Path(find_result[key]["path"]).resolve()
     assert (package_root / "content").is_dir(), (
         f"unexpected find target: {package_root}"
     )
@@ -1561,7 +1561,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
     b_find = ocx.json("package", "which", pkg_b.short)
     assert len(b_find) == 1, f"one identifier in, one entry out: {b_find}"
-    b_pkg_root = str(Path(next(iter(b_find.values()))))
+    b_pkg_root = str(Path(next(iter(b_find.values()))["path"]))
 
     assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
         f"sealed dep B's entrypoints/ must NOT appear in consumer PATH; PATH values: {path_values}"

@@ -1493,7 +1493,7 @@ def test_launcher_forged_ocx_env_fails_closed_on_whole_payload(
     )
     ocx.plain("package", "install", base_pkg.short)
     which = ocx.json("package", "which", base_pkg.short)
-    pkg_root = Path(which[base_pkg.short])
+    pkg_root = Path(which[base_pkg.short]["path"])
 
     forged = json.dumps(
         {

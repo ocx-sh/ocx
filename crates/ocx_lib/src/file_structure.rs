@@ -7,17 +7,19 @@ pub mod error;
 mod index_store;
 mod layer_store;
 mod package_store;
+mod shim_bin_store;
+mod shim_store;
 mod state_store;
 mod symlink_store;
 mod temp_store;
 
 pub use blob_store::{BlobDir, BlobStore};
-#[cfg(test)]
-pub(crate) use blob_store::{WRITE_BLOB_CALL_COUNT, WRITE_BLOB_TEST_LOCK};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file};
 pub use index_store::{CatalogEntryStatus, CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
+pub use shim_bin_store::ShimBinStore;
+pub use shim_store::{ShimDir, ShimStore};
 pub use state_store::StateStore;
 pub use symlink_store::{SymlinkKind, SymlinkStore};
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
@@ -25,7 +27,7 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 /// Root layout of the local OCX data directory.
 ///
 /// `FileStructure` is a thin composite that provides typed, well-named access
-/// to seven top-level stores:
+/// to nine top-level stores:
 ///
 /// - **`blobs`**    — content-addressed raw blob store
 /// - **`layers`**   — content-addressed extracted layer store
@@ -40,6 +42,15 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 /// - **`symlinks`** — install symlinks (candidate / current)
 /// - **`state`**    — persistent runtime state (update-check timestamps, etc.)
 /// - **`temp`**     — temporary staging directories for in-progress downloads
+/// - **`shim_bin`** — content-addressed store for the embedded `ocx-shim`
+///   executable blob (`.bin/ocx-shim/`), hardlinked by every generated
+///   Windows launcher; outside the GC graph, never walked by `ocx clean`
+///   (see the `shim_bin_store` module docs)
+/// - **`shims`** — identity-keyed store for generated shim directories
+///   (`shims/`), the on-disk form of a deferred tool: launchers under `bin/`,
+///   with `digest` and `refs/` as siblings. Unlike the three CAS tiers the
+///   repository IS part of its path, and its GC liveness is rooted directly in
+///   the lock pins (see the `shim_store` module docs)
 ///
 /// plus one non-store path:
 ///
@@ -58,6 +69,18 @@ pub struct FileStructure {
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
+    /// Content-addressed store for the embedded `ocx-shim` executable blob
+    /// (`$OCX_HOME/.bin/ocx-shim/`), hardlinked by every generated Windows
+    /// entrypoint launcher. Outside the three GC tiers — never walked by
+    /// `ocx clean` (plan decision D4). See the `shim_bin_store` module docs.
+    pub shim_bin: ShimBinStore,
+    /// Identity-keyed store for generated shim directories
+    /// (`$OCX_HOME/shims/`) — the on-disk form of a deferred tool. Keyed by
+    /// registry + repository + digest (the repository IS in the path, unlike
+    /// [`PackageStore`]), with launchers under `bin/`. Walked by `ocx clean`,
+    /// but rooted directly in the lock pins rather than reachable from a
+    /// package. See the `shim_store` module docs.
+    pub shims: ShimStore,
     /// Machine-global cross-process lock directory (`$OCX_HOME/locks`). Not a
     /// CAS store and never in the GC graph — sharded, content-keyed advisory
     /// lock files written by [`crate::utility::fs::lock_scoped`]. Kept out of
@@ -95,6 +118,14 @@ impl FileStructure {
             symlinks: SymlinkStore::new(root.join("symlinks")),
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
+            // `.bin/ocx-shim/` — a sibling namespace to the three CAS tiers
+            // above, not nested under any of them; see the `shim_bin_store`
+            // module docs for why it stays outside the GC graph.
+            shim_bin: ShimBinStore::new(root.join(".bin").join("ocx-shim")),
+            // `shims/` — a sibling namespace to the three CAS tiers, holding
+            // the deferred form of a tool. Present exactly when the matching
+            // `packages/` entry is absent.
+            shims: ShimStore::new(root.join("shims")),
             locks,
             root,
         }

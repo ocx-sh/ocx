@@ -41,7 +41,7 @@ def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
         which = ocx.json("package", "which", short)
     finally:
         ocx.env.pop("__OCX_TEST_LIBC", None)
-    pkg_root = Path(which[short])
+    pkg_root = Path(which[short]["path"])
     hello = pkg_root / "content" / "bin" / "hello"
     return hello.read_text()
 
@@ -468,7 +468,7 @@ def _package_root(ocx: OcxRunner, short: str, platform: str) -> Path:
     a non-host-libc entry.
     """
     which = ocx.json("package", "which", "--platform", platform, short)
-    return Path(which[short])
+    return Path(which[short]["path"])
 
 
 def _installed_marker(ocx: OcxRunner, short: str, platform: str) -> str:

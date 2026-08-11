@@ -4,6 +4,7 @@
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
 use crate::package::metadata::entrypoint::EntrypointName;
+use crate::package::metadata::{BinaryError, BinaryName};
 use crate::{file_structure, oci};
 
 /// Task-level error for package manager operations.
@@ -103,6 +104,26 @@ fn identifier_prefix(identifier: &oci::Identifier) -> String {
 pub struct OfflineManifestMissing {
     pub identifier: oci::Identifier,
     pub digest: oci::Digest,
+}
+
+/// Payload for the shim refusals that name a package **and** one of its claimed
+/// interface names ([`PackageErrorKind::ShimNameShadowsOcx`],
+/// [`ShimNameNotClaimed`](PackageErrorKind::ShimNameNotClaimed),
+/// [`ShimClaimUnfulfilled`](PackageErrorKind::ShimClaimUnfulfilled)).
+///
+/// A size device, not a semantic union: the three refusals are unrelated
+/// situations that happen to carry the same pair, and inlining it makes the
+/// variant 128 bytes — over the `clippy::result_large_err` ceiling every
+/// `Result<_, PackageErrorKind>` in the crate would then trip. Boxed for the
+/// same reason [`OfflineManifestMissing`] is.
+///
+/// The package is carried explicitly rather than read off
+/// [`PackageError::identifier`], because the offending node may be a dependency
+/// deep in the closure while the identifier is the tool the user asked for.
+#[derive(Debug)]
+pub struct ShimClaim {
+    pub package: oci::PinnedIdentifier,
+    pub name: BinaryName,
 }
 
 /// The cause of a single-package failure.
@@ -216,6 +237,71 @@ pub enum PackageErrorKind {
         available: Vec<oci::Platform>,
     },
 
+    /// The closure's interface name set is not enumerable, so no shim can be
+    /// generated for it: some node declares neither `binaries` nor entry
+    /// points, and a shim store is built by name (plan contract C-009).
+    ///
+    /// Names the offending node rather than relying on
+    /// [`PackageError::identifier`] — the node may be a dependency deep in the
+    /// closure while the identifier is the tool the user asked for.
+    #[error(
+        "cannot defer '{package}': it claims no binaries and no entry points, so its interface names are not enumerable"
+    )]
+    ShimNamesNotEnumerable { package: oci::PinnedIdentifier },
+
+    /// A claimed name equals the literal name `ocx`, which cannot be shimmed
+    /// (plan contract C-009).
+    ///
+    /// The literal, never `current_exe()`'s stem: the shadowing check is
+    /// against the string the generated body falls back to, which is `ocx` on
+    /// every build however this binary happens to be named.
+    ///
+    /// A shim body resolves `${OCX_BINARY_PIN:-ocx}`, so a shim named `ocx`
+    /// ahead on `PATH` re-resolves to itself whenever the pin is unset — the
+    /// case in any plain shell that merely sourced an exported env.
+    #[error(
+        "cannot defer '{}': the claimed name '{}' is ocx's own binary name, and a shim for it would re-invoke itself",
+        _0.package,
+        _0.name
+    )]
+    ShimNameShadowsOcx(Box<ShimClaim>),
+
+    /// A shim name is not a valid [`BinaryName`] (plan contract C-009 / C-011).
+    ///
+    /// Raised from **both** ends of the shim path, which is why the message
+    /// names neither an invocation nor a package: `ocx launcher shim` invoked
+    /// under a bad `argv0` (C-011, first leg), and `prepare_lazy` handed a
+    /// declared entry point name that does not survive the conversion (C-009 —
+    /// every Windows-reserved device name is a valid entry point name and none
+    /// is a valid binary name). The offending name and the reason come from the
+    /// wrapped [`BinaryError`]; the declaring package does not, so a producer
+    /// -side refusal deep in a closure is attributed only by the envelope's own
+    /// identifier.
+    ///
+    /// The grammar forbids `/`, `\` and the Windows-reserved device names at
+    /// construction, so this is also what stops a wire value containing a path
+    /// separator from bypassing `PATH` resolution entirely.
+    #[error("invalid shim name")]
+    ShimNameInvalid(#[source] BinaryError),
+
+    /// `ocx launcher shim` was invoked under a well-formed name that is not a
+    /// member of the composed name set (plan contract C-011, second leg).
+    #[error("'{}' is not an interface name declared by '{}'", _0.name, _0.package)]
+    ShimNameNotClaimed(Box<ShimClaim>),
+
+    /// The package materialized, but the name its metadata claimed is not
+    /// present on the composed `PATH` (plan contract C-011).
+    ///
+    /// Reported instead of the bare `ENOENT` an exec would otherwise produce,
+    /// so a wrong `binaries` claim is attributed to the publisher rather than
+    /// read as a missing package.
+    #[error(
+        "'{}' claims the name '{}', but no such executable is present after materialization",
+        _0.package,
+        _0.name
+    )]
+    ShimClaimUnfulfilled(Box<ShimClaim>),
+
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
     Internal(#[from] crate::Error),
@@ -314,7 +400,15 @@ impl ClassifyExitCode for PackageErrorKind {
             | Self::SymlinkRequiresTag
             | Self::DigestMissing
             | Self::EntrypointCollision { .. }
-            | Self::FeatureMismatch { .. } => ExitCode::DataError,
+            | Self::FeatureMismatch { .. }
+            // Every shim refusal is a claim the package's own metadata makes
+            // and cannot honour, or a wire value that does not satisfy the
+            // name grammar — malformed input, never a missing package.
+            | Self::ShimNamesNotEnumerable { .. }
+            | Self::ShimNameShadowsOcx(_)
+            | Self::ShimNameInvalid(_)
+            | Self::ShimNameNotClaimed(_)
+            | Self::ShimClaimUnfulfilled(_) => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
             // Required companion failure: delegate to the inner error's
             // classification so the exit code reflects the root cause (e.g.
